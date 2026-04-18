@@ -1,3 +1,0 @@
-[console_scripts]
-stormhelm-core = stormhelm.entrypoints.core:main
-stormhelm-ui = stormhelm.entrypoints.ui:main
