@@ -1,0 +1,21 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+
+def project_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def default_data_dir(app_name: str) -> Path:
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        return Path(local_app_data) / app_name
+    return Path.home() / "AppData" / "Local" / app_name
+
+
+def ensure_runtime_directories(paths: list[Path]) -> None:
+    for path in paths:
+        path.mkdir(parents=True, exist_ok=True)
+

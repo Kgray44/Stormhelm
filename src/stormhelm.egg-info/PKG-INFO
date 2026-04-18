@@ -1,0 +1,166 @@
+Metadata-Version: 2.4
+Name: stormhelm
+Version: 0.1.0
+Summary: Stormhelm Phase 1: a local-first desktop AI assistant foundation for Windows.
+Author: Stormhelm Team
+License: MIT
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: fastapi>=0.115.0
+Requires-Dist: httpx>=0.27.0
+Requires-Dist: PySide6>=6.7.0
+Requires-Dist: uvicorn>=0.30.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.2.0; extra == "dev"
+
+# Stormhelm
+
+Stormhelm is a local-first desktop AI assistant for Windows designed from day one as two separate parts:
+
+1. a background core service that owns orchestration, storage, sessions, tools, logs, and safety
+2. a PySide6 desktop shell that acts as a control panel, chat client, dashboard, and tray-ready frontend
+
+Phase 1 intentionally does not try to build the full always-on voice assistant yet. It establishes the architecture, packaging posture, and a working text-based MVP that can grow into voice, browser automation, app control, memory retrieval, and computer-use workflows later.
+
+## Phase 1 Goals
+
+- clean background-core-first architecture
+- separate UI and core processes
+- bounded concurrent job execution with room for 8+ tool workers
+- SQLite-backed local history, notes, preferences, and tool run storage
+- safe starter tools with explicit safety classifications
+- polished Qt shell with chat, status, activity, logs, notes, and settings surfaces
+- packaging-ready structure for portable builds and installer workflows
+
+## Repo Layout
+
+```text
+assets/                 Icons and Qt stylesheets
+config/                 Default and example config files
+docs/                   Architecture, roadmap, packaging, design, and plan docs
+installer/              PyInstaller and Inno Setup placeholders
+scripts/                Dev and packaging helper scripts
+src/stormhelm/          Application source code
+tests/                  Basic unit tests for Phase 1 foundations
+```
+
+## Architecture Summary
+
+### Background Core
+
+- FastAPI service bound to `127.0.0.1`
+- owns orchestration, sessions, job manager, safety, tools, persistence, and logs
+- can keep running even when the UI is closed
+- exposes a local HTTP API for chat, status, jobs, logs, notes, and settings
+
+### Desktop UI
+
+- PySide6 control shell
+- chat panel for the Phase 1 text assistant
+- status panel for core state
+- activity view for recent jobs
+- debug log view backed by the core event buffer
+- notes/memory view
+- settings summary view
+- tray-ready close behavior so the UI can hide without conceptually destroying the assistant
+
+### Storage
+
+- SQLite for conversations, notes, tool runs, and preferences
+- log files written under the user data directory
+- install files kept separate from user data for clean uninstall behavior later
+
+## Quick Start
+
+### 1. Install Python
+
+Stormhelm targets Python 3.11 or newer on Windows.
+
+### 2. Create a virtual environment
+
+```powershell
+py -3.11 -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install -e .[dev]
+```
+
+### 3. Review config
+
+- copy `.env.example` if you want environment overrides
+- copy `config/development.toml.example` to `config/development.toml` for local tweaks
+
+### 4. Run the core
+
+```powershell
+python -m stormhelm.entrypoints.core
+```
+
+### 5. Run the UI
+
+```powershell
+python -m stormhelm.entrypoints.ui
+```
+
+The UI will attempt to connect to the core on `127.0.0.1:8765` and can auto-start it when launched from source or from packaged binaries.
+
+## Safe Phase 1 Tooling
+
+- `clock` for local and UTC time
+- `system_info` for platform and runtime details
+- `file_reader` for allowlisted text file reads only
+- `notes_write` for SQLite-backed notes
+- `echo` for development validation
+- `shell_command` stub that demonstrates permission gating without enabling unrestricted shell execution
+
+## Configuration
+
+Stormhelm uses:
+
+- `config/default.toml` for defaults
+- optional environment overrides from `.env`
+- a packaging-friendly runtime path strategy that keeps user data under `%LOCALAPPDATA%\Stormhelm` by default
+
+Key settings include:
+
+- allowed read directories
+- per-tool enablement
+- max concurrent jobs
+- default job timeout
+- debug logging level
+- UI poll interval
+
+## Tests
+
+Phase 1 includes basic tests for:
+
+- config loading
+- storage and repositories
+- tool registration and execution
+- safety gating
+- job manager behavior
+
+Run them with:
+
+```powershell
+pytest -q
+```
+
+## Documentation
+
+- [Architecture Overview](docs/architecture-overview.md)
+- [Packaging Strategy](docs/packaging.md)
+- [Roadmap](docs/roadmap.md)
+- [Phase 1 Design Spec](docs/superpowers/specs/2026-04-18-stormhelm-phase1-design.md)
+- [Phase 1 Implementation Plan](docs/superpowers/plans/2026-04-18-stormhelm-phase1-foundation.md)
+
+## Voice and Future Expansion
+
+Voice is not implemented in Phase 1, but the architecture leaves clean insertion points for:
+
+- wake word and microphone pipeline components inside the core
+- speech-to-text and text-to-speech adapters
+- automation schedulers
+- browser and desktop control tools
+- semantic memory and retrieval layers
+- future screen/computer-use agents
+

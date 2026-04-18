@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stormhelm"
+version = "0.1.0"
+description = "Stormhelm Phase 1: a local-first desktop AI assistant foundation for Windows."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Stormhelm Team" }]
+dependencies = [
+  "fastapi>=0.115.0",
+  "httpx>=0.27.0",
+  "PySide6>=6.7.0",
+  "uvicorn>=0.30.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2.0",
+]
+
+[project.scripts]
+stormhelm-core = "stormhelm.entrypoints.core:main"
+stormhelm-ui = "stormhelm.entrypoints.ui:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+

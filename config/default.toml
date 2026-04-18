@@ -1,0 +1,44 @@
+app_name = "Stormhelm"
+environment = "development"
+debug = true
+
+[network]
+host = "127.0.0.1"
+port = 8765
+
+[storage]
+data_dir = ""
+database_path = ""
+logs_dir = ""
+
+[logging]
+level = "DEBUG"
+file_name = "stormhelm.log"
+
+[concurrency]
+max_workers = 8
+queue_size = 128
+default_job_timeout_seconds = 20
+
+[ui]
+poll_interval_ms = 1500
+hide_to_tray_on_close = true
+
+[safety]
+allowed_read_dirs = [
+  "${PROJECT_ROOT}",
+  "~/Documents",
+]
+allow_shell_stub = false
+
+[tools]
+max_file_read_bytes = 32768
+
+[tools.enabled]
+clock = true
+system_info = true
+file_reader = true
+notes_write = true
+echo = true
+shell_command = false
+

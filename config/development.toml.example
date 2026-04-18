@@ -1,0 +1,12 @@
+debug = true
+
+[network]
+port = 8765
+
+[safety]
+allowed_read_dirs = [
+  "${PROJECT_ROOT}",
+  "~/Documents",
+  "~/Desktop",
+]
+
