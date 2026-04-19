@@ -1,53 +1,54 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from PySide6 import QtGui, QtWidgets
 
 from stormhelm.config.models import AppConfig
+from stormhelm.ui.bridge import UiBridge
 
 
-def create_tray_icon(window: QtWidgets.QMainWindow, config: AppConfig) -> QtWidgets.QSystemTrayIcon:
-    tray = QtWidgets.QSystemTrayIcon(window)
-    tray.setIcon(_load_icon(window, config))
+def create_tray_icon(bridge: UiBridge, config: AppConfig) -> QtWidgets.QSystemTrayIcon:
+    tray = QtWidgets.QSystemTrayIcon()
+    tray.setIcon(_load_icon(config))
     tray.setToolTip("Stormhelm")
 
-    menu = QtWidgets.QMenu(window)
-    open_action = menu.addAction("Open Stormhelm")
-    open_action.triggered.connect(lambda: _show_window(window))
+    menu = QtWidgets.QMenu()
+    ghost_action = menu.addAction("Open Ghost Mode")
+    ghost_action.triggered.connect(lambda: _show_window(bridge, "ghost"))
 
-    hide_action = menu.addAction("Hide Window")
-    hide_action.triggered.connect(window.hide)
+    deck_action = menu.addAction("Open Command Deck")
+    deck_action.triggered.connect(lambda: _show_window(bridge, "deck"))
+
+    menu.addSeparator()
+    hide_action = menu.addAction("Fade To Dormant")
+    hide_action.triggered.connect(bridge.hideWindow)
 
     menu.addSeparator()
     quit_action = menu.addAction("Quit UI")
-    quit_action.triggered.connect(lambda: _quit_ui(window))
+    quit_action.triggered.connect(_quit_ui)
 
     tray.setContextMenu(menu)
-    tray.activated.connect(lambda reason: _handle_tray_click(reason, window))
+    tray.activated.connect(lambda reason: _handle_tray_click(reason, bridge))
     tray.show()
     return tray
 
 
-def _handle_tray_click(reason: QtWidgets.QSystemTrayIcon.ActivationReason, window: QtWidgets.QMainWindow) -> None:
+def _handle_tray_click(reason: QtWidgets.QSystemTrayIcon.ActivationReason, bridge: UiBridge) -> None:
     if reason == QtWidgets.QSystemTrayIcon.ActivationReason.Trigger:
-        _show_window(window)
+        _show_window(bridge, "ghost")
 
 
-def _show_window(window: QtWidgets.QMainWindow) -> None:
-    window.showNormal()
-    window.raise_()
-    window.activateWindow()
+def _show_window(bridge: UiBridge, mode: str) -> None:
+    bridge.setMode(mode)
+    bridge.showWindow()
 
 
-def _quit_ui(window: QtWidgets.QMainWindow) -> None:
-    if hasattr(window, "set_hide_to_tray_enabled"):
-        window.set_hide_to_tray_enabled(False)
+def _quit_ui() -> None:
     QtWidgets.QApplication.instance().quit()
 
 
-def _load_icon(window: QtWidgets.QMainWindow, config: AppConfig) -> QtGui.QIcon:
-    icon_path = Path(config.project_root) / "assets" / "icons" / "stormhelm.svg"
+def _load_icon(config: AppConfig) -> QtGui.QIcon:
+    icon_path = config.runtime.assets_dir / "icons" / "stormhelm.svg"
     if icon_path.exists():
         return QtGui.QIcon(str(icon_path))
-    return window.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_ComputerIcon)
+    style = QtWidgets.QApplication.instance().style()
+    return style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_ComputerIcon)

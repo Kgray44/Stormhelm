@@ -87,7 +87,14 @@ class JobManager:
         )
         loop = asyncio.get_running_loop()
         self._completion_futures[job.job_id] = loop.create_future()
-        await self._queue.put(job)
+        try:
+            self._queue.put_nowait(job)
+        except asyncio.QueueFull as error:
+            job.status = JobStatus.FAILED
+            job.finished_at = utc_now_iso()
+            job.error = "job_queue_full"
+            self._finalize(job)
+            raise RuntimeError("Stormhelm job queue is full.") from error
         return job
 
     async def submit_and_wait(
@@ -101,6 +108,9 @@ class JobManager:
         return await self.wait(job.job_id)
 
     async def wait(self, job_id: str) -> JobRecord:
+        job = self._jobs.get(job_id)
+        if job is not None and job.status not in {JobStatus.QUEUED, JobStatus.RUNNING}:
+            return job
         future = self._completion_futures[job_id]
         return await future
 
@@ -160,6 +170,7 @@ class JobManager:
             job.result = result.to_dict()
             job.error = result.error
         except asyncio.TimeoutError:
+            context.cancellation_requested.set()
             job.status = JobStatus.TIMED_OUT
             job.error = f"Job exceeded timeout of {job.timeout_seconds} seconds."
         except asyncio.CancelledError:
@@ -181,9 +192,10 @@ class JobManager:
             message=f"Job {job.job_id} finished with status '{job.status.value}'.",
             payload={"job_id": job.job_id, "status": job.status.value},
         )
-        future = self._completion_futures.get(job.job_id)
+        future = self._completion_futures.pop(job.job_id, None)
         if future is not None and not future.done():
             future.set_result(job)
+        self._prune_finished_jobs()
 
     def _persist(self, job: JobRecord) -> None:
         self.tool_runs.upsert_run(
@@ -197,3 +209,17 @@ class JobManager:
             result_payload=job.result,
             error_text=job.error,
         )
+
+    def _prune_finished_jobs(self) -> None:
+        retention_limit = max(self.config.concurrency.history_limit, self.config.concurrency.queue_size)
+        finished_jobs = [
+            job
+            for job in self._jobs.values()
+            if job.status not in {JobStatus.QUEUED, JobStatus.RUNNING}
+        ]
+        if len(finished_jobs) <= retention_limit:
+            return
+
+        removable = sorted(finished_jobs, key=lambda item: item.finished_at or item.created_at)
+        for job in removable[: len(finished_jobs) - retention_limit]:
+            self._jobs.pop(job.job_id, None)

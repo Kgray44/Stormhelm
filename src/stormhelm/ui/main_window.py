@@ -11,12 +11,15 @@ from stormhelm.ui.widgets.status_panel import StatusPanel
 
 
 class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self) -> None:
+    def __init__(self, *, version_label: str = "") -> None:
         super().__init__()
         self._hide_to_tray = True
         self.tray_icon: QtWidgets.QSystemTrayIcon | None = None
 
-        self.setWindowTitle("Stormhelm Control Shell")
+        title = "Stormhelm Control Shell"
+        if version_label:
+            title = f"{title} {version_label}"
+        self.setWindowTitle(title)
         self.resize(1360, 860)
 
         central = QtWidgets.QWidget()
@@ -66,4 +69,3 @@ class MainWindow(QtWidgets.QMainWindow):
             event.ignore()
             return
         super().closeEvent(event)
-

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "stormhelm"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Stormhelm Phase 1: a local-first desktop AI assistant foundation for Windows."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -21,6 +21,9 @@ dependencies = [
 dev = [
   "pytest>=8.2.0",
 ]
+packaging = [
+  "pyinstaller>=6.11.0",
+]
 
 [project.scripts]
 stormhelm-core = "stormhelm.entrypoints.core:main"
@@ -32,7 +35,9 @@ package-dir = { "" = "src" }
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.dynamic]
+version = { attr = "stormhelm.version.__version__" }
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-

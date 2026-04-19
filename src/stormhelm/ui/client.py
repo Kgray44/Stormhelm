@@ -8,6 +8,7 @@ from PySide6 import QtCore, QtNetwork
 
 class CoreApiClient(QtCore.QObject):
     error_occurred = QtCore.Signal(str, str)
+    snapshot_received = QtCore.Signal(dict)
     health_received = QtCore.Signal(dict)
     status_received = QtCore.Signal(dict)
     chat_received = QtCore.Signal(dict)
@@ -54,8 +55,52 @@ class CoreApiClient(QtCore.QObject):
     def fetch_settings(self) -> None:
         self._send_json("GET", "/settings", None, self.settings_received.emit)
 
-    def send_message(self, message: str, session_id: str = "default") -> None:
-        self._send_json("POST", "/chat/send", {"message": message, "session_id": session_id}, self.chat_received.emit)
+    def fetch_snapshot(
+        self,
+        *,
+        session_id: str = "default",
+        event_since_id: int = 0,
+        event_limit: int = 100,
+        job_limit: int = 50,
+        note_limit: int = 50,
+        history_limit: int = 100,
+    ) -> None:
+        self._send_json(
+            "GET",
+            (
+                "/snapshot"
+                f"?session_id={session_id}"
+                f"&event_since_id={event_since_id}"
+                f"&event_limit={event_limit}"
+                f"&job_limit={job_limit}"
+                f"&note_limit={note_limit}"
+                f"&history_limit={history_limit}"
+            ),
+            None,
+            self.snapshot_received.emit,
+        )
+
+    def send_message(
+        self,
+        message: str,
+        session_id: str = "default",
+        *,
+        surface_mode: str = "ghost",
+        active_module: str = "chartroom",
+        workspace_context: dict[str, object] | None = None,
+    ) -> None:
+        self._send_json(
+            "POST",
+            "/chat/send",
+            {
+                "message": message,
+                "session_id": session_id,
+                "surface_mode": surface_mode,
+                "active_module": active_module,
+                "workspace_context": workspace_context or {},
+            },
+            self.chat_received.emit,
+        )
 
     def save_note(self, title: str, content: str) -> None:
         self._send_json("POST", "/notes", {"title": title, "content": content}, self.note_saved.emit)
@@ -96,4 +141,3 @@ class CoreApiClient(QtCore.QObject):
             self.error_occurred.emit(purpose, str(error))
         finally:
             reply.deleteLater()
-

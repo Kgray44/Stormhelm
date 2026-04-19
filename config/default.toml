@@ -1,4 +1,5 @@
 app_name = "Stormhelm"
+release_channel = "dev"
 environment = "development"
 debug = true
 
@@ -10,19 +11,48 @@ port = 8765
 data_dir = ""
 database_path = ""
 logs_dir = ""
+state_dir = ""
 
 [logging]
 level = "DEBUG"
 file_name = "stormhelm.log"
+max_file_bytes = 1000000
+backup_count = 3
 
 [concurrency]
 max_workers = 8
 queue_size = 128
 default_job_timeout_seconds = 20
+history_limit = 500
 
 [ui]
 poll_interval_ms = 1500
 hide_to_tray_on_close = true
+ghost_shortcut = "Ctrl+Space"
+
+[openai]
+enabled = false
+base_url = "https://api.openai.com/v1"
+model = "gpt-5.4-mini"
+planner_model = "gpt-5.4-mini"
+reasoning_model = "gpt-5.4-mini"
+timeout_seconds = 60
+max_tool_rounds = 4
+max_output_tokens = 1200
+planner_max_output_tokens = 900
+reasoning_max_output_tokens = 1400
+instructions = """
+You are Stormhelm, a local-first desktop command assistant. Keep responses calm, concise, and operational.
+
+Behavior rules:
+- Ghost Mode is for quick orchestration, brief bearings, and external hand-offs.
+- Deck Mode is for integrated work, internal browsing, and internal file viewing.
+- Prefer opening research pages and files inside the Deck when the operator explicitly asks for Deck/internal viewing or when the current surface is the Deck.
+- Prefer external opens in Ghost Mode unless the operator explicitly requests Deck/internal viewing.
+- Use tools when they materially improve accuracy or when the operator asks to open, inspect, or save something.
+- Keep tool usage purposeful and specialized. Do not use one generic blob of work when a cleaner tool split is available.
+- When tools return actionable results, synthesize them into a short useful response.
+"""
 
 [safety]
 allowed_read_dirs = [
@@ -41,4 +71,16 @@ file_reader = true
 notes_write = true
 echo = true
 shell_command = false
-
+deck_open_url = true
+external_open_url = true
+deck_open_file = true
+external_open_file = true
+machine_status = true
+power_status = true
+resource_status = true
+storage_status = true
+network_status = true
+active_apps = true
+recent_files = true
+workspace_restore = true
+workspace_assemble = true

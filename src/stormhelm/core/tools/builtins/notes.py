@@ -10,6 +10,18 @@ class NotesWriteTool(BaseTool):
     name = "notes_write"
     display_name = "Notes Writer"
     description = "Persist a note to local Stormhelm memory storage."
+    category = "workspace"
+
+    def parameter_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Short title for the note."},
+                "content": {"type": "string", "description": "The note body to save into the logbook."},
+            },
+            "required": ["title", "content"],
+            "additionalProperties": False,
+        }
 
     def validate(self, arguments: dict[str, Any]) -> dict[str, Any]:
         title = str(arguments.get("title", "")).strip()
@@ -27,4 +39,3 @@ class NotesWriteTool(BaseTool):
             summary=f"Saved note '{note.title}'.",
             data=note.to_dict(),
         )
-

@@ -10,13 +10,17 @@ from stormhelm.config.models import (
     ConcurrencyConfig,
     LoggingConfig,
     NetworkConfig,
+    OpenAIConfig,
+    RuntimePathConfig,
     SafetyConfig,
     StorageConfig,
     ToolConfig,
     ToolEnablementConfig,
     UIConfig,
 )
-from stormhelm.shared.paths import default_data_dir, project_root as discover_project_root
+from stormhelm.shared.paths import default_data_dir
+from stormhelm.shared.runtime import RuntimeDiscovery, discover_runtime
+from stormhelm.version import API_PROTOCOL_VERSION, APP_NAME, __version__, current_release_channel
 
 
 ConfigDict = dict[str, Any]
@@ -27,12 +31,17 @@ def load_config(
     env: Mapping[str, str] | None = None,
     project_root: Path | None = None,
 ) -> AppConfig:
-    root = (project_root or discover_project_root()).resolve()
-    config_data = _read_toml(root / "config" / "default.toml")
+    runtime = _resolve_runtime(project_root)
+    root = _resolve_root(project_root, runtime)
+    config_data = _read_toml(runtime.resource_root / "config" / "default.toml")
 
-    override_path = Path(config_path).resolve() if config_path else root / "config" / "development.toml"
-    if override_path.exists():
-        config_data = _deep_merge(config_data, _read_toml(override_path))
+    for override_path in _initial_override_candidates(
+        runtime=runtime,
+        root=root,
+        config_path=config_path,
+    ):
+        if override_path.exists():
+            config_data = _deep_merge(config_data, _read_toml(override_path))
 
     env_values = dict(_parse_env_file(root / ".env"))
     env_values.update(os.environ)
@@ -40,27 +49,44 @@ def load_config(
         env_values.update(env)
 
     config_data = _apply_env_overrides(config_data, env_values)
-    return _build_app_config(config_data, root)
+
+    provisional_app_name = str(config_data.get("app_name", APP_NAME))
+    provisional_data_dir = _resolve_data_dir(config_data, root, provisional_app_name)
+    user_config_path = provisional_data_dir / "config" / "user.toml"
+    if user_config_path.exists():
+        config_data = _deep_merge(config_data, _read_toml(user_config_path))
+        config_data = _apply_env_overrides(config_data, env_values)
+
+    return _build_app_config(config_data, root, runtime, env_values)
 
 
-def _build_app_config(data: ConfigDict, root: Path) -> AppConfig:
-    app_name = str(data.get("app_name", "Stormhelm"))
+def _build_app_config(
+    data: ConfigDict,
+    root: Path,
+    runtime: RuntimeDiscovery,
+    env_values: Mapping[str, str],
+) -> AppConfig:
+    app_name = str(data.get("app_name", APP_NAME))
     environment = str(data.get("environment", "development"))
     debug = bool(data.get("debug", True))
+    release_channel = str(data.get("release_channel", current_release_channel())).strip() or current_release_channel()
 
     network_data = data.get("network", {})
     host = str(network_data.get("host", "127.0.0.1"))
     port = int(network_data.get("port", 8765))
 
+    data_dir = _resolve_data_dir(data, root, app_name)
     storage_data = data.get("storage", {})
-    data_dir = _expand_path(storage_data.get("data_dir") or "", root, None) or default_data_dir(app_name)
     logs_dir = _expand_path(storage_data.get("logs_dir") or "", root, data_dir) or (data_dir / "logs")
     database_path = _expand_path(storage_data.get("database_path") or "", root, data_dir) or (data_dir / "stormhelm.db")
+    state_dir = _expand_path(storage_data.get("state_dir") or "", root, data_dir) or (data_dir / "state")
 
     logging_data = data.get("logging", {})
     logging_config = LoggingConfig(
         level=str(logging_data.get("level", "DEBUG" if debug else "INFO")),
         file_name=str(logging_data.get("file_name", "stormhelm.log")),
+        max_file_bytes=int(logging_data.get("max_file_bytes", 1_000_000)),
+        backup_count=int(logging_data.get("backup_count", 3)),
     )
 
     concurrency_data = data.get("concurrency", {})
@@ -68,12 +94,38 @@ def _build_app_config(data: ConfigDict, root: Path) -> AppConfig:
         max_workers=int(concurrency_data.get("max_workers", 8)),
         queue_size=int(concurrency_data.get("queue_size", 128)),
         default_job_timeout_seconds=float(concurrency_data.get("default_job_timeout_seconds", 20)),
+        history_limit=int(concurrency_data.get("history_limit", 500)),
     )
 
     ui_data = data.get("ui", {})
     ui_config = UIConfig(
         poll_interval_ms=int(ui_data.get("poll_interval_ms", 1500)),
         hide_to_tray_on_close=bool(ui_data.get("hide_to_tray_on_close", True)),
+        ghost_shortcut=str(ui_data.get("ghost_shortcut", "Ctrl+Space")),
+    )
+
+    openai_data = data.get("openai", {})
+    openai_config = OpenAIConfig(
+        enabled=bool(openai_data.get("enabled", False)),
+        api_key=(
+            str(env_values.get("OPENAI_API_KEY") or env_values.get("STORMHELM_OPENAI_API_KEY") or "").strip()
+            or str(openai_data.get("api_key", "")).strip()
+            or None
+        ),
+        base_url=str(openai_data.get("base_url", "https://api.openai.com/v1")).rstrip("/"),
+        model=str(openai_data.get("model", "gpt-5.4-mini")).strip() or "gpt-5.4-mini",
+        planner_model=str(openai_data.get("planner_model", openai_data.get("model", "gpt-5.4-mini"))).strip()
+        or "gpt-5.4-mini",
+        reasoning_model=str(openai_data.get("reasoning_model", openai_data.get("model", "gpt-5.4-mini"))).strip()
+        or "gpt-5.4-mini",
+        timeout_seconds=float(openai_data.get("timeout_seconds", 60)),
+        max_tool_rounds=int(openai_data.get("max_tool_rounds", 4)),
+        max_output_tokens=int(openai_data.get("max_output_tokens", 1200)),
+        planner_max_output_tokens=int(openai_data.get("planner_max_output_tokens", openai_data.get("max_output_tokens", 900))),
+        reasoning_max_output_tokens=int(
+            openai_data.get("reasoning_max_output_tokens", openai_data.get("max_output_tokens", 1400))
+        ),
+        instructions=str(openai_data.get("instructions", "")).strip(),
     )
 
     safety_data = data.get("safety", {})
@@ -96,24 +148,57 @@ def _build_app_config(data: ConfigDict, root: Path) -> AppConfig:
             notes_write=bool(enabled_data.get("notes_write", True)),
             echo=bool(enabled_data.get("echo", True)),
             shell_command=bool(enabled_data.get("shell_command", False)),
+            deck_open_url=bool(enabled_data.get("deck_open_url", True)),
+            external_open_url=bool(enabled_data.get("external_open_url", True)),
+            deck_open_file=bool(enabled_data.get("deck_open_file", True)),
+            external_open_file=bool(enabled_data.get("external_open_file", True)),
+            machine_status=bool(enabled_data.get("machine_status", True)),
+            power_status=bool(enabled_data.get("power_status", True)),
+            resource_status=bool(enabled_data.get("resource_status", True)),
+            storage_status=bool(enabled_data.get("storage_status", True)),
+            network_status=bool(enabled_data.get("network_status", True)),
+            active_apps=bool(enabled_data.get("active_apps", True)),
+            recent_files=bool(enabled_data.get("recent_files", True)),
+            workspace_restore=bool(enabled_data.get("workspace_restore", True)),
+            workspace_assemble=bool(enabled_data.get("workspace_assemble", True)),
         ),
         max_file_read_bytes=int(tool_data.get("max_file_read_bytes", 32768)),
     )
 
     return AppConfig(
         app_name=app_name,
+        version=__version__,
+        protocol_version=API_PROTOCOL_VERSION,
+        release_channel=release_channel,
         environment=environment,
         debug=debug,
         project_root=root,
+        runtime=RuntimePathConfig(
+            mode=runtime.mode,
+            is_frozen=runtime.is_frozen,
+            source_root=runtime.source_root,
+            install_root=runtime.install_root,
+            resource_root=runtime.resource_root,
+            assets_dir=runtime.resource_root / "assets",
+            bundled_config_dir=runtime.resource_root / "config",
+            portable_config_path=runtime.install_root / "config" / "portable.toml",
+            user_config_path=data_dir / "config" / "user.toml",
+            state_dir=state_dir,
+            core_state_path=state_dir / "core-state.json",
+            first_run_marker_path=state_dir / "first-run.json",
+            core_executable_path=runtime.install_root / "stormhelm-core.exe",
+        ),
         network=NetworkConfig(host=host, port=port),
         storage=StorageConfig(
             data_dir=data_dir,
             database_path=database_path,
             logs_dir=logs_dir,
+            state_dir=state_dir,
         ),
         logging=logging_config,
         concurrency=concurrency_config,
         ui=ui_config,
+        openai=openai_config,
         safety=safety_config,
         tools=tool_config,
     )
@@ -154,11 +239,22 @@ def _apply_env_overrides(data: ConfigDict, env: Mapping[str, str]) -> ConfigDict
     overrides: dict[str, tuple[str, Callable[[str], Any]]] = {
         "STORMHELM_ENV": ("environment", str),
         "STORMHELM_DEBUG": ("debug", _parse_bool),
+        "STORMHELM_RELEASE_CHANNEL": ("release_channel", str),
         "STORMHELM_CORE_HOST": ("network.host", str),
         "STORMHELM_CORE_PORT": ("network.port", int),
         "STORMHELM_DATA_DIR": ("storage.data_dir", str),
         "STORMHELM_MAX_CONCURRENT_JOBS": ("concurrency.max_workers", int),
         "STORMHELM_DEFAULT_JOB_TIMEOUT_SECONDS": ("concurrency.default_job_timeout_seconds", float),
+        "STORMHELM_OPENAI_ENABLED": ("openai.enabled", _parse_bool),
+        "STORMHELM_OPENAI_BASE_URL": ("openai.base_url", str),
+        "STORMHELM_OPENAI_MODEL": ("openai.model", str),
+        "STORMHELM_OPENAI_PLANNER_MODEL": ("openai.planner_model", str),
+        "STORMHELM_OPENAI_REASONING_MODEL": ("openai.reasoning_model", str),
+        "STORMHELM_OPENAI_TIMEOUT_SECONDS": ("openai.timeout_seconds", float),
+        "STORMHELM_OPENAI_MAX_TOOL_ROUNDS": ("openai.max_tool_rounds", int),
+        "STORMHELM_OPENAI_MAX_OUTPUT_TOKENS": ("openai.max_output_tokens", int),
+        "STORMHELM_OPENAI_PLANNER_MAX_OUTPUT_TOKENS": ("openai.planner_max_output_tokens", int),
+        "STORMHELM_OPENAI_REASONING_MAX_OUTPUT_TOKENS": ("openai.reasoning_max_output_tokens", int),
     }
 
     for env_key, (path, parser) in overrides.items():
@@ -190,3 +286,44 @@ def _expand_path(raw: str | None, root: Path, data_dir: Path | None) -> Path | N
 
 def _parse_bool(raw: str) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resolve_runtime(project_root: Path | None) -> RuntimeDiscovery:
+    if project_root is not None:
+        root = Path(project_root).resolve()
+        return RuntimeDiscovery(
+            is_frozen=False,
+            mode="source",
+            source_root=root,
+            install_root=root,
+            resource_root=root,
+        )
+    return discover_runtime()
+
+
+def _resolve_root(project_root: Path | None, runtime: RuntimeDiscovery) -> Path:
+    if project_root is not None:
+        return Path(project_root).resolve()
+    if runtime.source_root is not None:
+        return runtime.source_root.resolve()
+    return runtime.install_root.resolve()
+
+
+def _initial_override_candidates(
+    *,
+    runtime: RuntimeDiscovery,
+    root: Path,
+    config_path: Path | None,
+) -> list[Path]:
+    candidates: list[Path] = []
+    if runtime.mode == "source":
+        candidates.append(root / "config" / "development.toml")
+    candidates.append(runtime.install_root / "config" / "portable.toml")
+    if config_path is not None:
+        candidates.append(Path(config_path).resolve())
+    return candidates
+
+
+def _resolve_data_dir(data: ConfigDict, root: Path, app_name: str) -> Path:
+    storage_data = data.get("storage", {})
+    return _expand_path(storage_data.get("data_dir") or "", root, None) or default_data_dir(app_name)

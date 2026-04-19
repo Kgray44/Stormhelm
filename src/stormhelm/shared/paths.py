@@ -3,9 +3,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from stormhelm.shared.runtime import find_project_root
 
 def project_root() -> Path:
-    return Path(__file__).resolve().parents[3]
+    return find_project_root()
 
 
 def default_data_dir(app_name: str) -> Path:
@@ -18,4 +19,3 @@ def default_data_dir(app_name: str) -> Path:
 def ensure_runtime_directories(paths: list[Path]) -> None:
     for path in paths:
         path.mkdir(parents=True, exist_ok=True)
-

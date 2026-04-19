@@ -1,27 +1,39 @@
-# Phase 1 placeholder spec for building stormhelm-core.exe
-# Run with: pyinstaller installer/pyinstaller/stormhelm-core.spec
+from pathlib import Path
 
-block_cipher = None
+
+project_root = Path.cwd()
+src_root = project_root / "src"
 
 a = Analysis(
-    ["src/stormhelm/entrypoints/core.py"],
-    pathex=["src"],
+    [str(src_root / "stormhelm" / "entrypoints" / "core.py")],
+    pathex=[str(src_root)],
     binaries=[],
-    datas=[("config", "config")],
-    hiddenimports=["uvicorn.logging", "uvicorn.loops.auto"],
+    datas=[
+        (str(project_root / "config"), "config"),
+    ],
+    hiddenimports=[
+        "uvicorn.logging",
+        "uvicorn.loops.auto",
+        "uvicorn.protocols.http.auto",
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[],
     noarchive=False,
 )
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
     a.binaries,
     a.zipfiles,
     a.datas,
+    [],
     name="stormhelm-core",
     console=True,
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
 )

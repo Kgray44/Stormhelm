@@ -10,6 +10,17 @@ class EchoTool(BaseTool):
     name = "echo"
     display_name = "Echo"
     description = "Echo text back for development and diagnostics."
+    category = "development"
+
+    def parameter_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "The text to echo back."},
+            },
+            "required": ["text"],
+            "additionalProperties": False,
+        }
 
     def validate(self, arguments: dict[str, Any]) -> dict[str, Any]:
         text = str(arguments.get("text", "")).strip()
@@ -23,4 +34,3 @@ class EchoTool(BaseTool):
             summary=f"Echoed {len(arguments['text'])} characters.",
             data={"text": arguments["text"]},
         )
-

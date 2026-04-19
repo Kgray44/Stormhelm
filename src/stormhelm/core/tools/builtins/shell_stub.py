@@ -10,7 +10,21 @@ class ShellCommandStubTool(BaseTool):
     name = "shell_command"
     display_name = "Shell Command Stub"
     description = "Demonstrate strict action-tool gating without enabling shell execution."
+    category = "system"
     classification = SafetyClassification.ACTION
+
+    def parameter_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "The shell command that was requested.",
+                },
+            },
+            "required": ["command"],
+            "additionalProperties": False,
+        }
 
     def validate(self, arguments: dict[str, Any]) -> dict[str, Any]:
         command = str(arguments.get("command", "")).strip()

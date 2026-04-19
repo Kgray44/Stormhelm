@@ -11,9 +11,17 @@ class ClockTool(BaseTool):
     name = "clock"
     display_name = "Clock"
     description = "Return local and UTC time information."
+    category = "system"
 
     def validate(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return {}
+
+    def parameter_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        }
 
     def execute_sync(self, context: ToolContext, arguments: dict[str, Any]) -> ToolResult:
         local_now = datetime.now().astimezone()
@@ -27,4 +35,3 @@ class ClockTool(BaseTool):
                 "timezone": str(local_now.tzinfo),
             },
         )
-

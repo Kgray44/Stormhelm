@@ -16,12 +16,15 @@ class StorageConfig:
     data_dir: Path
     database_path: Path
     logs_dir: Path
+    state_dir: Path
 
 
 @dataclass(slots=True)
 class LoggingConfig:
     level: str
     file_name: str
+    max_file_bytes: int
+    backup_count: int
 
 
 @dataclass(slots=True)
@@ -29,12 +32,30 @@ class ConcurrencyConfig:
     max_workers: int
     queue_size: int
     default_job_timeout_seconds: float
+    history_limit: int
 
 
 @dataclass(slots=True)
 class UIConfig:
     poll_interval_ms: int
     hide_to_tray_on_close: bool
+    ghost_shortcut: str
+
+
+@dataclass(slots=True)
+class OpenAIConfig:
+    enabled: bool
+    api_key: str | None
+    base_url: str
+    model: str
+    planner_model: str
+    reasoning_model: str
+    timeout_seconds: float
+    max_tool_rounds: int
+    max_output_tokens: int
+    planner_max_output_tokens: int
+    reasoning_max_output_tokens: int
+    instructions: str
 
 
 @dataclass(slots=True)
@@ -51,6 +72,19 @@ class ToolEnablementConfig:
     notes_write: bool = True
     echo: bool = True
     shell_command: bool = False
+    deck_open_url: bool = True
+    external_open_url: bool = True
+    deck_open_file: bool = True
+    external_open_file: bool = True
+    machine_status: bool = True
+    power_status: bool = True
+    resource_status: bool = True
+    storage_status: bool = True
+    network_status: bool = True
+    active_apps: bool = True
+    recent_files: bool = True
+    workspace_restore: bool = True
+    workspace_assemble: bool = True
 
     def is_enabled(self, tool_name: str) -> bool:
         return getattr(self, tool_name, False)
@@ -63,16 +97,38 @@ class ToolConfig:
 
 
 @dataclass(slots=True)
+class RuntimePathConfig:
+    mode: str
+    is_frozen: bool
+    source_root: Path | None
+    install_root: Path
+    resource_root: Path
+    assets_dir: Path
+    bundled_config_dir: Path
+    portable_config_path: Path
+    user_config_path: Path
+    state_dir: Path
+    core_state_path: Path
+    first_run_marker_path: Path
+    core_executable_path: Path
+
+
+@dataclass(slots=True)
 class AppConfig:
     app_name: str
+    version: str
+    protocol_version: int
+    release_channel: str
     environment: str
     debug: bool
     project_root: Path
+    runtime: RuntimePathConfig
     network: NetworkConfig
     storage: StorageConfig
     logging: LoggingConfig
     concurrency: ConcurrencyConfig
     ui: UIConfig
+    openai: OpenAIConfig
     safety: SafetyConfig
     tools: ToolConfig
 
@@ -82,10 +138,35 @@ class AppConfig:
 
     @property
     def log_file_path(self) -> Path:
-        return self.storage.logs_dir / self.logging.file_name
+        return self.core_log_file_path
+
+    @property
+    def core_log_file_path(self) -> Path:
+        return self.storage.logs_dir / _build_log_file_name(self.logging.file_name, "core")
+
+    @property
+    def ui_log_file_path(self) -> Path:
+        return self.storage.logs_dir / _build_log_file_name(self.logging.file_name, "ui")
+
+    @property
+    def version_label(self) -> str:
+        if self.release_channel.lower() in {"", "release", "stable"}:
+            return self.version
+        return f"{self.version} ({self.release_channel})"
 
     def to_dict(self) -> dict[str, Any]:
-        return _serialize(asdict(self))
+        data = _serialize(asdict(self))
+        openai = data.get("openai")
+        if isinstance(openai, dict) and openai.get("api_key"):
+            openai["api_key"] = "***configured***"
+        return data
+
+
+def _build_log_file_name(base_name: str, process_name: str) -> str:
+    path = Path(base_name)
+    if path.suffix:
+        return f"{path.stem}-{process_name}{path.suffix}"
+    return f"{base_name}-{process_name}.log"
 
 
 def _serialize(value: Any) -> Any:
@@ -98,4 +179,3 @@ def _serialize(value: Any) -> Any:
     if is_dataclass(value):
         return _serialize(asdict(value))
     return value
-
