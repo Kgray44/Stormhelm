@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from enum import StrEnum
 from typing import Any
 
@@ -8,6 +8,8 @@ from typing import Any
 def _serialize(value: Any) -> Any:
     if isinstance(value, StrEnum):
         return value.value
+    if is_dataclass(value):
+        return {str(key): _serialize(item) for key, item in asdict(value).items()}
     if hasattr(value, "to_dict") and callable(value.to_dict):
         return value.to_dict()
     if isinstance(value, dict):
@@ -24,6 +26,7 @@ class QueryShape(StrEnum):
     HISTORY_TREND = "history_trend"
     IDENTITY_LOOKUP = "identity_lookup"
     CONTROL_COMMAND = "control_command"
+    OPEN_BROWSER_DESTINATION = "open_browser_destination"
     REPAIR_REQUEST = "repair_request"
     SEARCH_REQUEST = "search_request"
     SEARCH_AND_OPEN = "search_and_open"

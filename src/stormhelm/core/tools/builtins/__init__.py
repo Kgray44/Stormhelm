@@ -19,6 +19,7 @@ from stormhelm.core.tools.builtins.system_state import (
     MachineStatusTool,
     NetworkDiagnosisTool,
     NetworkStatusTool,
+    NetworkThroughputTool,
     PowerProjectionTool,
     PowerStatusTool,
     RecentFilesTool,
@@ -85,6 +86,7 @@ def register_builtin_tools(registry) -> None:
     registry.register(ResourceDiagnosisTool())
     registry.register(StorageDiagnosisTool())
     registry.register(NetworkStatusTool())
+    registry.register(NetworkThroughputTool())
     registry.register(NetworkDiagnosisTool())
     registry.register(ActiveAppsTool())
     registry.register(AppControlTool())

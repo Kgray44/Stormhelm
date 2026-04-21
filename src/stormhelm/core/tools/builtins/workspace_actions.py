@@ -71,6 +71,21 @@ def _validate_external_url(raw_url: str) -> str:
     raise ValueError("Only http, https, and supported system settings URLs are allowed.")
 
 
+def _validate_response_contract(raw_contract: object) -> dict[str, str] | None:
+    if not isinstance(raw_contract, dict):
+        return None
+    bearing_title = str(raw_contract.get("bearing_title", "")).strip()
+    micro_response = str(raw_contract.get("micro_response", "")).strip()
+    full_response = str(raw_contract.get("full_response", "")).strip()
+    if not any((bearing_title, micro_response, full_response)):
+        return None
+    return {
+        "bearing_title": bearing_title,
+        "micro_response": micro_response,
+        "full_response": full_response,
+    }
+
+
 def _infer_file_item(path: Path, max_bytes: int) -> dict[str, Any]:
     suffix = path.suffix.lower()
     mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
@@ -122,21 +137,36 @@ class DeckOpenUrlTool(BaseTool):
             "type": "object",
             "properties": {
                 "url": {"type": "string", "description": "The http or https URL to open in the Deck."},
+                "label": {"type": "string", "description": "Optional human-readable destination label."},
+                "response_contract": {
+                    "type": "object",
+                    "properties": {
+                        "bearing_title": {"type": "string"},
+                        "micro_response": {"type": "string"},
+                        "full_response": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
             },
             "required": ["url"],
             "additionalProperties": False,
         }
 
     def validate(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        return {"url": _validate_http_url(str(arguments.get("url", "")))}
+        return {
+            "url": _validate_http_url(str(arguments.get("url", ""))),
+            "label": str(arguments.get("label", "")).strip() or None,
+            "response_contract": _validate_response_contract(arguments.get("response_contract")),
+        }
 
     def execute_sync(self, context: ToolContext, arguments: dict[str, Any]) -> ToolResult:
         url = arguments["url"]
         parsed = urlparse(url)
-        title = parsed.netloc or url
+        title = str(arguments.get("label") or parsed.netloc or url).strip()
+        response_contract = arguments.get("response_contract") if isinstance(arguments.get("response_contract"), dict) else None
         return ToolResult(
             success=True,
-            summary=f"Opened {title} in the Deck browser.",
+            summary=str(response_contract.get("full_response") if response_contract else "") or f"Opened {title} in the Deck browser.",
             data={
                 "action": {
                     "type": "workspace_open",
@@ -150,6 +180,7 @@ class DeckOpenUrlTool(BaseTool):
                         "subtitle": url,
                         "url": url,
                     },
+                    **(response_contract or {}),
                 }
             },
         )
@@ -167,27 +198,43 @@ class ExternalOpenUrlTool(BaseTool):
             "type": "object",
             "properties": {
                 "url": {"type": "string", "description": "The http or https URL to open externally."},
+                "label": {"type": "string", "description": "Optional human-readable destination label."},
+                "response_contract": {
+                    "type": "object",
+                    "properties": {
+                        "bearing_title": {"type": "string"},
+                        "micro_response": {"type": "string"},
+                        "full_response": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
             },
             "required": ["url"],
             "additionalProperties": False,
         }
 
     def validate(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        return {"url": _validate_external_url(str(arguments.get("url", "")))}
+        return {
+            "url": _validate_external_url(str(arguments.get("url", ""))),
+            "label": str(arguments.get("label", "")).strip() or None,
+            "response_contract": _validate_response_contract(arguments.get("response_contract")),
+        }
 
     def execute_sync(self, context: ToolContext, arguments: dict[str, Any]) -> ToolResult:
         url = arguments["url"]
         parsed = urlparse(url)
-        title = parsed.netloc or parsed.path or url
+        title = str(arguments.get("label") or parsed.netloc or parsed.path or url).strip()
+        response_contract = arguments.get("response_contract") if isinstance(arguments.get("response_contract"), dict) else None
         return ToolResult(
             success=True,
-            summary=f"Opened {title} externally.",
+            summary=str(response_contract.get("full_response") if response_contract else "") or f"Opened {title} externally.",
             data={
                 "action": {
                     "type": "open_external",
                     "kind": "url",
                     "url": url,
                     "title": title,
+                    **(response_contract or {}),
                 }
             },
         )

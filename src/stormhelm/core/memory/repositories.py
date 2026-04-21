@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from stormhelm.core.memory.database import SQLiteDatabase
 from stormhelm.core.memory.models import ChatMessageRecord, NoteRecord, SessionRecord
+from stormhelm.shared.json_safety import decode_json_dict, decode_json_value
 from stormhelm.shared.time import utc_now_iso
 
 
@@ -86,7 +87,10 @@ class ConversationRepository:
                 role=row["role"],
                 content=row["content"],
                 created_at=row["created_at"],
-                metadata=json.loads(row["metadata_json"]),
+                metadata=decode_json_dict(
+                    row["metadata_json"],
+                    context=f"chat_messages.metadata_json[{row['message_id']}]",
+                ),
             )
             for row in reversed(rows)
         ]
@@ -149,7 +153,13 @@ class PreferencesRepository:
             rows = connection.execute(
                 "SELECT preference_key, value_json FROM preferences ORDER BY preference_key"
             ).fetchall()
-        return {row["preference_key"]: json.loads(row["value_json"]) for row in rows}
+        return {
+            row["preference_key"]: decode_json_value(
+                row["value_json"],
+                context=f"preferences.value_json[{row['preference_key']}]",
+            )
+            for row in rows
+        }
 
 
 class ToolRunRepository:

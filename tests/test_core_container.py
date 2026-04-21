@@ -59,6 +59,20 @@ class FakeOperationalProbe:
                 "summary": "Gateway and external probes degraded together, which points to the local link.",
                 "confidence": "moderate",
             },
+            "throughput": {
+                "available": True,
+                "state": "ready",
+                "download_mbps": 84.25,
+                "upload_mbps": 12.5,
+                "source": "net_adapter_statistics",
+            },
+            "providers": {
+                "local_status": {"state": "ready", "detail": "Wi-Fi | gateway 192.168.1.1", "available": True},
+                "upstream_path": {"state": "ready", "detail": "latency 26 ms | jitter 3 ms", "available": True},
+                "observed_throughput": {"state": "ready", "detail": "Observed over the last 1.0 seconds on Wi-Fi.", "available": True},
+                "cloudflare_quality": {"state": "ready", "label": "Cloudflare quality", "detail": "Aligned with probes.", "available": True},
+            },
+            "source_debug": {"throughput_primary": "net_adapter_statistics"},
         }
 
     def resolve_location(self) -> dict[str, object]:
@@ -74,3 +88,4 @@ def test_core_container_status_snapshot_includes_operational_surface_state(temp_
     assert snapshot["systems_interpretation"]["headline"] == "Local Wi-Fi instability likely"
     assert snapshot["watch_state"]["tasks"] == []
     assert any(signal["title"] == "Battery drain elevated" for signal in snapshot["signal_state"]["signals"])
+    assert snapshot["system_state"]["network"]["throughput"]["download_mbps"] == 84.25

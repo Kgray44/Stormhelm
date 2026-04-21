@@ -131,7 +131,8 @@ def _build_app_config(
     hardware_telemetry_data = data.get("hardware_telemetry", {})
     hardware_telemetry_config = HardwareTelemetryConfig(
         enabled=bool(hardware_telemetry_data.get("enabled", True)),
-        helper_timeout_seconds=float(hardware_telemetry_data.get("helper_timeout_seconds", 2.5)),
+        helper_timeout_seconds=float(hardware_telemetry_data.get("helper_timeout_seconds", 12.0)),
+        provider_timeout_seconds=float(hardware_telemetry_data.get("provider_timeout_seconds", 5.0)),
         idle_cache_ttl_seconds=float(hardware_telemetry_data.get("idle_cache_ttl_seconds", 30)),
         active_cache_ttl_seconds=float(hardware_telemetry_data.get("active_cache_ttl_seconds", 8)),
         burst_cache_ttl_seconds=float(hardware_telemetry_data.get("burst_cache_ttl_seconds", 2)),
@@ -195,6 +196,7 @@ def _build_app_config(
             resource_status=bool(enabled_data.get("resource_status", True)),
             storage_status=bool(enabled_data.get("storage_status", True)),
             network_status=bool(enabled_data.get("network_status", True)),
+            network_throughput=bool(enabled_data.get("network_throughput", True)),
             network_diagnosis=bool(enabled_data.get("network_diagnosis", True)),
             active_apps=bool(enabled_data.get("active_apps", True)),
             app_control=bool(enabled_data.get("app_control", True)),
@@ -329,6 +331,7 @@ def _apply_env_overrides(data: ConfigDict, env: Mapping[str, str]) -> ConfigDict
         "STORMHELM_WEATHER_TIMEOUT_SECONDS": ("weather.timeout_seconds", float),
         "STORMHELM_HARDWARE_TELEMETRY_ENABLED": ("hardware_telemetry.enabled", _parse_bool),
         "STORMHELM_HARDWARE_TELEMETRY_TIMEOUT_SECONDS": ("hardware_telemetry.helper_timeout_seconds", float),
+        "STORMHELM_HARDWARE_TELEMETRY_PROVIDER_TIMEOUT_SECONDS": ("hardware_telemetry.provider_timeout_seconds", float),
         "STORMHELM_HARDWARE_TELEMETRY_IDLE_CACHE_TTL_SECONDS": ("hardware_telemetry.idle_cache_ttl_seconds", float),
         "STORMHELM_HARDWARE_TELEMETRY_ACTIVE_CACHE_TTL_SECONDS": ("hardware_telemetry.active_cache_ttl_seconds", float),
         "STORMHELM_HARDWARE_TELEMETRY_BURST_CACHE_TTL_SECONDS": ("hardware_telemetry.burst_cache_ttl_seconds", float),

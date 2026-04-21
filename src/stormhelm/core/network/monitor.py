@@ -10,7 +10,7 @@ import time
 from typing import Any, TYPE_CHECKING
 
 from stormhelm.core.network.analyzer import NetworkAnalyzer
-from stormhelm.core.network.providers import CloudflareQualityProvider
+from stormhelm.core.network.providers import CloudflareQualityProvider, ObservedThroughputProvider
 
 if TYPE_CHECKING:
     from stormhelm.core.events import EventBuffer
@@ -28,6 +28,7 @@ class NetworkMonitor:
         events: EventBuffer | None = None,
         analyzer: NetworkAnalyzer | None = None,
         cloudflare_provider: CloudflareQualityProvider | None = None,
+        throughput_provider: ObservedThroughputProvider | None = None,
         history_path: Path | None = None,
         history_limit: int = 120,
         event_limit: int = 48,
@@ -40,6 +41,7 @@ class NetworkMonitor:
         self._events = events
         self._analyzer = analyzer or NetworkAnalyzer()
         self._cloudflare_provider = cloudflare_provider or CloudflareQualityProvider(enabled=True)
+        self._throughput_provider = throughput_provider or ObservedThroughputProvider(probe)
         self._history = deque(maxlen=max(history_limit, 24))
         self._event_log = deque(maxlen=max(event_limit, 12))
         self._history_path = Path(history_path) if history_path is not None else None
@@ -127,6 +129,7 @@ class NetworkMonitor:
         dns = self._probe._dns_health(hostname="cloudflare.com")
         provider_state = self._cloudflare_provider.sample() if mode == "diagnostic" else self._cloudflare_provider.capability_state()
         captured_at = datetime.now().astimezone().isoformat()
+        throughput_sample = self._throughput_provider.capture_sample(primary_interface=primary, captured_at=captured_at)
         sample = {
             "captured_at": captured_at,
             "mode": mode,
@@ -137,6 +140,7 @@ class NetworkMonitor:
             "gateway_probe": gateway_probe,
             "external_probes": external_probes,
             "dns": dns,
+            "throughput_sample": throughput_sample,
             "providers": {"cloudflare_quality": provider_state},
         }
         with self._lock:
@@ -257,6 +261,7 @@ class NetworkMonitor:
         latest = samples[-1] if samples else {}
         interfaces = latest.get("interfaces", []) if isinstance(latest.get("interfaces"), list) else []
         primary = latest.get("primary_interface", {}) if isinstance(latest.get("primary_interface"), dict) else {}
+        last_sample_age_seconds = int(max(time.monotonic() - last_sample_at, 0)) if last_sample_at else None
         gateway_latencies = [float(item["gateway_probe"]["latency_ms"]) for item in samples if isinstance(item.get("gateway_probe"), dict) and item["gateway_probe"].get("latency_ms") is not None]
         gateway_losses = [1.0 for item in samples if isinstance(item.get("gateway_probe"), dict) and item["gateway_probe"].get("timed_out")]
         external_latencies: list[float] = []
@@ -300,6 +305,15 @@ class NetworkMonitor:
             external_jitter_ms=external_jitter,
             external_loss_pct=external_loss_pct,
         )
+        throughput = self._throughput_provider.summarize(samples, last_sample_age_seconds=last_sample_age_seconds)
+        local_provider = self._local_provider_state(primary, last_sample_age_seconds=last_sample_age_seconds)
+        upstream_provider = self._upstream_provider_state(
+            latest=latest,
+            external_latency_ms=external_latency,
+            external_jitter_ms=external_jitter,
+            external_loss_pct=external_loss_pct,
+            last_sample_age_seconds=last_sample_age_seconds,
+        )
 
         quality = {
             "latency_ms": external_latency if external_latency is not None else gateway_latency,
@@ -314,6 +328,12 @@ class NetworkMonitor:
             "signal_strength_dbm": primary.get("signal_strength_dbm"),
             "signal_quality_pct": primary.get("signal_quality_pct"),
             "connected": str(primary.get("status", "")).strip().lower() == "up",
+            "source_precedence": ["local_link", "upstream_external", "cloudflare_quality_enrichment"],
+            "source_status": {
+                "local_link_available": bool(local_provider.get("available")),
+                "upstream_available": bool(upstream_provider.get("available")),
+                "cloudflare_available": bool(provider_state.get("available")),
+            },
         }
 
         return {
@@ -324,9 +344,10 @@ class NetworkMonitor:
                 "history_ready": len(samples) >= 3,
                 "sample_count": len(samples),
                 "diagnostic_burst_active": diagnostic_until > time.monotonic(),
-                "last_sample_age_seconds": int(max(time.monotonic() - last_sample_at, 0)) if last_sample_at else None,
+                "last_sample_age_seconds": last_sample_age_seconds,
             },
             "quality": quality,
+            "throughput": throughput,
             "dns": {
                 "latency_ms": round(sum(dns_latencies) / len(dns_latencies), 1) if dns_latencies else None,
                 "failures": dns_failures,
@@ -334,7 +355,25 @@ class NetworkMonitor:
             "events": [_with_age(event) for event in events][-6:],
             "trend_points": trend_points,
             "providers": {
-                "cloudflare_quality": provider_state
+                "local_status": local_provider,
+                "upstream_path": upstream_provider,
+                "observed_throughput": {
+                    "state": throughput.get("state"),
+                    "label": throughput.get("label"),
+                    "detail": throughput.get("detail"),
+                "available": throughput.get("available"),
+                "source": throughput.get("source"),
+                "sampled_at": throughput.get("sampled_at"),
+                "last_sample_age_seconds": throughput.get("last_sample_age_seconds"),
+                "unsupported_code": throughput.get("unsupported_code"),
+                "unsupported_reason": throughput.get("unsupported_reason"),
+            },
+                "cloudflare_quality": provider_state,
+            },
+            "source_debug": {
+                "status_primary": "local_status",
+                "diagnosis_inputs": ["local_status", "upstream_path", "cloudflare_quality"],
+                "throughput_primary": str(throughput.get("source") or "net_adapter_statistics"),
             },
         }
 
@@ -368,6 +407,82 @@ class NetworkMonitor:
             enriched.setdefault("comparison_summary", "Stormhelm does not have enough external quality evidence to compare yet.")
         enriched["comparison_ready"] = bool(comparison_parts) or bool(enriched.get("comparison_ready"))
         return enriched
+
+    def _local_provider_state(self, primary: dict[str, Any], *, last_sample_age_seconds: int | None) -> dict[str, Any]:
+        if not primary:
+            return {
+                "state": "no_active_interface",
+                "label": "Local link telemetry",
+                "detail": "No active interface is being reported right now.",
+                "available": False,
+                "source": "net_ip_configuration",
+                "last_sample_age_seconds": last_sample_age_seconds,
+            }
+        gateway = primary.get("gateway", []) if isinstance(primary.get("gateway"), list) else []
+        dns_servers = primary.get("dns_servers", []) if isinstance(primary.get("dns_servers"), list) else []
+        detail_parts = [str(primary.get("profile") or primary.get("ssid") or primary.get("interface_alias") or "Active interface").strip()]
+        if gateway:
+            detail_parts.append(f"gateway {gateway[0]}")
+        if dns_servers:
+            detail_parts.append(f"DNS {', '.join(str(item) for item in dns_servers[:2])}")
+        signal_quality = primary.get("signal_quality_pct")
+        if signal_quality is not None:
+            detail_parts.append(f"signal {int(round(float(signal_quality)))}%")
+        return {
+            "state": "ready",
+            "label": "Local link telemetry",
+            "detail": " · ".join(part for part in detail_parts if part),
+            "available": True,
+            "source": "net_ip_configuration",
+            "interface_alias": primary.get("interface_alias"),
+            "profile": primary.get("ssid") or primary.get("profile"),
+            "gateway": gateway,
+            "dns_servers": dns_servers,
+            "signal_quality_pct": signal_quality,
+            "last_sample_age_seconds": last_sample_age_seconds,
+        }
+
+    def _upstream_provider_state(
+        self,
+        *,
+        latest: dict[str, Any],
+        external_latency_ms: float | None,
+        external_jitter_ms: float | None,
+        external_loss_pct: float | None,
+        last_sample_age_seconds: int | None,
+    ) -> dict[str, Any]:
+        probes = latest.get("external_probes", []) if isinstance(latest.get("external_probes"), list) else []
+        targets = [str(probe.get("target") or "").strip() for probe in probes if isinstance(probe, dict) and str(probe.get("target") or "").strip()]
+        if not probes:
+            return {
+                "state": "no_external_probe_data",
+                "label": "Upstream path probes",
+                "detail": "Stormhelm does not have current external probe data yet.",
+                "available": False,
+                "source": "icmp_external_probes",
+                "last_sample_age_seconds": last_sample_age_seconds,
+            }
+        detail_parts: list[str] = []
+        if external_latency_ms is not None:
+            detail_parts.append(f"latency {int(round(external_latency_ms))} ms")
+        if external_jitter_ms is not None:
+            detail_parts.append(f"jitter {int(round(external_jitter_ms))} ms")
+        if external_loss_pct is not None:
+            detail_parts.append(f"loss {external_loss_pct:.1f}%")
+        if targets:
+            detail_parts.append("targets " + ", ".join(targets[:2]))
+        return {
+            "state": "ready",
+            "label": "Upstream path probes",
+            "detail": " · ".join(detail_parts) if detail_parts else "External targets responded to the latest probes.",
+            "available": True,
+            "source": "icmp_external_probes",
+            "latency_ms": external_latency_ms,
+            "jitter_ms": external_jitter_ms,
+            "packet_loss_pct": external_loss_pct,
+            "targets": targets,
+            "last_sample_age_seconds": last_sample_age_seconds,
+        }
 
     def _load_persisted_history(self) -> None:
         if self._history_path is None or not self._history_path.exists():

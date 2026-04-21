@@ -67,6 +67,7 @@ class WeatherConfig:
 class HardwareTelemetryConfig:
     enabled: bool
     helper_timeout_seconds: float
+    provider_timeout_seconds: float
     idle_cache_ttl_seconds: float
     active_cache_ttl_seconds: float
     burst_cache_ttl_seconds: float
@@ -119,6 +120,7 @@ class ToolEnablementConfig:
     storage_status: bool = True
     storage_diagnosis: bool = True
     network_status: bool = True
+    network_throughput: bool = True
     network_diagnosis: bool = True
     active_apps: bool = True
     app_control: bool = True

@@ -34,6 +34,8 @@ class DesktopSearchTool(BaseTool):
 
     def validate(self, arguments: dict[str, Any]) -> dict[str, Any]:
         domains = arguments.get("domains")
+        raw_folder_hint = arguments.get("folder_hint")
+        folder_hint = str(raw_folder_hint).strip() if raw_folder_hint is not None else ""
         return {
             "query": str(arguments.get("query", "")).strip(),
             "domains": [str(item).strip().lower() for item in domains if str(item).strip()] if isinstance(domains, list) else None,
@@ -43,7 +45,7 @@ class DesktopSearchTool(BaseTool):
             "file_extensions": [str(item).strip().lower() for item in arguments.get("file_extensions", []) if str(item).strip()]
             if isinstance(arguments.get("file_extensions"), list)
             else None,
-            "folder_hint": str(arguments.get("folder_hint", "")).strip() or None,
+            "folder_hint": folder_hint or None,
             "prefer_folders": bool(arguments.get("prefer_folders", False)),
             "session_id": str(arguments.get("session_id", "default")).strip() or "default",
             "limit": max(1, min(int(arguments.get("limit", 8) or 8), 12)),

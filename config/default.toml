@@ -49,7 +49,8 @@ timeout_seconds = 6
 
 [hardware_telemetry]
 enabled = true
-helper_timeout_seconds = 2.5
+helper_timeout_seconds = 12.0
+provider_timeout_seconds = 5.0
 idle_cache_ttl_seconds = 30
 active_cache_ttl_seconds = 8
 burst_cache_ttl_seconds = 2
@@ -107,6 +108,7 @@ power_projection = true
 resource_status = true
 storage_status = true
 network_status = true
+network_throughput = true
 network_diagnosis = true
 active_apps = true
 app_control = true

@@ -1964,6 +1964,7 @@ class UiBridge(QtCore.QObject):
         quality = network.get("quality", {}) if isinstance(network.get("quality"), dict) else {}
         monitoring = network.get("monitoring", {}) if isinstance(network.get("monitoring"), dict) else {}
         providers = network.get("providers", {}) if isinstance(network.get("providers"), dict) else {}
+        throughput = network.get("throughput", {}) if isinstance(network.get("throughput"), dict) else {}
         events = network.get("events", []) if isinstance(network.get("events"), list) else []
         interfaces = network.get("interfaces", []) if isinstance(network.get("interfaces"), list) else []
         primary = interfaces[0] if interfaces and isinstance(interfaces[0], dict) else {}
@@ -1974,6 +1975,9 @@ class UiBridge(QtCore.QObject):
         confidence = str(assessment.get("confidence") or "low").strip().title() or "Low"
         evidence = str(assessment.get("evidence_sufficiency") or "gathering").replace("_", " ").strip() or "gathering"
         attribution = str(assessment.get("attribution") or "unclear").replace("_", " ").strip() or "unclear"
+        local_state = providers.get("local_status", {}) if isinstance(providers.get("local_status"), dict) else {}
+        upstream_state = providers.get("upstream_path", {}) if isinstance(providers.get("upstream_path"), dict) else {}
+        throughput_state = providers.get("observed_throughput", {}) if isinstance(providers.get("observed_throughput"), dict) else {}
         provider_state = providers.get("cloudflare_quality", {}) if isinstance(providers.get("cloudflare_quality"), dict) else {}
         provider_label = str(provider_state.get("label") or "External quality").strip() or "External quality"
         provider_mode = str(provider_state.get("state") or "unavailable").replace("_", " ").strip().title() or "Unavailable"
@@ -2051,6 +2055,16 @@ class UiBridge(QtCore.QObject):
                 {"label": "Gateway", "value": ", ".join(str(item) for item in (primary.get("gateway") or [])[:2]) or "Unavailable"},
                 {"label": "DNS", "value": ", ".join(str(item) for item in (primary.get("dns_servers") or [])[:2]) or "Unavailable"},
                 {"label": "Local IP", "value": ", ".join(str(item) for item in (primary.get("ipv4") or [])[:2]) or "Unavailable"},
+                {
+                    "label": "Throughput",
+                    "value": (
+                        f"{float(throughput.get('download_mbps')):.2f} down / {float(throughput.get('upload_mbps')):.2f} up Mbps"
+                        if isinstance(throughput.get("download_mbps"), (int, float)) and isinstance(throughput.get("upload_mbps"), (int, float))
+                        else str(throughput.get("detail") or throughput_state.get("detail") or "Unavailable")
+                    ),
+                },
+                {"label": "Local Source", "value": str(local_state.get("detail") or "Unavailable")},
+                {"label": "Upstream Source", "value": str(upstream_state.get("detail") or "Unavailable")},
                 {"label": "Provider", "value": provider_label},
                 {"label": "Provider State", "value": provider_mode},
                 {"label": "Provider Compare", "value": provider_detail},
@@ -2334,15 +2348,6 @@ class UiBridge(QtCore.QObject):
             return "Unknown"
         return f"{percent}%"
 
-    def _battery_detail(self, power: dict[str, Any]) -> str:
-        if not power.get("available"):
-            return "Battery telemetry unavailable"
-        ac_state = str(power.get("ac_line_status", "unknown")).title()
-        remaining = self._format_duration(power.get("seconds_remaining"))
-        if remaining:
-            return f"{ac_state} · {remaining} remaining"
-        return ac_state
-
     def _cpu_detail(self, resources: dict[str, Any]) -> str:
         cpu = resources.get("cpu", {})
         if not isinstance(cpu, dict):
@@ -2354,7 +2359,7 @@ class UiBridge(QtCore.QObject):
             parts.append(f"{cores} cores")
         if logical:
             parts.append(f"{logical} threads")
-        return " · ".join(parts)
+        return " - ".join(parts)
 
     def _memory_used_label(self, resources: dict[str, Any]) -> str:
         memory = resources.get("memory", {})
@@ -2413,28 +2418,6 @@ class UiBridge(QtCore.QObject):
         if isinstance(ipv4, list) and ipv4:
             return ", ".join(str(value) for value in ipv4[:2])
         return str(interface.get("profile", "No IP"))
-
-    def _power_detail_text(self, power: dict[str, Any]) -> str:
-        if not power.get("available"):
-            return "Battery telemetry unavailable"
-        ac_state = "Charging" if str(power.get("ac_line_status", "")).strip().lower() == "online" else str(power.get("ac_line_status", "unknown")).title()
-        remaining = self._format_duration(power.get("seconds_remaining"))
-        if remaining:
-            return f"{ac_state} - {remaining} remaining"
-        return ac_state
-
-    def _cpu_detail_text(self, resources: dict[str, Any]) -> str:
-        cpu = resources.get("cpu", {})
-        if not isinstance(cpu, dict):
-            return ""
-        cores = int(cpu.get("cores") or 0)
-        logical = int(cpu.get("logical_processors") or 0)
-        parts = []
-        if cores:
-            parts.append(f"{cores} cores")
-        if logical:
-            parts.append(f"{logical} threads")
-        return " - ".join(parts)
 
     def _battery_detail(self, power: dict[str, Any]) -> str:
         if not power.get("available"):

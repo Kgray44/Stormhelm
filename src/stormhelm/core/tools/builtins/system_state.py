@@ -111,8 +111,19 @@ def _format_bytes_ratio(used_bytes: object, total_bytes: object) -> str | None:
 
 def _primary_gpu(data: dict[str, Any]) -> dict[str, Any]:
     gpu = data.get("gpu")
-    if isinstance(gpu, list) and gpu and isinstance(gpu[0], dict):
-        return gpu[0]
+    if isinstance(gpu, list):
+        candidates = [item for item in gpu if isinstance(item, dict)]
+        if candidates:
+            candidates.sort(
+                key=lambda adapter: (
+                    float(adapter.get("utilization_percent") or 0.0),
+                    float(adapter.get("power_w") or 0.0),
+                    float(adapter.get("vram_used_bytes") or 0.0),
+                    float(adapter.get("temperature_c") or 0.0),
+                ),
+                reverse=True,
+            )
+            return candidates[0]
     return {}
 
 
@@ -121,46 +132,315 @@ def _telemetry_capabilities(data: dict[str, Any]) -> dict[str, Any]:
     return dict(capabilities) if isinstance(capabilities, dict) else {}
 
 
-def _resource_unavailable_summary(data: dict[str, Any], *, focus: str, metric: str) -> str:
-    capabilities = _telemetry_capabilities(data)
-    probe_path_phrase = "the current probe path" if not capabilities.get("helper_reachable") else "this environment"
+def _telemetry_sources(data: dict[str, Any]) -> dict[str, Any]:
+    sources = data.get("sources")
+    if isinstance(sources, dict):
+        return dict(sources)
+    sources = data.get("telemetry_sources")
+    return dict(sources) if isinstance(sources, dict) else {}
 
+
+def _telemetry_freshness(data: dict[str, Any]) -> dict[str, Any]:
+    freshness = data.get("freshness")
+    if isinstance(freshness, dict):
+        return dict(freshness)
+    freshness = data.get("telemetry_freshness")
+    return dict(freshness) if isinstance(freshness, dict) else {}
+
+
+def _reason_text(value: object) -> str:
+    return str(value or "").replace("_", " ").strip()
+
+
+def _age_text(value: object) -> str | None:
+    if not _has_numeric_signal(value):
+        return None
+    seconds = max(int(round(float(value))), 0)
+    if seconds <= 5:
+        return "just now"
+    if seconds < 60:
+        return f"{seconds} seconds ago"
+    minutes = max(int(round(seconds / 60.0)), 1)
+    return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+
+
+def _source_provider(source: object, fallback: str) -> str:
+    if isinstance(source, dict):
+        provider = str(source.get("provider") or "").strip()
+        if provider:
+            return provider
+    return fallback
+
+
+def _metric_source_map(data: dict[str, Any]) -> dict[str, Any]:
+    sources = _telemetry_sources(data)
+    metrics = sources.get("metrics")
+    return dict(metrics) if isinstance(metrics, dict) else {}
+
+
+def _resource_metric_keys(*, focus: str, metric: str) -> list[str]:
+    mapping = {
+        ("cpu", "usage"): ["cpu.utilization_percent"],
+        ("cpu", "temperature"): ["cpu.package_temperature_c"],
+        ("cpu", "clock"): ["cpu.effective_clock_mhz", "cpu.base_clock_mhz"],
+        ("cpu", "power"): ["cpu.package_power_w"],
+        ("gpu", "usage"): ["gpu.utilization_percent"],
+        ("gpu", "temperature"): ["gpu.temperature_c", "gpu.hotspot_temperature_c"],
+        ("gpu", "memory"): ["gpu.vram_used_bytes", "gpu.vram_total_bytes"],
+        ("gpu", "power"): ["gpu.power_w"],
+        ("gpu", "clock"): ["gpu.core_clock_mhz", "gpu.memory_clock_mhz"],
+        ("ram", "usage"): [],
+        ("ram", "free"): [],
+        ("ram", "pressure"): [],
+        ("overview", "overview"): ["cpu.utilization_percent", "gpu.utilization_percent"],
+    }
+    return mapping.get((focus, metric), [])
+
+
+def _power_metric_keys(metric: str) -> list[str]:
+    mapping = {
+        "overview": ["power.battery_percent", "power.instant_draw_w", "power.health_percent"],
+        "level": ["power.battery_percent"],
+        "charging": ["power.battery_percent", "power.charge_rate_w"],
+        "eta": ["power.time_to_full_seconds", "power.time_to_empty_seconds"],
+        "power_draw": ["power.instant_draw_w"],
+        "drain_rate": ["power.discharge_rate_w", "power.instant_draw_w"],
+        "time_to_empty": ["power.time_to_empty_seconds"],
+    }
+    return mapping.get(metric, [])
+
+
+def _preferred_metric_source(metric_map: dict[str, Any], metric_keys: list[str]) -> dict[str, Any]:
+    for metric_key in metric_keys:
+        source = metric_map.get(metric_key)
+        if isinstance(source, dict):
+            return source
+    return {}
+
+
+def _resource_metric_label(*, focus: str, metric: str) -> str:
+    labels = {
+        ("overview", "overview"): "live resource telemetry",
+        ("cpu", "usage"): "CPU usage",
+        ("cpu", "temperature"): "CPU temperature",
+        ("cpu", "clock"): "CPU clock telemetry",
+        ("cpu", "power"): "CPU package power",
+        ("gpu", "usage"): "GPU usage",
+        ("gpu", "temperature"): "GPU temperature",
+        ("gpu", "memory"): "GPU VRAM telemetry",
+        ("gpu", "power"): "GPU power telemetry",
+        ("gpu", "clock"): "GPU clock telemetry",
+        ("ram", "usage"): "current memory usage",
+        ("ram", "free"): "free memory",
+        ("ram", "pressure"): "memory pressure",
+    }
+    return labels.get((focus, metric), f"{focus.upper()} telemetry")
+
+
+def _resource_metric_present(data: dict[str, Any], *, focus: str, metric: str) -> bool:
+    cpu = data.get("cpu", {}) if isinstance(data.get("cpu"), dict) else {}
+    memory = data.get("memory", {}) if isinstance(data.get("memory"), dict) else {}
+    gpu = _primary_gpu(data)
+
+    if focus == "overview":
+        return any(
+            (
+                _has_numeric_signal(cpu.get("utilization_percent")),
+                _has_numeric_signal(memory.get("used_bytes")) and _has_numeric_signal(memory.get("total_bytes")),
+                _has_numeric_signal(gpu.get("utilization_percent")),
+            )
+        )
     if focus == "cpu":
-        cpu = data.get("cpu", {}) if isinstance(data.get("cpu"), dict) else {}
-        if metric == "temperature" and _has_numeric_signal(cpu.get("utilization_percent")):
-            return "CPU usage is available, but CPU temperature isn't exposed here."
-        if metric == "usage" and _has_numeric_signal(cpu.get("package_temperature_c")):
-            return "CPU temperature is available, but CPU usage isn't exposed here."
+        if metric in {"usage", "overview"}:
+            return _has_numeric_signal(cpu.get("utilization_percent")) or _has_numeric_signal(cpu.get("package_temperature_c"))
+        if metric == "temperature":
+            return _has_numeric_signal(cpu.get("package_temperature_c"))
         if metric == "clock":
-            return f"CPU clock telemetry isn't exposed by {probe_path_phrase}."
-        if metric == "temperature":
-            return f"CPU temperature isn't exposed by {probe_path_phrase}."
-        return f"CPU telemetry isn't available in {probe_path_phrase}."
-
-    if focus == "gpu":
-        gpu = _primary_gpu(data)
-        if not gpu:
-            return "GPU telemetry isn't available here."
-        if metric == "temperature" and _has_numeric_signal(gpu.get("utilization_percent")):
-            return "GPU usage is available, but GPU temperature isn't exposed here."
-        if metric == "usage" and _has_numeric_signal(gpu.get("temperature_c")):
-            return "GPU temperature is available, but GPU usage isn't exposed here."
-        if metric == "memory" and _has_numeric_signal(gpu.get("utilization_percent")):
-            return "GPU usage is available, but VRAM telemetry isn't exposed here."
+            return _has_numeric_signal(cpu.get("effective_clock_mhz"))
         if metric == "power":
-            return f"GPU power telemetry isn't exposed by {probe_path_phrase}."
+            return _has_numeric_signal(cpu.get("package_power_w"))
+    if focus == "gpu":
+        if metric in {"usage", "overview"}:
+            return _has_numeric_signal(gpu.get("utilization_percent")) or _has_numeric_signal(gpu.get("temperature_c"))
         if metric == "temperature":
-            return f"GPU temperature isn't exposed by {probe_path_phrase}."
-        return f"GPU telemetry isn't available in {probe_path_phrase}."
-
+            return _has_numeric_signal(gpu.get("temperature_c"))
+        if metric == "memory":
+            return _has_numeric_signal(gpu.get("vram_used_bytes")) or _has_numeric_signal(gpu.get("vram_total_bytes"))
+        if metric == "power":
+            return _has_numeric_signal(gpu.get("power_w"))
+        if metric == "clock":
+            return _has_numeric_signal(gpu.get("core_clock_mhz")) or _has_numeric_signal(gpu.get("memory_clock_mhz"))
     if focus == "ram":
-        if metric == "pressure":
-            return "Memory pressure can't be judged because current memory usage isn't available here."
+        if metric in {"usage", "overview", "pressure"}:
+            return _has_numeric_signal(memory.get("used_bytes")) and _has_numeric_signal(memory.get("total_bytes"))
         if metric == "free":
-            return "Free memory isn't available here."
-        return "Current memory usage isn't available here."
+            return _has_numeric_signal(memory.get("free_bytes"))
+    return False
 
-    return "Live resource telemetry isn't available here."
+
+def _resource_metric_contract(data: dict[str, Any], *, focus: str, metric: str) -> dict[str, Any]:
+    capabilities = _telemetry_capabilities(data)
+    sources = _telemetry_sources(data)
+    metric_sources = _metric_source_map(data)
+    freshness = _telemetry_freshness(data)
+    helper_source = sources.get("helper") if isinstance(sources.get("helper"), dict) else {}
+    domain_key = "memory" if focus == "ram" else focus
+    domain_source = sources.get(domain_key) if isinstance(sources.get(domain_key), dict) else {}
+    metric_source = _preferred_metric_source(metric_sources, _resource_metric_keys(focus=focus, metric=metric))
+    label = _resource_metric_label(focus=focus, metric=metric)
+    helper_reachable = bool(capabilities.get("helper_reachable"))
+    helper_installed = bool(capabilities.get("helper_installed"))
+    sample_age = freshness.get("sample_age_seconds")
+    provider = _source_provider(metric_source, _source_provider(domain_source, _source_provider(helper_source, "system_probe_floor")))
+    capability_key = {
+        "cpu": "cpu_deep_telemetry_available",
+        "gpu": "gpu_deep_telemetry_available",
+    }.get(focus)
+    domain_supported = True if capability_key is None else bool(capabilities.get(capability_key))
+    available = _resource_metric_present(data, focus=focus, metric=metric) or bool(metric_source.get("available"))
+    unsupported_reason = None
+
+    if not available:
+        exact_reason = str(metric_source.get("unsupported_reason") or "").strip()
+        if exact_reason:
+            unsupported_reason = exact_reason
+        elif focus == "ram":
+            unsupported_reason = f"{label} isn't exposed by the current OS memory snapshot."
+        elif helper_installed and not helper_reachable:
+            helper_reason = _reason_text(freshness.get("reason") or helper_source.get("detail") or "helper_unreachable")
+            unsupported_reason = (
+                f"{label} is unavailable because the helper telemetry path is unreachable"
+                f"{f' ({helper_reason})' if helper_reason else ''}. Stormhelm is on the coarse probe floor for this metric."
+            )
+        elif helper_reachable and not domain_supported:
+            unsupported_reason = f"{label} isn't supported by the active helper/provider path on this machine."
+        elif helper_reachable:
+            unsupported_reason = f"{label} isn't present in the latest helper-backed sample."
+        else:
+            unsupported_reason = f"{label} isn't exposed by the current probe floor."
+
+    return {
+        "requested_focus": focus,
+        "requested_metric": metric,
+        "label": label,
+        "available": available,
+        "provider": provider,
+        "helper_installed": helper_installed,
+        "helper_reachable": helper_reachable,
+        "helper_state": str(helper_source.get("state") or ("reachable" if helper_reachable else "unavailable")).strip() or "unavailable",
+        "sample_age_seconds": sample_age,
+        "sample_age_label": _age_text(sample_age),
+        "sampling_tier": freshness.get("sampling_tier"),
+        "unsupported_reason": unsupported_reason,
+    }
+
+
+def _power_metric_contract(status: dict[str, Any], *, metric: str) -> dict[str, Any]:
+    capabilities = dict(status.get("telemetry_capabilities", {})) if isinstance(status.get("telemetry_capabilities"), dict) else {}
+    sources = dict(status.get("telemetry_sources", {})) if isinstance(status.get("telemetry_sources"), dict) else {}
+    metric_sources = dict(sources.get("metrics", {})) if isinstance(sources.get("metrics"), dict) else {}
+    freshness = dict(status.get("telemetry_freshness", {})) if isinstance(status.get("telemetry_freshness"), dict) else {}
+    helper_source = sources.get("helper") if isinstance(sources.get("helper"), dict) else {}
+    power_source = sources.get("power") if isinstance(sources.get("power"), dict) else {}
+    metric_source = _preferred_metric_source(metric_sources, _power_metric_keys(metric))
+    helper_reachable = bool(capabilities.get("helper_reachable"))
+    helper_installed = bool(capabilities.get("helper_installed"))
+    provider = _source_provider(metric_source, _source_provider(power_source, _source_provider(helper_source, "system_probe_floor")))
+    sample_age = freshness.get("sample_age_seconds")
+    label = {
+        "overview": "power status",
+        "level": "battery percentage",
+        "charging": "charge state",
+        "eta": "battery projection",
+        "power_draw": "battery draw",
+        "drain_rate": "battery drain rate",
+        "time_to_empty": "time-to-empty projection",
+    }.get(metric, metric.replace("_", " "))
+
+    available = bool(status.get("available"))
+    unsupported_reason = None
+    exact_reason = str(metric_source.get("unsupported_reason") or "").strip()
+    if metric == "level" and status.get("battery_percent") is None:
+        unsupported_reason = exact_reason or "Battery percentage isn't exposed by the current power provider."
+    elif metric == "eta" and status.get("time_to_full_seconds") is None and status.get("time_to_empty_seconds") is None and status.get("seconds_remaining") is None:
+        if exact_reason:
+            unsupported_reason = exact_reason
+        elif helper_installed and not helper_reachable:
+            helper_reason = _reason_text(freshness.get("reason") or helper_source.get("detail") or "helper_unreachable")
+            unsupported_reason = (
+                "A reliable battery ETA is unavailable because the helper telemetry path is unreachable"
+                f"{f' ({helper_reason})' if helper_reason else ''}."
+            )
+        else:
+            unsupported_reason = "This machine is not exposing a reliable battery ETA right now."
+    elif metric in {"power_draw", "drain_rate"} and not any(
+        _has_numeric_signal(status.get(key))
+        for key in ("instant_power_draw_watts", "rolling_power_draw_watts", "discharge_rate_watts", "charge_rate_watts")
+    ):
+        if exact_reason:
+            unsupported_reason = exact_reason
+        elif helper_installed and not helper_reachable:
+            helper_reason = _reason_text(freshness.get("reason") or helper_source.get("detail") or "helper_unreachable")
+            unsupported_reason = (
+                "Live battery draw is unavailable because the helper telemetry path is unreachable"
+                f"{f' ({helper_reason})' if helper_reason else ''}."
+            )
+        elif helper_reachable and not bool(capabilities.get("power_current_available")):
+            unsupported_reason = "The helper is reachable, but current-sense battery telemetry is not supported on this machine."
+        else:
+            unsupported_reason = "Windows is not exposing a reliable live battery-draw reading on this machine."
+
+    return {
+        "requested_metric": metric,
+        "label": label,
+        "available": available,
+        "provider": provider,
+        "helper_installed": helper_installed,
+        "helper_reachable": helper_reachable,
+        "helper_state": str(helper_source.get("state") or ("reachable" if helper_reachable else "unavailable")).strip() or "unavailable",
+        "sample_age_seconds": sample_age,
+        "sample_age_label": _age_text(sample_age),
+        "sampling_tier": freshness.get("sampling_tier"),
+        "unsupported_reason": unsupported_reason,
+    }
+
+
+def _power_overview_summary(status: dict[str, Any]) -> str:
+    percent = status.get("battery_percent")
+    ac_line = str(status.get("ac_line_status", "unknown")).strip().lower() or "unknown"
+    ac_text = "on AC" if ac_line == "online" else "on battery" if ac_line == "offline" else f"with AC line {ac_line}"
+    draw = status.get("rolling_power_draw_watts")
+    draw_label = "avg draw"
+    if not _has_numeric_signal(draw):
+        draw = status.get("instant_power_draw_watts") or status.get("discharge_rate_watts") or status.get("charge_rate_watts")
+        draw_label = "draw"
+    health = status.get("health_percent")
+    wear = status.get("wear_percent")
+    eta_seconds = status.get("time_to_full_seconds") if ac_line == "online" else status.get("time_to_empty_seconds") or status.get("seconds_remaining")
+
+    parts = []
+    if percent is not None:
+        parts.append(f"Power is holding at {percent}% {ac_text}.")
+    else:
+        parts.append(f"Power bearings are live {ac_text}.")
+    if _has_numeric_signal(draw):
+        parts.append(f"Current {draw_label} is {float(draw):.1f} W.")
+    if isinstance(eta_seconds, int):
+        minutes = max(int(eta_seconds // 60), 0)
+        if ac_line == "online":
+            parts.append(f"About {minutes} more minute{'s' if minutes != 1 else ''} to full.")
+        else:
+            parts.append(f"About {minutes} more minute{'s' if minutes != 1 else ''} remaining.")
+    if _has_numeric_signal(health):
+        parts.append(f"Battery health is {int(round(float(health)))}%.")
+    elif _has_numeric_signal(wear):
+        parts.append(f"Battery wear is {int(round(float(wear)))}%.")
+    return " ".join(parts)
+
+
+def _resource_unavailable_summary(data: dict[str, Any], *, focus: str, metric: str) -> str:
+    contract = _resource_metric_contract(data, focus=focus, metric=metric)
+    return str(contract.get("unsupported_reason") or "Live resource telemetry isn't available here.")
 
 
 def _resource_identity_summary(data: dict[str, Any], *, focus: str) -> str:
@@ -223,6 +503,11 @@ def _resource_telemetry_summary(data: dict[str, Any], *, focus: str, metric: str
             if clock:
                 return f"CPU clock is {clock} right now."
             return _resource_unavailable_summary(data, focus="cpu", metric="clock")
+        if metric == "power":
+            power = _format_power(cpu.get("package_power_w"))
+            if power:
+                return f"CPU package power is {power} right now."
+            return _resource_unavailable_summary(data, focus="cpu", metric="power")
 
     if focus == "gpu":
         if metric in {"usage", "overview"}:
@@ -256,6 +541,16 @@ def _resource_telemetry_summary(data: dict[str, Any], *, focus: str, metric: str
             if power:
                 return f"GPU power draw is {power} right now."
             return _resource_unavailable_summary(data, focus="gpu", metric="power")
+        if metric == "clock":
+            core_clock = _format_clock(gpu.get("core_clock_mhz"))
+            memory_clock = _format_clock(gpu.get("memory_clock_mhz"))
+            if core_clock and memory_clock:
+                return f"GPU clocks are {core_clock} core and {memory_clock} memory right now."
+            if core_clock:
+                return f"GPU core clock is {core_clock} right now."
+            if memory_clock:
+                return f"GPU memory clock is {memory_clock} right now."
+            return _resource_unavailable_summary(data, focus="gpu", metric="clock")
 
     if focus == "ram":
         total = memory.get("total_bytes")
@@ -432,12 +727,13 @@ class PowerStatusTool(BaseTool):
         data = _probe(context).power_status()
         persona = PersonaContract(context.config)
         focus = arguments["focus"]
+        contract = _power_metric_contract(data, metric=focus)
         if not data.get("available"):
-            summary = persona.report("Power bearings are not available on this machine.")
+            summary = persona.report(str(contract.get("unsupported_reason") or "Power bearings are not available on this machine."))
         elif focus == "charging":
             if data.get("battery_percent") is None:
                 summary = persona.report(
-                    f"AC line is {data.get('ac_line_status', 'unknown')}, but the battery percentage is not available."
+                    str(contract.get("unsupported_reason") or f"AC line is {data.get('ac_line_status', 'unknown')}, but the battery percentage is not available.")
                 )
             else:
                 summary = persona.report(
@@ -449,31 +745,24 @@ class PowerStatusTool(BaseTool):
                 minutes = max(int(int(data.get("time_to_full_seconds") or 0) // 60), 0)
                 summary = persona.report(f"Charging course projects about {minutes} more minute{'s' if minutes != 1 else ''} to full.")
             elif data.get("ac_line_status") == "online":
-                summary = persona.report(
-                    "Power bearings show the battery percentage and charging state, but this machine is not exposing a reliable time-to-full estimate."
-                )
+                summary = persona.report(str(contract.get("unsupported_reason") or "Power bearings show the battery percentage and charging state, but this machine is not exposing a reliable time-to-full estimate."))
             elif isinstance(seconds_remaining, int):
                 minutes = max(int(seconds_remaining // 60), 0)
                 summary = persona.report(f"Battery endurance is holding for about {minutes} more minute{'s' if minutes != 1 else ''}.")
             else:
-                summary = persona.report(
-                    "Power bearings show the battery percentage, but the system is not exposing a reliable remaining-time estimate."
-                )
+                summary = persona.report(str(contract.get("unsupported_reason") or "Power bearings show the battery percentage, but the system is not exposing a reliable remaining-time estimate."))
         elif focus == "level":
             if data.get("battery_percent") is None:
-                summary = persona.report("Battery percentage is not available from this machine right now.")
+                summary = persona.report(str(contract.get("unsupported_reason") or "Battery percentage is not available from this machine right now."))
             else:
                 summary = persona.report(f"Power is holding at {data.get('battery_percent')}%.")
         else:
             if data.get("battery_percent") is None:
-                summary = persona.report(
-                    f"AC line is {data.get('ac_line_status', 'unknown')} and no battery percentage is available."
-                )
+                summary = persona.report(str(contract.get("unsupported_reason") or f"AC line is {data.get('ac_line_status', 'unknown')} and no battery percentage is available."))
             else:
-                summary = persona.report(
-                    f"Power is holding at {data.get('battery_percent')}% with AC line {data.get('ac_line_status', 'unknown')}."
-                )
+                summary = persona.report(_power_overview_summary(data))
         payload = _merge_data_with_focus(data, present_in=arguments["present_in"], module="systems", state_hint="power")
+        payload["metric_contract"] = contract
         return ToolResult(success=True, summary=summary, data=payload)
 
 
@@ -511,37 +800,38 @@ class PowerProjectionTool(BaseTool):
         }
 
     def execute_sync(self, context: ToolContext, arguments: dict[str, Any]) -> ToolResult:
-        data = _probe(context).power_projection(
+        probe = _probe(context)
+        data = probe.power_projection(
             metric=arguments["metric"],
             target_percent=arguments["target_percent"],
             assume_unplugged=arguments["assume_unplugged"],
         )
+        status_snapshot = probe.power_status()
         persona = PersonaContract(context.config)
         metric = arguments["metric"]
         notes = [str(note).strip() for note in data.get("notes", []) if str(note).strip()]
         minutes = data.get("projection_minutes")
         target_percent = arguments["target_percent"]
         assume_unplugged = arguments["assume_unplugged"]
+        contract = _power_metric_contract(status_snapshot, metric=metric)
 
         if not data.get("available"):
-            summary = persona.report("Power projection bearings are unavailable on this machine right now.")
+            summary = persona.report(str(contract.get("unsupported_reason") or "Power projection bearings are unavailable on this machine right now."))
         elif metric == "power_draw":
             if data.get("power_draw_watts") is not None:
                 summary = persona.report(f"Current power draw is holding around {data.get('power_draw_watts')} W.")
             else:
-                summary = persona.report("Stormhelm can see the current charge state, but this machine is not exposing a reliable live power-draw reading.")
+                summary = persona.report(str(contract.get("unsupported_reason") or "Stormhelm can see the current charge state, but this machine is not exposing a reliable live power-draw reading."))
         elif metric == "drain_rate":
             if data.get("power_draw_watts") is not None:
                 summary = persona.report(f"Battery drain is running at about {data.get('power_draw_watts')} W.")
             else:
-                summary = persona.report(
-                    "Stormhelm can see the current charge state, but this machine is not exposing a reliable drain-rate reading yet."
-                )
+                summary = persona.report(str(contract.get("unsupported_reason") or "Stormhelm can see the current charge state, but this machine is not exposing a reliable drain-rate reading yet."))
         elif metric == "time_to_empty":
             if data.get("reliable") and isinstance(minutes, int):
                 summary = persona.report(f"If the present discharge holds, battery endurance is about {minutes} more minute{'s' if minutes != 1 else ''}.")
             else:
-                detail = notes[0] if notes else "The system is not exposing a reliable time-to-empty estimate."
+                detail = notes[0] if notes else str(contract.get("unsupported_reason") or "The system is not exposing a reliable time-to-empty estimate.")
                 summary = persona.report(detail)
         else:
             if data.get("reliable") and isinstance(minutes, int) and isinstance(target_percent, int):
@@ -556,7 +846,7 @@ class PowerProjectionTool(BaseTool):
                         f"Power should reach {target_percent}% in about {minutes} minute{'s' if minutes != 1 else ''} on the current course."
                     )
             else:
-                detail = notes[0] if notes else "Stormhelm can see the current charge and power state, but not a reliable threshold projection yet."
+                detail = notes[0] if notes else str(contract.get("unsupported_reason") or "Stormhelm can see the current charge and power state, but not a reliable threshold projection yet.")
                 summary = persona.report(detail)
         payload = _merge_data_with_focus(
             data,
@@ -565,6 +855,8 @@ class PowerProjectionTool(BaseTool):
             section="overview",
             state_hint="power_projection",
         )
+        payload["metric_contract"] = contract
+        payload["status_snapshot"] = status_snapshot
         return ToolResult(success=True, summary=summary, data=payload)
 
 
@@ -611,6 +903,7 @@ class ResourceStatusTool(BaseTool):
         else:
             summary = persona.report(_resource_telemetry_summary(data, focus=focus, metric=metric))
         payload = _merge_data_with_focus(data, present_in=arguments["present_in"], module="systems", state_hint="resources")
+        payload["metric_contract"] = _resource_metric_contract(data, focus=focus, metric=metric)
         return ToolResult(success=True, summary=summary, data=payload)
 
 
@@ -657,7 +950,7 @@ class NetworkStatusTool(BaseTool):
         return {
             "type": "object",
             "properties": {
-                "focus": {"type": "string", "enum": ["overview", "network", "ip"], "default": "overview"},
+                "focus": {"type": "string", "enum": ["overview", "network", "ip", "signal"], "default": "overview"},
                 "present_in": {"type": "string", "enum": ["none", "deck"], "default": "none"},
             },
             "additionalProperties": False,
@@ -673,6 +966,51 @@ class NetworkStatusTool(BaseTool):
         persona = PersonaContract(context.config)
         summary = persona.report(NetworkResponseFormatter().format_status_response(data, focus=arguments["focus"]))
         payload = _merge_data_with_focus(data, present_in=arguments["present_in"], module="systems", state_hint="network")
+        return ToolResult(success=True, summary=summary, data=payload)
+
+
+class NetworkThroughputTool(BaseTool):
+    name = "network_throughput"
+    display_name = "Network Throughput"
+    description = "Return current observed network download and upload throughput, or the exact reason it cannot be sampled."
+    category = "network"
+
+    def parameter_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "metric": {"type": "string", "enum": ["internet_speed", "download_speed", "upload_speed"], "default": "internet_speed"},
+                "present_in": {"type": "string", "enum": ["none", "deck"], "default": "none"},
+            },
+            "additionalProperties": False,
+        }
+
+    def validate(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        metric = str(arguments.get("metric", "internet_speed")).strip().lower() or "internet_speed"
+        present_in = str(arguments.get("present_in", "none")).strip().lower() or "none"
+        return {"metric": metric, "present_in": present_in}
+
+    def execute_sync(self, context: ToolContext, arguments: dict[str, Any]) -> ToolResult:
+        data = _probe(context).network_throughput(metric=arguments["metric"])
+        persona = PersonaContract(context.config)
+        summary = persona.report(NetworkResponseFormatter().format_throughput_response(data))
+        payload = _merge_data_with_focus(
+            data,
+            present_in=arguments["present_in"],
+            module="systems",
+            section="network",
+            state_hint="network-throughput",
+        )
+        payload["metric_contract"] = {
+            "requested_metric": arguments["metric"],
+            "provider": data.get("source"),
+            "state": data.get("state"),
+            "sample_age_seconds": data.get("last_sample_age_seconds"),
+            "sample_age_label": _age_text(data.get("last_sample_age_seconds")),
+            "sample_window_seconds": data.get("sample_window_seconds"),
+            "unsupported_code": data.get("unsupported_code"),
+            "unsupported_reason": data.get("unsupported_reason"),
+        }
         return ToolResult(success=True, summary=summary, data=payload)
 
 

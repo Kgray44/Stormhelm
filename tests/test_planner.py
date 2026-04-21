@@ -1208,3 +1208,116 @@ def test_planner_routes_fix_wifi_to_repair_action() -> None:
     assert decision.request_type == "repair_execution"
     assert decision.tool_requests[0].tool_name == "repair_action"
     assert decision.tool_requests[0].arguments["repair_kind"] == "network_repair"
+
+
+def test_planner_routes_known_site_browser_destination_to_external_open_url() -> None:
+    planner = DeterministicPlanner()
+
+    decision = planner.plan(
+        "open YouTube in a browser",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "direct_action"
+    assert decision.structured_query is not None
+    assert decision.structured_query.query_shape.value == "open_browser_destination"
+    assert decision.structured_query.execution_type == "resolve_url_then_open_in_browser"
+    assert decision.tool_requests[0].tool_name == "external_open_url"
+    assert decision.tool_requests[0].arguments["url"] == "https://www.youtube.com/"
+    assert decision.structured_query.slots["destination_name"] == "youtube"
+    assert decision.structured_query.slots["destination_scope"] == "general"
+
+
+def test_planner_routes_personal_youtube_history_browser_destination_to_known_history_url() -> None:
+    planner = DeterministicPlanner()
+
+    decision = planner.plan(
+        "open my personal youtube history in a browser",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "direct_action"
+    assert decision.structured_query is not None
+    assert decision.structured_query.query_shape.value == "open_browser_destination"
+    assert decision.tool_requests[0].tool_name == "external_open_url"
+    assert decision.tool_requests[0].arguments["url"] == "https://www.youtube.com/feed/history"
+    assert decision.structured_query.slots["destination_name"] == "youtube_history"
+    assert decision.structured_query.slots["destination_scope"] == "personal"
+
+
+def test_planner_routes_youtube_search_phrase_to_browser_search_open() -> None:
+    planner = DeterministicPlanner()
+
+    decision = planner.plan(
+        "search YouTube for lo-fi music",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "browser_search"
+    assert decision.tool_requests[0].tool_name == "external_open_url"
+    assert decision.tool_requests[0].arguments["url"] == "https://www.youtube.com/results?search_query=lo-fi+music"
+    assert decision.structured_query is not None
+    assert decision.structured_query.query_shape.value == "search_browser_destination"
+    assert decision.structured_query.execution_type == "resolve_search_url_then_open_in_browser"
+    assert decision.structured_query.slots["search_provider"] == "youtube"
+
+
+def test_planner_routes_lookup_phrase_to_web_search_open() -> None:
+    planner = DeterministicPlanner()
+
+    decision = planner.plan(
+        "look up OpenAI pricing",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "browser_search"
+    assert decision.tool_requests[0].tool_name == "external_open_url"
+    assert decision.tool_requests[0].arguments["url"] == "https://www.google.com/search?q=OpenAI+pricing"
+    assert decision.structured_query is not None
+    assert decision.structured_query.query_shape.value == "search_browser_destination"
+    assert decision.structured_query.slots["search_provider"] == "web"
+
+
+def test_planner_reports_browser_open_capability_unavailable_specifically() -> None:
+    planner = DeterministicPlanner()
+
+    decision = planner.plan(
+        "open Gmail in a browser",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+        available_tools={"app_control"},
+    )
+
+    assert decision.request_type == "unsupported_capability"
+    assert decision.unsupported_reason is not None
+    assert decision.unsupported_reason.code == "browser_opening_unavailable"
+    assert decision.assistant_message == "Browser opening isn't available in the current environment."

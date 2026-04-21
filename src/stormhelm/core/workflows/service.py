@@ -798,7 +798,7 @@ class WorkflowPowerService:
             success = False
             error = "workflow_failed"
         elif chain.partial:
-            chain.summary = f"Completed {completed_steps} of {len(chain.steps)} steps with some limits."
+            chain.summary = self._partial_summary(chain, completed_steps=completed_steps)
             success = True
             error = None
         else:
@@ -1170,6 +1170,21 @@ class WorkflowPowerService:
             "relaunch_app": f"Relaunched {chain.title.replace('Relaunch ', '').strip()}.",
         }
         return labels.get(chain.kind, f"Completed {chain.title.lower()}.")
+
+    def _partial_summary(self, chain: ActionChain, *, completed_steps: int) -> str:
+        failed_step = next((step for step in chain.steps if step.status == "failed"), None)
+        if chain.kind == "network_repair":
+            dns_flushed = any(step.kind == "flush_dns" and step.status == "completed" for step in chain.steps)
+            if failed_step is not None and failed_step.kind == "restart_network_adapter":
+                if dns_flushed:
+                    return "Ran the first network repair steps and flushed the DNS cache, but adapter recovery is unavailable here."
+                return "Ran the first network repair steps, but adapter recovery is unavailable here."
+            if dns_flushed:
+                return "Ran the first network repair steps and flushed the DNS cache, but some recovery actions were unavailable."
+            return "Ran the first network repair steps, but some recovery actions were unavailable."
+
+        success_label = self._success_summary(chain).rstrip(".")
+        return f"{success_label} with some limits ({completed_steps}/{len(chain.steps)} steps)."
 
     def _failure_summary(self, chain: ActionChain) -> str:
         failed_step = next((step for step in chain.steps if step.status == "failed"), None)

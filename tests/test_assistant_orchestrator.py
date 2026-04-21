@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from stormhelm.core.events import EventBuffer
 from stormhelm.core.jobs.manager import JobManager
 from stormhelm.core.memory.database import SQLiteDatabase
@@ -174,6 +176,17 @@ class FakeSystemProbe:
             "power_source": "ac",
             "charge_rate_watts": 18.5,
             "discharge_rate_watts": None,
+            "instant_power_draw_watts": 18.5,
+            "telemetry_capabilities": {
+                "helper_installed": True,
+                "helper_reachable": True,
+                "power_current_available": True,
+            },
+            "telemetry_sources": {
+                "helper": {"provider": "stormhelm_helper", "state": "reachable"},
+                "power": {"provider": "stormhelm_helper", "confidence": "measured"},
+            },
+            "telemetry_freshness": {"sampling_tier": "active", "sample_age_seconds": 2.0},
         }
 
     def power_projection(
@@ -199,9 +212,40 @@ class FakeSystemProbe:
 
     def resource_status(self) -> dict[str, object]:
         return {
-            "cpu": {"name": "Test CPU", "logical_processors": 16, "max_clock_mhz": 4000},
+            "cpu": {
+                "name": "Test CPU",
+                "logical_processors": 16,
+                "max_clock_mhz": 4000,
+                "utilization_percent": 37.0,
+                "package_temperature_c": 71.0,
+                "effective_clock_mhz": 3985,
+            },
             "memory": {"total_bytes": 32 * 1024**3, "free_bytes": 20 * 1024**3, "used_bytes": 12 * 1024**3},
-            "gpu": [{"name": "Test GPU", "adapter_ram": 8 * 1024**3, "driver_version": "1.0"}],
+            "gpu": [
+                {
+                    "name": "Test GPU",
+                    "adapter_ram": 8 * 1024**3,
+                    "driver_version": "1.0",
+                    "utilization_percent": 58.0,
+                    "temperature_c": 66.0,
+                    "vram_total_bytes": 8 * 1024**3,
+                    "vram_used_bytes": 2 * 1024**3,
+                    "power_w": 118.5,
+                }
+            ],
+            "capabilities": {
+                "helper_installed": True,
+                "helper_reachable": True,
+                "cpu_deep_telemetry_available": True,
+                "gpu_deep_telemetry_available": True,
+                "thermal_sensor_availability": True,
+            },
+            "sources": {
+                "helper": {"provider": "stormhelm_helper", "state": "reachable"},
+                "cpu": {"provider": "stormhelm_helper", "confidence": "best_effort"},
+                "gpu": {"provider": "stormhelm_helper", "confidence": "best_effort"},
+            },
+            "freshness": {"sampling_tier": "active", "sample_age_seconds": 2.0},
         }
 
     def storage_status(self) -> dict[str, object]:
@@ -211,8 +255,68 @@ class FakeSystemProbe:
         return {
             "hostname": "stormhelm-test",
             "fqdn": "stormhelm-test.local",
-            "interfaces": [{"interface_alias": "Wi-Fi", "profile": "Home", "status": "Up", "ipv4": ["192.168.1.20"]}],
+            "interfaces": [
+                {
+                    "interface_alias": "Wi-Fi",
+                    "profile": "Home",
+                    "ssid": "Home",
+                    "status": "Up",
+                    "ipv4": ["192.168.1.20"],
+                    "gateway": ["192.168.1.1"],
+                    "dns_servers": ["1.1.1.1", "8.8.8.8"],
+                    "signal_quality_pct": 82,
+                }
+            ],
+            "monitoring": {"history_ready": True, "sample_count": 8, "last_sample_age_seconds": 4},
+            "quality": {
+                "connected": True,
+                "signal_quality_pct": 82,
+                "latency_ms": 28,
+                "jitter_ms": 4,
+                "packet_loss_pct": 0.0,
+            },
+            "throughput": {
+                "available": True,
+                "metric": "internet_speed",
+                "state": "ready",
+                "source": "net_adapter_statistics",
+                "download_mbps": 126.4,
+                "upload_mbps": 18.7,
+                "sample_window_seconds": 1.0,
+                "last_sample_age_seconds": 0.0,
+            },
+            "providers": {
+                "local_status": {"state": "ready", "detail": "Home | gateway 192.168.1.1 | DNS 1.1.1.1, 8.8.8.8 | signal 82%", "available": True},
+                "upstream_path": {"state": "ready", "detail": "latency 28 ms | jitter 4 ms | loss 0.0%", "available": True},
+                "observed_throughput": {"state": "ready", "detail": "Observed over the last 1.0 seconds on Wi-Fi.", "available": True},
+                "cloudflare_quality": {"state": "ready", "label": "Cloudflare quality", "detail": "Cloudflare-quality sample refreshed around 29 ms.", "available": True},
+            },
+            "source_debug": {
+                "status_primary": "local_status",
+                "diagnosis_inputs": ["local_status", "upstream_path", "cloudflare_quality"],
+                "throughput_primary": "net_adapter_statistics",
+            },
         }
+
+    def network_throughput(self, *, metric: str = "internet_speed") -> dict[str, object]:
+        payload = dict(self.network_status().get("throughput", {}))
+        payload.update(
+            {
+                "metric": metric,
+                "interfaces": self.network_status().get("interfaces", []),
+                "quality": self.network_status().get("quality", {}),
+                "monitoring": self.network_status().get("monitoring", {}),
+                "providers": self.network_status().get("providers", {}),
+                "source_debug": self.network_status().get("source_debug", {}),
+            }
+        )
+        if metric == "download_speed":
+            payload["metric_value_mbps"] = payload.get("download_mbps")
+        elif metric == "upload_speed":
+            payload["metric_value_mbps"] = payload.get("upload_mbps")
+        else:
+            payload["metric_value_mbps"] = payload.get("download_mbps")
+        return payload
 
     def network_diagnosis(
         self,
@@ -243,15 +347,33 @@ class FakeSystemProbe:
                 "packet_loss_pct": 3.4,
                 "signal_strength_dbm": -63,
             },
+            "throughput": {
+                "available": True,
+                "metric": "internet_speed",
+                "state": "ready",
+                "source": "net_adapter_statistics",
+                "download_mbps": 126.4,
+                "upload_mbps": 18.7,
+                "sample_window_seconds": 1.0,
+                "last_sample_age_seconds": 0.0,
+            },
             "events": [
                 {"kind": "packet_loss_burst", "title": "Packet-loss burst", "detail": "External loss reached 3.4%.", "seconds_ago": 34}
             ],
             "providers": {
+                "local_status": {"state": "ready", "detail": "Home | gateway 192.168.1.1 | DNS 1.1.1.1, 8.8.8.8 | signal 82%", "available": True},
+                "upstream_path": {"state": "ready", "detail": "latency 46 ms | jitter 19 ms | loss 3.4%", "available": True},
+                "observed_throughput": {"state": "ready", "detail": "Observed over the last 1.0 seconds on Wi-Fi.", "available": True},
                 "cloudflare_quality": {
                     "state": "partial",
                     "label": "Cloudflare quality",
                     "detail": "Waiting for richer quality samples.",
                 }
+            },
+            "source_debug": {
+                "status_primary": "local_status",
+                "diagnosis_inputs": ["local_status", "upstream_path", "cloudflare_quality"],
+                "throughput_primary": "net_adapter_statistics",
             },
             "focus": focus,
         }
@@ -445,6 +567,16 @@ class PartialNetworkRepairProbe(FakeSystemProbe):
         return {"success": False, "reason": "unsupported"}
 
 
+class StatusLeakageSystemProbe(FakeSystemProbe):
+    def network_status(self) -> dict[str, object]:
+        payload = dict(super().network_status())
+        payload["assessment"] = {
+            "headline": "Local Wi-Fi instability likely",
+            "summary": "This should never leak into current-status formatting.",
+        }
+        return payload
+
+
 class BrowserAwareSystemProbe(FakeSystemProbe):
     def __init__(self) -> None:
         self.focus_requests: list[str] = []
@@ -558,6 +690,18 @@ def _build_assistant(temp_config, *, system_probe=None) -> tuple[AssistantOrches
     return assistant, jobs, executor, session_state
 
 
+def _planner_debug(payload: dict[str, object]) -> dict[str, object]:
+    assistant_message = payload.get("assistant_message") if isinstance(payload.get("assistant_message"), dict) else {}
+    metadata = assistant_message.get("metadata") if isinstance(assistant_message.get("metadata"), dict) else {}
+    return dict(metadata.get("planner_debug") or {})
+
+
+def _planner_obedience(payload: dict[str, object]) -> dict[str, object]:
+    assistant_message = payload.get("assistant_message") if isinstance(payload.get("assistant_message"), dict) else {}
+    metadata = assistant_message.get("metadata") if isinstance(assistant_message.get("metadata"), dict) else {}
+    return dict(metadata.get("planner_obedience") or {})
+
+
 def _build_assistant_with_workspace(
     temp_config,
     *,
@@ -614,6 +758,34 @@ def _build_assistant_with_workspace(
         provider=None,
     )
     return assistant, jobs, executor, session_state, workspace_service
+
+
+def _run_assistant_once(
+    assistant: AssistantOrchestrator,
+    jobs: JobManager,
+    executor: ToolExecutor,
+    *,
+    message: str,
+    surface_mode: str = "ghost",
+    active_module: str = "systems",
+    workspace_context: dict[str, object] | None = None,
+    input_context: dict[str, object] | None = None,
+) -> dict[str, object]:
+    async def runner() -> dict[str, object]:
+        await jobs.start()
+        try:
+            return await assistant.handle_message(
+                message,
+                surface_mode=surface_mode,
+                active_module=active_module,
+                workspace_context=workspace_context,
+                input_context=input_context,
+            )
+        finally:
+            await jobs.stop()
+            executor.shutdown()
+
+    return asyncio.run(runner())
 
 
 def test_assistant_orchestrator_routes_deck_open_url_without_provider(temp_config) -> None:
@@ -1197,25 +1369,28 @@ def test_assistant_orchestrator_uses_recent_power_context_for_eta_follow_up(temp
 
 
 def test_assistant_orchestrator_translates_network_state_into_useful_human_meaning(temp_config) -> None:
-    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
-
-    async def runner() -> dict[str, object]:
-        await jobs.start()
-        try:
-            return await assistant.handle_message(
-                "what network am i on?",
-                surface_mode="ghost",
-                active_module="systems",
-            )
-        finally:
-            await jobs.stop()
-            executor.shutdown()
-
-    payload = asyncio.run(runner())
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=StatusLeakageSystemProbe())
+    payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="what network am i on?",
+        surface_mode="ghost",
+        active_module="systems",
+    )
+    planner_debug = _planner_debug(payload)
+    planner_obedience = _planner_obedience(payload)
 
     assert payload["jobs"][0]["tool_name"] == "network_status"
     assert "connected" in payload["assistant_message"]["content"].lower()
     assert "wi-fi" in payload["assistant_message"]["content"].lower()
+    assert "local wi-fi instability likely" not in payload["assistant_message"]["content"].lower()
+    assert planner_debug["structured_query"]["query_shape"] == "current_status"
+    assert planner_debug["execution_plan"]["plan_type"] == "retrieve_current_status"
+    assert planner_debug["response_mode"] == "status_summary"
+    assert planner_obedience["actual_tool_names"] == ["network_status"]
+    assert planner_obedience["actual_result_mode"] == "status_summary"
+    assert planner_obedience["authority_enforced"] is True
 
 
 def test_assistant_orchestrator_routes_network_diagnostic_questions_to_evidence_based_answer(temp_config) -> None:
@@ -1238,6 +1413,138 @@ def test_assistant_orchestrator_routes_network_diagnostic_questions_to_evidence_
     assert payload["jobs"][0]["tool_name"] == "network_diagnosis"
     assert "local wi-fi instability" in payload["assistant_message"]["content"].lower()
     assert "gateway jitter" in payload["assistant_message"]["content"].lower()
+
+
+@pytest.mark.parametrize(
+    ("query", "expected_shape", "expected_plan", "expected_response_mode", "expected_tool", "required_text", "forbidden_text"),
+    [
+        (
+            "what is my current internet speed",
+            "current_metric",
+            "run_measurement",
+            "numeric_metric",
+            "network_throughput",
+            "mbps",
+            "local wi-fi instability likely",
+        ),
+        (
+            "what is my download speed right now",
+            "current_metric",
+            "run_measurement",
+            "numeric_metric",
+            "network_throughput",
+            "download speed",
+            "local wi-fi instability likely",
+        ),
+        (
+            "am i connected",
+            "current_status",
+            "retrieve_current_status",
+            "status_summary",
+            "network_status",
+            "connected",
+            "local wi-fi instability likely",
+        ),
+        (
+            "what network am i on",
+            "current_status",
+            "retrieve_current_status",
+            "status_summary",
+            "network_status",
+            "connected",
+            "local wi-fi instability likely",
+        ),
+        (
+            "what is my wi-fi signal",
+            "current_status",
+            "retrieve_current_status",
+            "status_summary",
+            "network_status",
+            "signal",
+            "local wi-fi instability likely",
+        ),
+        (
+            "why does my internet keep skipping",
+            "diagnostic_causal",
+            "diagnose_from_telemetry",
+            "diagnostic_summary",
+            "network_diagnosis",
+            "local wi-fi instability likely",
+            "",
+        ),
+        (
+            "has my wi-fi been unstable today",
+            "history_trend",
+            "analyze_history",
+            "history_summary",
+            "network_diagnosis",
+            "local wi-fi instability likely",
+            "",
+        ),
+    ],
+)
+def test_assistant_orchestrator_enforces_network_planner_contract_end_to_end(
+    temp_config,
+    query: str,
+    expected_shape: str,
+    expected_plan: str,
+    expected_response_mode: str,
+    expected_tool: str | None,
+    required_text: str,
+    forbidden_text: str,
+) -> None:
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=StatusLeakageSystemProbe())
+    payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message=query,
+        surface_mode="ghost",
+        active_module="systems",
+    )
+    planner_debug = _planner_debug(payload)
+    planner_obedience = _planner_obedience(payload)
+    content = payload["assistant_message"]["content"].lower()
+
+    assert planner_debug["structured_query"]["query_shape"] == expected_shape
+    assert planner_debug["execution_plan"]["plan_type"] == expected_plan
+    assert payload["assistant_message"]["metadata"]["planner_obedience"]["expected_response_mode"] == expected_response_mode
+    assert planner_obedience["actual_result_mode"] == expected_response_mode
+    assert planner_obedience["authority_enforced"] is True
+
+    if expected_tool is None:
+        assert payload["jobs"] == []
+        assert planner_obedience["actual_tool_names"] == []
+    else:
+        assert payload["jobs"][0]["tool_name"] == expected_tool
+        assert planner_obedience["actual_tool_names"] == [expected_tool]
+
+    assert required_text in content
+    if forbidden_text:
+        assert forbidden_text not in content
+
+
+def test_assistant_orchestrator_enforces_fix_wifi_as_repair_request(temp_config) -> None:
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=PartialNetworkRepairProbe())
+    payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="fix Wi-Fi",
+        surface_mode="ghost",
+        active_module="systems",
+    )
+    planner_debug = _planner_debug(payload)
+    planner_obedience = _planner_obedience(payload)
+
+    assert planner_debug["structured_query"]["query_shape"] == "repair_request"
+    assert planner_debug["execution_plan"]["plan_type"] == "execute_repair"
+    assert planner_debug["response_mode"] == "action_result"
+    assert payload["jobs"][0]["tool_name"] == "repair_action"
+    assert planner_obedience["actual_tool_names"] == ["repair_action"]
+    assert planner_obedience["actual_result_mode"] == "action_result"
+    assert planner_obedience["authority_enforced"] is True
+    assert "network repair" in payload["assistant_message"]["content"].lower() or "dns" in payload["assistant_message"]["content"].lower()
 
 
 def test_assistant_orchestrator_routes_battery_drain_question_to_power_diagnosis(temp_config) -> None:
@@ -1280,6 +1587,108 @@ def test_assistant_orchestrator_routes_machine_slowdown_question_to_resource_dia
 
     assert payload["jobs"][0]["tool_name"] == "resource_diagnosis"
     assert "memory pressure" in payload["assistant_message"]["content"].lower()
+
+
+@pytest.mark.parametrize(
+    ("query", "expected_shape", "expected_plan", "expected_response_mode", "expected_tool", "required_text", "forbidden_text"),
+    [
+        (
+            "what GPU do I have",
+            "identity_lookup",
+            "retrieve_identity",
+            "identity_summary",
+            "resource_status",
+            "gpu is test gpu",
+            "gpu usage is",
+        ),
+        (
+            "what is my GPU usage right now",
+            "current_metric",
+            "retrieve_live_metric",
+            "numeric_metric",
+            "resource_status",
+            "gpu telemetry",
+            "gpu is test gpu",
+        ),
+        (
+            "is my GPU under load",
+            "diagnostic_causal",
+            "diagnose_from_telemetry",
+            "diagnostic_summary",
+            "resource_status",
+            "gpu telemetry",
+            "gpu is test gpu",
+        ),
+        (
+            "CPU temp",
+            "current_metric",
+            "retrieve_live_metric",
+            "numeric_metric",
+            "resource_status",
+            "cpu temperature",
+            "cpu is test cpu",
+        ),
+        (
+            "what CPU do I have",
+            "identity_lookup",
+            "retrieve_identity",
+            "identity_summary",
+            "resource_status",
+            "cpu is test cpu",
+            "cpu temperature",
+        ),
+        (
+            "current RAM usage",
+            "current_metric",
+            "retrieve_live_metric",
+            "numeric_metric",
+            "resource_status",
+            "memory usage is",
+            "installed memory is",
+        ),
+        (
+            "what is slowing this machine down",
+            "diagnostic_causal",
+            "diagnose_from_telemetry",
+            "diagnostic_summary",
+            "resource_diagnosis",
+            "memory pressure",
+            "gpu is test gpu",
+        ),
+    ],
+)
+def test_assistant_orchestrator_enforces_resource_planner_contract_end_to_end(
+    temp_config,
+    query: str,
+    expected_shape: str,
+    expected_plan: str,
+    expected_response_mode: str,
+    expected_tool: str,
+    required_text: str,
+    forbidden_text: str,
+) -> None:
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+    payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message=query,
+        surface_mode="ghost",
+        active_module="systems",
+    )
+    planner_debug = _planner_debug(payload)
+    planner_obedience = _planner_obedience(payload)
+    content = payload["assistant_message"]["content"].lower()
+
+    assert planner_debug["structured_query"]["query_shape"] == expected_shape
+    assert planner_debug["execution_plan"]["plan_type"] == expected_plan
+    assert planner_debug["response_mode"] == expected_response_mode
+    assert payload["jobs"][0]["tool_name"] == expected_tool
+    assert planner_obedience["actual_tool_names"] == [expected_tool]
+    assert planner_obedience["actual_result_mode"] == expected_response_mode
+    assert planner_obedience["authority_enforced"] is True
+    assert required_text in content
+    assert forbidden_text not in content
 
 
 def test_assistant_orchestrator_mutates_weather_follow_up_horizon(temp_config) -> None:
@@ -1496,6 +1905,174 @@ def test_assistant_orchestrator_supports_active_item_shorthand_follow_up(temp_co
     assert payload["jobs"][0]["arguments"]["path"] == "C:/Stormhelm/spec.pdf"
 
 
+def test_assistant_orchestrator_enforces_search_and_open_contract_for_documents_lookup(temp_config) -> None:
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+    payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="open the Stormhelm docs in Documents",
+        surface_mode="ghost",
+        active_module="chartroom",
+    )
+    planner_debug = _planner_debug(payload)
+    planner_obedience = _planner_obedience(payload)
+    content = payload["assistant_message"]["content"].lower()
+
+    assert planner_debug["structured_query"]["query_shape"] == "search_and_open"
+    assert planner_debug["execution_plan"]["plan_type"] == "search_then_open"
+    assert planner_debug["response_mode"] == "search_result"
+    assert payload["jobs"][0]["tool_name"] == "desktop_search"
+    assert planner_obedience["actual_tool_names"] == ["desktop_search"]
+    assert planner_obedience["actual_result_mode"] == "search_result"
+    assert planner_obedience["authority_enforced"] is True
+    assert "documents" in content
+    assert "accessible" in content
+    assert "local wi-fi instability likely" not in content
+
+
+def test_assistant_orchestrator_enforces_search_and_open_contract_for_latest_cad_lookup(temp_config) -> None:
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+    payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="find the latest CAD file and open it",
+        surface_mode="ghost",
+        active_module="chartroom",
+    )
+    planner_debug = _planner_debug(payload)
+    planner_obedience = _planner_obedience(payload)
+    content = payload["assistant_message"]["content"].lower()
+
+    assert planner_debug["structured_query"]["query_shape"] == "search_and_open"
+    assert planner_debug["execution_plan"]["plan_type"] == "search_then_open"
+    assert planner_debug["response_mode"] == "search_result"
+    assert payload["jobs"][0]["tool_name"] == "desktop_search"
+    assert planner_obedience["actual_tool_names"] == ["desktop_search"]
+    assert planner_obedience["actual_result_mode"] == "search_result"
+    assert planner_obedience["authority_enforced"] is True
+    assert "match" in content
+    assert "connected on" not in content
+
+
+def test_assistant_orchestrator_enforces_comparison_requests_as_clarifications(temp_config) -> None:
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+    payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="compare these two files",
+        surface_mode="ghost",
+        active_module="chartroom",
+    )
+    planner_debug = _planner_debug(payload)
+    planner_obedience = _planner_obedience(payload)
+
+    assert payload["jobs"] == []
+    assert planner_debug["structured_query"]["query_shape"] == "comparison_request"
+    assert planner_debug["response_mode"] == "clarification"
+    assert planner_obedience["actual_result_mode"] == "clarification"
+    assert planner_obedience["authority_enforced"] is True
+    assert payload["assistant_message"]["content"] == "Which two files should I compare?"
+
+
+def test_assistant_orchestrator_enforces_workspace_restore_contract(temp_config) -> None:
+    assistant, jobs, executor, _, workspace_service = _build_assistant_with_workspace(temp_config)
+    workspace_service.repository.upsert_workspace(
+        name="Troubleshooting Workspace",
+        topic="troubleshooting",
+        summary="Network diagnostics and repair notes.",
+    )
+
+    payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="open my troubleshooting workspace",
+        surface_mode="ghost",
+        active_module="chartroom",
+    )
+    planner_debug = _planner_debug(payload)
+    planner_obedience = _planner_obedience(payload)
+
+    assert payload["jobs"][0]["tool_name"] == "workspace_restore"
+    assert planner_debug["structured_query"]["query_shape"] == "workspace_request"
+    assert planner_debug["execution_plan"]["plan_type"] == "restore_workspace"
+    assert planner_debug["response_mode"] == "workspace_result"
+    assert planner_obedience["actual_tool_names"] == ["workspace_restore"]
+    assert planner_obedience["actual_result_mode"] == "workspace_result"
+    assert planner_obedience["authority_enforced"] is True
+
+
+def test_assistant_orchestrator_enforces_workspace_continuity_contract(temp_config) -> None:
+    assistant, jobs, executor, _, workspace_service = _build_assistant_with_workspace(temp_config)
+    workspace = workspace_service.repository.upsert_workspace(
+        name="Troubleshooting Workspace",
+        topic="troubleshooting",
+        summary="Network diagnostics and repair notes.",
+        active_goal="Finish the network repair pass.",
+    )
+    workspace_service.capture_workspace_context(
+        session_id="default",
+        prompt="Carry the troubleshooting workspace forward.",
+        surface_mode="deck",
+        active_module="chartroom",
+        workspace_context={
+            "workspace": workspace.to_dict(),
+            "module": "chartroom",
+            "section": "working-set",
+            "opened_items": [],
+            "active_item": {},
+        },
+    )
+
+    payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="continue where I left off",
+        surface_mode="ghost",
+        active_module="chartroom",
+    )
+    planner_debug = _planner_debug(payload)
+    planner_obedience = _planner_obedience(payload)
+
+    assert payload["jobs"][0]["tool_name"] == "workspace_where_left_off"
+    assert planner_debug["structured_query"]["query_shape"] == "workspace_request"
+    assert planner_debug["execution_plan"]["plan_type"] == "summarize_workspace"
+    assert planner_debug["response_mode"] == "workspace_result"
+    assert planner_obedience["actual_tool_names"] == ["workspace_where_left_off"]
+    assert planner_obedience["actual_result_mode"] == "workspace_result"
+    assert planner_obedience["authority_enforced"] is True
+
+
+def test_assistant_orchestrator_enforces_workspace_assembly_contract(temp_project_root, temp_config) -> None:
+    docs_dir = temp_project_root / "docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    (docs_dir / "motor-torque-notes.md").write_text("Motor torque notes", encoding="utf-8")
+
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+    payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="create a research workspace for motor torque",
+        surface_mode="ghost",
+        active_module="chartroom",
+    )
+    planner_debug = _planner_debug(payload)
+    planner_obedience = _planner_obedience(payload)
+
+    assert payload["jobs"][0]["tool_name"] == "workspace_assemble"
+    assert planner_debug["structured_query"]["query_shape"] == "workspace_request"
+    assert planner_debug["execution_plan"]["plan_type"] == "assemble_workspace"
+    assert planner_debug["response_mode"] == "workspace_result"
+    assert planner_obedience["actual_tool_names"] == ["workspace_assemble"]
+    assert planner_obedience["actual_result_mode"] == "workspace_result"
+    assert planner_obedience["authority_enforced"] is True
+
+
 def test_assistant_orchestrator_includes_input_context_for_reasoner_backed_selection_request(temp_config) -> None:
     provider = InputContextProvider()
     temp_config.openai.enabled = True
@@ -1531,3 +2108,137 @@ def test_assistant_orchestrator_includes_input_context_for_reasoner_backed_selec
     assert provider.calls
     serialized = str(provider.calls[0]["input_items"])
     assert "Selected packaging notes." in serialized
+
+
+def test_assistant_orchestrator_opens_personal_youtube_history_in_browser_with_compact_contract(temp_config) -> None:
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+    payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="open my personal youtube history in a browser",
+        surface_mode="ghost",
+        active_module="chartroom",
+    )
+    planner_debug = _planner_debug(payload)
+    metadata = payload["assistant_message"]["metadata"]
+
+    assert planner_debug["structured_query"]["query_shape"] == "open_browser_destination"
+    assert planner_debug["execution_plan"]["plan_type"] == "resolve_url_then_open_in_browser"
+    assert payload["jobs"][0]["tool_name"] == "external_open_url"
+    assert payload["jobs"][0]["arguments"]["url"] == "https://www.youtube.com/feed/history"
+    assert payload["actions"][0]["type"] == "open_external"
+    assert payload["actions"][0]["url"] == "https://www.youtube.com/feed/history"
+    assert metadata["bearing_title"] == "YouTube history opened"
+    assert metadata["micro_response"] == "Opened YouTube history in the browser."
+    assert metadata["full_response"] == "Resolved the destination and opened it in the browser."
+
+
+def test_assistant_orchestrator_reports_unresolved_browser_destination_without_launch_category_error(temp_config) -> None:
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+    payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="open the nebula portal in a browser",
+        surface_mode="ghost",
+        active_module="chartroom",
+    )
+    planner_debug = _planner_debug(payload)
+    metadata = payload["assistant_message"]["metadata"]
+
+    assert planner_debug["structured_query"]["query_shape"] == "open_browser_destination"
+    assert payload["jobs"] == []
+    assert payload["actions"] == []
+    assert metadata["bearing_title"] == "Browser destination unresolved"
+    assert metadata["micro_response"] == "I couldn't resolve that site."
+    assert metadata["full_response"] == "I couldn't resolve a browser destination for that request."
+    assert "launch" not in payload["assistant_message"]["content"].lower()
+
+
+@pytest.mark.parametrize(
+    ("message", "expected_url", "expected_destination_name", "expected_scope", "expected_title"),
+    [
+        ("open youtube in a browser", "https://www.youtube.com/", "youtube", "general", "YouTube"),
+        ("open gmail in a browser", "https://mail.google.com/mail/u/0/#inbox", "gmail", "general", "Gmail"),
+        ("open chatgpt in a browser", "https://chatgpt.com/", "chatgpt", "general", "ChatGPT"),
+        ("open github in a browser", "https://github.com/", "github", "general", "GitHub"),
+        ("open openai in a browser", "https://openai.com/", "openai", "general", "OpenAI"),
+        ("open youtube history in a browser", "https://www.youtube.com/feed/history", "youtube_history", "general", "YouTube history"),
+        ("open my email in a browser", "https://mail.google.com/mail/u/0/#inbox", "gmail", "personal", "Gmail"),
+        ("open my gmail in a browser", "https://mail.google.com/mail/u/0/#inbox", "gmail", "personal", "Gmail"),
+    ],
+)
+def test_assistant_orchestrator_routes_known_browser_destinations_end_to_end(
+    temp_config,
+    message: str,
+    expected_url: str,
+    expected_destination_name: str,
+    expected_scope: str,
+    expected_title: str,
+) -> None:
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+    payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message=message,
+        surface_mode="ghost",
+        active_module="chartroom",
+    )
+    planner_debug = _planner_debug(payload)
+    planner_obedience = _planner_obedience(payload)
+    metadata = payload["assistant_message"]["metadata"]
+    structured_slots = planner_debug["structured_query"]["slots"]
+
+    assert planner_debug["structured_query"]["query_shape"] == "open_browser_destination"
+    assert planner_debug["execution_plan"]["plan_type"] == "resolve_url_then_open_in_browser"
+    assert structured_slots["destination_name"] == expected_destination_name
+    assert structured_slots["destination_scope"] == expected_scope
+    assert payload["jobs"][0]["tool_name"] == "external_open_url"
+    assert payload["jobs"][0]["arguments"]["url"] == expected_url
+    assert payload["actions"][0]["type"] == "open_external"
+    assert payload["actions"][0]["url"] == expected_url
+    assert metadata["bearing_title"] == f"{expected_title} opened"
+    assert planner_obedience["actual_tool_names"] == ["external_open_url"]
+    assert planner_obedience["actual_result_mode"] == "action_result"
+    assert planner_obedience["authority_enforced"] is True
+
+
+def test_assistant_orchestrator_keeps_app_launch_and_web_search_distinct_from_browser_destinations(temp_config) -> None:
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+
+    chrome_payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="open Chrome",
+        surface_mode="ghost",
+        active_module="chartroom",
+    )
+    planner_debug = _planner_debug(chrome_payload)
+
+    assert planner_debug["structured_query"]["query_shape"] == "control_command"
+    assert chrome_payload["jobs"][0]["tool_name"] == "app_control"
+    assert chrome_payload["jobs"][0]["arguments"]["action"] == "launch"
+    assert chrome_payload["jobs"][0]["arguments"]["app_name"] == "chrome"
+
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+    search_payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="search YouTube for cats",
+        surface_mode="ghost",
+        active_module="chartroom",
+    )
+    search_debug = _planner_debug(search_payload)
+    search_obedience = _planner_obedience(search_payload)
+
+    assert search_debug["structured_query"]["query_shape"] == "search_browser_destination"
+    assert search_debug["execution_plan"]["plan_type"] == "resolve_search_url_then_open_in_browser"
+    assert search_payload["jobs"][0]["tool_name"] == "external_open_url"
+    assert search_payload["jobs"][0]["arguments"]["url"] == "https://www.youtube.com/results?search_query=cats"
+    assert search_payload["actions"][0]["type"] == "open_external"
+    assert search_payload["actions"][0]["url"] == "https://www.youtube.com/results?search_query=cats"
+    assert search_obedience["authority_enforced"] is True

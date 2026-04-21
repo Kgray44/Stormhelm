@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 from stormhelm.config.models import AppConfig
 from stormhelm.core.memory.repositories import PreferencesRepository
+from stormhelm.core.network.providers import ObservedThroughputProvider
 from stormhelm.core.system.hardware_telemetry import (
     HardwareTelemetryHelperClient,
     helper_cache_ttl_seconds,
@@ -524,18 +525,18 @@ class SystemProbe:
 
     def network_status(self) -> dict[str, Any]:
         base = self._network_interface_status()
-        if self.network_monitor is None:
-            return base
-        snapshot = self.network_monitor.snapshot(diagnostic_burst=False)
+        snapshot = self.network_monitor.snapshot(diagnostic_burst=False) if self.network_monitor is not None else self._fallback_network_telemetry(base)
         merged = dict(base)
         merged.update(
             {
                 "monitoring": snapshot.get("monitoring", {}),
                 "quality": snapshot.get("quality", {}),
                 "dns": snapshot.get("dns", {}),
+                "throughput": snapshot.get("throughput", {}),
                 "events": snapshot.get("events", []),
                 "trend_points": snapshot.get("trend_points", []),
                 "providers": snapshot.get("providers", {}),
+                "source_debug": snapshot.get("source_debug", {}),
                 "assessment": snapshot.get("assessment", {}),
             }
         )
@@ -543,43 +544,73 @@ class SystemProbe:
 
     def network_diagnosis(self, *, focus: str = "overview", diagnostic_burst: bool = False) -> dict[str, Any]:
         base = self._network_interface_status()
-        if self.network_monitor is None:
-            telemetry = {
-                "monitoring": {"history_ready": False, "sample_count": 0, "diagnostic_burst_active": False, "last_sample_age_seconds": None},
-                "quality": {
-                    "latency_ms": None,
-                    "gateway_latency_ms": None,
-                    "external_latency_ms": None,
-                    "jitter_ms": None,
-                    "gateway_jitter_ms": None,
-                    "external_jitter_ms": None,
-                    "packet_loss_pct": None,
-                    "gateway_packet_loss_pct": None,
-                    "external_packet_loss_pct": None,
-                    "signal_strength_dbm": None,
-                    "signal_quality_pct": None,
-                    "connected": bool(base.get("interfaces")),
-                },
-                "dns": {"latency_ms": None, "failures": 0},
-                "events": [],
-                "trend_points": [],
-                "providers": {"cloudflare_quality": {"state": "unsupported", "label": "Cloudflare quality", "detail": "No external quality provider is attached."}},
-                "assessment": {
-                    "kind": "insufficient_evidence",
-                    "headline": "Not enough evidence yet",
-                    "summary": "Stormhelm does not have enough recent telemetry to explain the connection confidently.",
-                    "confidence": "low",
-                    "attribution": "unclear",
-                    "evidence_sufficiency": "gathering",
-                    "next_checks": ["Let Stormhelm gather a short diagnostic sample first."],
-                },
-            }
-        else:
-            telemetry = self.network_monitor.snapshot(diagnostic_burst=diagnostic_burst)
+        telemetry = self.network_monitor.snapshot(diagnostic_burst=diagnostic_burst) if self.network_monitor is not None else self._fallback_network_telemetry(base)
         merged = dict(base)
         merged.update(telemetry)
         merged["focus"] = focus
         return merged
+
+    def network_throughput(self, *, metric: str = "internet_speed") -> dict[str, Any]:
+        normalized_metric = str(metric or "internet_speed").strip().lower() or "internet_speed"
+        status = self.network_status()
+        throughput = status.get("throughput", {}) if isinstance(status.get("throughput"), dict) else {}
+        interfaces = status.get("interfaces", []) if isinstance(status.get("interfaces"), list) else []
+        primary = interfaces[0] if interfaces and isinstance(interfaces[0], dict) else {}
+
+        if (not throughput.get("available")) or throughput.get("state") in {"stale", "provider_unavailable", "waiting_for_baseline", "interval_too_short"}:
+            measured = ObservedThroughputProvider(self).measure_current(primary_interface=primary)
+            if isinstance(measured, dict):
+                throughput = measured
+                providers = dict(status.get("providers", {})) if isinstance(status.get("providers"), dict) else {}
+                providers["observed_throughput"] = {
+                    "state": measured.get("state"),
+                    "label": measured.get("label"),
+                    "detail": measured.get("detail"),
+                    "available": measured.get("available"),
+                    "source": measured.get("source"),
+                    "sampled_at": measured.get("sampled_at"),
+                    "last_sample_age_seconds": measured.get("last_sample_age_seconds"),
+                    "unsupported_code": measured.get("unsupported_code"),
+                    "unsupported_reason": measured.get("unsupported_reason"),
+                }
+                source_debug = dict(status.get("source_debug", {})) if isinstance(status.get("source_debug"), dict) else {}
+                source_debug["throughput_primary"] = str(measured.get("source") or "net_adapter_statistics")
+                source_debug["throughput_resolution"] = "active_measurement"
+                status["providers"] = providers
+                status["source_debug"] = source_debug
+                status["throughput"] = measured
+
+        selected_value = None
+        if normalized_metric == "download_speed":
+            selected_value = throughput.get("download_mbps")
+        elif normalized_metric == "upload_speed":
+            selected_value = throughput.get("upload_mbps")
+
+        return {
+            "available": bool(throughput.get("available")),
+            "metric": normalized_metric,
+            "metric_value_mbps": selected_value,
+            "download_mbps": throughput.get("download_mbps"),
+            "upload_mbps": throughput.get("upload_mbps"),
+            "current": bool(throughput.get("current")) if throughput.get("available") else False,
+            "stale": bool(throughput.get("stale")) if throughput.get("available") else False,
+            "sample_kind": throughput.get("sample_kind"),
+            "sample_window_seconds": throughput.get("sample_window_seconds"),
+            "sampled_at": throughput.get("sampled_at"),
+            "last_sample_age_seconds": throughput.get("last_sample_age_seconds"),
+            "receive_link_mbps": throughput.get("receive_link_mbps"),
+            "transmit_link_mbps": throughput.get("transmit_link_mbps"),
+            "source": throughput.get("source"),
+            "state": throughput.get("state"),
+            "detail": throughput.get("detail"),
+            "unsupported_code": throughput.get("unsupported_code") or throughput.get("state"),
+            "unsupported_reason": throughput.get("unsupported_reason"),
+            "interfaces": interfaces,
+            "quality": status.get("quality", {}),
+            "monitoring": status.get("monitoring", {}),
+            "providers": status.get("providers", {}),
+            "source_debug": status.get("source_debug", {}),
+        }
 
     def attach_network_monitor(self, monitor: NetworkMonitor) -> None:
         self.network_monitor = monitor
@@ -610,6 +641,32 @@ class SystemProbe:
             "fqdn": socket.getfqdn(),
             "interfaces": interfaces,
         }
+
+    def _network_interface_counters(self) -> list[dict[str, Any]]:
+        payload = self._run_powershell_json(
+            """
+            if (-not (Get-Command Get-NetAdapterStatistics -ErrorAction SilentlyContinue)) {
+                @() | ConvertTo-Json -Compress -Depth 4
+            } else {
+                Get-NetAdapterStatistics | ForEach-Object {
+                    [pscustomobject]@{
+                        interface_alias = $_.Name
+                        received_bytes = [int64]$_.ReceivedBytes
+                        sent_bytes = [int64]$_.SentBytes
+                    }
+                } | ConvertTo-Json -Compress -Depth 4
+            }
+            """
+        )
+        return [
+            {
+                "interface_alias": str(item.get("interface_alias") or "").strip(),
+                "received_bytes": self._coerce_int(item.get("received_bytes")),
+                "sent_bytes": self._coerce_int(item.get("sent_bytes")),
+            }
+            for item in self._ensure_list(payload)
+            if isinstance(item, dict) and str(item.get("interface_alias") or "").strip()
+        ]
 
     def _wireless_interface_details(self) -> dict[str, Any]:
         try:
@@ -689,6 +746,113 @@ class SystemProbe:
             return {"hostname": hostname, "latency_ms": latency_ms, "failed": False}
         except Exception:
             return {"hostname": hostname, "latency_ms": None, "failed": True}
+
+    def _fallback_network_telemetry(self, base: dict[str, Any]) -> dict[str, Any]:
+        interfaces = base.get("interfaces", []) if isinstance(base.get("interfaces"), list) else []
+        primary = interfaces[0] if interfaces and isinstance(interfaces[0], dict) else {}
+        connected = str(primary.get("status", "")).strip().lower() == "up"
+        gateway = primary.get("gateway", []) if isinstance(primary.get("gateway"), list) else []
+        dns_servers = primary.get("dns_servers", []) if isinstance(primary.get("dns_servers"), list) else []
+        throughput_detail = "Stormhelm's throughput monitor is not attached in this environment."
+        local_detail_parts = [str(primary.get("ssid") or primary.get("profile") or primary.get("interface_alias") or "Active interface").strip()]
+        if gateway:
+            local_detail_parts.append(f"gateway {gateway[0]}")
+        if dns_servers:
+            local_detail_parts.append(f"DNS {', '.join(str(item) for item in dns_servers[:2])}")
+        signal_quality = primary.get("signal_quality_pct")
+        if signal_quality is not None:
+            local_detail_parts.append(f"signal {int(round(float(signal_quality)))}%")
+
+        return {
+            "monitoring": {"history_ready": False, "sample_count": 0, "diagnostic_burst_active": False, "last_sample_age_seconds": None},
+            "quality": {
+                "latency_ms": None,
+                "gateway_latency_ms": None,
+                "external_latency_ms": None,
+                "jitter_ms": None,
+                "gateway_jitter_ms": None,
+                "external_jitter_ms": None,
+                "packet_loss_pct": None,
+                "gateway_packet_loss_pct": None,
+                "external_packet_loss_pct": None,
+                "signal_strength_dbm": None,
+                "signal_quality_pct": signal_quality,
+                "connected": connected,
+                "source_precedence": ["local_link", "upstream_external", "cloudflare_quality_enrichment"],
+                "source_status": {
+                    "local_link_available": bool(primary),
+                    "upstream_available": False,
+                    "cloudflare_available": False,
+                },
+            },
+            "dns": {"latency_ms": None, "failures": 0},
+            "throughput": {
+                "state": "provider_unavailable",
+                "available": False,
+                "label": "Observed throughput",
+                "detail": throughput_detail,
+                "source": "net_adapter_statistics",
+                "unsupported_code": "provider_unavailable",
+                "unsupported_reason": throughput_detail,
+            },
+            "events": [],
+            "trend_points": [],
+            "providers": {
+                "local_status": {
+                    "state": "ready" if primary else "no_active_interface",
+                    "label": "Local link telemetry",
+                    "detail": " | ".join(part for part in local_detail_parts if part) if primary else "No active interface is being reported right now.",
+                    "available": bool(primary),
+                    "source": "net_ip_configuration",
+                    "interface_alias": primary.get("interface_alias"),
+                    "profile": primary.get("ssid") or primary.get("profile"),
+                    "gateway": gateway,
+                    "dns_servers": dns_servers,
+                    "signal_quality_pct": signal_quality,
+                    "last_sample_age_seconds": None,
+                },
+                "upstream_path": {
+                    "state": "no_external_probe_data",
+                    "label": "Upstream path probes",
+                    "detail": "Stormhelm does not have current external probe data yet.",
+                    "available": False,
+                    "source": "icmp_external_probes",
+                    "last_sample_age_seconds": None,
+                },
+                "observed_throughput": {
+                    "state": "provider_unavailable",
+                    "label": "Observed throughput",
+                    "detail": throughput_detail,
+                    "available": False,
+                    "source": "net_adapter_statistics",
+                    "sampled_at": None,
+                    "last_sample_age_seconds": None,
+                    "unsupported_code": "provider_unavailable",
+                    "unsupported_reason": throughput_detail,
+                },
+                "cloudflare_quality": {
+                    "state": "unsupported",
+                    "label": "Cloudflare quality",
+                    "detail": "No external quality provider is attached.",
+                    "available": False,
+                },
+            },
+            "source_debug": {
+                "status_primary": "local_status",
+                "diagnosis_inputs": ["local_status"],
+                "throughput_primary": "net_adapter_statistics",
+                "throughput_resolution": "monitor_unavailable",
+            },
+            "assessment": {
+                "kind": "insufficient_evidence",
+                "headline": "Network monitoring limited",
+                "summary": "Stormhelm can read current link status, but recent diagnostic telemetry is not attached yet.",
+                "confidence": "low",
+                "attribution": "unclear",
+                "evidence_sufficiency": "gathering",
+                "next_checks": ["Attach the network monitor to gather recent path and quality evidence."],
+            },
+        }
 
     def active_apps(self) -> dict[str, Any]:
         payload = self._run_powershell_json(

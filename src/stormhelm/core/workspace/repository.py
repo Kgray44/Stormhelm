@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from stormhelm.core.memory.database import SQLiteDatabase
 from stormhelm.core.workspace.models import WorkspaceItemRecord, WorkspaceRecord, WorkspaceSnapshotRecord
+from stormhelm.shared.json_safety import decode_json_dict, decode_json_list
 from stormhelm.shared.time import utc_now_iso
 
 
@@ -462,6 +463,46 @@ class WorkspaceRepository:
             )
 
     def _row_to_workspace(self, row) -> WorkspaceRecord:
+        pending_next_steps = [
+            str(value).strip()
+            for value in decode_json_list(
+                row["pending_next_steps_json"],
+                context=f"workspaces.pending_next_steps_json[{row['workspace_id']}]",
+            )
+            if str(value).strip()
+        ]
+        references = [
+            dict(item)
+            for item in decode_json_list(
+                row["references_json"],
+                context=f"workspaces.references_json[{row['workspace_id']}]",
+            )
+            if isinstance(item, dict)
+        ]
+        findings = [
+            dict(item)
+            for item in decode_json_list(
+                row["findings_json"],
+                context=f"workspaces.findings_json[{row['workspace_id']}]",
+            )
+            if isinstance(item, dict)
+        ]
+        session_notes = [
+            dict(item)
+            for item in decode_json_list(
+                row["session_notes_json"],
+                context=f"workspaces.session_notes_json[{row['workspace_id']}]",
+            )
+            if isinstance(item, dict)
+        ]
+        tags = [
+            str(value).strip()
+            for value in decode_json_list(
+                row["tags_json"],
+                context=f"workspaces.tags_json[{row['workspace_id']}]",
+            )
+            if str(value).strip()
+        ]
         return WorkspaceRecord(
             workspace_id=row["workspace_id"],
             name=row["name"],
@@ -479,16 +520,16 @@ class WorkspaceRepository:
             last_surface_mode=row["last_surface_mode"],
             last_active_module=row["last_active_module"],
             last_active_section=row["last_active_section"],
-            pending_next_steps=json.loads(row["pending_next_steps_json"]),
-            references=json.loads(row["references_json"]),
-            findings=json.loads(row["findings_json"]),
-            session_notes=json.loads(row["session_notes_json"]),
+            pending_next_steps=pending_next_steps,
+            references=references,
+            findings=findings,
+            session_notes=session_notes,
             where_left_off=row["where_left_off"],
             pinned=bool(row["pinned"]),
             archived=bool(row["archived"]),
             archived_at=row["archived_at"],
             last_snapshot_at=row["last_snapshot_at"],
-            tags=json.loads(row["tags_json"]),
+            tags=tags,
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             last_opened_at=row["last_opened_at"],
@@ -508,7 +549,10 @@ class WorkspaceRepository:
             url=row["url"],
             path=row["path"],
             summary=row["summary"],
-            metadata=json.loads(row["metadata_json"]),
+            metadata=decode_json_dict(
+                row["metadata_json"],
+                context=f"workspace_items.metadata_json[{row['item_id']}]",
+            ),
             score=float(row["score"]),
             opened_count=int(row["opened_count"]),
             created_at=row["created_at"],
@@ -522,7 +566,10 @@ class WorkspaceRepository:
             workspace_id=row["workspace_id"],
             session_id=row["session_id"],
             summary=row["summary"],
-            payload=json.loads(row["payload_json"]),
+            payload=decode_json_dict(
+                row["payload_json"],
+                context=f"workspace_snapshots.payload_json[{row['snapshot_id']}]",
+            ),
             created_at=row["created_at"],
         )
 

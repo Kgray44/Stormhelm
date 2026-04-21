@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import subprocess
+
 from stormhelm.core.system.hardware_telemetry import (
+    HardwareTelemetryHelperClient,
+    _run_powershell_json,
     build_helper_unreachable_snapshot,
     merge_hardware_snapshots,
     overlay_power_status,
@@ -19,6 +23,24 @@ def test_helper_unreachable_snapshot_reports_fallback_capabilities() -> None:
     assert snapshot["capabilities"]["helper_reachable"] is False
     assert snapshot["freshness"]["reason"] == "helper_missing"
     assert snapshot["sources"]["helper"]["state"] == "unreachable"
+
+
+def test_helper_wrapper_and_provider_collectors_use_separate_timeouts(temp_config, monkeypatch) -> None:
+    temp_config.hardware_telemetry.helper_timeout_seconds = 12.0
+    temp_config.hardware_telemetry.provider_timeout_seconds = 5.0
+    calls: list[tuple[list[str], float]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append((list(command), float(kwargs["timeout"])))
+        return subprocess.CompletedProcess(command, 0, "{}", "")
+
+    monkeypatch.setattr("stormhelm.core.system.hardware_telemetry.subprocess.run", fake_run)
+
+    HardwareTelemetryHelperClient(temp_config).snapshot(sampling_tier="active")
+    _run_powershell_json(temp_config, "[pscustomobject]@{} | ConvertTo-Json -Compress")
+
+    assert calls[0][1] == 12.0
+    assert calls[1][1] == 5.0
 
 
 def test_merge_hardware_snapshots_prefers_enrichment_values_without_dropping_existing_fields() -> None:

@@ -14,6 +14,7 @@ from stormhelm.core.memory.database import SQLiteDatabase
 from stormhelm.core.memory.repositories import ConversationRepository, NotesRepository, PreferencesRepository
 from stormhelm.core.orchestrator.persona import PersonaContract
 from stormhelm.core.orchestrator.planner import DeterministicPlanner
+from stormhelm.core.orchestrator.planner import PlannerDecision
 from stormhelm.core.orchestrator.router import IntentRouter
 from stormhelm.core.orchestrator.router import ToolRequest
 from stormhelm.core.orchestrator.session_state import ConversationStateStore
@@ -208,6 +209,8 @@ class AssistantOrchestrator:
         actions: list[dict[str, Any]] = []
         jobs: list[dict[str, Any]] = []
         assistant_text = routed.assistant_message
+        planner_debug: dict[str, Any] = {}
+        planned_decision: PlannerDecision | None = None
         resolved_workspace_context = workspace_context or (
             self.workspace_service.active_workspace_summary(session_id) if self.workspace_service is not None else {}
         )
@@ -250,7 +253,14 @@ class AssistantOrchestrator:
                     recent_tool_results=recent_tool_results,
                     learned_preferences=learned_preferences,
                     active_context=active_context,
+                    available_tools={
+                        tool.name
+                        for tool in self.tool_registry.all_tools()
+                        if self.config.tools.enabled.is_enabled(tool.name)
+                    },
                 )
+                planned_decision = planned
+                planner_debug = dict(planned.debug)
                 if planned.tool_requests:
                     pre_action = self.judgment.assess_pre_action(
                         session_id=session_id,
@@ -339,12 +349,29 @@ class AssistantOrchestrator:
             jobs = []
             actions = []
 
+        planner_obedience = self._planner_obedience_metadata(
+            planned_decision=planned_decision,
+            jobs=jobs,
+            actions=actions,
+            text=assistant_text,
+        )
+        if planner_obedience:
+            planner_debug.update(
+                {
+                    "actual_tool_names": list(planner_obedience.get("actual_tool_names") or []),
+                    "actual_result_mode": str(planner_obedience.get("actual_result_mode") or ""),
+                    "planner_authority": dict(planner_obedience),
+                }
+            )
+
         response_metadata = self._build_response_metadata(
             text=assistant_text,
             jobs=jobs,
             actions=actions,
             active_module=active_module,
             judgment=response_judgment,
+            planner_obedience=planner_obedience,
+            planned_decision=planned_decision,
         )
         assistant_message = self.conversations.add_message(
             session_id,
@@ -355,6 +382,7 @@ class AssistantOrchestrator:
                 "jobs": jobs,
                 "surface_mode": surface_mode,
                 "active_module": active_module,
+                "planner_debug": planner_debug,
                 **response_metadata,
             },
         )
@@ -364,6 +392,24 @@ class AssistantOrchestrator:
             message=f"Handled message in session '{session_id}'.",
             payload={"job_count": len(jobs), "action_count": len(actions), "surface_mode": surface_mode},
         )
+        if planner_obedience:
+            self.events.publish(
+                level="DEBUG",
+                source="planner",
+                message="Verified planner obedience for handled message.",
+                payload={
+                    "session_id": session_id,
+                    "query_shape": str(planner_obedience.get("query_shape", "")),
+                    "execution_plan_type": str(planner_obedience.get("execution_plan_type", "")),
+                    "planned_tool_names": list(planner_obedience.get("planned_tool_names") or []),
+                    "actual_tool_names": list(planner_obedience.get("actual_tool_names") or []),
+                    "expected_response_mode": str(planner_obedience.get("expected_response_mode", "")),
+                    "actual_result_mode": str(planner_obedience.get("actual_result_mode", "")),
+                    "authority_enforced": bool(planner_obedience.get("authority_enforced", False)),
+                    "compatibility_shim_used": bool(planner_obedience.get("compatibility_shim_used", False)),
+                    "legacy_fallback_used": str(planner_obedience.get("legacy_fallback_used", "")),
+                },
+            )
         judgment_metadata = response_metadata.get("judgment") if isinstance(response_metadata.get("judgment"), dict) else {}
         next_suggestion = response_metadata.get("next_suggestion") if isinstance(response_metadata.get("next_suggestion"), dict) else {}
         if judgment_metadata or next_suggestion:
@@ -750,7 +796,10 @@ class AssistantOrchestrator:
         actions: list[dict[str, Any]],
         active_module: str,
         judgment: dict[str, Any] | None = None,
+        planner_obedience: dict[str, Any] | None = None,
+        planned_decision: PlannerDecision | None = None,
     ) -> dict[str, Any]:
+        planner_contract = self._planner_response_contract(planned_decision)
         action_contract = next(
             (
                 action
@@ -762,7 +811,7 @@ class AssistantOrchestrator:
                     or action.get("full_response")
                 )
             ),
-            {},
+            planner_contract,
         )
         full_response = str(action_contract.get("full_response") or self.persona.report(text)).strip()
         metadata: dict[str, Any] = {
@@ -785,7 +834,158 @@ class AssistantOrchestrator:
                 "recovery": bool(judgment.get("recovery", False)),
                 "debug": dict(judgment.get("debug") or {}) if isinstance(judgment.get("debug"), dict) else {},
             }
+        if planner_obedience:
+            metadata["planner_obedience"] = dict(planner_obedience)
         return metadata
+
+    def _planner_response_contract(self, planned_decision: PlannerDecision | None) -> dict[str, Any]:
+        if planned_decision is None or planned_decision.structured_query is None:
+            return {}
+        slots = planned_decision.structured_query.slots if isinstance(planned_decision.structured_query.slots, dict) else {}
+        if planned_decision.unsupported_reason is not None:
+            contract = slots.get("unsupported_response_contract")
+            if isinstance(contract, dict):
+                return dict(contract)
+        contract = slots.get("response_contract")
+        if isinstance(contract, dict):
+            return dict(contract)
+        return {}
+
+    def _planner_obedience_metadata(
+        self,
+        *,
+        planned_decision: PlannerDecision | None,
+        jobs: list[dict[str, Any]],
+        actions: list[dict[str, Any]],
+        text: str,
+    ) -> dict[str, Any]:
+        if planned_decision is None:
+            return {}
+        planned_tool_names = [request.tool_name for request in planned_decision.tool_requests]
+        actual_tool_names = [
+            str(job.get("tool_name", "")).strip()
+            for job in jobs
+            if isinstance(job, dict) and str(job.get("tool_name", "")).strip()
+        ]
+        expected_response_mode = str(planned_decision.response_mode or "").strip()
+        actual_result_mode = self._actual_result_mode(
+            planned_decision=planned_decision,
+            jobs=jobs,
+            actions=actions,
+            text=text,
+        )
+        legacy_fallback = ""
+        semantic_debug = planned_decision.debug.get("semantic_parse_proposal") if isinstance(planned_decision.debug, dict) else {}
+        if isinstance(semantic_debug, dict):
+            legacy_fallback = str(semantic_debug.get("fallback_path") or "").strip()
+        compatibility_shim_used = bool(
+            planned_decision.execution_plan is not None and planned_decision.execution_plan.plan_type == "compatibility_shim"
+        )
+        tool_dispatch_match = planned_tool_names == actual_tool_names if (planned_tool_names or actual_tool_names) else True
+        response_mode_match = expected_response_mode == actual_result_mode if expected_response_mode else not actual_result_mode
+
+        final_result_type = "assistant_message"
+        if actual_tool_names:
+            final_result_type = "tool_result"
+        if expected_response_mode == "unsupported":
+            final_result_type = "unsupported"
+        elif expected_response_mode == "clarification":
+            final_result_type = "clarification"
+        elif expected_response_mode == "workspace_result":
+            final_result_type = "workspace_result"
+        elif expected_response_mode == "search_result":
+            final_result_type = "search_result"
+        elif expected_response_mode == "action_result":
+            final_result_type = "action_result"
+        elif expected_response_mode in {"numeric_metric", "status_summary", "identity_summary", "diagnostic_summary", "history_summary", "forecast_summary"}:
+            final_result_type = expected_response_mode
+
+        return {
+            "query_shape": planned_decision.structured_query.query_shape.value if planned_decision.structured_query is not None else "",
+            "execution_plan_type": str(planned_decision.execution_plan.plan_type if planned_decision.execution_plan is not None else ""),
+            "planned_tool_names": planned_tool_names,
+            "actual_tool_names": actual_tool_names,
+            "expected_response_mode": expected_response_mode,
+            "actual_result_mode": actual_result_mode,
+            "final_result_type": final_result_type,
+            "tool_dispatch_match": tool_dispatch_match,
+            "response_mode_match": response_mode_match,
+            "authority_enforced": tool_dispatch_match and response_mode_match,
+            "compatibility_shim_used": compatibility_shim_used,
+            "legacy_fallback_used": legacy_fallback,
+        }
+
+    def _actual_result_mode(
+        self,
+        *,
+        planned_decision: PlannerDecision,
+        jobs: list[dict[str, Any]],
+        actions: list[dict[str, Any]],
+        text: str,
+    ) -> str:
+        del actions, text
+        if not jobs:
+            return str(planned_decision.response_mode or "").strip()
+        primary_job = jobs[0] if isinstance(jobs[0], dict) else {}
+        tool_name = str(primary_job.get("tool_name", "")).strip().lower()
+        arguments = primary_job.get("arguments") if isinstance(primary_job.get("arguments"), dict) else {}
+
+        if tool_name in {"network_status", "power_status", "storage_status", "location_status", "saved_locations", "active_apps", "recent_files"}:
+            return "status_summary"
+        if tool_name == "network_throughput":
+            return "numeric_metric"
+        if tool_name == "machine_status":
+            focus = str(arguments.get("focus", "")).strip().lower()
+            return "identity_summary" if focus == "identity" else "status_summary"
+        if tool_name in {"network_diagnosis", "power_diagnosis", "resource_diagnosis", "storage_diagnosis"}:
+            return str(planned_decision.response_mode or "diagnostic_summary")
+        if tool_name == "resource_status":
+            query_kind = str(arguments.get("query_kind", "")).strip().lower()
+            if query_kind == "identity":
+                return "identity_summary"
+            if query_kind == "diagnostic":
+                return "diagnostic_summary"
+            return "numeric_metric"
+        if tool_name == "weather_current":
+            return str(planned_decision.response_mode or "forecast_summary")
+        if tool_name == "desktop_search":
+            return "search_result"
+        if tool_name in {
+            "workspace_restore",
+            "workspace_assemble",
+            "workspace_save",
+            "workspace_clear",
+            "workspace_archive",
+            "workspace_rename",
+            "workspace_tag",
+            "workspace_list",
+            "workspace_where_left_off",
+            "workspace_next_steps",
+        }:
+            return "workspace_result"
+        if tool_name in {
+            "app_control",
+            "window_control",
+            "system_control",
+            "workflow_execute",
+            "repair_action",
+            "routine_execute",
+            "routine_save",
+            "trusted_hook_execute",
+            "trusted_hook_register",
+            "maintenance_action",
+            "file_operation",
+            "browser_context",
+            "activity_summary",
+            "context_action",
+            "save_location",
+            "external_open_url",
+            "deck_open_url",
+            "external_open_file",
+            "deck_open_file",
+        }:
+            return str(planned_decision.response_mode or "action_result")
+        return str(planned_decision.response_mode or "").strip()
 
     def _micro_response(self, text: str) -> str:
         cleaned = " ".join(str(text or "").split()).strip()
@@ -822,6 +1022,7 @@ class AssistantOrchestrator:
                 "storage_status": "Storage",
                 "storage_diagnosis": "Storage",
                 "network_status": "Network",
+                "network_throughput": "Network",
                 "network_diagnosis": "Network",
                 "weather_current": "Weather",
                 "location_status": "Location",

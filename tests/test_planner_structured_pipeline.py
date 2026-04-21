@@ -47,7 +47,7 @@ def test_planner_exposes_structured_current_metric_query_for_cpu_temperature() -
     assert decision.tool_requests[0].arguments["metric"] == "temperature"
 
 
-def test_planner_blocks_internet_speed_metric_when_no_throughput_capability_exists() -> None:
+def test_planner_routes_internet_speed_metric_to_network_throughput_tool() -> None:
     decision = _plan("what is my current internet speed")
 
     assert decision.structured_query is not None
@@ -55,13 +55,12 @@ def test_planner_blocks_internet_speed_metric_when_no_throughput_capability_exis
     assert decision.structured_query.query_shape == "current_metric"
     assert decision.structured_query.requested_metric == "internet_speed"
     assert decision.capability_plan is not None
-    assert decision.capability_plan.supported is False
-    assert decision.capability_plan.unsupported_reason is not None
-    assert "throughput" in decision.capability_plan.unsupported_reason.lower()
-    assert decision.tool_requests == []
-    assert decision.assistant_message is not None
-    assert "throughput" in decision.assistant_message.lower()
-    assert "isn't available" in decision.assistant_message.lower()
+    assert decision.capability_plan.supported is True
+    assert decision.execution_plan is not None
+    assert decision.execution_plan.plan_type == "run_measurement"
+    assert decision.response_mode == "numeric_metric"
+    assert decision.tool_requests[0].tool_name == "network_throughput"
+    assert decision.tool_requests[0].arguments["metric"] == "internet_speed"
 
 
 def test_planner_distinguishes_network_status_from_network_diagnosis_and_history() -> None:

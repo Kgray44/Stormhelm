@@ -5,6 +5,18 @@ import re
 from typing import Any
 
 from stormhelm.core.intelligence.language import normalize_phrase
+from stormhelm.core.orchestrator.browser_destinations import BrowserDestinationResolver
+from stormhelm.core.orchestrator.browser_destinations import BrowserIntentType
+from stormhelm.core.orchestrator.browser_destinations import BrowserOpenFailureReason
+from stormhelm.core.orchestrator.planner_models import CapabilityPlan
+from stormhelm.core.orchestrator.planner_models import ClarificationReason
+from stormhelm.core.orchestrator.planner_models import ExecutionPlan
+from stormhelm.core.orchestrator.planner_models import NormalizedCommand
+from stormhelm.core.orchestrator.planner_models import QueryShape
+from stormhelm.core.orchestrator.planner_models import ResponseMode
+from stormhelm.core.orchestrator.planner_models import SemanticParseProposal
+from stormhelm.core.orchestrator.planner_models import StructuredQuery
+from stormhelm.core.orchestrator.planner_models import UnsupportedReason
 from stormhelm.core.orchestrator.router import ToolRequest
 
 NOTE_EXTENSIONS = {".md", ".markdown", ".txt"}
@@ -42,6 +54,54 @@ KNOWN_FOLDER_ALIASES: dict[str, tuple[str, ...]] = {
     "Music": ("music", "my music", "music folder", "the music folder"),
     "Videos": ("videos", "my videos", "videos folder", "the videos folder"),
 }
+DEFAULT_AVAILABLE_TOOLS = {
+    "machine_status",
+    "power_status",
+    "power_projection",
+    "power_diagnosis",
+    "resource_status",
+    "resource_diagnosis",
+    "storage_status",
+    "storage_diagnosis",
+    "network_status",
+    "network_throughput",
+    "network_diagnosis",
+    "location_status",
+    "saved_locations",
+    "save_location",
+    "weather_current",
+    "active_apps",
+    "recent_files",
+    "app_control",
+    "window_control",
+    "system_control",
+    "desktop_search",
+    "workflow_execute",
+    "repair_action",
+    "routine_execute",
+    "routine_save",
+    "trusted_hook_register",
+    "trusted_hook_execute",
+    "maintenance_action",
+    "file_operation",
+    "browser_context",
+    "activity_summary",
+    "context_action",
+    "workspace_restore",
+    "workspace_assemble",
+    "workspace_save",
+    "workspace_clear",
+    "workspace_archive",
+    "workspace_rename",
+    "workspace_tag",
+    "workspace_list",
+    "workspace_where_left_off",
+    "workspace_next_steps",
+    "deck_open_url",
+    "external_open_url",
+    "deck_open_file",
+    "external_open_file",
+}
 
 
 @dataclass(slots=True)
@@ -51,6 +111,13 @@ class PlannerDecision:
     assistant_message: str | None = None
     requires_reasoner: bool = False
     active_request_state: dict[str, object] = field(default_factory=dict)
+    structured_query: StructuredQuery | None = None
+    capability_plan: CapabilityPlan | None = None
+    execution_plan: ExecutionPlan | None = None
+    response_mode: str | None = None
+    unsupported_reason: UnsupportedReason | None = None
+    clarification_reason: ClarificationReason | None = None
+    debug: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -100,6 +167,10 @@ class RequestClassification:
 
 
 class DeterministicPlanner:
+    def __init__(self, *, available_tools: set[str] | None = None) -> None:
+        self._available_tools = set(available_tools or DEFAULT_AVAILABLE_TOOLS)
+        self._browser_destination_resolver = BrowserDestinationResolver()
+
     def plan(
         self,
         message: str,
@@ -113,493 +184,1478 @@ class DeterministicPlanner:
         recent_tool_results: list[dict[str, Any]] | None = None,
         learned_preferences: dict[str, dict[str, object]] | None = None,
         active_context: dict[str, Any] | None = None,
+        available_tools: set[str] | None = None,
     ) -> PlannerDecision:
-        lower = normalize_phrase(message)
-        if not lower:
-            return PlannerDecision()
+        normalized = self._normalize_command(message, surface_mode=surface_mode, active_module=active_module)
+        debug: dict[str, Any] = {"normalized_command": normalized.to_dict()}
+        if not normalized.normalized_text:
+            return PlannerDecision(debug=debug)
 
+        lower = normalized.normalized_text
         guardrail_message = self._guardrail_message(message, lower, active_context=active_context)
         if guardrail_message:
-            return PlannerDecision(request_type="guardrail_clarify", assistant_message=guardrail_message)
-
-        system_control = self._system_control_request(message, lower)
-        if system_control is not None:
+            clarification = ClarificationReason(code="guardrail", message=guardrail_message)
+            debug["clarification_reason"] = clarification.to_dict()
+            debug["response_mode"] = ResponseMode.CLARIFICATION.value
             return PlannerDecision(
-                request_type="direct_action",
-                tool_requests=[ToolRequest("system_control", system_control)],
-                active_request_state={
-                    "family": "system_control",
-                    "subject": "system_control",
-                    "request_type": "direct_action",
-                    "parameters": dict(system_control),
-                },
+                request_type="guardrail_clarify",
+                assistant_message=guardrail_message,
+                clarification_reason=clarification,
+                response_mode=ResponseMode.CLARIFICATION.value,
+                debug=debug,
             )
 
-        window_control = self._window_control_request(message, lower)
-        if window_control is not None:
-            return PlannerDecision(
-                request_type="direct_action",
-                tool_requests=[ToolRequest("window_control", window_control)],
-                active_request_state={
-                    "family": "window_control",
-                    "subject": "window_control",
-                    "request_type": "direct_action",
-                    "parameters": dict(window_control),
-                },
-            )
-
-        routine_save = self._routine_save_request(
+        semantic = self._semantic_parse_proposal(
             message,
-            lower,
-            active_request_state=active_request_state or {},
-        )
-        if routine_save is not None:
-            return PlannerDecision(
-                request_type="routine_save",
-                tool_requests=[ToolRequest("routine_save", {**routine_save, "session_id": session_id})],
-                active_request_state={
-                    "family": "routine",
-                    "subject": str(routine_save.get("routine_name", "routine")),
-                    "request_type": "routine_save",
-                    "parameters": dict(routine_save),
-                },
-            )
-
-        trusted_hook_register = self._trusted_hook_register_request(message, lower)
-        if trusted_hook_register is not None:
-            return PlannerDecision(
-                request_type="trusted_hook_register",
-                tool_requests=[ToolRequest("trusted_hook_register", trusted_hook_register)],
-                active_request_state={
-                    "family": "trusted_hook",
-                    "subject": str(trusted_hook_register.get("hook_name", "trusted hook")),
-                    "request_type": "trusted_hook_register",
-                    "parameters": dict(trusted_hook_register),
-                },
-            )
-
-        trusted_hook_execute = self._trusted_hook_execute_request(message, lower)
-        if trusted_hook_execute is not None:
-            return PlannerDecision(
-                request_type="trusted_hook_execution",
-                tool_requests=[ToolRequest("trusted_hook_execute", {**trusted_hook_execute, "session_id": session_id})],
-                active_request_state={
-                    "family": "trusted_hook",
-                    "subject": str(trusted_hook_execute.get("hook_name", "trusted hook")),
-                    "request_type": "trusted_hook_execution",
-                    "parameters": dict(trusted_hook_execute),
-                },
-            )
-
-        maintenance_action = self._maintenance_action_request(message, lower)
-        if maintenance_action is not None:
-            return PlannerDecision(
-                request_type="maintenance_execution",
-                tool_requests=[ToolRequest("maintenance_action", {**maintenance_action, "session_id": session_id})],
-                active_request_state={
-                    "family": "maintenance",
-                    "subject": str(maintenance_action.get("maintenance_kind", "maintenance")),
-                    "request_type": "maintenance_execution",
-                    "parameters": dict(maintenance_action),
-                },
-            )
-
-        file_operation = self._file_operation_request(message, lower)
-        if file_operation is not None:
-            return PlannerDecision(
-                request_type="file_operation",
-                tool_requests=[ToolRequest("file_operation", {**file_operation, "session_id": session_id})],
-                active_request_state={
-                    "family": "file_operation",
-                    "subject": str(file_operation.get("operation", "file operation")),
-                    "request_type": "file_operation",
-                    "parameters": dict(file_operation),
-                },
-            )
-
-        routine_execute = self._routine_execute_request(message, lower)
-        if routine_execute is not None:
-            return PlannerDecision(
-                request_type="routine_execution",
-                tool_requests=[ToolRequest("routine_execute", {**routine_execute, "session_id": session_id})],
-                active_request_state={
-                    "family": "routine",
-                    "subject": str(routine_execute.get("routine_name", "routine")),
-                    "request_type": "routine_execution",
-                    "parameters": dict(routine_execute),
-                },
-            )
-
-        repair_action = self._repair_action_request(message, lower)
-        if repair_action is not None:
-            return PlannerDecision(
-                request_type="repair_execution",
-                tool_requests=[ToolRequest("repair_action", {**repair_action, "session_id": session_id})],
-                active_request_state={
-                    "family": "repair",
-                    "subject": str(repair_action.get("repair_kind", "repair")),
-                    "request_type": "repair_execution",
-                    "parameters": dict(repair_action),
-                },
-            )
-
-        activity_summary = self._activity_summary_request(message, lower)
-        if activity_summary is not None:
-            return PlannerDecision(
-                request_type="activity_summary",
-                tool_requests=[ToolRequest("activity_summary", {**activity_summary, "session_id": session_id})],
-                active_request_state={
-                    "family": "activity",
-                    "subject": "recent_activity",
-                    "request_type": "activity_summary",
-                    "parameters": dict(activity_summary),
-                },
-            )
-
-        browser_request = self._browser_context_request(message, lower, active_context=active_context)
-        if browser_request is not None:
-            return PlannerDecision(
-                request_type="browser_context",
-                tool_requests=[ToolRequest("browser_context", {**browser_request, "session_id": session_id})],
-                active_request_state={
-                    "family": "browser",
-                    "subject": str(browser_request.get("operation", "browser_context")),
-                    "request_type": "browser_context",
-                    "parameters": dict(browser_request),
-                },
-            )
-
-        desktop_search = self._desktop_search_request(message, lower, surface_mode=surface_mode)
-        if desktop_search is not None:
-            return PlannerDecision(
-                request_type="search_and_act" if str(desktop_search.get("action", "search")) == "open" else "search",
-                tool_requests=[ToolRequest("desktop_search", {**desktop_search, "session_id": session_id})],
-                active_request_state={
-                    "family": "search",
-                    "subject": str(desktop_search.get("query", "search")),
-                    "request_type": "search_and_act" if str(desktop_search.get("action", "search")) == "open" else "search",
-                    "parameters": dict(desktop_search),
-                },
-            )
-
-        workflow_request = self._workflow_execution_request(message, lower)
-        if workflow_request is not None:
-            return PlannerDecision(
-                request_type="workflow_execution",
-                tool_requests=[ToolRequest("workflow_execute", {**workflow_request, "query": message, "session_id": session_id})],
-                active_request_state={
-                    "family": "workflow",
-                    "subject": str(workflow_request.get("workflow_kind", "workflow")),
-                    "request_type": "workflow_execution",
-                    "parameters": dict(workflow_request),
-                },
-            )
-
-        context_action = self._context_action_request(message, lower, active_context=active_context)
-        if context_action is not None:
-            return PlannerDecision(
-                request_type="context_action",
-                tool_requests=[ToolRequest("context_action", {**context_action, "session_id": session_id})],
-                active_request_state={
-                    "family": "context",
-                    "subject": str(context_action.get("operation", "context")),
-                    "request_type": "context_action",
-                    "parameters": dict(context_action),
-                },
-            )
-
-        app_control = self._app_control_request(message, lower)
-        if app_control is not None:
-            return PlannerDecision(
-                request_type="direct_action",
-                tool_requests=[ToolRequest("app_control", app_control)],
-                active_request_state={
-                    "family": "app_control",
-                    "subject": "app_control",
-                    "request_type": "direct_action",
-                    "parameters": dict(app_control),
-                },
-            )
-
-        if self._looks_like_open_location_settings(lower):
-            return PlannerDecision(
-                request_type="direct_action",
-                tool_requests=[ToolRequest("external_open_url", {"url": "ms-settings:privacy-location"})],
-            )
-        if self._looks_like_workspace_clear(lower):
-            return PlannerDecision(
-                request_type="direct_action",
-                tool_requests=[ToolRequest("workspace_clear", {"session_id": session_id})],
-            )
-        if self._looks_like_workspace_save(lower):
-            return PlannerDecision(
-                request_type="direct_action",
-                tool_requests=[ToolRequest("workspace_save", {"session_id": session_id})],
-            )
-        if self._looks_like_workspace_archive(lower):
-            return PlannerDecision(
-                request_type="direct_action",
-                tool_requests=[ToolRequest("workspace_archive", {"query": message, "session_id": session_id})],
-            )
-        if self._looks_like_workspace_rename(lower):
-            new_name = self._extract_after_phrase(message, " to ")
-            if new_name:
-                return PlannerDecision(
-                    request_type="direct_action",
-                    tool_requests=[ToolRequest("workspace_rename", {"new_name": new_name, "session_id": session_id})],
-                )
-        if self._looks_like_workspace_tag(lower):
-            tags = self._extract_tags(message)
-            if tags:
-                return PlannerDecision(
-                    request_type="direct_action",
-                    tool_requests=[ToolRequest("workspace_tag", {"tags": tags, "session_id": session_id})],
-                )
-        if self._looks_like_workspace_list(lower):
-            return PlannerDecision(
-                request_type="direct_deterministic_fact",
-                tool_requests=[
-                    ToolRequest(
-                        "workspace_list",
-                        {
-                            "query": self._extract_workspace_list_query(message),
-                            "archived_only": "archived" in lower,
-                            "include_archived": "archived" in lower,
-                            "session_id": session_id,
-                        },
-                    )
-                ]
-            )
-        if self._looks_like_where_left_off(lower):
-            return PlannerDecision(
-                request_type="follow_up_grounded",
-                tool_requests=[ToolRequest("workspace_where_left_off", {"session_id": session_id})],
-            )
-        if self._looks_like_next_steps(lower):
-            return PlannerDecision(
-                request_type="follow_up_grounded",
-                tool_requests=[ToolRequest("workspace_next_steps", {"session_id": session_id})],
-            )
-        if self._looks_like_workspace_restore(lower):
-            return PlannerDecision(
-                request_type="workspace_restore",
-                tool_requests=[ToolRequest("workspace_restore", {"query": message, "session_id": session_id})],
-                requires_reasoner=True,
-            )
-        if self._looks_like_workspace_assemble(lower):
-            return PlannerDecision(
-                request_type="workspace_assembly",
-                tool_requests=[ToolRequest("workspace_assemble", {"query": message, "session_id": session_id})],
-                requires_reasoner=True,
-            )
-        if self._looks_like_save_home_location(lower):
-            return PlannerDecision(
-                request_type="direct_action",
-                tool_requests=[ToolRequest("save_location", {"target": "home", "source_mode": "current"})],
-            )
-        if self._looks_like_saved_locations_list(lower):
-            return PlannerDecision(
-                request_type="direct_deterministic_fact",
-                tool_requests=[ToolRequest("saved_locations", {"mode": "all"})],
-            )
-        location_source_message = self._location_source_follow_up_message(
-            lower,
-            active_request_state=active_request_state or {},
-            recent_tool_results=recent_tool_results or [],
-        )
-        if location_source_message:
-            return PlannerDecision(
-                request_type="follow_up_grounded",
-                assistant_message=location_source_message,
-            )
-        open_item_decision = self._plan_active_item_follow_up(
-            message,
-            surface_mode=surface_mode,
-            workspace_context=workspace_context,
-            active_posture=active_posture,
-        )
-        if open_item_decision is not None:
-            return open_item_decision
-
-        classification = self.classify(
-            message,
-            surface_mode=surface_mode,
-            active_module=active_module,
+            normalized=normalized,
+            session_id=session_id,
             workspace_context=workspace_context,
             active_posture=active_posture,
             active_request_state=active_request_state or {},
             recent_tool_results=recent_tool_results or [],
             learned_preferences=learned_preferences or {},
+            active_context=active_context or {},
         )
-        if classification.family == "weather":
+        debug["semantic_parse_proposal"] = semantic.to_dict()
+
+        structured_query, clarification_reason = self._validate_structured_query(
+            semantic,
+            normalized=normalized,
+            active_context=active_context or {},
+        )
+        debug["structured_query"] = structured_query.to_dict()
+        if clarification_reason is not None:
+            debug["clarification_reason"] = clarification_reason.to_dict()
+            debug["response_mode"] = ResponseMode.CLARIFICATION.value
             return PlannerDecision(
-                request_type=classification.request_type,
-                tool_requests=[
-                    ToolRequest(
-                        "weather_current",
-                        {
-                            "location_mode": classification.location_mode,
-                            "named_location": classification.named_location,
-                            "named_location_type": classification.named_location_type,
-                            "allow_home_fallback": classification.allow_home_fallback,
-                            "forecast_target": classification.forecast_target,
-                            "open_target": classification.open_target,
-                        },
-                    )
-                ],
-                active_request_state=classification.to_active_request_state(),
+                request_type="clarification_request",
+                assistant_message=clarification_reason.message,
+                structured_query=structured_query,
+                clarification_reason=clarification_reason,
+                response_mode=ResponseMode.CLARIFICATION.value,
+                debug=debug,
             )
-        if classification.family == "location":
+
+        if structured_query.query_shape == QueryShape.UNCLASSIFIED:
+            debug["response_mode"] = ResponseMode.SUMMARY_RESULT.value
             return PlannerDecision(
-                request_type=classification.request_type,
-                tool_requests=[
-                    ToolRequest(
-                        "location_status",
-                        {
-                            "mode": classification.location_mode,
-                            "named_location": classification.named_location,
-                            "named_location_type": classification.named_location_type,
-                            "allow_home_fallback": classification.allow_home_fallback,
-                        },
-                    )
-                ],
-                active_request_state=classification.to_active_request_state(),
+                request_type="unclassified",
+                structured_query=structured_query,
+                response_mode=ResponseMode.SUMMARY_RESULT.value,
+                debug=debug,
+            )
+
+        capability_plan = self._plan_capabilities(
+            structured_query,
+            available_tools=set(available_tools or self._available_tools),
+        )
+        debug["capability_plan"] = capability_plan.to_dict()
+        provisional_execution_plan = self._build_execution_plan(
+            structured_query,
+            capability_plan=capability_plan,
+            session_id=session_id,
+        )
+        if not capability_plan.supported and capability_plan.unsupported_reason is not None:
+            debug["unsupported_reason"] = capability_plan.unsupported_reason.to_dict()
+            debug["execution_plan"] = provisional_execution_plan.to_dict()
+            debug["response_mode"] = ResponseMode.UNSUPPORTED.value
+            return PlannerDecision(
+                request_type="unsupported_capability",
+                assistant_message=capability_plan.unsupported_reason.message,
+                structured_query=structured_query,
+                capability_plan=capability_plan,
+                execution_plan=provisional_execution_plan,
+                unsupported_reason=capability_plan.unsupported_reason,
+                response_mode=ResponseMode.UNSUPPORTED.value,
+                debug=debug,
+            )
+
+        execution_plan = provisional_execution_plan
+        debug["execution_plan"] = execution_plan.to_dict()
+        debug["response_mode"] = execution_plan.response_mode.value
+
+        tool_requests: list[ToolRequest] = []
+        if execution_plan.tool_name:
+            tool_requests.append(ToolRequest(execution_plan.tool_name, dict(execution_plan.tool_arguments)))
+
+        return PlannerDecision(
+            request_type=execution_plan.request_type,
+            tool_requests=tool_requests,
+            assistant_message=execution_plan.assistant_message,
+            requires_reasoner=execution_plan.requires_reasoner,
+            active_request_state=self._active_request_state_from_structured_query(structured_query, execution_plan),
+            structured_query=structured_query,
+            capability_plan=capability_plan,
+            execution_plan=execution_plan,
+            response_mode=execution_plan.response_mode.value,
+            debug=debug,
+        )
+
+    def _tool_proposal(
+        self,
+        *,
+        query_shape: QueryShape,
+        domain: str | None,
+        tool_name: str | None = None,
+        tool_arguments: dict[str, Any] | None = None,
+        request_type_hint: str | None = None,
+        family: str | None = None,
+        subject: str | None = None,
+        requested_metric: str | None = None,
+        requested_action: str | None = None,
+        timescale: str | None = None,
+        output_type: str | None = None,
+        diagnostic_mode: bool = False,
+        confidence: float = 0.9,
+        evidence: list[str] | None = None,
+        follow_up: bool = False,
+        assistant_message: str | None = None,
+        execution_type: str | None = None,
+        output_mode: str | None = None,
+        fallback_path: str | None = None,
+        slots: dict[str, Any] | None = None,
+    ) -> SemanticParseProposal:
+        proposal_slots = dict(slots or {})
+        if tool_name is not None:
+            proposal_slots["tool_name"] = tool_name
+        if tool_arguments is not None:
+            proposal_slots["tool_arguments"] = dict(tool_arguments)
+        if request_type_hint is not None:
+            proposal_slots["request_type_hint"] = request_type_hint
+        if family is not None:
+            proposal_slots["family"] = family
+        if subject is not None:
+            proposal_slots["subject"] = subject
+        if timescale is not None:
+            proposal_slots["timescale"] = timescale
+        if output_type is not None:
+            proposal_slots["output_type"] = output_type
+        if assistant_message is not None:
+            proposal_slots["assistant_message"] = assistant_message
+        if execution_type is not None:
+            proposal_slots["execution_type"] = execution_type
+        if output_mode is not None:
+            proposal_slots["output_mode"] = output_mode
+        if diagnostic_mode:
+            proposal_slots["diagnostic_mode"] = True
+        return SemanticParseProposal(
+            query_shape=query_shape,
+            domain=domain,
+            requested_metric=requested_metric,
+            requested_action=requested_action,
+            slots=proposal_slots,
+            confidence=confidence,
+            evidence=list(evidence or []),
+            follow_up=follow_up,
+            fallback_path=fallback_path,
+        )
+
+    def _normalize_command(
+        self,
+        message: str,
+        *,
+        surface_mode: str,
+        active_module: str,
+    ) -> NormalizedCommand:
+        normalized_text = normalize_phrase(message)
+        tokens = [token for token in normalized_text.split() if token]
+        explicitness_level = "explicit"
+        if len(tokens) <= 3:
+            explicitness_level = "terse"
+        if tokens and any(token in {"this", "that", "it", "these", "those"} for token in tokens):
+            explicitness_level = "deictic"
+        return NormalizedCommand(
+            raw_text=message,
+            normalized_text=normalized_text,
+            tokens=tokens,
+            surface_mode=surface_mode,
+            active_module=active_module,
+            explicitness_level=explicitness_level,
+        )
+
+    def _semantic_parse_proposal(
+        self,
+        message: str,
+        *,
+        normalized: NormalizedCommand,
+        session_id: str,
+        workspace_context: dict[str, Any] | None,
+        active_posture: dict[str, Any] | None,
+        active_request_state: dict[str, Any],
+        recent_tool_results: list[dict[str, Any]],
+        learned_preferences: dict[str, dict[str, object]],
+        active_context: dict[str, Any],
+    ) -> SemanticParseProposal:
+        del session_id
+        lower = normalized.normalized_text
+        recent_family = self._recent_family(recent_tool_results)
+        weather_open_default = str(self._preference_value(learned_preferences, "weather", "open_target") or "none")
+        weather_location_default = str(self._preference_value(learned_preferences, "weather", "location_mode") or "auto")
+        present_in = "deck" if any(token in lower for token in {" in systems", " in the systems", "show in systems"}) else "none"
+
+        location_source_message = self._location_source_follow_up_message(
+            lower,
+            active_request_state=active_request_state,
+            recent_tool_results=recent_tool_results,
+        )
+        if location_source_message is not None:
+            return self._tool_proposal(
+                query_shape=QueryShape.SUMMARY_REQUEST,
+                domain="weather",
+                request_type_hint="follow_up_grounded",
+                family="weather",
+                subject="weather",
+                confidence=0.97,
+                evidence=["recent weather result grounds the location-source answer"],
+                follow_up=True,
+                assistant_message=location_source_message,
+                execution_type="summarize_context",
+                output_mode=ResponseMode.SUMMARY_RESULT.value,
+            )
+
+        follow_up = self._classify_follow_up(
+            lower,
+            active_request_state=active_request_state,
+            recent_tool_results=recent_tool_results,
+            recent_family=recent_family,
+            present_in=present_in,
+        )
+        if follow_up is not None:
+            return self._proposal_from_classification(
+                follow_up,
+                message=message,
+                lower=lower,
+                follow_up=True,
+            )
+
+        active_item_decision = self._plan_active_item_follow_up(
+            message,
+            surface_mode=normalized.surface_mode,
+            workspace_context=workspace_context,
+            active_posture=active_posture,
+        )
+        if active_item_decision is not None:
+            return self._tool_proposal(
+                query_shape=QueryShape.SEARCH_AND_OPEN,
+                domain="files",
+                request_type_hint=active_item_decision.request_type,
+                family="desktop_search",
+                subject="active_item",
+                confidence=0.94,
+                evidence=["active workspace item can satisfy the reopen request"],
+                follow_up=True,
+                execution_type="search_then_open",
+                output_mode=ResponseMode.SEARCH_RESULT.value,
+                slots={"compatibility_decision": active_item_decision},
+            )
+
+        if lower.startswith("compare ") or " compare " in f" {lower}":
+            comparison_target = re.sub(r"^(?:compare)\s+", "", lower, flags=re.IGNORECASE).strip(" .")
+            return self._tool_proposal(
+                query_shape=QueryShape.COMPARISON_REQUEST,
+                domain="files" if "file" in lower else "system",
+                request_type_hint="comparison_request",
+                family="comparison",
+                subject="files" if "file" in lower else "comparison",
+                requested_action="compare",
+                confidence=0.92,
+                evidence=["comparison verb detected"],
+                execution_type="compare_items",
+                output_mode=ResponseMode.SUMMARY_RESULT.value,
+                slots={
+                    "comparison_target": comparison_target,
+                    "current_context_reference": "deictic" if any(token in lower for token in {"this", "that", "these", "those"}) else None,
+                },
+            )
+
+        if self._looks_like_where_left_off(lower):
+            return self._tool_proposal(
+                query_shape=QueryShape.WORKSPACE_REQUEST,
+                domain="workspace",
+                tool_name="workspace_where_left_off",
+                tool_arguments={},
+                request_type_hint="workspace_restore",
+                family="workspace",
+                subject="where_left_off",
+                requested_action="where_left_off",
+                confidence=0.96,
+                evidence=["continuity phrasing matched workspace continuation"],
+                execution_type="summarize_workspace",
+                output_mode=ResponseMode.WORKSPACE_RESULT.value,
+            )
+        if self._looks_like_next_steps(lower):
+            return self._tool_proposal(
+                query_shape=QueryShape.WORKSPACE_REQUEST,
+                domain="workspace",
+                tool_name="workspace_next_steps",
+                tool_arguments={},
+                request_type_hint="direct_deterministic_fact",
+                family="workspace",
+                subject="next_steps",
+                requested_action="next_steps",
+                confidence=0.95,
+                evidence=["next-steps phrasing matched workspace summary"],
+                execution_type="summarize_workspace",
+                output_mode=ResponseMode.WORKSPACE_RESULT.value,
+            )
+        if self._looks_like_workspace_save(lower):
+            return self._tool_proposal(
+                query_shape=QueryShape.WORKSPACE_REQUEST,
+                domain="workspace",
+                tool_name="workspace_save",
+                tool_arguments={},
+                request_type_hint="direct_action",
+                family="workspace",
+                subject="save",
+                requested_action="save",
+                confidence=0.96,
+                evidence=["workspace save phrase detected"],
+                execution_type="save_workspace",
+                output_mode=ResponseMode.WORKSPACE_RESULT.value,
+            )
+        if self._looks_like_workspace_clear(lower):
+            return self._tool_proposal(
+                query_shape=QueryShape.WORKSPACE_REQUEST,
+                domain="workspace",
+                tool_name="workspace_clear",
+                tool_arguments={},
+                request_type_hint="direct_action",
+                family="workspace",
+                subject="clear",
+                requested_action="clear",
+                confidence=0.96,
+                evidence=["workspace clear phrase detected"],
+                execution_type="clear_workspace",
+                output_mode=ResponseMode.WORKSPACE_RESULT.value,
+            )
+        if self._looks_like_workspace_archive(lower):
+            return self._tool_proposal(
+                query_shape=QueryShape.WORKSPACE_REQUEST,
+                domain="workspace",
+                tool_name="workspace_archive",
+                tool_arguments={"query": message},
+                request_type_hint="direct_action",
+                family="workspace",
+                subject="archive",
+                requested_action="archive",
+                confidence=0.95,
+                evidence=["workspace archive phrase detected"],
+                execution_type="archive_workspace",
+                output_mode=ResponseMode.WORKSPACE_RESULT.value,
+            )
+        if self._looks_like_workspace_rename(lower):
+            return self._tool_proposal(
+                query_shape=QueryShape.WORKSPACE_REQUEST,
+                domain="workspace",
+                tool_name="workspace_rename",
+                tool_arguments={"new_name": self._extract_after_phrase(message, "to")},
+                request_type_hint="direct_action",
+                family="workspace",
+                subject="rename",
+                requested_action="rename",
+                confidence=0.95,
+                evidence=["workspace rename phrase detected"],
+                execution_type="rename_workspace",
+                output_mode=ResponseMode.WORKSPACE_RESULT.value,
+            )
+        if self._looks_like_workspace_tag(lower):
+            return self._tool_proposal(
+                query_shape=QueryShape.WORKSPACE_REQUEST,
+                domain="workspace",
+                tool_name="workspace_tag",
+                tool_arguments={"tags": self._extract_tags(message)},
+                request_type_hint="direct_action",
+                family="workspace",
+                subject="tag",
+                requested_action="tag",
+                confidence=0.94,
+                evidence=["workspace tag phrase detected"],
+                execution_type="tag_workspace",
+                output_mode=ResponseMode.WORKSPACE_RESULT.value,
+            )
+        if self._looks_like_workspace_list(lower):
+            include_archived = "archived" in lower
+            archived_only = "show my archived workspaces" in lower
+            return self._tool_proposal(
+                query_shape=QueryShape.WORKSPACE_REQUEST,
+                domain="workspace",
+                tool_name="workspace_list",
+                tool_arguments={
+                    "query": self._extract_workspace_list_query(message),
+                    "include_archived": include_archived,
+                    "archived_only": archived_only,
+                },
+                request_type_hint="direct_deterministic_fact",
+                family="workspace",
+                subject="list",
+                requested_action="list",
+                confidence=0.95,
+                evidence=["workspace listing phrase detected"],
+                execution_type="list_workspaces",
+                output_mode=ResponseMode.WORKSPACE_RESULT.value,
+            )
+        if self._looks_like_workspace_assemble(lower):
+            return self._tool_proposal(
+                query_shape=QueryShape.WORKSPACE_REQUEST,
+                domain="workspace",
+                tool_name="workspace_assemble",
+                tool_arguments={"query": message},
+                request_type_hint="workspace_assembly",
+                family="workspace",
+                subject="assemble",
+                requested_action="assemble",
+                confidence=0.95,
+                evidence=["workspace assembly phrasing detected"],
+                execution_type="assemble_workspace",
+                output_mode=ResponseMode.WORKSPACE_RESULT.value,
+            )
+        if self._looks_like_workspace_restore(lower):
+            return self._tool_proposal(
+                query_shape=QueryShape.WORKSPACE_REQUEST,
+                domain="workspace",
+                tool_name="workspace_restore",
+                tool_arguments={"query": message},
+                request_type_hint="workspace_restore",
+                family="workspace",
+                subject="restore",
+                requested_action="restore",
+                confidence=0.95,
+                evidence=["workspace restore phrasing detected"],
+                execution_type="restore_workspace",
+                output_mode=ResponseMode.WORKSPACE_RESULT.value,
+            )
+
+        routine_save = self._routine_save_request(message, lower, active_request_state=active_request_state)
+        if routine_save is not None:
+            return self._tool_proposal(
+                query_shape=QueryShape.ROUTINE_REQUEST,
+                domain="workflow",
+                tool_name="routine_save",
+                tool_arguments=routine_save,
+                request_type_hint="routine_save",
+                family="routine",
+                subject="save",
+                requested_action="save_routine",
+                confidence=0.95,
+                evidence=["save this as a routine phrasing detected"],
+                execution_type="save_routine",
+                output_mode=ResponseMode.ACTION_RESULT.value,
+            )
+        trusted_hook = self._trusted_hook_execute_request(message, lower)
+        if trusted_hook is not None:
+            return self._tool_proposal(
+                query_shape=QueryShape.CONTROL_COMMAND,
+                domain="system",
+                tool_name="trusted_hook_execute",
+                tool_arguments=trusted_hook,
+                request_type_hint="trusted_hook_execution",
+                family="trusted_hook",
+                subject="execute",
+                requested_action="execute_trusted_hook",
+                confidence=0.95,
+                evidence=["trusted hook execution phrase detected"],
+                execution_type="execute_control_command",
+                output_mode=ResponseMode.ACTION_RESULT.value,
+            )
+        workflow_request = self._workflow_execution_request(message, lower)
+        if workflow_request is not None:
+            return self._tool_proposal(
+                query_shape=QueryShape.WORKFLOW_REQUEST,
+                domain="workflow",
+                tool_name="workflow_execute",
+                tool_arguments=workflow_request,
+                request_type_hint="workflow_execution",
+                family="workflow",
+                subject=str(workflow_request.get("workflow_kind") or "workflow"),
+                requested_action="execute_workflow",
+                confidence=0.94,
+                evidence=["workflow setup phrasing detected"],
+                execution_type="execute_workflow",
+                output_mode=ResponseMode.ACTION_RESULT.value,
+            )
+        routine_execute = self._routine_execute_request(message, lower)
+        if routine_execute is not None:
+            return self._tool_proposal(
+                query_shape=QueryShape.ROUTINE_REQUEST,
+                domain="workflow",
+                tool_name="routine_execute",
+                tool_arguments=routine_execute,
+                request_type_hint="routine_execution",
+                family="routine",
+                subject=str(routine_execute.get("routine_name") or "routine"),
+                requested_action="execute_routine",
+                confidence=0.94,
+                evidence=["routine execution phrase detected"],
+                execution_type="execute_routine",
+                output_mode=ResponseMode.ACTION_RESULT.value,
+            )
+        maintenance_request = self._maintenance_action_request(message, lower)
+        if maintenance_request is not None:
+            return self._tool_proposal(
+                query_shape=QueryShape.MAINTENANCE_REQUEST,
+                domain="files",
+                tool_name="maintenance_action",
+                tool_arguments=maintenance_request,
+                request_type_hint="maintenance_execution",
+                family="maintenance",
+                subject=str(maintenance_request.get("maintenance_kind") or "maintenance"),
+                requested_action="execute_maintenance",
+                confidence=0.94,
+                evidence=["maintenance phrase detected"],
+                execution_type="execute_maintenance",
+                output_mode=ResponseMode.ACTION_RESULT.value,
+            )
+        file_operation = self._file_operation_request(message, lower)
+        if file_operation is not None:
+            return self._tool_proposal(
+                query_shape=QueryShape.FILE_OPERATION,
+                domain="files",
+                tool_name="file_operation",
+                tool_arguments=file_operation,
+                request_type_hint="file_operation",
+                family="file_operation",
+                subject=str(file_operation.get("operation") or "file_operation"),
+                requested_action="file_operation",
+                confidence=0.94,
+                evidence=["file-operation phrase detected"],
+                execution_type="execute_file_operation",
+                output_mode=ResponseMode.ACTION_RESULT.value,
+            )
+        browser_context = self._browser_context_request(message, lower, active_context=active_context)
+        if browser_context is not None:
+            return self._tool_proposal(
+                query_shape=QueryShape.BROWSER_CONTEXT,
+                domain="browser",
+                tool_name="browser_context",
+                tool_arguments=browser_context,
+                request_type_hint="browser_context",
+                family="browser_context",
+                subject=str(browser_context.get("operation") or "browser_context"),
+                requested_action=str(browser_context.get("operation") or "browser_context"),
+                confidence=0.95,
+                evidence=["browser-context phrase detected"],
+                execution_type="inspect_browser_context",
+                output_mode=ResponseMode.ACTION_RESULT.value,
+            )
+        activity_request = self._activity_summary_request(message, lower)
+        if activity_request is not None:
+            return self._tool_proposal(
+                query_shape=QueryShape.SUMMARY_REQUEST,
+                domain="activity",
+                tool_name="activity_summary",
+                tool_arguments=activity_request,
+                request_type_hint="activity_summary",
+                family="activity",
+                subject="summary",
+                requested_action="summarize_activity",
+                confidence=0.94,
+                evidence=["activity summary phrase detected"],
+                execution_type="summarize_activity",
+                output_mode=ResponseMode.SUMMARY_RESULT.value,
+            )
+        context_action = self._context_action_request(message, lower, active_context=active_context)
+        if context_action is not None:
+            return self._tool_proposal(
+                query_shape=QueryShape.CONTEXT_ACTION,
+                domain="context",
+                tool_name="context_action",
+                tool_arguments=context_action,
+                request_type_hint="context_action",
+                family="context_action",
+                subject=str(context_action.get("operation") or "context_action"),
+                requested_action=str(context_action.get("operation") or "context_action"),
+                confidence=0.94,
+                evidence=["context-action phrasing detected"],
+                execution_type="execute_context_action",
+                output_mode=ResponseMode.ACTION_RESULT.value,
+            )
+        browser_destination = self._browser_destination_request(message, lower, surface_mode=normalized.surface_mode)
+        if browser_destination is not None:
+            return browser_destination
+        search_request = self._desktop_search_request(message, lower, surface_mode=normalized.surface_mode)
+        if search_request is not None:
+            action = str(search_request.get("action") or "search")
+            return self._tool_proposal(
+                query_shape=QueryShape.SEARCH_AND_OPEN if action == "open" else QueryShape.SEARCH_REQUEST,
+                domain="files",
+                tool_name="desktop_search",
+                tool_arguments=search_request,
+                request_type_hint="search_and_act",
+                family="desktop_search",
+                subject="search",
+                requested_action=action,
+                confidence=0.94,
+                evidence=["desktop-search phrasing detected"],
+                execution_type="search_then_open" if action == "open" else "search_desktop",
+                output_mode=ResponseMode.SEARCH_RESULT.value,
+                slots={"target_scope": "desktop"},
+            )
+        repair_request = self._repair_action_request(message, lower)
+        if repair_request is not None:
+            return self._tool_proposal(
+                query_shape=QueryShape.REPAIR_REQUEST,
+                domain="network" if "network" in str(repair_request.get("repair_kind") or "") or "dns" in str(repair_request.get("repair_kind") or "") else "system",
+                tool_name="repair_action",
+                tool_arguments=repair_request,
+                request_type_hint="repair_execution",
+                family="repair",
+                subject=str(repair_request.get("repair_kind") or "repair"),
+                requested_action=str(repair_request.get("repair_kind") or "repair"),
+                confidence=0.94,
+                evidence=["repair phrasing detected"],
+                execution_type="execute_repair",
+                output_mode=ResponseMode.ACTION_RESULT.value,
+            )
+        system_control = self._system_control_request(message, lower)
+        if system_control is not None:
+            return self._tool_proposal(
+                query_shape=QueryShape.CONTROL_COMMAND,
+                domain="system",
+                tool_name="system_control",
+                tool_arguments=system_control,
+                request_type_hint="direct_action",
+                family="system_control",
+                subject=str(system_control.get("action") or "system_control"),
+                requested_action=str(system_control.get("action") or "system_control"),
+                confidence=0.95,
+                evidence=["system control phrase detected"],
+                execution_type="execute_control_command",
+                output_mode=ResponseMode.ACTION_RESULT.value,
+            )
+        window_control = self._window_control_request(message, lower)
+        if window_control is not None:
+            return self._tool_proposal(
+                query_shape=QueryShape.CONTROL_COMMAND,
+                domain="windows",
+                tool_name="window_control",
+                tool_arguments=window_control,
+                request_type_hint="direct_action",
+                family="window_control",
+                subject=str(window_control.get("action") or "window_control"),
+                requested_action=str(window_control.get("action") or "window_control"),
+                confidence=0.95,
+                evidence=["window control phrase detected"],
+                execution_type="execute_control_command",
+                output_mode=ResponseMode.ACTION_RESULT.value,
+            )
+        app_control = self._app_control_request(message, lower)
+        if app_control is not None:
+            return self._tool_proposal(
+                query_shape=QueryShape.CONTROL_COMMAND,
+                domain="applications",
+                tool_name="app_control",
+                tool_arguments=app_control,
+                request_type_hint="direct_action",
+                family="app_control",
+                subject=str(app_control.get("action") or "app_control"),
+                requested_action=str(app_control.get("action") or "app_control"),
+                confidence=0.95,
+                evidence=["app control phrase detected"],
+                execution_type="execute_control_command",
+                output_mode=ResponseMode.ACTION_RESULT.value,
+            )
+
+        named_location = None
+        named_location_type = None
+        location_reference = self._location_reference_override(lower)
+        if location_reference is not None:
+            named_location, named_location_type = location_reference
+
+        if self._looks_like_save_home_location(lower):
+            active_family = str(active_request_state.get("family") or "").strip().lower()
+            parameters = active_request_state.get("parameters") if isinstance(active_request_state.get("parameters"), dict) else {}
+            source_mode = str(parameters.get("location_mode") or "current").strip().lower() or "current"
+            if active_family == "location" and parameters.get("mode"):
+                source_mode = str(parameters.get("mode")).strip().lower() or source_mode
+            return self._tool_proposal(
+                query_shape=QueryShape.CONTROL_COMMAND,
+                domain="location",
+                tool_name="save_location",
+                tool_arguments={"target": "home", "source_mode": source_mode},
+                request_type_hint="direct_action",
+                family="location",
+                subject="save_home",
+                requested_action="save_home_location",
+                confidence=0.95,
+                evidence=["save home location phrase detected"],
+                execution_type="execute_control_command",
+                output_mode=ResponseMode.ACTION_RESULT.value,
+            )
+        if self._looks_like_open_location_settings(lower):
+            return self._tool_proposal(
+                query_shape=QueryShape.CONTROL_COMMAND,
+                domain="location",
+                tool_name="external_open_url",
+                tool_arguments={"url": "ms-settings:privacy-location"},
+                request_type_hint="direct_action",
+                family="location",
+                subject="open_settings",
+                requested_action="open_location_settings",
+                confidence=0.95,
+                evidence=["open location settings phrase detected"],
+                execution_type="execute_control_command",
+                output_mode=ResponseMode.ACTION_RESULT.value,
+            )
+        if self._looks_like_saved_locations_list(lower):
+            return self._tool_proposal(
+                query_shape=QueryShape.CURRENT_STATUS,
+                domain="location",
+                tool_name="saved_locations",
+                tool_arguments={},
+                request_type_hint="direct_deterministic_fact",
+                family="location",
+                subject="saved_locations",
+                requested_action="list_saved_locations",
+                confidence=0.95,
+                evidence=["saved-locations listing phrase detected"],
+                execution_type="retrieve_current_status",
+                output_mode=ResponseMode.STATUS_SUMMARY.value,
+            )
+        if self._looks_like_location(lower):
+            mode = "named" if named_location else self._location_mode(lower, previous="auto")
+            allow_home_fallback = self._allow_home_fallback(lower, previous=(mode != "current"))
+            arguments: dict[str, Any] = {"mode": mode, "allow_home_fallback": allow_home_fallback}
+            if named_location:
+                arguments["named_location"] = named_location
+                arguments["named_location_type"] = named_location_type or "saved_alias"
+            return self._tool_proposal(
+                query_shape=QueryShape.CURRENT_STATUS,
+                domain="location",
+                tool_name="location_status",
+                tool_arguments=arguments,
+                request_type_hint="direct_deterministic_fact",
+                family="location",
+                subject="location",
+                requested_metric="location",
+                confidence=0.95,
+                evidence=["location status phrase detected"],
+                execution_type="retrieve_current_status",
+                output_mode=ResponseMode.STATUS_SUMMARY.value,
+            )
+        if self._looks_like_weather(lower):
+            open_target = self._open_target(lower, previous="none", preferred=weather_open_default)
+            forecast_target = self._forecast_target(lower, previous="current")
+            location_mode = "named" if named_location else self._location_mode(lower, previous=weather_location_default)
+            allow_home_fallback = self._allow_home_fallback(lower, previous=True)
+            arguments = {
+                "open_target": open_target,
+                "location_mode": location_mode,
+                "allow_home_fallback": allow_home_fallback,
+                "forecast_target": forecast_target,
+            }
+            if named_location:
+                arguments["named_location"] = named_location
+                arguments["named_location_type"] = named_location_type or "saved_alias"
+            request_type_hint = "direct_action" if open_target != "none" else ("deterministic_projection_request" if forecast_target != "current" else "direct_deterministic_fact")
+            return self._tool_proposal(
+                query_shape=QueryShape.FORECAST_REQUEST if forecast_target != "current" else QueryShape.CURRENT_STATUS,
+                domain="weather",
+                tool_name="weather_current",
+                tool_arguments=arguments,
+                request_type_hint=request_type_hint,
+                family="weather",
+                subject="weather",
+                requested_metric="forecast" if forecast_target != "current" else "current_conditions",
+                timescale="now" if forecast_target == "current" else forecast_target,
+                output_type="summary",
+                confidence=0.95,
+                evidence=["weather phrasing detected"],
+                execution_type="retrieve_forecast" if forecast_target != "current" else "retrieve_current_status",
+                output_mode=ResponseMode.FORECAST_SUMMARY.value,
+            )
+        if self._looks_like_power_diagnosis(lower):
+            return self._tool_proposal(
+                query_shape=QueryShape.DIAGNOSTIC_CAUSAL,
+                domain="power",
+                tool_name="power_diagnosis",
+                tool_arguments={},
+                request_type_hint="deterministic_diagnostic_request",
+                family="power_diagnosis",
+                subject="power_diagnosis",
+                requested_metric="drain_rate",
+                diagnostic_mode=True,
+                confidence=0.95,
+                evidence=["battery-drain diagnosis phrasing detected"],
+                execution_type="diagnose_from_telemetry",
+                output_mode=ResponseMode.DIAGNOSTIC_SUMMARY.value,
+            )
+        if self._looks_like_power_projection(lower, recent_family=recent_family):
+            metric, target_percent = self._power_projection_shape(lower, previous_parameters={})
+            return self._tool_proposal(
+                query_shape=QueryShape.FORECAST_REQUEST,
+                domain="power",
+                tool_name="power_projection",
+                tool_arguments={
+                    "metric": metric,
+                    "target_percent": target_percent,
+                    "assume_unplugged": self._assume_unplugged(lower, previous=False),
+                },
+                request_type_hint="deterministic_projection_request",
+                family="power_projection",
+                subject="power_projection",
+                requested_metric=metric,
+                output_type="summary",
+                confidence=0.95,
+                evidence=["power projection phrasing detected"],
+                execution_type="project_power_state",
+                output_mode=ResponseMode.FORECAST_SUMMARY.value,
+            )
+        if self._looks_like_power_status(lower, recent_family=recent_family):
+            focus = self._power_focus(lower)
+            return self._tool_proposal(
+                query_shape=QueryShape.CURRENT_STATUS,
+                domain="power",
+                tool_name="power_status",
+                tool_arguments={"focus": focus},
+                request_type_hint="direct_deterministic_fact",
+                family="power",
+                subject="power",
+                requested_metric=focus,
+                confidence=0.95,
+                evidence=["power status phrasing detected"],
+                execution_type="retrieve_current_status",
+                output_mode=ResponseMode.STATUS_SUMMARY.value,
+            )
+        if any(token in lower for token in {"download speed", "downloads speed", "upload speed", "uploads speed", "internet speed", "throughput"}) and any(
+            token in lower for token in {"internet", "network", "wi-fi", "wifi", "download speed", "downloads speed", "upload speed", "uploads speed"}
+        ):
+            metric = "internet_speed"
+            if "download speed" in lower or "downloads speed" in lower:
+                metric = "download_speed"
+            elif "upload speed" in lower or "uploads speed" in lower:
+                metric = "upload_speed"
+            return self._tool_proposal(
+                query_shape=QueryShape.CURRENT_METRIC,
+                domain="network",
+                tool_name="network_throughput",
+                tool_arguments={"metric": metric, "present_in": present_in},
+                request_type_hint="direct_deterministic_fact",
+                family="network",
+                subject="throughput",
+                requested_metric=metric,
+                timescale="now",
+                output_type="numeric",
+                confidence=0.95,
+                evidence=["network throughput phrasing detected"],
+                execution_type="run_measurement",
+                output_mode=ResponseMode.NUMERIC_METRIC.value,
+            )
+        if any(token in lower for token in {"unstable today", "earlier", "lately", "recently"}) and any(
+            token in lower for token in {"wi-fi", "wifi", "internet", "network", "connection"}
+        ) and any(token in lower for token in {"unstable", "drop", "dropped", "skipping", "choppy", "disconnect"}):
+            return self._tool_proposal(
+                query_shape=QueryShape.HISTORY_TREND,
+                domain="network",
+                tool_name="network_diagnosis",
+                tool_arguments={"focus": "history", "diagnostic_burst": False},
+                request_type_hint="deterministic_diagnostic_request",
+                family="network_diagnosis",
+                subject="network_history",
+                requested_metric="stability",
+                timescale="today" if "today" in lower else "recent",
+                output_type="summary",
+                diagnostic_mode=True,
+                confidence=0.94,
+                evidence=["network history phrasing detected"],
+                execution_type="analyze_history",
+                output_mode=ResponseMode.HISTORY_SUMMARY.value,
+            )
+        if self._looks_like_network_diagnosis(lower):
+            return self._tool_proposal(
+                query_shape=QueryShape.DIAGNOSTIC_CAUSAL,
+                domain="network",
+                tool_name="network_diagnosis",
+                tool_arguments={"focus": self._network_focus(lower, previous="overview"), "diagnostic_burst": True},
+                request_type_hint="deterministic_diagnostic_request",
+                family="network_diagnosis",
+                subject="network_diagnosis",
+                requested_metric="stability",
+                output_type="summary",
+                diagnostic_mode=True,
+                confidence=0.95,
+                evidence=["network diagnosis phrasing detected"],
+                execution_type="diagnose_from_telemetry",
+                output_mode=ResponseMode.DIAGNOSTIC_SUMMARY.value,
+            )
+        if any(phrase in lower for phrase in {"am i connected", "are we connected", "what network am i on", "what is my ip", "what's my ip", "my ip", "ip address", "wifi signal", "wi-fi signal", "signal strength", "rssi"}):
+            focus = self._network_status_focus(lower)
+            return self._tool_proposal(
+                query_shape=QueryShape.CURRENT_STATUS,
+                domain="network",
+                tool_name="network_status",
+                tool_arguments={"focus": focus},
+                request_type_hint="direct_deterministic_fact",
+                family="network",
+                subject="network",
+                requested_metric=focus,
+                confidence=0.95,
+                evidence=["network status phrasing detected"],
+                execution_type="retrieve_current_status",
+                output_mode=ResponseMode.STATUS_SUMMARY.value,
+            )
+        if self._looks_like_resource_diagnosis(lower):
+            return self._tool_proposal(
+                query_shape=QueryShape.DIAGNOSTIC_CAUSAL,
+                domain="system",
+                tool_name="resource_diagnosis",
+                tool_arguments={},
+                request_type_hint="deterministic_diagnostic_request",
+                family="resource_diagnosis",
+                subject="resource_diagnosis",
+                requested_metric="bottleneck",
+                diagnostic_mode=True,
+                confidence=0.95,
+                evidence=["machine slowdown diagnosis phrasing detected"],
+                execution_type="diagnose_from_telemetry",
+                output_mode=ResponseMode.DIAGNOSTIC_SUMMARY.value,
+            )
+        resource_query_kind = self._resource_query_kind(lower, recent_family=recent_family)
+        if resource_query_kind is not None:
+            focus = self._resource_focus(lower)
+            metric = self._resource_metric(lower, focus=focus, query_kind=resource_query_kind)
+            query_shape = QueryShape.CURRENT_METRIC
+            output_mode = ResponseMode.NUMERIC_METRIC.value
+            output_type = "numeric"
+            request_type_hint = "direct_deterministic_fact"
+            diagnostic_mode = False
+            if resource_query_kind == "identity":
+                query_shape = QueryShape.IDENTITY_LOOKUP
+                output_mode = ResponseMode.IDENTITY_SUMMARY.value
+                output_type = "identity"
+            elif resource_query_kind == "diagnostic":
+                query_shape = QueryShape.DIAGNOSTIC_CAUSAL
+                output_mode = ResponseMode.DIAGNOSTIC_SUMMARY.value
+                output_type = "interpreted"
+                request_type_hint = "deterministic_diagnostic_request"
+                diagnostic_mode = True
+            domain = focus if focus in {"gpu", "cpu", "ram"} else "system"
+            return self._tool_proposal(
+                query_shape=query_shape,
+                domain=domain,
+                tool_name="resource_status",
+                tool_arguments={"focus": focus, "query_kind": resource_query_kind, "metric": metric},
+                request_type_hint=request_type_hint,
+                family="resource",
+                subject=focus,
+                requested_metric=metric,
+                timescale="now" if query_shape == QueryShape.CURRENT_METRIC else None,
+                output_type=output_type,
+                diagnostic_mode=diagnostic_mode,
+                confidence=0.95,
+                evidence=["resource query phrasing detected"],
+                execution_type="retrieve_identity" if query_shape == QueryShape.IDENTITY_LOOKUP else "diagnose_from_telemetry" if diagnostic_mode else "retrieve_live_metric",
+                output_mode=output_mode,
+            )
+        if any(token in lower for token in {"running apps", "open apps", "active windows", "what is open", "open windows"}):
+            return self._tool_proposal(
+                query_shape=QueryShape.CURRENT_STATUS,
+                domain="applications",
+                tool_name="active_apps",
+                tool_arguments={},
+                request_type_hint="direct_deterministic_fact",
+                family="active_apps",
+                subject="active_apps",
+                requested_metric="applications",
+                confidence=0.94,
+                evidence=["active apps phrasing detected"],
+                execution_type="retrieve_current_status",
+                output_mode=ResponseMode.STATUS_SUMMARY.value,
+            )
+        if any(token in lower for token in {"recent files", "recent documents", "what was i working on"}):
+            return self._tool_proposal(
+                query_shape=QueryShape.CURRENT_STATUS,
+                domain="files",
+                tool_name="recent_files",
+                tool_arguments={},
+                request_type_hint="direct_deterministic_fact",
+                family="recent_files",
+                subject="recent_files",
+                requested_metric="recent_files",
+                confidence=0.94,
+                evidence=["recent-files phrasing detected"],
+                execution_type="retrieve_current_status",
+                output_mode=ResponseMode.STATUS_SUMMARY.value,
+            )
+        if self._looks_like_storage_diagnosis(lower):
+            return self._tool_proposal(
+                query_shape=QueryShape.DIAGNOSTIC_CAUSAL,
+                domain="storage",
+                tool_name="storage_diagnosis",
+                tool_arguments={},
+                request_type_hint="deterministic_diagnostic_request",
+                family="storage_diagnosis",
+                subject="storage_diagnosis",
+                requested_metric="capacity_pressure",
+                diagnostic_mode=True,
+                confidence=0.94,
+                evidence=["storage diagnosis phrasing detected"],
+                execution_type="diagnose_from_telemetry",
+                output_mode=ResponseMode.DIAGNOSTIC_SUMMARY.value,
+            )
+        if self._looks_like_storage_status(lower):
+            return self._tool_proposal(
+                query_shape=QueryShape.CURRENT_STATUS,
+                domain="storage",
+                tool_name="storage_status",
+                tool_arguments={},
+                request_type_hint="direct_deterministic_fact",
+                family="storage",
+                subject="storage",
+                requested_metric="storage",
+                confidence=0.94,
+                evidence=["storage status phrasing detected"],
+                execution_type="retrieve_current_status",
+                output_mode=ResponseMode.STATUS_SUMMARY.value,
+            )
+        if self._looks_like_machine(lower):
+            focus = "time" if "timezone" in lower or "time zone" in lower else "identity"
+            return self._tool_proposal(
+                query_shape=QueryShape.CURRENT_STATUS if focus == "time" else QueryShape.IDENTITY_LOOKUP,
+                domain="machine",
+                tool_name="machine_status",
+                tool_arguments={"focus": focus},
+                request_type_hint="direct_deterministic_fact",
+                family="machine",
+                subject="machine",
+                requested_metric=focus,
+                confidence=0.94,
+                evidence=["machine status phrasing detected"],
+                execution_type="retrieve_current_status" if focus == "time" else "retrieve_identity",
+                output_mode=ResponseMode.STATUS_SUMMARY.value if focus == "time" else ResponseMode.IDENTITY_SUMMARY.value,
+            )
+        if self._looks_like_system_overview(lower):
+            return self._tool_proposal(
+                query_shape=QueryShape.SUMMARY_REQUEST,
+                domain="system",
+                request_type_hint="mixed_command_explanation",
+                family="system_overview",
+                subject="system_overview",
+                requested_action="summarize_system",
+                confidence=0.8,
+                evidence=["system-overview phrasing detected"],
+                execution_type="summarize_activity",
+                output_mode=ResponseMode.SUMMARY_RESULT.value,
+                slots={"requires_reasoner": True},
+            )
+        return SemanticParseProposal(
+            query_shape=QueryShape.UNCLASSIFIED,
+            confidence=0.0,
+            evidence=["no structured query shape matched"],
+            fallback_path="unclassified",
+        )
+
+    def _proposal_from_classification(
+        self,
+        classification: RequestClassification,
+        *,
+        message: str,
+        lower: str,
+        follow_up: bool,
+    ) -> SemanticParseProposal:
+        del message
+        if classification.family == "weather":
+            return self._tool_proposal(
+                query_shape=QueryShape.FORECAST_REQUEST if classification.forecast_target != "current" else QueryShape.CURRENT_STATUS,
+                domain="weather",
+                tool_name="weather_current",
+                tool_arguments={
+                    "open_target": classification.open_target,
+                    "location_mode": classification.location_mode,
+                    "named_location": classification.named_location,
+                    "named_location_type": classification.named_location_type,
+                    "allow_home_fallback": classification.allow_home_fallback,
+                    "forecast_target": classification.forecast_target,
+                },
+                request_type_hint=classification.request_type,
+                family="weather",
+                subject="weather",
+                requested_metric="forecast" if classification.forecast_target != "current" else "current_conditions",
+                timescale="now" if classification.forecast_target == "current" else classification.forecast_target,
+                output_type="summary",
+                confidence=0.94,
+                evidence=["follow-up classification grounded weather routing"],
+                follow_up=follow_up,
+                execution_type="retrieve_forecast" if classification.forecast_target != "current" else "retrieve_current_status",
+                output_mode=ResponseMode.FORECAST_SUMMARY.value,
             )
         if classification.family == "power":
-            return PlannerDecision(
-                request_type=classification.request_type,
-                tool_requests=[
-                    ToolRequest(
-                        "power_status",
-                        {"focus": classification.focus, "present_in": classification.present_in},
-                    )
-                ],
-                active_request_state=classification.to_active_request_state(),
+            return self._tool_proposal(
+                query_shape=QueryShape.CURRENT_STATUS,
+                domain="power",
+                tool_name="power_status",
+                tool_arguments={"focus": classification.focus},
+                request_type_hint=classification.request_type,
+                family="power",
+                subject="power",
+                requested_metric=classification.focus,
+                confidence=0.94,
+                evidence=["follow-up classification grounded power status"],
+                follow_up=follow_up,
+                execution_type="retrieve_current_status",
+                output_mode=ResponseMode.STATUS_SUMMARY.value,
             )
         if classification.family == "power_projection":
-            return PlannerDecision(
-                request_type=classification.request_type,
-                tool_requests=[
-                    ToolRequest(
-                        "power_projection",
-                        {
-                            "metric": classification.metric,
-                            "target_percent": classification.target_percent,
-                            "assume_unplugged": classification.assume_unplugged,
-                            "present_in": classification.present_in,
-                        },
-                    )
-                ],
-                active_request_state=classification.to_active_request_state(),
-            )
-        if classification.family == "power_diagnosis":
-            return PlannerDecision(
-                request_type=classification.request_type,
-                tool_requests=[ToolRequest("power_diagnosis", {"present_in": classification.present_in})],
-                active_request_state=classification.to_active_request_state(),
-            )
-        if classification.family == "resource":
-            return PlannerDecision(
-                request_type=classification.request_type,
-                tool_requests=[
-                    ToolRequest(
-                        "resource_status",
-                        {
-                            "focus": classification.focus,
-                            "query_kind": classification.query_kind,
-                            "metric": classification.metric,
-                            "present_in": classification.present_in,
-                        },
-                    )
-                ],
-                active_request_state=classification.to_active_request_state(),
-            )
-        if classification.family == "resource_diagnosis":
-            return PlannerDecision(
-                request_type=classification.request_type,
-                tool_requests=[ToolRequest("resource_diagnosis", {"present_in": classification.present_in})],
-                active_request_state=classification.to_active_request_state(),
-            )
-        if classification.family == "network":
-            return PlannerDecision(
-                request_type=classification.request_type,
-                tool_requests=[
-                    ToolRequest(
-                        "network_status",
-                        {"focus": classification.focus, "present_in": classification.present_in},
-                    )
-                ],
-                active_request_state=classification.to_active_request_state(),
+            return self._tool_proposal(
+                query_shape=QueryShape.FORECAST_REQUEST,
+                domain="power",
+                tool_name="power_projection",
+                tool_arguments={
+                    "metric": classification.metric,
+                    "target_percent": classification.target_percent,
+                    "assume_unplugged": classification.assume_unplugged,
+                },
+                request_type_hint=classification.request_type,
+                family="power_projection",
+                subject="power_projection",
+                requested_metric=classification.metric,
+                output_type="summary",
+                confidence=0.94,
+                evidence=["follow-up classification grounded power projection"],
+                follow_up=follow_up,
+                execution_type="project_power_state",
+                output_mode=ResponseMode.FORECAST_SUMMARY.value,
             )
         if classification.family == "network_diagnosis":
-            return PlannerDecision(
-                request_type=classification.request_type,
-                tool_requests=[
-                    ToolRequest(
-                        "network_diagnosis",
-                        {
-                            "focus": classification.focus,
-                            "diagnostic_burst": classification.metric == "diagnostic_burst",
-                            "present_in": classification.present_in,
-                        },
-                    )
-                ],
-                active_request_state=classification.to_active_request_state(),
+            focus = classification.focus or self._network_focus(lower, previous="overview")
+            query_shape = QueryShape.HISTORY_TREND if focus == "history" else QueryShape.DIAGNOSTIC_CAUSAL
+            output_mode = ResponseMode.HISTORY_SUMMARY.value if query_shape == QueryShape.HISTORY_TREND else ResponseMode.DIAGNOSTIC_SUMMARY.value
+            return self._tool_proposal(
+                query_shape=query_shape,
+                domain="network",
+                tool_name="network_diagnosis",
+                tool_arguments={"focus": focus, "diagnostic_burst": True},
+                request_type_hint=classification.request_type,
+                family="network_diagnosis",
+                subject="network_diagnosis",
+                requested_metric="stability",
+                timescale="today" if focus == "history" else None,
+                output_type="summary",
+                diagnostic_mode=True,
+                confidence=0.94,
+                evidence=["follow-up classification grounded network diagnosis"],
+                follow_up=follow_up,
+                execution_type="analyze_history" if query_shape == QueryShape.HISTORY_TREND else "diagnose_from_telemetry",
+                output_mode=output_mode,
             )
-        if classification.family == "machine":
-            return PlannerDecision(
-                request_type=classification.request_type,
-                tool_requests=[
-                    ToolRequest(
-                        "machine_status",
-                        {"focus": classification.focus, "present_in": classification.present_in},
-                    )
-                ],
-                active_request_state=classification.to_active_request_state(),
+        return self._tool_proposal(
+            query_shape=QueryShape.UNCLASSIFIED,
+            domain=classification.family,
+            request_type_hint=classification.request_type,
+            family=classification.family,
+            subject=classification.family,
+            confidence=0.2,
+            evidence=["legacy follow-up classification required an unclassified compatibility fallback"],
+            follow_up=follow_up,
+            fallback_path="legacy_follow_up",
+        )
+
+    def _validate_structured_query(
+        self,
+        semantic: SemanticParseProposal,
+        *,
+        normalized: NormalizedCommand,
+        active_context: dict[str, Any],
+    ) -> tuple[StructuredQuery, ClarificationReason | None]:
+        slots = dict(semantic.slots)
+        query_shape = semantic.query_shape
+        domain = semantic.domain
+        requested_metric = semantic.requested_metric
+        requested_action = semantic.requested_action
+        timescale = str(slots.get("timescale") or "").strip() or None
+        target_scope = str(slots.get("target_scope") or domain or "").strip() or None
+        output_mode = str(slots.get("output_mode") or "").strip() or None
+        execution_type = str(slots.get("execution_type") or "").strip() or None
+        output_type = str(slots.get("output_type") or "").strip() or None
+        diagnostic_mode = bool(slots.get("diagnostic_mode", False))
+        comparison_target = str(slots.get("comparison_target") or "").strip() or None
+        current_context_reference = str(slots.get("current_context_reference") or "").strip() or None
+        if not current_context_reference:
+            if isinstance(active_context.get("selection"), dict) and active_context["selection"].get("value"):
+                current_context_reference = "selection"
+            elif isinstance(active_context.get("clipboard"), dict) and active_context["clipboard"].get("value"):
+                current_context_reference = "clipboard"
+
+        if query_shape == QueryShape.CURRENT_METRIC:
+            timescale = timescale or "now"
+            output_mode = output_mode or ResponseMode.NUMERIC_METRIC.value
+            output_type = output_type or "numeric"
+            if execution_type is None:
+                execution_type = "run_measurement" if domain == "network" and requested_metric in {"internet_speed", "download_speed", "upload_speed"} else "retrieve_live_metric"
+        elif query_shape == QueryShape.CURRENT_STATUS:
+            output_mode = output_mode or ResponseMode.STATUS_SUMMARY.value
+            output_type = output_type or "summary"
+            execution_type = execution_type or "retrieve_current_status"
+        elif query_shape == QueryShape.DIAGNOSTIC_CAUSAL:
+            output_mode = output_mode or ResponseMode.DIAGNOSTIC_SUMMARY.value
+            output_type = output_type or "summary"
+            diagnostic_mode = True
+            execution_type = execution_type or "diagnose_from_telemetry"
+        elif query_shape == QueryShape.HISTORY_TREND:
+            output_mode = output_mode or ResponseMode.HISTORY_SUMMARY.value
+            output_type = output_type or "summary"
+            diagnostic_mode = True
+            timescale = timescale or "recent"
+            execution_type = execution_type or "analyze_history"
+        elif query_shape == QueryShape.IDENTITY_LOOKUP:
+            output_mode = output_mode or ResponseMode.IDENTITY_SUMMARY.value
+            output_type = output_type or "identity"
+            execution_type = execution_type or "retrieve_identity"
+        elif query_shape == QueryShape.CONTROL_COMMAND:
+            output_mode = output_mode or ResponseMode.ACTION_RESULT.value
+            output_type = output_type or "action"
+            execution_type = execution_type or "execute_control_command"
+        elif query_shape == QueryShape.OPEN_BROWSER_DESTINATION:
+            output_mode = output_mode or ResponseMode.ACTION_RESULT.value
+            output_type = output_type or "action"
+            execution_type = execution_type or "resolve_url_then_open_in_browser"
+        elif query_shape == QueryShape.REPAIR_REQUEST:
+            output_mode = output_mode or ResponseMode.ACTION_RESULT.value
+            output_type = output_type or "action"
+            execution_type = execution_type or "execute_repair"
+        elif query_shape in {QueryShape.SEARCH_REQUEST, QueryShape.SEARCH_AND_OPEN}:
+            output_mode = output_mode or ResponseMode.SEARCH_RESULT.value
+            output_type = output_type or "search_result"
+            execution_type = execution_type or ("search_then_open" if query_shape == QueryShape.SEARCH_AND_OPEN else "search_desktop")
+        elif query_shape == QueryShape.WORKSPACE_REQUEST:
+            output_mode = output_mode or ResponseMode.WORKSPACE_RESULT.value
+            output_type = output_type or "workspace"
+            execution_type = execution_type or "assemble_workspace"
+        elif query_shape == QueryShape.WORKFLOW_REQUEST:
+            output_mode = output_mode or ResponseMode.ACTION_RESULT.value
+            output_type = output_type or "action"
+            execution_type = execution_type or "execute_workflow"
+        elif query_shape == QueryShape.SUMMARY_REQUEST:
+            output_mode = output_mode or ResponseMode.SUMMARY_RESULT.value
+            output_type = output_type or "summary"
+            execution_type = execution_type or "summarize_activity"
+        elif query_shape == QueryShape.COMPARISON_REQUEST:
+            output_mode = output_mode or ResponseMode.SUMMARY_RESULT.value
+            output_type = output_type or "comparison"
+            execution_type = execution_type or "compare_items"
+        elif query_shape == QueryShape.FORECAST_REQUEST:
+            output_mode = output_mode or ResponseMode.FORECAST_SUMMARY.value
+            output_type = output_type or "summary"
+            execution_type = execution_type or "retrieve_forecast"
+        elif query_shape in {QueryShape.BROWSER_CONTEXT, QueryShape.CONTEXT_ACTION, QueryShape.ROUTINE_REQUEST, QueryShape.MAINTENANCE_REQUEST, QueryShape.FILE_OPERATION}:
+            output_mode = output_mode or ResponseMode.ACTION_RESULT.value
+            output_type = output_type or "action"
+            execution_type = execution_type or "execute_control_command"
+
+        capability_requirements: list[str] = []
+        if query_shape == QueryShape.CURRENT_METRIC:
+            capability_requirements.append("throughput_measurement" if execution_type == "run_measurement" else "live_telemetry")
+        elif query_shape == QueryShape.CURRENT_STATUS:
+            capability_requirements.append("status_fetch")
+        elif query_shape == QueryShape.IDENTITY_LOOKUP:
+            capability_requirements.append("identity_lookup")
+        elif query_shape == QueryShape.DIAGNOSTIC_CAUSAL:
+            capability_requirements.append("diagnostic_telemetry")
+        elif query_shape == QueryShape.HISTORY_TREND:
+            capability_requirements.append("history_telemetry")
+        elif query_shape == QueryShape.OPEN_BROWSER_DESTINATION:
+            capability_requirements.append("browser_open")
+        elif query_shape in {QueryShape.CONTROL_COMMAND, QueryShape.REPAIR_REQUEST, QueryShape.WORKFLOW_REQUEST, QueryShape.ROUTINE_REQUEST, QueryShape.MAINTENANCE_REQUEST, QueryShape.FILE_OPERATION, QueryShape.CONTEXT_ACTION}:
+            capability_requirements.append("action_execution")
+        elif query_shape in {QueryShape.SEARCH_REQUEST, QueryShape.SEARCH_AND_OPEN}:
+            capability_requirements.append("desktop_search")
+        elif query_shape == QueryShape.WORKSPACE_REQUEST:
+            capability_requirements.append("workspace_management")
+        elif query_shape in {QueryShape.SUMMARY_REQUEST, QueryShape.COMPARISON_REQUEST, QueryShape.FORECAST_REQUEST, QueryShape.BROWSER_CONTEXT}:
+            capability_requirements.append("structured_summary")
+
+        structured_query = StructuredQuery(
+            domain=domain,
+            query_shape=query_shape,
+            requested_metric=requested_metric,
+            requested_action=requested_action,
+            timescale=timescale,
+            target_scope=target_scope,
+            output_mode=output_mode,
+            execution_type=execution_type,
+            capability_requirements=capability_requirements,
+            confidence=semantic.confidence,
+            diagnostic_mode=diagnostic_mode,
+            output_type=output_type,
+            comparison_target=comparison_target,
+            current_context_reference=current_context_reference,
+            slots=slots,
+        )
+
+        if query_shape == QueryShape.COMPARISON_REQUEST and (
+            comparison_target is None
+            or comparison_target in {"these two files", "these files", "those files", "these", "those", "this", "that"}
+        ):
+            return structured_query, ClarificationReason(
+                code="missing_comparison_targets",
+                message="Which two files should I compare?",
+                missing_slots=["left_target", "right_target"],
             )
-        if classification.family == "active_apps":
-            return PlannerDecision(
-                request_type=classification.request_type,
-                tool_requests=[ToolRequest("active_apps")],
-                active_request_state=classification.to_active_request_state(),
+        if query_shape == QueryShape.WORKSPACE_REQUEST and requested_action == "rename":
+            tool_arguments = slots.get("tool_arguments") if isinstance(slots.get("tool_arguments"), dict) else {}
+            if not str(tool_arguments.get("new_name") or "").strip():
+                return structured_query, ClarificationReason(
+                    code="missing_workspace_name",
+                    message="What should I rename the workspace to?",
+                    missing_slots=["new_name"],
+                )
+        if query_shape == QueryShape.WORKSPACE_REQUEST and requested_action == "tag":
+            tool_arguments = slots.get("tool_arguments") if isinstance(slots.get("tool_arguments"), dict) else {}
+            if not isinstance(tool_arguments.get("tags"), list) or not tool_arguments.get("tags"):
+                return structured_query, ClarificationReason(
+                    code="missing_workspace_tags",
+                    message="What tags should I add to the workspace?",
+                    missing_slots=["tags"],
+                )
+        if query_shape == QueryShape.UNCLASSIFIED and normalized.normalized_text:
+            structured_query.confidence = 0.0
+        return structured_query, None
+
+    def _plan_capabilities(
+        self,
+        structured_query: StructuredQuery,
+        *,
+        available_tools: set[str],
+    ) -> CapabilityPlan:
+        slots = structured_query.slots if isinstance(structured_query.slots, dict) else {}
+        tool_name = str(slots.get("tool_name") or "").strip() or None
+        required_tools: list[str] = [tool_name] if tool_name else []
+        required_capabilities = list(structured_query.capability_requirements)
+        missing_capabilities: list[str] = []
+        notes: list[str] = []
+        freshness_expectation = None
+        if structured_query.query_shape == QueryShape.CURRENT_METRIC:
+            freshness_expectation = "live"
+        elif structured_query.query_shape == QueryShape.HISTORY_TREND:
+            freshness_expectation = "recent_history"
+        elif structured_query.query_shape == QueryShape.CURRENT_STATUS:
+            freshness_expectation = "current"
+        elif structured_query.query_shape in {QueryShape.CONTROL_COMMAND, QueryShape.REPAIR_REQUEST}:
+            freshness_expectation = "immediate"
+
+        if structured_query.query_shape == QueryShape.COMPARISON_REQUEST and not tool_name:
+            missing_capabilities.append("file_comparison")
+            return CapabilityPlan(
+                supported=False,
+                available_tools=sorted(tool for tool in available_tools if tool in DEFAULT_AVAILABLE_TOOLS),
+                required_tools=[],
+                required_capabilities=required_capabilities,
+                missing_capabilities=missing_capabilities,
+                freshness_expectation=freshness_expectation,
+                unsupported_reason=UnsupportedReason(
+                    code="comparison_capability_unavailable",
+                    message="Deterministic file comparison isn't available in the current execution path yet.",
+                ),
+                notes=["The planner can classify comparison requests before a comparison executor exists."],
             )
-        if classification.family == "recent_files":
-            return PlannerDecision(
-                request_type=classification.request_type,
-                tool_requests=[ToolRequest("recent_files")],
-                active_request_state=classification.to_active_request_state(),
+
+        if tool_name is not None and tool_name not in available_tools:
+            missing_capabilities.append(tool_name)
+            unsupported_code = "tool_unavailable"
+            unsupported_message = f"{tool_name} isn't available in the current environment."
+            if structured_query.query_shape == QueryShape.OPEN_BROWSER_DESTINATION:
+                unsupported_code = "browser_opening_unavailable"
+                unsupported_message = "Browser opening isn't available in the current environment."
+            return CapabilityPlan(
+                supported=False,
+                available_tools=sorted(tool for tool in available_tools if tool in DEFAULT_AVAILABLE_TOOLS),
+                required_tools=required_tools,
+                required_capabilities=required_capabilities,
+                missing_capabilities=missing_capabilities,
+                freshness_expectation=freshness_expectation,
+                unsupported_reason=UnsupportedReason(
+                    code=unsupported_code,
+                    message=unsupported_message,
+                ),
+                notes=["The planner selected a deterministic route whose tool is disabled or unavailable."],
             )
-        if classification.family == "storage":
-            return PlannerDecision(
-                request_type=classification.request_type,
-                tool_requests=[ToolRequest("storage_status")],
-                active_request_state=classification.to_active_request_state(),
+
+        if tool_name is None and not slots.get("assistant_message"):
+            notes.append("No deterministic tool is required for this structured query.")
+        return CapabilityPlan(
+            supported=True,
+            available_tools=sorted(tool for tool in available_tools if tool in DEFAULT_AVAILABLE_TOOLS),
+            required_tools=required_tools,
+            required_capabilities=required_capabilities,
+            missing_capabilities=[],
+            freshness_expectation=freshness_expectation,
+            unsupported_reason=None,
+            notes=notes,
+        )
+
+    def _build_execution_plan(
+        self,
+        structured_query: StructuredQuery,
+        *,
+        capability_plan: CapabilityPlan,
+        session_id: str,
+    ) -> ExecutionPlan:
+        del capability_plan, session_id
+        slots = structured_query.slots if isinstance(structured_query.slots, dict) else {}
+        compatibility_decision = slots.get("compatibility_decision")
+        if isinstance(compatibility_decision, PlannerDecision):
+            tool_name = None
+            tool_arguments: dict[str, Any] = {}
+            if compatibility_decision.tool_requests:
+                tool_name = compatibility_decision.tool_requests[0].tool_name
+                tool_arguments = dict(compatibility_decision.tool_requests[0].arguments)
+            return ExecutionPlan(
+                plan_type=structured_query.execution_type or "compatibility_shim",
+                request_type=str(slots.get("request_type_hint") or compatibility_decision.request_type or "unclassified"),
+                response_mode=ResponseMode(structured_query.output_mode or ResponseMode.SUMMARY_RESULT.value),
+                tool_name=tool_name,
+                tool_arguments=tool_arguments,
+                family=str(slots.get("family") or ""),
+                subject=str(slots.get("subject") or ""),
+                requires_reasoner=bool(slots.get("requires_reasoner") or compatibility_decision.requires_reasoner),
+                assistant_message=compatibility_decision.assistant_message,
             )
-        if classification.family == "storage_diagnosis":
-            return PlannerDecision(
-                request_type=classification.request_type,
-                tool_requests=[ToolRequest("storage_diagnosis", {"present_in": classification.present_in})],
-                active_request_state=classification.to_active_request_state(),
-            )
-        if classification.family == "system_overview":
-            return PlannerDecision(
-                request_type=classification.request_type,
-                requires_reasoner=classification.requires_reasoner,
-                tool_requests=[
-                    ToolRequest("machine_status", {"focus": "overview", "present_in": classification.present_in}),
-                    ToolRequest("power_status", {"focus": "overview", "present_in": classification.present_in}),
-                    ToolRequest("resource_status", {"focus": "overview", "present_in": classification.present_in}),
-                    ToolRequest("storage_status"),
-                    ToolRequest("network_status", {"focus": "overview", "present_in": classification.present_in}),
-                ],
-                active_request_state=classification.to_active_request_state(),
-            )
-        if surface_mode.strip().lower() == "ghost" and any(token in lower for token in {"open externally", "open in browser"}):
-            return PlannerDecision(
-                request_type="direct_action",
-                assistant_message="Standing by for a specific URL or file path to open externally.",
-            )
-        return PlannerDecision(request_type=classification.request_type, active_request_state=classification.to_active_request_state())
+
+        request_type = str(slots.get("request_type_hint") or "direct_deterministic_fact")
+        return ExecutionPlan(
+            plan_type=structured_query.execution_type or "unclassified",
+            request_type=request_type,
+            response_mode=ResponseMode(structured_query.output_mode or ResponseMode.SUMMARY_RESULT.value),
+            tool_name=str(slots.get("tool_name") or "").strip() or None,
+            tool_arguments=dict(slots.get("tool_arguments") or {}),
+            family=str(slots.get("family") or structured_query.domain or ""),
+            subject=str(slots.get("subject") or structured_query.domain or ""),
+            requires_reasoner=bool(slots.get("requires_reasoner", False)),
+            assistant_message=str(slots.get("assistant_message") or "").strip() or None,
+        )
+
+    def _active_request_state_from_structured_query(
+        self,
+        structured_query: StructuredQuery,
+        execution_plan: ExecutionPlan,
+    ) -> dict[str, object]:
+        family = (execution_plan.family or structured_query.domain or "").strip()
+        if not family:
+            return {}
+        parameters = dict(structured_query.slots.get("tool_arguments") or {})
+        parameters.update(
+            {
+                "query_shape": structured_query.query_shape.value,
+                "execution_type": structured_query.execution_type,
+            }
+        )
+        if structured_query.requested_metric:
+            parameters["metric"] = structured_query.requested_metric
+        if structured_query.requested_action:
+            parameters["requested_action"] = structured_query.requested_action
+        if structured_query.timescale:
+            parameters["timescale"] = structured_query.timescale
+        return {
+            "family": family,
+            "subject": execution_plan.subject or family,
+            "request_type": execution_plan.request_type,
+            "query_shape": structured_query.query_shape.value,
+            "route": {
+                "tool_name": execution_plan.tool_name or "",
+                "response_mode": execution_plan.response_mode.value,
+            },
+            "parameters": parameters,
+            "structured_query": structured_query.to_dict(),
+        }
 
     def classify(
         self,
@@ -723,10 +1779,11 @@ class DeterministicPlanner:
                 present_in=present_in,
             )
         if self._looks_like_network_status(lower):
+            focus = self._network_status_focus(lower)
             return RequestClassification(
                 request_type="direct_deterministic_fact",
                 family="network",
-                focus="ip" if " ip" in f" {lower}" or "address" in lower else "overview",
+                focus=focus,
                 present_in=present_in,
             )
         if self._looks_like_machine(lower):
@@ -763,7 +1820,30 @@ class DeterministicPlanner:
         lower = message.lower()
         if requires_reasoner:
             return True
-        if request_type in {"direct_deterministic_fact", "deterministic_projection_request", "deterministic_diagnostic_request", "follow_up_grounded", "direct_action"}:
+        if request_type in {
+            "direct_deterministic_fact",
+            "deterministic_projection_request",
+            "deterministic_diagnostic_request",
+            "follow_up_grounded",
+            "direct_action",
+            "unsupported_capability",
+            "clarification_request",
+            "guardrail_clarify",
+            "comparison_request",
+            "workspace_restore",
+            "workspace_assembly",
+            "routine_execution",
+            "routine_save",
+            "maintenance_execution",
+            "file_operation",
+            "trusted_hook_execution",
+            "browser_context",
+            "activity_summary",
+            "context_action",
+            "workflow_execution",
+            "search_and_act",
+            "repair_execution",
+        }:
             return False
         if any(
             phrase in lower
@@ -999,7 +2079,16 @@ class DeterministicPlanner:
         )
 
     def _looks_like_where_left_off(self, lower: str) -> bool:
-        return any(phrase in lower for phrase in {"what were we doing", "where did we leave off", "continue from there"})
+        return any(
+            phrase in lower
+            for phrase in {
+                "what were we doing",
+                "where did we leave off",
+                "continue from there",
+                "continue where i left off",
+                "resume where i left off",
+            }
+        )
 
     def _looks_like_next_steps(self, lower: str) -> bool:
         return any(phrase in lower for phrase in {"what's next", "what is next", "what still needs doing", "what's left"})
@@ -1427,6 +2516,8 @@ class DeterministicPlanner:
         )
 
     def _network_focus(self, lower: str, *, previous: str) -> str:
+        if any(token in lower for token in {"signal", "rssi"}):
+            return "signal"
         if any(token in lower for token in {"router or the isp", "wifi or the isp", "wi fi or the isp", "local or upstream", "upstream"}):
             return "attribution"
         if "packet loss" in lower:
@@ -1440,6 +2531,13 @@ class DeterministicPlanner:
         if "today" in lower or "recently" in lower:
             return "history"
         return previous
+
+    def _network_status_focus(self, lower: str) -> str:
+        if any(token in lower for token in {"signal", "rssi"}):
+            return "signal"
+        if "ip" in lower or "address" in lower:
+            return "ip"
+        return "overview"
 
     def _looks_like_machine(self, lower: str) -> bool:
         return any(token in lower for token in {"machine name", "os version", "what computer", "what machine", "timezone", "time zone"})
@@ -1588,7 +2686,95 @@ class DeterministicPlanner:
             return {"operation": "find", "query": message}
         return None
 
+    def _browser_destination_request(
+        self,
+        message: str,
+        lower: str,
+        *,
+        surface_mode: str,
+    ) -> SemanticParseProposal | None:
+        if self._browser_destination_resolver.intent_type(lower) != BrowserIntentType.OPEN_DESTINATION:
+            return None
+        request = self._browser_destination_resolver.parse(message, surface_mode=surface_mode)
+        if request is None:
+            return None
+
+        resolution = self._browser_destination_resolver.resolve(request)
+        failure_reason = resolution.failure_reason or BrowserOpenFailureReason.DESTINATION_UNRESOLVED
+        response_contract = (
+            self._browser_destination_resolver.response_contract_for_success(resolution)
+            if resolution.success
+            else self._browser_destination_resolver.response_contract_for_failure(failure_reason)
+        )
+        slots: dict[str, Any] = {
+            "target_scope": "browser",
+            "browser_intent_type": request.intent_type.value,
+            "destination_type": "known_web_destination",
+            "destination_scope": request.scope.value,
+            "browser_preference": request.browser_preference,
+            "open_target": request.open_target,
+            "browser_destination_request": request.to_dict(),
+            "destination_resolution": resolution.to_dict(),
+            "response_contract": dict(response_contract),
+            "unsupported_response_contract": self._browser_destination_resolver.response_contract_for_failure(
+                BrowserOpenFailureReason.BROWSER_OPEN_UNAVAILABLE
+            ),
+            "legacy_routes_bypassed": {
+                "desktop_search": True,
+                "app_control": True,
+            },
+        }
+        evidence = [
+            "browser destination intent detected",
+            "desktop-search route bypassed",
+            "app-control route bypassed",
+            *resolution.notes,
+        ]
+        if resolution.success and resolution.destination is not None:
+            open_plan = self._browser_destination_resolver.build_open_plan(resolution)
+            slots.update(
+                {
+                    "destination_name": resolution.destination.key,
+                    "known_destination_mapping": resolution.destination.to_dict(),
+                    "browser_open_plan": open_plan.to_dict(),
+                }
+            )
+            return self._tool_proposal(
+                query_shape=QueryShape.OPEN_BROWSER_DESTINATION,
+                domain="browser",
+                tool_name=open_plan.tool_name,
+                tool_arguments=open_plan.tool_arguments,
+                request_type_hint="direct_action",
+                family="browser_destination",
+                subject=resolution.destination.key,
+                requested_action="open_browser_destination",
+                confidence=0.97,
+                evidence=evidence,
+                execution_type="resolve_url_then_open_in_browser",
+                output_mode=ResponseMode.ACTION_RESULT.value,
+                slots=slots,
+            )
+
+        slots["browser_open_failure_reason"] = failure_reason.value
+        slots["destination_type"] = "unresolved_web_destination"
+        return self._tool_proposal(
+            query_shape=QueryShape.OPEN_BROWSER_DESTINATION,
+            domain="browser",
+            request_type_hint="direct_action",
+            family="browser_destination",
+            subject=request.destination_phrase or "browser_destination",
+            requested_action="open_browser_destination",
+            confidence=0.9,
+            evidence=evidence,
+            assistant_message=response_contract["full_response"],
+            execution_type="resolve_url_then_open_in_browser",
+            output_mode=ResponseMode.ACTION_RESULT.value,
+            slots=slots,
+        )
+
     def _desktop_search_request(self, message: str, lower: str, *, surface_mode: str) -> dict[str, object] | None:
+        if self._browser_destination_resolver.intent_type(lower) == BrowserIntentType.SEARCH_REQUEST:
+            return None
         explicit_search = any(lower.startswith(prefix) for prefix in {"find ", "search ", "pull up ", "locate "}) or " find " in lower
         open_style_lookup = any(lower.startswith(prefix) for prefix in FILE_LOOKUP_PREFIXES)
         folder_hint = self._extract_known_folder_hint(lower)
@@ -1683,7 +2869,25 @@ class DeterministicPlanner:
         )
 
     def _repair_action_request(self, message: str, lower: str) -> dict[str, object] | None:
-        if any(phrase in lower for phrase in {"try fixing my wi fi", "try fixing my wi-fi", "try fixing my wifi", "try fixing my network", "fix my wi fi", "fix my wi-fi", "fix my wifi", "fix my network"}):
+        if any(
+            phrase in lower
+            for phrase in {
+                "try fixing my wi fi",
+                "try fixing my wi-fi",
+                "try fixing my wifi",
+                "try fixing my network",
+                "try fixing wi fi",
+                "try fixing wi-fi",
+                "try fixing wifi",
+                "fix my wi fi",
+                "fix my wi-fi",
+                "fix my wifi",
+                "fix my network",
+                "fix wi fi",
+                "fix wi-fi",
+                "fix wifi",
+            }
+        ):
             return {"repair_kind": "network_repair", "target": "wi-fi"}
         if any(phrase in lower for phrase in {"run connectivity checks", "check my connection", "connectivity checks", "run a 60 second network check", "run a 60-second network check"}):
             return {"repair_kind": "connectivity_checks", "target": "network"}

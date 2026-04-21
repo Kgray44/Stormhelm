@@ -923,7 +923,8 @@ class WorkspaceService:
         if workspace is None:
             return {"summary": self.persona.error("no workspace is currently held on watch"), "workspace": {}}
         posture = self.session_state.get_active_posture(session_id)
-        if posture and str(posture.get("workspace", {}).get("workspaceId", "")).strip() == workspace.workspace_id:
+        posture_workspace = self._posture_workspace_payload(posture)
+        if posture and str(posture_workspace.get("workspaceId", "")).strip() == workspace.workspace_id:
             self._save_snapshot_from_posture(session_id=session_id, workspace=workspace, posture=posture)
         archived = self.repository.set_archived(workspace.workspace_id, True) or workspace
         self.repository.record_activity(
@@ -1075,7 +1076,8 @@ class WorkspaceService:
         return None
 
     def _workspace_from_posture(self, session_id: str, posture: dict[str, Any]) -> WorkspaceRecord | None:
-        workspace_id = str(posture.get("workspace", {}).get("workspaceId", "")).strip() if posture else ""
+        workspace_payload = self._posture_workspace_payload(posture)
+        workspace_id = str(workspace_payload.get("workspaceId", "")).strip()
         if not workspace_id:
             workspace_id = self.session_state.get_active_workspace_id(session_id) or ""
         if not workspace_id:
@@ -2386,6 +2388,7 @@ class WorkspaceService:
         workspace: WorkspaceRecord,
         posture: dict[str, Any],
     ):
+        workspace_payload = self._posture_workspace_payload(posture)
         opened_items = self._normalize_item_list(posture.get("opened_items"))
         active_item = posture.get("active_item") if isinstance(posture.get("active_item"), dict) else {}
         pending_next_steps = self._normalize_string_list(posture.get("pending_next_steps") or workspace.pending_next_steps)
@@ -2411,7 +2414,7 @@ class WorkspaceService:
             topic=workspace.topic,
             summary=workspace.summary,
             title=workspace.title or workspace.name,
-            status=str(posture.get("workspace", {}).get("status", workspace.status)),
+            status=str(workspace_payload.get("status", workspace.status)),
             category=workspace.category or workspace.topic,
             template_key=str(posture.get("template_key") or workspace.template_key),
             template_source=str(posture.get("template_source") or workspace.template_source),
@@ -2505,6 +2508,14 @@ class WorkspaceService:
             },
         )
         return snapshot
+
+    def _posture_workspace_payload(self, posture: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(posture, dict):
+            return {}
+        workspace_payload = posture.get("workspace")
+        if isinstance(workspace_payload, dict):
+            return dict(workspace_payload)
+        return {}
 
     def _matching_notes(self, topic: str, *, limit: int) -> list[dict[str, Any]]:
         lowered = topic.lower()
