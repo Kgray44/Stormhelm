@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from stormhelm.config.models import AppConfig
@@ -18,22 +19,44 @@ class PersonaContract:
     def confirmation(self, text: str) -> str:
         return self.report(text)
 
+    def assumption(self, text: str) -> str:
+        detail = self._clean(text).rstrip(".")
+        if not detail:
+            detail = "Stormhelm made the safest available assumption"
+        return self.report(f"{detail}.")
+
+    def clarification(self, text: str) -> str:
+        detail = self._clean(text).rstrip(".?")
+        if not detail:
+            detail = "Which course should Stormhelm take"
+        return f"{detail}?"
+
+    def suggestion(self, text: str) -> str:
+        detail = self._clean(text).rstrip(".")
+        if not detail:
+            return ""
+        return self.report(f"Likely next bearing: {detail}.")
+
     def error(self, text: str) -> str:
         detail = self._clean(text).rstrip(".")
         if not detail:
             detail = "the requested course could not be secured"
         return f"Stormhelm could not secure that course: {detail}."
 
-    def workspace_restored(self, name: str, item_count: int, basis: str | None = None) -> str:
+    def workspace_restored(self, name: str, item_count: int, basis: str | None = None, likely_next: str | None = None) -> str:
         detail = f"Restored {name} to the Deck and recovered {item_count} relevant item{'s' if item_count != 1 else ''}"
         if basis:
             detail = f"{detail} from {basis}"
+        if likely_next:
+            detail = f"{detail}. Likely next bearing: {likely_next.rstrip('.')}"
         return self.report(f"{detail}.")
 
-    def workspace_assembled(self, name: str, item_count: int, basis: str | None = None) -> str:
+    def workspace_assembled(self, name: str, item_count: int, basis: str | None = None, likely_next: str | None = None) -> str:
         detail = f"Assembled the {name} workspace and plotted {item_count} relevant item{'s' if item_count != 1 else ''}"
         if basis:
             detail = f"{detail} from {basis}"
+        if likely_next:
+            detail = f"{detail}. Likely next bearing: {likely_next.rstrip('.')}"
         return self.report(f"{detail}.")
 
     def build_provider_instructions(
@@ -64,6 +87,8 @@ class PersonaContract:
             "Deck Mode is for integrated work, internal viewing, workspace assembly, and sustained collaboration.",
             "Stormhelm persona is mandatory on every visible answer. Never sound like a generic assistant.",
             "Wrap system facts, tool summaries, restore notices, and errors in Stormhelm's calm command voice.",
+            "Keep visible replies concise. Prefer 1-3 short sentences unless the operator clearly asks for more detail.",
+            "No self-introductions, no 'Stormhelm here', no emojis, no filler, and no fake enthusiasm.",
         ]
         workspace_summary = self.describe_workspace_context(workspace_context)
         if workspace_summary:
@@ -94,6 +119,8 @@ class PersonaContract:
         cleaned = " ".join(str(text or "").split())
         if not cleaned:
             return ""
+        cleaned = re.sub(r"^(stormhelm(?:\s+here)?\s*[:,-]?\s*)", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"^[\u263a-\U0001f645]+\s*", "", cleaned)
         if cleaned[-1] not in ".!?":
             cleaned += "."
         return cleaned

@@ -57,6 +57,20 @@ def _validate_http_url(raw_url: str) -> str:
     return candidate
 
 
+def _validate_external_url(raw_url: str) -> str:
+    candidate = raw_url.strip()
+    if not candidate:
+        raise ValueError("A non-empty 'url' is required.")
+    if candidate.startswith("www."):
+        candidate = f"https://{candidate}"
+    parsed = urlparse(candidate)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return candidate
+    if parsed.scheme == "ms-settings":
+        return candidate
+    raise ValueError("Only http, https, and supported system settings URLs are allowed.")
+
+
 def _infer_file_item(path: Path, max_bytes: int) -> dict[str, Any]:
     suffix = path.suffix.lower()
     mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
@@ -159,12 +173,12 @@ class ExternalOpenUrlTool(BaseTool):
         }
 
     def validate(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        return {"url": _validate_http_url(str(arguments.get("url", "")))}
+        return {"url": _validate_external_url(str(arguments.get("url", "")))}
 
     def execute_sync(self, context: ToolContext, arguments: dict[str, Any]) -> ToolResult:
         url = arguments["url"]
         parsed = urlparse(url)
-        title = parsed.netloc or url
+        title = parsed.netloc or parsed.path or url
         return ToolResult(
             success=True,
             summary=f"Opened {title} externally.",

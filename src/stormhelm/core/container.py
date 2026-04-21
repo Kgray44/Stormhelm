@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from time import monotonic
 from typing import Any
 
 from stormhelm.config.loader import load_config
@@ -15,6 +16,8 @@ from stormhelm.core.memory.repositories import (
     PreferencesRepository,
     ToolRunRepository,
 )
+from stormhelm.core.network import CloudflareQualityProvider, NetworkMonitor
+from stormhelm.core.operations.service import OperationalAwarenessService
 from stormhelm.core.orchestrator.assistant import AssistantOrchestrator
 from stormhelm.core.orchestrator.persona import PersonaContract
 from stormhelm.core.orchestrator.planner import DeterministicPlanner
@@ -39,6 +42,7 @@ class CoreContainer:
     config: AppConfig
     events: EventBuffer
     database: SQLiteDatabase
+    system_probe: SystemProbe
     conversations: ConversationRepository
     notes: NotesRepository
     preferences: PreferencesRepository
@@ -48,7 +52,11 @@ class CoreContainer:
     tool_executor: ToolExecutor
     jobs: JobManager
     assistant: AssistantOrchestrator
+    network_monitor: NetworkMonitor | None = None
     runtime_bootstrap: RuntimeBootstrapResult | None = None
+    operational_awareness: OperationalAwarenessService = field(default_factory=OperationalAwarenessService)
+    _system_state_cache: dict[str, Any] | None = None
+    _system_state_cached_at: float = 0.0
 
     async def start(self) -> None:
         ensure_runtime_directories(
@@ -65,6 +73,8 @@ class CoreContainer:
         self.database.initialize()
         self.conversations.ensure_session()
         await self.jobs.start()
+        if self.network_monitor is not None:
+            self.network_monitor.start()
         self.events.publish(
             level="INFO",
             source="core",
@@ -86,11 +96,17 @@ class CoreContainer:
 
     async def stop(self) -> None:
         self.events.publish(level="INFO", source="core", message="Stormhelm core shutting down.")
+        if self.network_monitor is not None:
+            self.network_monitor.stop()
         await self.jobs.stop()
         self.tool_executor.shutdown()
         clear_runtime_state(self.config)
 
     def status_snapshot(self) -> dict[str, Any]:
+        jobs = self.jobs.list_jobs(limit=64)
+        system_state = self._system_state_snapshot()
+        recent_events = self.events.recent(limit=32)
+        watch_state = self._watch_state_snapshot(jobs)
         return {
             "app_name": self.config.app_name,
             "version": self.config.version,
@@ -109,9 +125,73 @@ class CoreContainer:
             "resource_root": str(self.config.runtime.resource_root),
             "max_workers": self.config.concurrency.max_workers,
             "tool_count": len(self.tool_registry.metadata()),
-            "recent_jobs": len(self.jobs.list_jobs(limit=25)),
+            "recent_jobs": len(jobs[:25]),
+            "system_state": system_state,
+            "systems_interpretation": self.operational_awareness.build_systems_interpretation(system_state).to_dict(),
+            "signal_state": {
+                "signals": [
+                    signal.to_dict()
+                    for signal in self.operational_awareness.build_signals(
+                        events=recent_events,
+                        jobs=jobs,
+                        system_state=system_state,
+                    )
+                ]
+            },
+            "provider_state": self._provider_state_snapshot(),
+            "tool_state": self._tool_state_snapshot(),
+            "watch_state": watch_state,
             "first_run": bool(self.runtime_bootstrap and self.runtime_bootstrap.first_run),
         }
+
+    def _system_state_snapshot(self) -> dict[str, Any]:
+        now = monotonic()
+        if self._system_state_cache is not None and (now - self._system_state_cached_at) < 15.0:
+            cached = dict(self._system_state_cache)
+            cached["network"] = self.system_probe.network_status()
+            self._system_state_cache = cached
+            return cached
+
+        snapshot = {
+            "machine": self.system_probe.machine_status(),
+            "power": self.system_probe.power_status(),
+            "resources": self.system_probe.resource_status(),
+            "hardware": self.system_probe.hardware_telemetry_snapshot(sampling_tier="active"),
+            "storage": self.system_probe.storage_status(),
+            "network": self.system_probe.network_status(),
+            "location": self.system_probe.resolve_location(),
+        }
+        self._system_state_cache = snapshot
+        self._system_state_cached_at = now
+        return snapshot
+
+    def _provider_state_snapshot(self) -> dict[str, Any]:
+        return {
+            "enabled": self.config.openai.enabled,
+            "configured": bool(self.config.openai.api_key),
+            "planner_model": self.config.openai.planner_model,
+            "reasoning_model": self.config.openai.reasoning_model,
+            "timeout_seconds": self.config.openai.timeout_seconds,
+            "max_tool_rounds": self.config.openai.max_tool_rounds,
+        }
+
+    def _tool_state_snapshot(self) -> dict[str, Any]:
+        enabled_tools = [
+            metadata["name"]
+            for metadata in self.tool_registry.metadata()
+            if self.config.tools.enabled.is_enabled(str(metadata.get("name", "")))
+        ]
+        return {
+            "enabled_count": len(enabled_tools),
+            "enabled_tools": enabled_tools,
+        }
+
+    def _watch_state_snapshot(self, jobs: list[dict[str, Any]]) -> dict[str, Any]:
+        return self.operational_awareness.build_watch_snapshot(
+            jobs=jobs,
+            worker_capacity=self.config.concurrency.max_workers,
+            default_timeout_seconds=self.config.concurrency.default_job_timeout_seconds,
+        ).to_dict()
 
 
 def build_container(config: AppConfig | None = None) -> CoreContainer:
@@ -126,7 +206,14 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
     persona = PersonaContract(app_config)
     planner = DeterministicPlanner()
     safety = SafetyPolicy(app_config)
-    system_probe = SystemProbe(app_config)
+    system_probe = SystemProbe(app_config, preferences=preferences)
+    network_monitor = NetworkMonitor(
+        probe=system_probe,
+        events=events,
+        cloudflare_provider=CloudflareQualityProvider(enabled=True, timeout_seconds=2.5),
+        history_path=app_config.storage.state_dir / "network-history.json",
+    )
+    system_probe.attach_network_monitor(network_monitor)
     registry = ToolRegistry()
     register_builtin_tools(registry)
     executor = ToolExecutor(registry, max_sync_workers=app_config.concurrency.max_workers)
@@ -176,6 +263,7 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
         config=app_config,
         events=events,
         database=database,
+        system_probe=system_probe,
         conversations=conversations,
         notes=notes,
         preferences=preferences,
@@ -185,4 +273,5 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
         tool_executor=executor,
         jobs=jobs,
         assistant=assistant,
+        network_monitor=network_monitor,
     )

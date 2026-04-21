@@ -2,21 +2,31 @@ import QtQuick 2.15
 
 Item {
     id: root
+    objectName: "transcriptTimeline"
 
     property var messages: []
     property bool compact: false
     property bool framed: true
     property bool autoFollow: true
+    property bool followPending: false
+    readonly property real followThreshold: 28
+
+    function nearBottom() {
+        var remaining = listView.contentHeight - (listView.contentY + listView.height)
+        return listView.atYEnd || remaining <= root.followThreshold
+    }
 
     function followToBottom() {
         if (listView.count > 0) {
             listView.positionViewAtEnd()
         }
+        root.followPending = false
+        root.autoFollow = true
     }
 
     onMessagesChanged: {
-        if (root.autoFollow || (root.messages.length > 0 && root.messages[root.messages.length - 1].role === "user")) {
-            root.autoFollow = true
+        if (root.autoFollow || root.nearBottom()) {
+            root.followPending = true
             Qt.callLater(root.followToBottom)
         }
     }
@@ -36,12 +46,25 @@ Item {
 
     ListView {
         id: listView
+        objectName: "transcriptList"
         anchors.fill: parent
         anchors.margins: root.framed ? (root.compact ? 16 : 22) : 0
         spacing: root.compact ? 8 : 12
         clip: true
         model: root.messages
-        onMovementEnded: root.autoFollow = listView.atYEnd
+        boundsBehavior: Flickable.StopAtBounds
+        onMovementStarted: {
+            if (!root.nearBottom()) {
+                root.autoFollow = false
+                root.followPending = false
+            }
+        }
+        onMovementEnded: root.autoFollow = root.nearBottom()
+        onContentHeightChanged: {
+            if (root.followPending) {
+                Qt.callLater(root.followToBottom)
+            }
+        }
         Component.onCompleted: Qt.callLater(root.followToBottom)
 
         delegate: Item {

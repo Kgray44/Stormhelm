@@ -12,6 +12,20 @@ Item {
     property real orbit: 0
     property real shimmer: 0
     property real variance: 0
+    property real adaptiveGlowBoost: 0.06
+    property real adaptiveAnchorGlowBoost: 0.08
+    property real adaptiveAnchorStrokeBoost: 0.12
+    property real adaptiveAnchorFillBoost: 0.04
+    property real adaptiveAnchorBackdropOpacity: 0.05
+    property real adaptiveTone: 0
+    property real adaptiveLabelContrast: 0.08
+    property real visualAdaptiveGlowBoost: adaptiveGlowBoost
+    property real visualAdaptiveAnchorGlowBoost: adaptiveAnchorGlowBoost
+    property real visualAdaptiveAnchorStrokeBoost: adaptiveAnchorStrokeBoost
+    property real visualAdaptiveAnchorFillBoost: adaptiveAnchorFillBoost
+    property real visualAdaptiveAnchorBackdropOpacity: adaptiveAnchorBackdropOpacity
+    property real visualAdaptiveTone: adaptiveTone
+    property real visualAdaptiveLabelContrast: adaptiveLabelContrast
     property color displayAccentColor: root.accentForState(root.assistantState)
     property real displayAmplitude: root.amplitudeForState(root.assistantState)
 
@@ -39,6 +53,20 @@ Item {
             + Math.round(colorValue.g * 255) + ","
             + Math.round(colorValue.b * 255) + ","
             + alphaValue + ")"
+    }
+
+    function toneColor(baseColor) {
+        if (root.visualAdaptiveTone > 0) {
+            return Qt.darker(baseColor, 1 + root.visualAdaptiveTone * 0.7)
+        }
+        if (root.visualAdaptiveTone < 0) {
+            return Qt.lighter(baseColor, 1 + Math.abs(root.visualAdaptiveTone) * 0.45)
+        }
+        return baseColor
+    }
+
+    function contrastColor(baseColor, boost) {
+        return Qt.lighter(root.toneColor(baseColor), 1 + boost)
     }
 
     NumberAnimation on phase {
@@ -85,6 +113,36 @@ Item {
         NumberAnimation { duration: 320; easing.type: Easing.InOutQuad }
     }
 
+    onAdaptiveGlowBoostChanged: root.visualAdaptiveGlowBoost = root.adaptiveGlowBoost
+    onAdaptiveAnchorGlowBoostChanged: root.visualAdaptiveAnchorGlowBoost = root.adaptiveAnchorGlowBoost
+    onAdaptiveAnchorStrokeBoostChanged: root.visualAdaptiveAnchorStrokeBoost = root.adaptiveAnchorStrokeBoost
+    onAdaptiveAnchorFillBoostChanged: root.visualAdaptiveAnchorFillBoost = root.adaptiveAnchorFillBoost
+    onAdaptiveAnchorBackdropOpacityChanged: root.visualAdaptiveAnchorBackdropOpacity = root.adaptiveAnchorBackdropOpacity
+    onAdaptiveToneChanged: root.visualAdaptiveTone = root.adaptiveTone
+    onAdaptiveLabelContrastChanged: root.visualAdaptiveLabelContrast = root.adaptiveLabelContrast
+
+    Behavior on visualAdaptiveGlowBoost {
+        NumberAnimation { duration: 560; easing.type: Easing.InOutCubic }
+    }
+    Behavior on visualAdaptiveAnchorGlowBoost {
+        NumberAnimation { duration: 560; easing.type: Easing.InOutCubic }
+    }
+    Behavior on visualAdaptiveAnchorStrokeBoost {
+        NumberAnimation { duration: 560; easing.type: Easing.InOutCubic }
+    }
+    Behavior on visualAdaptiveAnchorFillBoost {
+        NumberAnimation { duration: 560; easing.type: Easing.InOutCubic }
+    }
+    Behavior on visualAdaptiveAnchorBackdropOpacity {
+        NumberAnimation { duration: 560; easing.type: Easing.InOutCubic }
+    }
+    Behavior on visualAdaptiveTone {
+        NumberAnimation { duration: 560; easing.type: Easing.InOutCubic }
+    }
+    Behavior on visualAdaptiveLabelContrast {
+        NumberAnimation { duration: 560; easing.type: Easing.InOutCubic }
+    }
+
     Canvas {
         id: coreCanvas
         anchors.fill: parent
@@ -103,6 +161,7 @@ Item {
             var pulse = 1 + Math.sin(root.phase) * root.displayAmplitude
             var subtle = 1 + Math.sin(root.variance) * 0.03
             var accent = root.displayAccentColor
+            var deckMode = root.shellMode === "deck"
 
             function circleStroke(radius, lineWidth, alpha) {
                 ctx.beginPath()
@@ -126,6 +185,17 @@ Item {
                 gradient.addColorStop(0, root.rgba(accent, alpha))
                 gradient.addColorStop(0.58, root.rgba(accent, alpha * 0.22))
                 gradient.addColorStop(1, root.rgba(accent, 0))
+                ctx.beginPath()
+                ctx.fillStyle = gradient
+                ctx.arc(cx, cy, radius, 0, Math.PI * 2)
+                ctx.fill()
+            }
+
+            function darkBackdrop(radius, alpha) {
+                var gradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius)
+                gradient.addColorStop(0, "rgba(6, 10, 14," + alpha + ")")
+                gradient.addColorStop(0.58, "rgba(8, 12, 16," + (alpha * 0.45) + ")")
+                gradient.addColorStop(1, "rgba(8, 12, 16,0)")
                 ctx.beginPath()
                 ctx.fillStyle = gradient
                 ctx.arc(cx, cy, radius, 0, Math.PI * 2)
@@ -202,20 +272,33 @@ Item {
                 ctx.fill()
             }
 
-            glowFill(outerR * 1.06, root.shellMode === "ghost" ? 0.16 : 0.12)
-            glowFill(outerR * 0.68, 0.08 + root.displayAmplitude * 0.08)
+            if (deckMode) {
+                var deckGradient = ctx.createRadialGradient(cx, cy, outerR * 0.18, cx, cy, outerR * 1.08)
+                deckGradient.addColorStop(0, "rgba(8, 13, 18, 0.82)")
+                deckGradient.addColorStop(0.66, "rgba(12, 18, 24, 0.34)")
+                deckGradient.addColorStop(1, "rgba(12, 18, 24, 0.0)")
+                ctx.beginPath()
+                ctx.fillStyle = deckGradient
+                ctx.arc(cx, cy, outerR * 1.08, 0, Math.PI * 2)
+                ctx.fill()
+            }
 
-            circleStroke(outerR * 0.98, 1.0, 0.1)
-            circleStroke(outerR * 0.82 * subtle, 1.2, 0.2)
-            circleStroke(irisR * (0.98 + Math.sin(root.shimmer) * 0.01), 1.1, 0.18)
+            darkBackdrop(outerR * 1.02, root.visualAdaptiveAnchorBackdropOpacity)
 
-            drawBearingArc(outerR * 0.9, root.orbit + 0.12, Math.PI * 0.42, 2.0, 0.28)
-            drawBearingArc(outerR * 0.74, root.orbit + Math.PI * 0.86, Math.PI * 0.24, 1.5, 0.18)
-            drawBearingArc(outerR * 0.6, root.orbit + Math.PI * 1.42, Math.PI * 0.2, 1.3, 0.14)
-            drawBearingArc(outerR * 0.5, -Math.PI * 0.58, Math.PI * 0.16, 1.0, 0.12)
+            glowFill(outerR * 1.08, (root.shellMode === "ghost" ? 0.16 : 0.15) + root.visualAdaptiveGlowBoost * 0.28 + root.visualAdaptiveAnchorGlowBoost * 0.56)
+            glowFill(outerR * 0.74, 0.08 + root.displayAmplitude * 0.08 + root.visualAdaptiveGlowBoost * 0.14 + root.visualAdaptiveAnchorGlowBoost * 0.34 + root.visualAdaptiveAnchorFillBoost * 0.1)
 
-            drawTicks(outerR * 1.02, 0.22)
-            drawCompassArms(outerR, 0.24)
+            circleStroke(outerR * 0.98, 1.0 + root.visualAdaptiveAnchorStrokeBoost * 1.45, 0.12 + root.visualAdaptiveLabelContrast * 0.18 + root.visualAdaptiveAnchorStrokeBoost * 0.34)
+            circleStroke(outerR * 0.82 * subtle, 1.2 + root.visualAdaptiveAnchorStrokeBoost * 1.15, 0.22 + root.visualAdaptiveLabelContrast * 0.14 + root.visualAdaptiveAnchorStrokeBoost * 0.27)
+            circleStroke(irisR * (0.98 + Math.sin(root.shimmer) * 0.01), 1.1 + root.visualAdaptiveAnchorStrokeBoost * 0.92, 0.2 + root.visualAdaptiveLabelContrast * 0.12 + root.visualAdaptiveAnchorStrokeBoost * 0.24)
+
+            drawBearingArc(outerR * 0.9, root.orbit + 0.12, Math.PI * 0.42, 2.0 + root.visualAdaptiveAnchorStrokeBoost * 1.55, 0.32 + root.visualAdaptiveAnchorStrokeBoost * 0.28)
+            drawBearingArc(outerR * 0.74, root.orbit + Math.PI * 0.86, Math.PI * 0.24, 1.5 + root.visualAdaptiveAnchorStrokeBoost * 0.92, 0.18 + root.visualAdaptiveAnchorStrokeBoost * 0.16)
+            drawBearingArc(outerR * 0.6, root.orbit + Math.PI * 1.42, Math.PI * 0.2, 1.3 + root.visualAdaptiveAnchorStrokeBoost * 0.68, 0.14 + root.visualAdaptiveAnchorStrokeBoost * 0.13)
+            drawBearingArc(outerR * 0.5, -Math.PI * 0.58, Math.PI * 0.16, 1.0 + root.visualAdaptiveAnchorStrokeBoost * 0.48, 0.12 + root.visualAdaptiveAnchorStrokeBoost * 0.1)
+
+            drawTicks(outerR * 1.02, 0.22 + root.visualAdaptiveAnchorStrokeBoost * 0.16)
+            drawCompassArms(outerR, 0.24 + root.visualAdaptiveAnchorStrokeBoost * 0.18)
 
             if (root.assistantState === "listening" || root.assistantState === "speaking") {
                 circleStroke(outerR * (0.52 + pulse * 0.16), 1.4, 0.18)
@@ -244,8 +327,8 @@ Item {
                 ringSegment(outerR * 0.88, 2.28, 3.02, 2.2, 0.34)
             }
 
-            drawHeart(heartR * pulse, 0.44 + root.displayAmplitude * 0.9, root.displayAmplitude * 0.46)
-            circleStroke(heartR * 1.28, 1.2, 0.18)
+            drawHeart(heartR * pulse, 0.44 + root.displayAmplitude * 0.9 + root.visualAdaptiveAnchorFillBoost * 0.56, root.displayAmplitude * 0.46)
+            circleStroke(heartR * 1.28, 1.2 + root.visualAdaptiveAnchorStrokeBoost * 0.6, 0.18 + root.visualAdaptiveAnchorStrokeBoost * 0.18 + root.visualAdaptiveAnchorFillBoost * 0.08)
         }
     }
 
@@ -261,6 +344,13 @@ Item {
     onShellModeChanged: coreCanvas.requestPaint()
     onDisplayAccentColorChanged: coreCanvas.requestPaint()
     onDisplayAmplitudeChanged: coreCanvas.requestPaint()
+    onVisualAdaptiveGlowBoostChanged: coreCanvas.requestPaint()
+    onVisualAdaptiveAnchorGlowBoostChanged: coreCanvas.requestPaint()
+    onVisualAdaptiveAnchorStrokeBoostChanged: coreCanvas.requestPaint()
+    onVisualAdaptiveAnchorFillBoostChanged: coreCanvas.requestPaint()
+    onVisualAdaptiveAnchorBackdropOpacityChanged: coreCanvas.requestPaint()
+    onVisualAdaptiveToneChanged: coreCanvas.requestPaint()
+    onVisualAdaptiveLabelContrastChanged: coreCanvas.requestPaint()
 
     Component.onCompleted: {
         root.displayAccentColor = root.accentForState(root.assistantState)
@@ -278,10 +368,12 @@ Item {
              : root.assistantState === "acting" ? "Acting"
              : root.assistantState === "speaking" ? "Speaking"
              : "Warning"
-        color: "#c7dbe5"
+        color: root.contrastColor("#c7dbe5", root.visualAdaptiveLabelContrast * 0.3)
         font.family: "Bahnschrift SemiCondensed"
         font.pixelSize: root.shellMode === "ghost" ? 13 : 12
         font.letterSpacing: 2.1
         opacity: 0.58
+        style: Text.Raised
+        styleColor: Qt.rgba(0.01, 0.04, 0.07, 0.16 + root.visualAdaptiveLabelContrast * 0.22)
     }
 }

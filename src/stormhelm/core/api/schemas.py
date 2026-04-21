@@ -11,11 +11,14 @@ class ChatRequest(BaseModel):
     surface_mode: str = "ghost"
     active_module: str = "chartroom"
     workspace_context: dict[str, Any] = Field(default_factory=dict)
+    input_context: dict[str, Any] = Field(default_factory=dict)
 
 
 class NoteCreateRequest(BaseModel):
     title: str = Field(..., min_length=1)
     content: str = Field(..., min_length=1)
+    session_id: str = "default"
+    workspace_id: str = ""
 
 
 class EventsResponse(BaseModel):

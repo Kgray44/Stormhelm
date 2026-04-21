@@ -15,6 +15,8 @@ class MainController(QtCore.QObject):
         self.bridge = bridge
         self.client = client
         self._core_online = False
+        self._snapshot_in_flight = False
+        self._snapshot_refresh_queued = False
 
         self.refresh_timer = QtCore.QTimer(self)
         self.refresh_timer.setInterval(self.config.ui.poll_interval_ms)
@@ -34,7 +36,8 @@ class MainController(QtCore.QObject):
         self.bridge.set_local_identity(self.config.version_label)
         try:
             started = ensure_core_running(self.config)
-            self.bridge.set_status_line("Stormhelm core launched." if started else "Connected to a running Stormhelm core.")
+            if not started:
+                self.bridge.set_status_line("Standing watch.")
         except Exception as error:
             self.bridge.set_connection_error(str(error))
             self.bridge.set_status_line(f"Core startup issue: {error}")
@@ -43,7 +46,7 @@ class MainController(QtCore.QObject):
         self.refresh_timer.start()
 
     def poll(self) -> None:
-        self.client.fetch_snapshot()
+        self._request_snapshot()
 
     def _handle_local_mode_command(self, message: str) -> bool:
         normalized = (message or "").strip().lower()
@@ -68,31 +71,37 @@ class MainController(QtCore.QObject):
             surface_mode=self.bridge.mode_value,
             active_module=self.bridge.active_module_key,
             workspace_context=self.bridge.workspace_context_payload(),
+            input_context=self.bridge.input_context_payload(),
         )
 
     def _save_note(self, title: str, content: str) -> None:
-        self.client.save_note(title, content)
+        workspace = self.bridge.workspace_context_payload().get("workspace", {})
+        workspace_id = str(workspace.get("workspaceId", "")) if isinstance(workspace, dict) else ""
+        self.client.save_note(title, content, session_id="default", workspace_id=workspace_id)
 
     def _handle_error(self, purpose: str, error: str) -> None:
+        if str(purpose).startswith("/snapshot"):
+            self._complete_snapshot_request()
         self._core_online = False
         self.bridge.set_connection_error(f"{purpose}: {error}")
 
     def _handle_health(self, payload: dict) -> None:
         if payload.get("status") == "ok" and not self._core_online:
             self._core_online = True
-            self.bridge.set_status_line("Stormhelm core online.")
+            self.bridge.set_status_line("Standing watch.")
         self.bridge.apply_health(payload)
 
     def _handle_chat(self, payload: dict) -> None:
         self._apply_actions(payload.get("actions", []))
         self.bridge.apply_chat_result(payload)
-        self.client.fetch_snapshot()
+        self._request_snapshot(force=True)
 
     def _handle_note_saved(self, payload: dict) -> None:
         self.bridge.note_saved(payload)
-        self.client.fetch_snapshot()
+        self._request_snapshot(force=True)
 
     def _handle_snapshot(self, payload: dict) -> None:
+        self._complete_snapshot_request()
         self.bridge.apply_snapshot(payload)
 
     def _apply_actions(self, actions: object) -> None:
@@ -111,3 +120,18 @@ class MainController(QtCore.QObject):
         if not target:
             return
         QtGui.QDesktopServices.openUrl(QtCore.QUrl(target))
+
+    def _request_snapshot(self, *, force: bool = False) -> None:
+        if self._snapshot_in_flight:
+            if force:
+                self._snapshot_refresh_queued = True
+            return
+        self._snapshot_in_flight = True
+        self.client.fetch_snapshot()
+
+    def _complete_snapshot_request(self) -> None:
+        self._snapshot_in_flight = False
+        if not self._snapshot_refresh_queued:
+            return
+        self._snapshot_refresh_queued = False
+        self._request_snapshot()

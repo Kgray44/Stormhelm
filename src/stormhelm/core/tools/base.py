@@ -5,6 +5,7 @@ from abc import ABC
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from typing import Any
+from typing import Callable
 
 from stormhelm.config.models import AppConfig
 from stormhelm.core.events import EventBuffer
@@ -27,7 +28,12 @@ class ToolContext:
     safety_policy: SafetyPolicy
     system_probe: SystemProbe | None = None
     workspace_service: WorkspaceService | None = None
+    progress_callback: Callable[[dict[str, Any]], None] | None = None
     cancellation_requested: asyncio.Event = field(default_factory=asyncio.Event)
+
+    def report_progress(self, payload: dict[str, Any]) -> None:
+        if callable(self.progress_callback):
+            self.progress_callback(dict(payload))
 
 
 class BaseTool(ABC):

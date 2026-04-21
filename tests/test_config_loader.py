@@ -20,6 +20,9 @@ def test_load_config_applies_environment_overrides(temp_project_root: Path) -> N
             "STORMHELM_OPENAI_MODEL": "gpt-5.4-mini",
             "STORMHELM_OPENAI_PLANNER_MODEL": "gpt-5.4-mini",
             "STORMHELM_OPENAI_REASONING_MODEL": "gpt-5.4",
+            "STORMHELM_HOME_LABEL": "Brooklyn Home",
+            "STORMHELM_HOME_LATITUDE": "40.6782",
+            "STORMHELM_HOME_LONGITUDE": "-73.9442",
             "OPENAI_API_KEY": "test-key",
         },
     )
@@ -36,6 +39,45 @@ def test_load_config_applies_environment_overrides(temp_project_root: Path) -> N
     assert config.openai.planner_model == "gpt-5.4-mini"
     assert config.openai.reasoning_model == "gpt-5.4"
     assert config.openai.api_key == "test-key"
+    assert config.location.home_label == "Brooklyn Home"
+    assert config.location.home_latitude == pytest.approx(40.6782)
+    assert config.location.home_longitude == pytest.approx(-73.9442)
+    assert config.hardware_telemetry.enabled is True
+    assert config.hardware_telemetry.helper_timeout_seconds == pytest.approx(2.5)
+    assert config.hardware_telemetry.active_cache_ttl_seconds == pytest.approx(8)
+
+
+def test_load_config_defaults_to_nano_planner_and_full_reasoner(temp_project_root: Path) -> None:
+    config = load_config(project_root=temp_project_root, env={})
+
+    assert config.openai.planner_model == "gpt-5.4-nano"
+    assert config.openai.reasoning_model == "gpt-5.4"
+    assert config.hardware_telemetry.enabled is True
+    assert config.hardware_telemetry.hwinfo_enabled is True
+    assert config.hardware_telemetry.hwinfo_executable_path is None
+
+
+def test_load_config_applies_hardware_telemetry_environment_overrides(temp_project_root: Path) -> None:
+    config = load_config(
+        project_root=temp_project_root,
+        env={
+            "STORMHELM_HARDWARE_TELEMETRY_ENABLED": "false",
+            "STORMHELM_HARDWARE_TELEMETRY_TIMEOUT_SECONDS": "4.5",
+            "STORMHELM_HARDWARE_TELEMETRY_IDLE_CACHE_TTL_SECONDS": "40",
+            "STORMHELM_HARDWARE_TELEMETRY_ACTIVE_CACHE_TTL_SECONDS": "10",
+            "STORMHELM_HARDWARE_TELEMETRY_BURST_CACHE_TTL_SECONDS": "1.5",
+            "STORMHELM_HARDWARE_TELEMETRY_HWINFO_ENABLED": "false",
+            "STORMHELM_HARDWARE_TELEMETRY_HWINFO_PATH": "C:/Tools/HWiNFO64.EXE",
+        },
+    )
+
+    assert config.hardware_telemetry.enabled is False
+    assert config.hardware_telemetry.helper_timeout_seconds == pytest.approx(4.5)
+    assert config.hardware_telemetry.idle_cache_ttl_seconds == pytest.approx(40)
+    assert config.hardware_telemetry.active_cache_ttl_seconds == pytest.approx(10)
+    assert config.hardware_telemetry.burst_cache_ttl_seconds == pytest.approx(1.5)
+    assert config.hardware_telemetry.hwinfo_enabled is False
+    assert config.hardware_telemetry.hwinfo_executable_path == "C:/Tools/HWiNFO64.EXE"
 
 
 def test_load_config_uses_install_root_when_packaged(monkeypatch: pytest.MonkeyPatch, workspace_temp_dir: Path) -> None:

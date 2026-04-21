@@ -54,6 +54,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             surface_mode=payload.surface_mode,
             active_module=payload.active_module,
             workspace_context=payload.workspace_context,
+            input_context=payload.input_context,
         )
 
     @app.get("/chat/history")
@@ -89,6 +90,12 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     async def create_note(payload: NoteCreateRequest, request: Request) -> dict[str, object]:
         current: CoreContainer = request.app.state.container
         note = current.notes.create_note(payload.title, payload.content)
+        if payload.workspace_id:
+            current.assistant.workspace_service.link_note_to_active_workspace(
+                session_id=payload.session_id,
+                note_id=note.note_id,
+                workspace_id=payload.workspace_id,
+            )
         current.events.publish(level="INFO", source="api", message=f"Saved note '{note.title}'.")
         return note.to_dict()
 
@@ -125,6 +132,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 for message in current.conversations.list_messages(session_id=session_id, limit=history_limit)
             ],
             "tools": current.tool_registry.metadata(),
+            "active_workspace": current.assistant.workspace_service.active_workspace_summary(session_id),
         }
 
     return app

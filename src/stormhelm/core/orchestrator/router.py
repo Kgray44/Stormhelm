@@ -87,12 +87,51 @@ class IntentRouter:
         if self._looks_like_path(text):
             return self._route_open_target(text, prefer_deck=normalized_surface == "deck")
 
+        if lower.startswith("/workspace "):
+            payload = text[11:].strip()
+            payload_lower = payload.lower()
+            if payload_lower == "save" or payload_lower == "snapshot":
+                return RoutedCommand(tool_calls=[ToolRequest("workspace_save", {"session_id": "default"})])
+            if payload_lower == "clear":
+                return RoutedCommand(tool_calls=[ToolRequest("workspace_clear", {"session_id": "default"})])
+            if payload_lower == "archive":
+                return RoutedCommand(tool_calls=[ToolRequest("workspace_archive", {"session_id": "default"})])
+            if payload_lower == "recent":
+                return RoutedCommand(
+                    tool_calls=[ToolRequest("workspace_list", {"session_id": "default", "query": "", "archived_only": False})]
+                )
+            if payload_lower == "archived":
+                return RoutedCommand(
+                    tool_calls=[
+                        ToolRequest(
+                            "workspace_list",
+                            {"session_id": "default", "query": "", "archived_only": True, "include_archived": True},
+                        )
+                    ]
+                )
+            if payload_lower == "leftoff":
+                return RoutedCommand(tool_calls=[ToolRequest("workspace_where_left_off", {"session_id": "default"})])
+            if payload_lower == "next":
+                return RoutedCommand(tool_calls=[ToolRequest("workspace_next_steps", {"session_id": "default"})])
+            if payload_lower.startswith("restore "):
+                return RoutedCommand(
+                    tool_calls=[ToolRequest("workspace_restore", {"query": payload[8:].strip(), "session_id": "default"})]
+                )
+            if payload_lower.startswith("rename "):
+                return RoutedCommand(
+                    tool_calls=[ToolRequest("workspace_rename", {"new_name": payload[7:].strip(), "session_id": "default"})]
+                )
+            if payload_lower.startswith("tag "):
+                tags = [part.strip() for part in payload[4:].replace(",", " ").split() if part.strip()]
+                return RoutedCommand(tool_calls=[ToolRequest("workspace_tag", {"tags": tags, "session_id": "default"})])
+
         if text.startswith("/"):
             return RoutedCommand(
                 assistant_message=(
                     "Available direct commands: /time, /system, /echo <text>, /read <path>, "
                     "/battery, /storage, /network, /apps, /recent, /note <title> | <content>, "
-                    "/open [deck|external] <url-or-path>, or /shell <command>."
+                    "/open [deck|external] <url-or-path>, /workspace [save|clear|archive|recent|archived|leftoff|next|restore <query>|rename <name>|tag <tags>], "
+                    "or /shell <command>."
                 )
             )
 

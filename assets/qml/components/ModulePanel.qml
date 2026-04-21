@@ -6,6 +6,7 @@ Item {
     id: root
 
     signal saveNote(string title, string content)
+    property bool panelMode: false
 
     property var moduleData: ({
         key: "placeholder",
@@ -14,6 +15,8 @@ Item {
         eyebrow: "",
         headline: "",
         body: "",
+        stats: [],
+        sections: [],
         entries: []
     })
     readonly property var safeData: root.moduleData || ({
@@ -23,24 +26,26 @@ Item {
         eyebrow: "",
         headline: "",
         body: "",
+        stats: [],
+        sections: [],
         entries: []
     })
 
     implicitHeight: {
         switch (safeData.kind) {
         case "notes":
-            return 320
+            return root.panelMode ? 260 : 320
         case "system":
-            return 248
+            return root.panelMode ? 220 : 248
         default:
-            return 228
+            return root.panelMode ? 208 : 228
         }
     }
 
     FieldSurface {
         anchors.fill: parent
         radius: 30
-        padding: 18
+        padding: root.panelMode ? 14 : 18
         tintColor: "#15212b"
         edgeColor: "#628da2"
         glowColor: "#80c6dd"
@@ -50,7 +55,7 @@ Item {
 
         ColumnLayout {
             anchors.fill: parent
-            spacing: 12
+            spacing: root.panelMode ? 10 : 12
 
             Text {
                 text: root.safeData.eyebrow
@@ -64,7 +69,7 @@ Item {
                 text: root.safeData.title
                 color: "#eef7fb"
                 font.family: "Bahnschrift SemiCondensed"
-                font.pixelSize: 22
+                font.pixelSize: root.panelMode ? 18 : 22
             }
 
             Text {
@@ -72,7 +77,7 @@ Item {
                 color: "#d2e3eb"
                 wrapMode: Text.Wrap
                 font.family: "Segoe UI Semibold"
-                font.pixelSize: 14
+                font.pixelSize: root.panelMode ? 13 : 14
             }
 
             Text {
@@ -80,9 +85,123 @@ Item {
                 color: "#94afbc"
                 wrapMode: Text.Wrap
                 font.family: "Segoe UI"
-                font.pixelSize: 12
+                font.pixelSize: root.panelMode ? 11 : 12
                 lineHeight: 1.24
                 Layout.fillWidth: true
+                visible: !root.panelMode || text.length < 220
+            }
+
+            Flow {
+                Layout.fillWidth: true
+                spacing: 8
+                visible: (root.safeData.stats || []).length > 0
+
+                Repeater {
+                    model: root.safeData.stats || []
+
+                    delegate: Rectangle {
+                        required property var modelData
+                        radius: 13
+                        color: "#10202a"
+                        border.width: 1
+                        border.color: "#33586b"
+                        height: 28
+                        width: statRow.implicitWidth + 18
+
+                        Row {
+                            id: statRow
+                            anchors.centerIn: parent
+                            spacing: 6
+
+                            Text {
+                                text: modelData.label
+                                color: "#84a0ae"
+                                font.family: "Bahnschrift SemiCondensed"
+                                font.pixelSize: 10
+                                font.letterSpacing: 1.1
+                            }
+
+                            Text {
+                                text: modelData.value
+                                color: "#edf7fb"
+                                font.family: "Segoe UI Semibold"
+                                font.pixelSize: 10
+                            }
+                        }
+                    }
+                }
+            }
+
+            ListView {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                spacing: 14
+                visible: (root.safeData.sections || []).length > 0
+                model: root.safeData.sections || []
+
+                delegate: Column {
+                    required property var modelData
+                    width: ListView.view.width
+                    spacing: 6
+
+                    Text {
+                        text: modelData.title
+                        width: parent.width
+                        color: "#d7e9f1"
+                        font.family: "Bahnschrift SemiCondensed"
+                        font.pixelSize: 13
+                        font.letterSpacing: 1.1
+                    }
+
+                    Text {
+                        text: modelData.summary
+                        width: parent.width
+                        color: "#7f9aa8"
+                        font.family: "Segoe UI"
+                        font.pixelSize: 11
+                        wrapMode: Text.Wrap
+                    }
+
+                    Repeater {
+                        model: modelData.entries || []
+
+                        delegate: Column {
+                            required property var modelData
+                            width: parent.width
+                            spacing: 3
+
+                            Text {
+                                text: modelData.primary
+                                width: parent.width
+                                color: "#eef7fb"
+                                font.family: "Segoe UI Semibold"
+                                font.pixelSize: 12
+                                wrapMode: Text.Wrap
+                            }
+
+                            Text {
+                                text: modelData.secondary
+                                width: parent.width
+                                color: "#8ca7b5"
+                                font.family: "Bahnschrift SemiCondensed"
+                                font.pixelSize: 10
+                                font.letterSpacing: 1.1
+                                wrapMode: Text.Wrap
+                            }
+
+                            Text {
+                                text: modelData.detail
+                                visible: text.length > 0
+                                width: parent.width
+                                color: "#bfd2dc"
+                                font.family: "Segoe UI"
+                                font.pixelSize: 11
+                                wrapMode: Text.Wrap
+                            }
+                        }
+                    }
+                }
             }
 
             ListView {
@@ -90,6 +209,7 @@ Item {
                 Layout.fillHeight: true
                 clip: true
                 spacing: 10
+                visible: (root.safeData.sections || []).length === 0
                 model: root.safeData.entries
 
                 delegate: Item {

@@ -27,6 +27,7 @@ packaging = [
 
 [project.scripts]
 stormhelm-core = "stormhelm.entrypoints.core:main"
+stormhelm-telemetry-helper = "stormhelm.entrypoints.telemetry_helper:main"
 stormhelm-ui = "stormhelm.entrypoints.ui:main"
 
 [tool.setuptools]

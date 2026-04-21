@@ -9,14 +9,16 @@ Item {
 
     property var messages: []
     property string statusLine: ""
+    property bool panelMode: false
 
     ColumnLayout {
         anchors.fill: parent
-        spacing: 12
+        spacing: root.panelMode ? 10 : 12
 
         ColumnLayout {
             Layout.fillWidth: true
             spacing: 3
+            visible: !root.panelMode
 
             Text {
                 text: "Command Spine"
@@ -34,6 +36,16 @@ Item {
                 wrapMode: Text.Wrap
                 Layout.fillWidth: true
             }
+        }
+
+        Text {
+            visible: root.panelMode
+            text: root.statusLine
+            color: "#89a5b2"
+            font.family: "Segoe UI"
+            font.pixelSize: 11
+            wrapMode: Text.Wrap
+            Layout.fillWidth: true
         }
 
         TranscriptTimeline {

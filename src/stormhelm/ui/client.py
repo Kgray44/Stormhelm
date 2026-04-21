@@ -88,6 +88,7 @@ class CoreApiClient(QtCore.QObject):
         surface_mode: str = "ghost",
         active_module: str = "chartroom",
         workspace_context: dict[str, object] | None = None,
+        input_context: dict[str, object] | None = None,
     ) -> None:
         self._send_json(
             "POST",
@@ -98,12 +99,23 @@ class CoreApiClient(QtCore.QObject):
                 "surface_mode": surface_mode,
                 "active_module": active_module,
                 "workspace_context": workspace_context or {},
+                "input_context": input_context or {},
             },
             self.chat_received.emit,
         )
 
-    def save_note(self, title: str, content: str) -> None:
-        self._send_json("POST", "/notes", {"title": title, "content": content}, self.note_saved.emit)
+    def save_note(self, title: str, content: str, *, session_id: str = "default", workspace_id: str = "") -> None:
+        self._send_json(
+            "POST",
+            "/notes",
+            {
+                "title": title,
+                "content": content,
+                "session_id": session_id,
+                "workspace_id": workspace_id,
+            },
+            self.note_saved.emit,
+        )
 
     def _send_json(
         self,

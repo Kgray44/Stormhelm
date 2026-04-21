@@ -30,12 +30,38 @@ poll_interval_ms = 1500
 hide_to_tray_on_close = true
 ghost_shortcut = "Ctrl+Space"
 
+[location]
+allow_approximate_lookup = true
+lookup_timeout_seconds = 5
+home_label = ""
+home_city = ""
+home_region = ""
+home_country = ""
+home_latitude = ""
+home_longitude = ""
+home_timezone = ""
+
+[weather]
+enabled = true
+units = "imperial"
+provider_base_url = "https://api.open-meteo.com/v1"
+timeout_seconds = 6
+
+[hardware_telemetry]
+enabled = true
+helper_timeout_seconds = 2.5
+idle_cache_ttl_seconds = 30
+active_cache_ttl_seconds = 8
+burst_cache_ttl_seconds = 2
+hwinfo_enabled = true
+hwinfo_executable_path = ""
+
 [openai]
 enabled = false
 base_url = "https://api.openai.com/v1"
-model = "gpt-5.4-mini"
-planner_model = "gpt-5.4-mini"
-reasoning_model = "gpt-5.4-mini"
+model = "gpt-5.4-nano"
+planner_model = "gpt-5.4-nano"
+reasoning_model = "gpt-5.4"
 timeout_seconds = 60
 max_tool_rounds = 4
 max_output_tokens = 1200
@@ -77,10 +103,25 @@ deck_open_file = true
 external_open_file = true
 machine_status = true
 power_status = true
+power_projection = true
 resource_status = true
 storage_status = true
 network_status = true
+network_diagnosis = true
 active_apps = true
+app_control = true
 recent_files = true
+location_status = true
+saved_locations = true
+save_location = true
+weather_current = true
 workspace_restore = true
 workspace_assemble = true
+workspace_save = true
+workspace_clear = true
+workspace_archive = true
+workspace_rename = true
+workspace_tag = true
+workspace_list = true
+workspace_where_left_off = true
+workspace_next_steps = true

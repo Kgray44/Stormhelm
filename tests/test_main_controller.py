@@ -17,7 +17,7 @@ class DummyClient(QtCore.QObject):
         super().__init__()
         self.sent_messages: list[str] = []
         self.sent_payloads: list[dict[str, str]] = []
-        self.saved_notes: list[tuple[str, str]] = []
+        self.saved_notes: list[dict[str, str]] = []
         self.snapshot_calls = 0
 
     def fetch_snapshot(self) -> None:
@@ -31,6 +31,7 @@ class DummyClient(QtCore.QObject):
         surface_mode: str = "ghost",
         active_module: str = "chartroom",
         workspace_context: dict[str, object] | None = None,
+        input_context: dict[str, object] | None = None,
     ) -> None:
         self.sent_messages.append(message)
         self.sent_payloads.append(
@@ -40,11 +41,19 @@ class DummyClient(QtCore.QObject):
                 "surface_mode": surface_mode,
                 "active_module": active_module,
                 "workspace_context": workspace_context or {},
+                "input_context": input_context or {},
             }
         )
 
-    def save_note(self, title: str, content: str) -> None:
-        self.saved_notes.append((title, content))
+    def save_note(self, title: str, content: str, *, session_id: str = "default", workspace_id: str = "") -> None:
+        self.saved_notes.append(
+            {
+                "title": title,
+                "content": content,
+                "session_id": session_id,
+                "workspace_id": workspace_id,
+            }
+        )
 
 
 def test_main_controller_intercepts_local_deck_command(temp_config) -> None:
@@ -82,3 +91,116 @@ def test_main_controller_still_sends_normal_messages(temp_config) -> None:
     assert client.sent_messages == ["plot a safe course"]
     assert client.sent_payloads[0]["surface_mode"] == "ghost"
     assert client.sent_payloads[0]["active_module"] == "chartroom"
+
+
+def test_main_controller_sends_workspace_and_input_context(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+    client = DummyClient()
+    controller = MainController(config=temp_config, bridge=bridge, client=client)
+
+    bridge.setSelectionContext(
+        {
+            "kind": "text",
+            "value": "selected packaging notes",
+            "preview": "selected packaging notes",
+        }
+    )
+    bridge.setClipboardContext(
+        {
+            "kind": "url",
+            "value": "https://example.com/packaging",
+            "preview": "https://example.com/packaging",
+        }
+    )
+
+    controller._send_message("use this in the workspace")
+
+    assert client.sent_payloads[0]["workspace_context"]["module"] == "chartroom"
+    assert client.sent_payloads[0]["input_context"]["selection"]["kind"] == "text"
+    assert client.sent_payloads[0]["input_context"]["clipboard"]["kind"] == "url"
+
+
+def test_main_controller_does_not_auto_restore_workspace_from_snapshot_on_startup(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+    client = DummyClient()
+    controller = MainController(config=temp_config, bridge=bridge, client=client)
+
+    controller._handle_snapshot(
+        {
+            "active_workspace": {
+                "action": {
+                    "type": "workspace_restore",
+                    "module": "files",
+                    "section": "opened-items",
+                    "workspace": {
+                        "workspaceId": "ws-packaging",
+                        "name": "Packaging Workspace",
+                        "topic": "packaging",
+                        "summary": "Continue the portable packaging work.",
+                    },
+                    "items": [
+                        {
+                            "itemId": "item-readme",
+                            "kind": "markdown",
+                            "viewer": "markdown",
+                            "title": "README.md",
+                            "path": "C:/Stormhelm/README.md",
+                        }
+                    ],
+                    "active_item_id": "item-readme",
+                }
+            }
+        }
+    )
+
+    assert bridge.mode_value == "ghost"
+    assert bridge.active_module_key == "chartroom"
+    assert bridge.workspaceCanvas["title"] == "Chartroom"
+    assert bridge.activeOpenedItem == {}
+
+
+def test_main_controller_poll_is_single_flight_until_snapshot_returns(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+    client = DummyClient()
+    controller = MainController(config=temp_config, bridge=bridge, client=client)
+
+    controller.poll()
+    controller.poll()
+
+    assert client.snapshot_calls == 1
+
+    controller._handle_snapshot({})
+    controller.poll()
+
+    assert client.snapshot_calls == 2
+
+
+def test_main_controller_chat_queues_one_refresh_behind_inflight_snapshot(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+    client = DummyClient()
+    controller = MainController(config=temp_config, bridge=bridge, client=client)
+
+    controller.poll()
+    assert client.snapshot_calls == 1
+
+    controller._handle_chat(
+        {
+            "assistant_message": {
+                "message_id": "assistant-1",
+                "role": "assistant",
+                "content": "Ready.",
+                "created_at": "2026-04-20T18:10:00Z",
+                "metadata": {
+                    "bearing_title": "Ready",
+                    "micro_response": "Ready.",
+                    "full_response": "Ready.",
+                },
+            }
+        }
+    )
+
+    assert client.snapshot_calls == 1
+
+    controller._handle_snapshot({})
+
+    assert client.snapshot_calls == 2

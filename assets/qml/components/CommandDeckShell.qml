@@ -8,6 +8,16 @@ Item {
     signal activateWorkspaceItem(string key)
     signal activateOpenedItem(string itemId)
     signal closeOpenedItem(string itemId)
+    signal updateDeckPanelGrid(string panelId, int gridX, int gridY, int colSpan, int rowSpan)
+    signal pinDeckPanel(string panelId, bool pinned)
+    signal collapseDeckPanel(string panelId, bool collapsed)
+    signal hideDeckPanel(string panelId, bool hidden)
+    signal restoreDeckPanel(string panelId)
+    signal saveDeckLayout()
+    signal resetDeckLayout()
+    signal autoArrangeDeckLayout()
+    signal restoreSavedDeckLayout()
+    signal setDeckLayoutPreset(string preset)
 
     property real coreBottom: 0
     property real deckProgress: 1
@@ -18,23 +28,31 @@ Item {
     property var workspaceCanvas: ({})
     property var railItems: []
     property var statusItems: []
+    property var deckPanels: []
+    property var hiddenPanels: []
+    property var panelCatalog: []
+    property var deckLayoutPresets: []
+    property string activeDeckLayoutPreset: ""
     property string statusLine: ""
     property string modeTitle: ""
     property string modeSubtitle: ""
     property string assistantState: "idle"
+    property bool panelLauncherExpanded: true
     readonly property real sideInset: 38
     readonly property real workspaceRailWidth: 156
-    readonly property real contextWidth: Math.min(parent.width * 0.23, 352)
     readonly property real bottomRailHeight: 74
-    readonly property real deckTop: root.coreBottom + 34
-    readonly property real rightRegionX: parent.width - root.contextWidth - root.sideInset
-    readonly property real mainFieldX: root.sideInset + root.workspaceRailWidth + 26
-    readonly property real mainFieldWidth: Math.max(620, root.rightRegionX - root.mainFieldX - 22)
-    readonly property real collaborationWidth: Math.max(420, root.mainFieldWidth * 0.66)
-    readonly property real spineWidth: Math.min(334, Math.max(278, root.mainFieldWidth * 0.29))
-    readonly property rect collaborationRect: Qt.rect(collaborationField.x, collaborationField.y, collaborationField.width, collaborationField.height)
-    readonly property rect contextRect: Qt.rect(contextRegion.x, contextRegion.y, contextRegion.width, contextRegion.height)
+    readonly property real deckTop: 60
+    readonly property real mainFieldX: root.sideInset + root.workspaceRailWidth + 24
+    readonly property real mainFieldWidth: parent.width - root.mainFieldX - root.sideInset
+    readonly property rect collaborationRect: Qt.rect(panelWorkspace.x + deckField.x, panelWorkspace.y + deckField.y, panelWorkspace.width, panelWorkspace.height)
+    readonly property rect contextRect: Qt.rect(utilityColumn.x + deckField.x, utilityColumn.y + deckField.y, utilityColumn.width, utilityColumn.height)
     readonly property rect railRect: Qt.rect(commandRail.x, commandRail.y, commandRail.width, commandRail.height)
+    readonly property var layoutTools: [
+        { "key": "tidy", "label": "Tidy" },
+        { "key": "save", "label": "Save" },
+        { "key": "restore", "label": "Restore" },
+        { "key": "reset", "label": "Reset" }
+    ]
 
     TopStatusStrip {
         width: Math.min(parent.width - 96, 1020)
@@ -48,123 +66,334 @@ Item {
     WorkspaceRail {
         id: workspaceRail
         x: (parent.width / 2 - width * 0.5) * (1 - root.deckProgress) + root.sideInset * root.deckProgress
-        y: root.deckTop + 16
+        y: root.deckTop + 8
         width: root.workspaceRailWidth
-        height: commandRail.y - y - 22
+        height: commandRail.y - y - 18
         items: root.workspaceItems
         revealProgress: root.deckProgress
         opacity: root.deckProgress
         onActivateItem: function(key) { root.activateWorkspaceItem(key) }
     }
 
-    FieldSurface {
-        id: collaborationField
+    Item {
+        id: deckField
         x: root.mainFieldX
         y: root.deckTop
         width: root.mainFieldWidth
-        height: commandRail.y - y - 16
-        radius: 36
-        padding: 28
-        tintColor: "#101a23"
-        edgeColor: "#648fa4"
-        glowColor: "#87cee4"
-        fillOpacity: 0.78
-        edgeOpacity: 0.2
-        lineOpacity: 0.06
-        opacity: 0.32 + root.deckProgress * 0.68
+        height: commandRail.y - y - 10
+        opacity: 0.3 + root.deckProgress * 0.7
 
-        RowLayout {
-            anchors.fill: parent
-            spacing: 22
-
-            WorkspaceCanvas {
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                Layout.preferredWidth: root.collaborationWidth
-                canvasData: root.workspaceCanvas
-                onActivateOpenedItem: function(itemId) { root.activateOpenedItem(itemId) }
-                onCloseOpenedItem: function(itemId) { root.closeOpenedItem(itemId) }
-            }
-
-            Rectangle {
-                Layout.preferredWidth: 1
-                Layout.fillHeight: true
-                color: "#37586a"
-                opacity: 0.26
-            }
-
-            CommandSpine {
-                Layout.preferredWidth: root.spineWidth
-                Layout.fillHeight: true
-                messages: root.messages
-                statusLine: root.statusLine
-                onSend: function(text) { stormhelmBridge.sendMessage(text) }
-                onComposerFocusChanged: function(focused) { stormhelmBridge.setComposerFocus(focused) }
-            }
-        }
-    }
-
-    Item {
-        id: contextRegion
-        x: root.rightRegionX
-        y: root.deckTop + 22
-        width: root.contextWidth
-        height: commandRail.y - y - 16
-        opacity: 0.18 + root.deckProgress * 0.82
-
-        ColumnLayout {
-            anchors.fill: parent
+        Row {
+            id: controlDeck
+            anchors.top: parent.top
+            anchors.left: parent.left
+            anchors.right: utilityColumn.left
+            anchors.rightMargin: utilityColumn.visible ? 14 : 0
             spacing: 12
 
-            Repeater {
-                model: root.supportModules.slice(0, 2)
+            Row {
+                id: layoutPresetRow
+                objectName: "deckLayoutPresetRow"
+                spacing: 8
 
-                delegate: Item {
-                    required property var modelData
-                    Layout.fillWidth: true
-                    implicitHeight: supportColumn.implicitHeight + 10
+                Repeater {
+                    model: root.deckLayoutPresets
 
-                    Rectangle {
-                        anchors.left: parent.left
-                        anchors.right: parent.right
-                        anchors.bottom: parent.bottom
-                        height: 1
-                        color: "#345767"
-                        opacity: 0.22
-                    }
-
-                    Column {
-                        id: supportColumn
-                        anchors.left: parent.left
-                        anchors.right: parent.right
-                        spacing: 3
+                    delegate: Rectangle {
+                        required property var modelData
+                        readonly property bool active: String(modelData.key || "") === root.activeDeckLayoutPreset
+                        radius: 16
+                        height: 28
+                        width: presetLabel.implicitWidth + 22
+                        color: active ? "#173342" : "#0f1b23"
+                        border.width: 1
+                        border.color: active ? "#8ed5ea" : "#425f70"
+                        opacity: active ? 0.96 : 0.84
 
                         Text {
-                            text: modelData.title
-                            color: "#d6e8f0"
+                            id: presetLabel
+                            anchors.centerIn: parent
+                            text: modelData.label
+                            color: active ? "#f2fbff" : "#d5e7ef"
                             font.family: "Bahnschrift SemiCondensed"
-                            font.pixelSize: 13
-                            font.letterSpacing: 1.3
-                            elide: Text.ElideRight
+                            font.pixelSize: 11
+                            font.letterSpacing: 1.1
                         }
 
-                        Text {
-                            text: modelData.headline
-                            color: "#7e9aa7"
-                            font.family: "Segoe UI"
-                            font.pixelSize: 10
-                            wrapMode: Text.Wrap
-                            width: parent.width
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.setDeckLayoutPreset(String(modelData.key || ""))
                         }
                     }
                 }
             }
 
-            ModulePanel {
+            Item {
                 Layout.fillWidth: true
-                Layout.fillHeight: true
-                moduleData: root.activeModule
-                onSaveNote: function(title, content) { stormhelmBridge.saveNote(title, content) }
+                width: Math.max(0, parent.width - layoutPresetRow.width - layoutToolRow.width - 12)
+                height: 1
+            }
+
+            Row {
+                id: layoutToolRow
+                spacing: 8
+
+                Repeater {
+                    model: root.layoutTools
+
+                    delegate: Rectangle {
+                        required property var modelData
+                        radius: 16
+                        height: 28
+                        width: label.implicitWidth + 20
+                        color: "#11202a"
+                        border.width: 1
+                        border.color: "#49697a"
+                        opacity: 0.88
+
+                        Text {
+                            id: label
+                            anchors.centerIn: parent
+                            text: modelData.label
+                            color: "#e3f2f8"
+                            font.family: "Bahnschrift SemiCondensed"
+                            font.pixelSize: 11
+                            font.letterSpacing: 1.1
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                if (modelData.key === "tidy") {
+                                    root.autoArrangeDeckLayout()
+                                } else if (modelData.key === "save") {
+                                    root.saveDeckLayout()
+                                } else if (modelData.key === "restore") {
+                                    root.restoreSavedDeckLayout()
+                                } else if (modelData.key === "reset") {
+                                    root.resetDeckLayout()
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        DeckPanelWorkspace {
+            id: panelWorkspace
+            anchors.top: controlDeck.bottom
+            anchors.topMargin: 10
+            anchors.left: parent.left
+            anchors.right: utilityColumn.left
+            anchors.rightMargin: utilityColumn.visible ? 14 : 0
+            anchors.bottom: parent.bottom
+            panels: root.deckPanels
+            messages: root.messages
+            statusLine: root.statusLine
+            deckProgress: root.deckProgress
+
+            onPanelGridCommitted: function(panelId, gridX, gridY, colSpan, rowSpan) {
+                root.updateDeckPanelGrid(panelId, gridX, gridY, colSpan, rowSpan)
+            }
+            onPanelPinnedChanged: function(panelId, pinned) {
+                root.pinDeckPanel(panelId, pinned)
+            }
+            onPanelCollapsedChanged: function(panelId, collapsed) {
+                root.collapseDeckPanel(panelId, collapsed)
+            }
+            onPanelHiddenChanged: function(panelId, hidden) {
+                root.hideDeckPanel(panelId, hidden)
+            }
+        }
+
+        Column {
+            id: utilityColumn
+            anchors.top: controlDeck.bottom
+            anchors.topMargin: 10
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            width: 132
+            spacing: 10
+            visible: root.panelCatalog.length > 0 || root.hiddenPanels.length > 0
+
+            Rectangle {
+                id: panelLauncher
+                objectName: "deckPanelLauncher"
+                width: parent.width
+                radius: 20
+                color: "#0f1820"
+                border.width: 1
+                border.color: "#425f70"
+                opacity: 0.92
+                implicitHeight: launcherHeader.height + launcherEntries.implicitHeight + 18
+
+                Column {
+                    anchors.fill: parent
+                    anchors.margins: 10
+                    spacing: 8
+
+                    Row {
+                        id: launcherHeader
+                        width: parent.width
+                        spacing: 8
+
+                        Text {
+                            text: "Panels"
+                            color: "#edf7fb"
+                            font.family: "Bahnschrift SemiCondensed"
+                            font.pixelSize: 12
+                            font.letterSpacing: 1.2
+                        }
+
+                        Rectangle {
+                            width: 22
+                            height: 22
+                            radius: 11
+                            color: "#11202a"
+                            border.width: 1
+                            border.color: "#4a6779"
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: root.panelLauncherExpanded ? "-" : "+"
+                                color: "#e3f2f8"
+                                font.family: "Bahnschrift SemiCondensed"
+                                font.pixelSize: 12
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.panelLauncherExpanded = !root.panelLauncherExpanded
+                            }
+                        }
+                    }
+
+                    Column {
+                        id: launcherEntries
+                        width: parent.width
+                        spacing: 6
+                        visible: root.panelLauncherExpanded
+
+                        Repeater {
+                            model: root.panelCatalog
+
+                            delegate: Rectangle {
+                                required property var modelData
+                                readonly property bool hidden: Boolean(modelData.hidden)
+                                width: launcherEntries.width
+                                height: 28
+                                radius: 14
+                                color: hidden ? "#10232f" : "#15212a"
+                                border.width: 1
+                                border.color: hidden ? "#6baec7" : "#35505f"
+                                opacity: hidden ? 0.94 : 0.82
+
+                                Row {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 10
+                                    anchors.rightMargin: 8
+                                    spacing: 6
+
+                                    Text {
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        text: hidden ? "+" : "•"
+                                        color: hidden ? "#b5eeff" : "#8fb5c3"
+                                        font.family: "Bahnschrift SemiCondensed"
+                                        font.pixelSize: 12
+                                    }
+
+                                    Text {
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        width: parent.width - 18
+                                        text: modelData.title
+                                        color: "#e7f5fb"
+                                        font.family: "Bahnschrift SemiCondensed"
+                                        font.pixelSize: 10
+                                        elide: Text.ElideRight
+                                    }
+                                }
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        if (hidden) {
+                                            root.restoreDeckPanel(String(modelData.panelId || ""))
+                                        } else {
+                                            root.hideDeckPanel(String(modelData.panelId || ""), true)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Column {
+                id: hiddenRail
+                objectName: "deckHiddenRail"
+                width: parent.width
+                spacing: 8
+                visible: root.hiddenPanels.length > 0
+
+                Text {
+                    text: "Hidden"
+                    color: "#8faab7"
+                    font.family: "Bahnschrift SemiCondensed"
+                    font.pixelSize: 11
+                    font.letterSpacing: 1.3
+                }
+
+                Repeater {
+                    model: root.hiddenPanels
+
+                    delegate: Rectangle {
+                        required property var modelData
+                        width: hiddenRail.width
+                        height: 54
+                        radius: 18
+                        color: "#11202a"
+                        border.width: 1
+                        border.color: "#436173"
+                        opacity: 0.82
+
+                        Column {
+                            anchors.centerIn: parent
+                            width: parent.width - 12
+                            spacing: 2
+
+                            Text {
+                                width: parent.width
+                                text: modelData.title
+                                color: "#edf7fb"
+                                font.family: "Bahnschrift SemiCondensed"
+                                font.pixelSize: 10
+                                horizontalAlignment: Text.AlignHCenter
+                                wrapMode: Text.Wrap
+                            }
+
+                            Text {
+                                width: parent.width
+                                text: "Restore"
+                                color: "#86a2af"
+                                font.family: "Segoe UI"
+                                font.pixelSize: 9
+                                horizontalAlignment: Text.AlignHCenter
+                            }
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.restoreDeckPanel(modelData.panelId)
+                        }
+                    }
+                }
             }
         }
     }

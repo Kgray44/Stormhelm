@@ -8,9 +8,12 @@ from typing import Any, Callable, Mapping
 from stormhelm.config.models import (
     AppConfig,
     ConcurrencyConfig,
+    HardwareTelemetryConfig,
+    LocationConfig,
     LoggingConfig,
     NetworkConfig,
     OpenAIConfig,
+    WeatherConfig,
     RuntimePathConfig,
     SafetyConfig,
     StorageConfig,
@@ -104,6 +107,38 @@ def _build_app_config(
         ghost_shortcut=str(ui_data.get("ghost_shortcut", "Ctrl+Space")),
     )
 
+    location_data = data.get("location", {})
+    location_config = LocationConfig(
+        allow_approximate_lookup=bool(location_data.get("allow_approximate_lookup", True)),
+        lookup_timeout_seconds=float(location_data.get("lookup_timeout_seconds", 5)),
+        home_label=str(location_data.get("home_label", "")).strip() or None,
+        home_city=str(location_data.get("home_city", "")).strip() or None,
+        home_region=str(location_data.get("home_region", "")).strip() or None,
+        home_country=str(location_data.get("home_country", "")).strip() or None,
+        home_latitude=_parse_optional_float(location_data.get("home_latitude")),
+        home_longitude=_parse_optional_float(location_data.get("home_longitude")),
+        home_timezone=str(location_data.get("home_timezone", "")).strip() or None,
+    )
+
+    weather_data = data.get("weather", {})
+    weather_config = WeatherConfig(
+        enabled=bool(weather_data.get("enabled", True)),
+        units=str(weather_data.get("units", "imperial")).strip() or "imperial",
+        provider_base_url=str(weather_data.get("provider_base_url", "https://api.open-meteo.com/v1")).rstrip("/"),
+        timeout_seconds=float(weather_data.get("timeout_seconds", 6)),
+    )
+
+    hardware_telemetry_data = data.get("hardware_telemetry", {})
+    hardware_telemetry_config = HardwareTelemetryConfig(
+        enabled=bool(hardware_telemetry_data.get("enabled", True)),
+        helper_timeout_seconds=float(hardware_telemetry_data.get("helper_timeout_seconds", 2.5)),
+        idle_cache_ttl_seconds=float(hardware_telemetry_data.get("idle_cache_ttl_seconds", 30)),
+        active_cache_ttl_seconds=float(hardware_telemetry_data.get("active_cache_ttl_seconds", 8)),
+        burst_cache_ttl_seconds=float(hardware_telemetry_data.get("burst_cache_ttl_seconds", 2)),
+        hwinfo_enabled=bool(hardware_telemetry_data.get("hwinfo_enabled", True)),
+        hwinfo_executable_path=str(hardware_telemetry_data.get("hwinfo_executable_path", "")).strip() or None,
+    )
+
     openai_data = data.get("openai", {})
     openai_config = OpenAIConfig(
         enabled=bool(openai_data.get("enabled", False)),
@@ -113,11 +148,11 @@ def _build_app_config(
             or None
         ),
         base_url=str(openai_data.get("base_url", "https://api.openai.com/v1")).rstrip("/"),
-        model=str(openai_data.get("model", "gpt-5.4-mini")).strip() or "gpt-5.4-mini",
-        planner_model=str(openai_data.get("planner_model", openai_data.get("model", "gpt-5.4-mini"))).strip()
-        or "gpt-5.4-mini",
-        reasoning_model=str(openai_data.get("reasoning_model", openai_data.get("model", "gpt-5.4-mini"))).strip()
-        or "gpt-5.4-mini",
+        model=str(openai_data.get("model", "gpt-5.4-nano")).strip() or "gpt-5.4-nano",
+        planner_model=str(openai_data.get("planner_model", openai_data.get("model", "gpt-5.4-nano"))).strip()
+        or "gpt-5.4-nano",
+        reasoning_model=str(openai_data.get("reasoning_model", "gpt-5.4")).strip()
+        or "gpt-5.4",
         timeout_seconds=float(openai_data.get("timeout_seconds", 60)),
         max_tool_rounds=int(openai_data.get("max_tool_rounds", 4)),
         max_output_tokens=int(openai_data.get("max_output_tokens", 1200)),
@@ -147,6 +182,8 @@ def _build_app_config(
             file_reader=bool(enabled_data.get("file_reader", True)),
             notes_write=bool(enabled_data.get("notes_write", True)),
             echo=bool(enabled_data.get("echo", True)),
+            browser_context=bool(enabled_data.get("browser_context", True)),
+            activity_summary=bool(enabled_data.get("activity_summary", True)),
             shell_command=bool(enabled_data.get("shell_command", False)),
             deck_open_url=bool(enabled_data.get("deck_open_url", True)),
             external_open_url=bool(enabled_data.get("external_open_url", True)),
@@ -154,13 +191,32 @@ def _build_app_config(
             external_open_file=bool(enabled_data.get("external_open_file", True)),
             machine_status=bool(enabled_data.get("machine_status", True)),
             power_status=bool(enabled_data.get("power_status", True)),
+            power_projection=bool(enabled_data.get("power_projection", True)),
             resource_status=bool(enabled_data.get("resource_status", True)),
             storage_status=bool(enabled_data.get("storage_status", True)),
             network_status=bool(enabled_data.get("network_status", True)),
+            network_diagnosis=bool(enabled_data.get("network_diagnosis", True)),
             active_apps=bool(enabled_data.get("active_apps", True)),
+            app_control=bool(enabled_data.get("app_control", True)),
+            window_status=bool(enabled_data.get("window_status", True)),
+            window_control=bool(enabled_data.get("window_control", True)),
+            control_capabilities=bool(enabled_data.get("control_capabilities", True)),
             recent_files=bool(enabled_data.get("recent_files", True)),
+            location_status=bool(enabled_data.get("location_status", True)),
+            saved_locations=bool(enabled_data.get("saved_locations", True)),
+            save_location=bool(enabled_data.get("save_location", True)),
+            weather_current=bool(enabled_data.get("weather_current", True)),
+            context_action=bool(enabled_data.get("context_action", True)),
             workspace_restore=bool(enabled_data.get("workspace_restore", True)),
             workspace_assemble=bool(enabled_data.get("workspace_assemble", True)),
+            workspace_save=bool(enabled_data.get("workspace_save", True)),
+            workspace_clear=bool(enabled_data.get("workspace_clear", True)),
+            workspace_archive=bool(enabled_data.get("workspace_archive", True)),
+            workspace_rename=bool(enabled_data.get("workspace_rename", True)),
+            workspace_tag=bool(enabled_data.get("workspace_tag", True)),
+            workspace_list=bool(enabled_data.get("workspace_list", True)),
+            workspace_where_left_off=bool(enabled_data.get("workspace_where_left_off", True)),
+            workspace_next_steps=bool(enabled_data.get("workspace_next_steps", True)),
         ),
         max_file_read_bytes=int(tool_data.get("max_file_read_bytes", 32768)),
     )
@@ -198,6 +254,9 @@ def _build_app_config(
         logging=logging_config,
         concurrency=concurrency_config,
         ui=ui_config,
+        location=location_config,
+        weather=weather_config,
+        hardware_telemetry=hardware_telemetry_config,
         openai=openai_config,
         safety=safety_config,
         tools=tool_config,
@@ -255,6 +314,26 @@ def _apply_env_overrides(data: ConfigDict, env: Mapping[str, str]) -> ConfigDict
         "STORMHELM_OPENAI_MAX_OUTPUT_TOKENS": ("openai.max_output_tokens", int),
         "STORMHELM_OPENAI_PLANNER_MAX_OUTPUT_TOKENS": ("openai.planner_max_output_tokens", int),
         "STORMHELM_OPENAI_REASONING_MAX_OUTPUT_TOKENS": ("openai.reasoning_max_output_tokens", int),
+        "STORMHELM_HOME_LABEL": ("location.home_label", str),
+        "STORMHELM_HOME_CITY": ("location.home_city", str),
+        "STORMHELM_HOME_REGION": ("location.home_region", str),
+        "STORMHELM_HOME_COUNTRY": ("location.home_country", str),
+        "STORMHELM_HOME_LATITUDE": ("location.home_latitude", float),
+        "STORMHELM_HOME_LONGITUDE": ("location.home_longitude", float),
+        "STORMHELM_HOME_TIMEZONE": ("location.home_timezone", str),
+        "STORMHELM_ALLOW_APPROXIMATE_LOCATION": ("location.allow_approximate_lookup", _parse_bool),
+        "STORMHELM_LOCATION_LOOKUP_TIMEOUT_SECONDS": ("location.lookup_timeout_seconds", float),
+        "STORMHELM_WEATHER_ENABLED": ("weather.enabled", _parse_bool),
+        "STORMHELM_WEATHER_UNITS": ("weather.units", str),
+        "STORMHELM_WEATHER_BASE_URL": ("weather.provider_base_url", str),
+        "STORMHELM_WEATHER_TIMEOUT_SECONDS": ("weather.timeout_seconds", float),
+        "STORMHELM_HARDWARE_TELEMETRY_ENABLED": ("hardware_telemetry.enabled", _parse_bool),
+        "STORMHELM_HARDWARE_TELEMETRY_TIMEOUT_SECONDS": ("hardware_telemetry.helper_timeout_seconds", float),
+        "STORMHELM_HARDWARE_TELEMETRY_IDLE_CACHE_TTL_SECONDS": ("hardware_telemetry.idle_cache_ttl_seconds", float),
+        "STORMHELM_HARDWARE_TELEMETRY_ACTIVE_CACHE_TTL_SECONDS": ("hardware_telemetry.active_cache_ttl_seconds", float),
+        "STORMHELM_HARDWARE_TELEMETRY_BURST_CACHE_TTL_SECONDS": ("hardware_telemetry.burst_cache_ttl_seconds", float),
+        "STORMHELM_HARDWARE_TELEMETRY_HWINFO_ENABLED": ("hardware_telemetry.hwinfo_enabled", _parse_bool),
+        "STORMHELM_HARDWARE_TELEMETRY_HWINFO_PATH": ("hardware_telemetry.hwinfo_executable_path", str),
     }
 
     for env_key, (path, parser) in overrides.items():
@@ -286,6 +365,15 @@ def _expand_path(raw: str | None, root: Path, data_dir: Path | None) -> Path | N
 
 def _parse_bool(raw: str) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_optional_float(raw: Any) -> float | None:
+    if raw in {None, ""}:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def _resolve_runtime(project_root: Path | None) -> RuntimeDiscovery:

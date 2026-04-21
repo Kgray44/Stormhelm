@@ -152,6 +152,8 @@ class JobManager:
 
     async def _execute_job(self, job: JobRecord, worker_index: int) -> None:
         context = self.context_factory(job.job_id)
+        loop = asyncio.get_running_loop()
+        context.progress_callback = lambda payload: loop.call_soon_threadsafe(self._update_progress, job.job_id, payload)
         job.started_at = utc_now_iso()
         job.status = JobStatus.RUNNING
         self._persist(job)
@@ -190,12 +192,25 @@ class JobManager:
             level="INFO" if job.status == JobStatus.COMPLETED else "WARNING",
             source="job_manager",
             message=f"Job {job.job_id} finished with status '{job.status.value}'.",
-            payload={"job_id": job.job_id, "status": job.status.value},
+            payload={
+                "job_id": job.job_id,
+                "status": job.status.value,
+                "tool_name": job.tool_name,
+                "result_summary": str(job.result.get("summary", "")).strip() if isinstance(job.result, dict) else "",
+                "error": job.error,
+            },
         )
         future = self._completion_futures.pop(job.job_id, None)
         if future is not None and not future.done():
             future.set_result(job)
         self._prune_finished_jobs()
+
+    def _update_progress(self, job_id: str, payload: dict[str, object]) -> None:
+        job = self._jobs.get(job_id)
+        if job is None or job.status not in {JobStatus.QUEUED, JobStatus.RUNNING}:
+            return
+        job.result = dict(payload)
+        self._persist(job)
 
     def _persist(self, job: JobRecord) -> None:
         self.tool_runs.upsert_run(

@@ -36,6 +36,8 @@ TEXT_EXTENSIONS = {
 }
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg"}
 SKIP_DIRS = {".git", ".venv", "__pycache__", "node_modules", "dist", "build", ".runtime", "release"}
+INTERNAL_PROJECT_DIRS = {"src", "tests", "assets", "config", "scripts"}
+INTERNAL_PROJECT_TOKENS = {"stormhelm", "ghost", "deck", "chartroom", "qml", "scheduler", "orchestrator", "development", "dev"}
 
 
 class WorkspaceIndexer:
@@ -43,7 +45,9 @@ class WorkspaceIndexer:
         self.config = config
 
     def search_files(self, query: str, *, limit: int = 8) -> list[dict[str, Any]]:
-        tokens = [token for token in self._normalize(query).split() if len(token) > 1]
+        normalized_query = self._normalize(query)
+        tokens = [token for token in normalized_query.split() if len(token) > 1]
+        allow_internal_project_files = self._query_targets_internal_project(normalized_query)
         roots = [Path(path) for path in self.config.safety.allowed_read_dirs if Path(path).exists()]
         candidates: list[tuple[float, dict[str, Any]]] = []
         visited = 0
@@ -56,13 +60,17 @@ class WorkspaceIndexer:
                         break
                     path = Path(current_root) / filename
                     try:
-                        score = self._score_path(path, tokens)
+                        score, reason = self._score_path(
+                            path,
+                            tokens,
+                            allow_internal_project_files=allow_internal_project_files,
+                        )
                     except OSError:
                         continue
                     if score <= 0:
                         continue
                     try:
-                        payload = self._build_item(path)
+                        payload = self._build_item(path, reason=reason)
                     except OSError:
                         continue
                     candidates.append((score, payload))
@@ -83,22 +91,37 @@ class WorkspaceIndexer:
                 break
         return unique
 
-    def _score_path(self, path: Path, tokens: list[str]) -> float:
+    def _score_path(
+        self,
+        path: Path,
+        tokens: list[str],
+        *,
+        allow_internal_project_files: bool,
+    ) -> tuple[float, str]:
         lowered_name = path.name.lower()
         lowered_parent = str(path.parent).lower()
         if not tokens:
-            return 0.0
+            return 0.0, ""
+        if not allow_internal_project_files and self._is_internal_project_path(path):
+            return 0.0, ""
         score = 0.0
+        matched_name_tokens: list[str] = []
+        matched_parent_tokens: list[str] = []
         for token in tokens:
             if token in lowered_name:
                 score += 6.0
+                matched_name_tokens.append(token)
             if token in lowered_parent:
                 score += 2.5
+                matched_parent_tokens.append(token)
+        if not matched_name_tokens and not matched_parent_tokens:
+            return 0.0, ""
         if path.suffix.lower() in {".md", ".pdf", ".txt", ".py"}:
             score += 1.5
-        return score
+        reason = self._relevance_reason(path, matched_name_tokens, matched_parent_tokens)
+        return score, reason
 
-    def _build_item(self, path: Path) -> dict[str, Any]:
+    def _build_item(self, path: Path, *, reason: str) -> dict[str, Any]:
         suffix = path.suffix.lower()
         mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         item: dict[str, Any] = {
@@ -109,7 +132,7 @@ class WorkspaceIndexer:
             "mime_type": mime_type,
             "module": "files",
             "section": "opened-items",
-            "summary": f"Indexed from {path.parent.name or path.parent}",
+            "summary": reason or f"Indexed from {path.parent.name or path.parent}",
         }
         if suffix == ".pdf":
             item["kind"] = "pdf"
@@ -133,3 +156,29 @@ class WorkspaceIndexer:
 
     def _normalize(self, value: str) -> str:
         return " ".join(value.lower().replace("-", " ").replace("_", " ").split())
+
+    def _query_targets_internal_project(self, normalized_query: str) -> bool:
+        return any(token in normalized_query.split() for token in INTERNAL_PROJECT_TOKENS)
+
+    def _is_internal_project_path(self, path: Path) -> bool:
+        try:
+            relative = path.resolve().relative_to(self.config.project_root.resolve())
+        except ValueError:
+            return False
+        parts = [part.lower() for part in relative.parts]
+        if not parts:
+            return False
+        if parts[0] in INTERNAL_PROJECT_DIRS:
+            return True
+        if len(parts) >= 2 and parts[0] == "src" and parts[1] == "stormhelm":
+            return True
+        return False
+
+    def _relevance_reason(self, path: Path, matched_name_tokens: list[str], matched_parent_tokens: list[str]) -> str:
+        if matched_name_tokens:
+            token_text = ", ".join(dict.fromkeys(matched_name_tokens))
+            return f"Matches the workspace topic in the file name ({token_text})."
+        if matched_parent_tokens:
+            token_text = ", ".join(dict.fromkeys(matched_parent_tokens))
+            return f"Matches the workspace topic in the containing path ({token_text})."
+        return f"Indexed from {path.parent.name or path.parent}"

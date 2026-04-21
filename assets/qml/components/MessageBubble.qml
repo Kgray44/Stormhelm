@@ -13,8 +13,10 @@ Item {
         role: "assistant",
         speaker: "Stormhelm",
         shortTime: "",
-        content: ""
+        content: "",
+        nextSuggestion: ({})
     })
+    readonly property var safeNextSuggestion: root.safeMessage && root.safeMessage.nextSuggestion ? root.safeMessage.nextSuggestion : ({})
     property bool compact: false
     property string presentation: "deck"
     readonly property bool userMessage: safeMessage.role === "user"
@@ -25,6 +27,7 @@ Item {
     FieldSurface {
         id: bubble
         width: Math.min(root.width * (root.compact ? 0.88 : 0.92), root.userMessage ? 560 : 720)
+        implicitHeight: contentColumn.implicitHeight + padding * 2
         anchors.horizontalCenter: root.userMessage ? undefined : parent.horizontalCenter
         anchors.right: root.userMessage ? parent.right : undefined
         anchors.left: root.userMessage ? undefined : parent.left
@@ -39,6 +42,7 @@ Item {
         accentTopLine: !root.userMessage
 
         Column {
+            id: contentColumn
             anchors.fill: parent
             spacing: 8
 
@@ -68,6 +72,17 @@ Item {
                 font.family: "Segoe UI"
                 font.pixelSize: root.compact ? 14 : 16
                 lineHeight: 1.25
+            }
+
+            Text {
+                width: parent.width
+                visible: !root.userMessage && !!root.safeNextSuggestion.title
+                text: "Next: " + root.safeNextSuggestion.title
+                wrapMode: Text.Wrap
+                color: "#9fd0e3"
+                font.family: "Bahnschrift SemiCondensed"
+                font.pixelSize: root.compact ? 12 : 13
+                font.letterSpacing: 0.8
             }
         }
     }
