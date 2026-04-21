@@ -178,17 +178,57 @@ def _metric_source_map(data: dict[str, Any]) -> dict[str, Any]:
     return dict(metrics) if isinstance(metrics, dict) else {}
 
 
+def _format_rpm(value: object) -> str | None:
+    if not _has_numeric_signal(value):
+        return None
+    return f"{int(round(float(value)))} RPM"
+
+
+def _thermal_fans(data: dict[str, Any]) -> list[dict[str, Any]]:
+    thermal = data.get("thermal")
+    if not isinstance(thermal, dict):
+        return []
+    fans = thermal.get("fans")
+    return [fan for fan in fans if isinstance(fan, dict)] if isinstance(fans, list) else []
+
+
+def _matched_thermal_fan(data: dict[str, Any], *, focus: str) -> dict[str, Any]:
+    fans = _thermal_fans(data)
+    if not fans:
+        return {}
+    token = "gpu" if focus == "gpu" else "cpu"
+    for fan in fans:
+        label = str(fan.get("label") or "").strip().lower()
+        if token in label:
+            return fan
+    return fans[0] if len(fans) == 1 else {}
+
+
+def _fan_summary(fan: dict[str, Any], *, focus_label: str) -> str | None:
+    rpm = _format_rpm(fan.get("rpm"))
+    duty = _format_percent(fan.get("duty_percent") or fan.get("fan_percent"))
+    if rpm and duty:
+        return f"{focus_label} fan is {rpm} at {duty} duty right now."
+    if rpm:
+        return f"{focus_label} fan is {rpm} right now."
+    if duty:
+        return f"{focus_label} fan is running at {duty} duty right now."
+    return None
+
+
 def _resource_metric_keys(*, focus: str, metric: str) -> list[str]:
     mapping = {
         ("cpu", "usage"): ["cpu.utilization_percent"],
         ("cpu", "temperature"): ["cpu.package_temperature_c"],
         ("cpu", "clock"): ["cpu.effective_clock_mhz", "cpu.base_clock_mhz"],
         ("cpu", "power"): ["cpu.package_power_w"],
+        ("cpu", "fan"): ["thermal.cpu_fan_rpm", "thermal.cpu_fan_duty_percent"],
         ("gpu", "usage"): ["gpu.utilization_percent"],
         ("gpu", "temperature"): ["gpu.temperature_c", "gpu.hotspot_temperature_c"],
         ("gpu", "memory"): ["gpu.vram_used_bytes", "gpu.vram_total_bytes"],
         ("gpu", "power"): ["gpu.power_w"],
         ("gpu", "clock"): ["gpu.core_clock_mhz", "gpu.memory_clock_mhz"],
+        ("gpu", "fan"): ["thermal.gpu_fan_rpm", "thermal.gpu_fan_duty_percent", "gpu.fan_rpm", "gpu.fan_percent"],
         ("ram", "usage"): [],
         ("ram", "free"): [],
         ("ram", "pressure"): [],
@@ -225,11 +265,13 @@ def _resource_metric_label(*, focus: str, metric: str) -> str:
         ("cpu", "temperature"): "CPU temperature",
         ("cpu", "clock"): "CPU clock telemetry",
         ("cpu", "power"): "CPU package power",
+        ("cpu", "fan"): "CPU fan telemetry",
         ("gpu", "usage"): "GPU usage",
         ("gpu", "temperature"): "GPU temperature",
         ("gpu", "memory"): "GPU VRAM telemetry",
         ("gpu", "power"): "GPU power telemetry",
         ("gpu", "clock"): "GPU clock telemetry",
+        ("gpu", "fan"): "GPU fan telemetry",
         ("ram", "usage"): "current memory usage",
         ("ram", "free"): "free memory",
         ("ram", "pressure"): "memory pressure",
@@ -259,6 +301,9 @@ def _resource_metric_present(data: dict[str, Any], *, focus: str, metric: str) -
             return _has_numeric_signal(cpu.get("effective_clock_mhz"))
         if metric == "power":
             return _has_numeric_signal(cpu.get("package_power_w"))
+        if metric == "fan":
+            fan = _matched_thermal_fan(data, focus="cpu")
+            return _has_numeric_signal(fan.get("rpm")) or _has_numeric_signal(fan.get("duty_percent"))
     if focus == "gpu":
         if metric in {"usage", "overview"}:
             return _has_numeric_signal(gpu.get("utilization_percent")) or _has_numeric_signal(gpu.get("temperature_c"))
@@ -270,6 +315,15 @@ def _resource_metric_present(data: dict[str, Any], *, focus: str, metric: str) -
             return _has_numeric_signal(gpu.get("power_w"))
         if metric == "clock":
             return _has_numeric_signal(gpu.get("core_clock_mhz")) or _has_numeric_signal(gpu.get("memory_clock_mhz"))
+        if metric == "fan":
+            return any(
+                (
+                    _has_numeric_signal(gpu.get("fan_rpm")),
+                    _has_numeric_signal(gpu.get("fan_percent")),
+                    _has_numeric_signal(_matched_thermal_fan(data, focus="gpu").get("rpm")),
+                    _has_numeric_signal(_matched_thermal_fan(data, focus="gpu").get("duty_percent")),
+                )
+            )
     if focus == "ram":
         if metric in {"usage", "overview", "pressure"}:
             return _has_numeric_signal(memory.get("used_bytes")) and _has_numeric_signal(memory.get("total_bytes"))
@@ -297,6 +351,8 @@ def _resource_metric_contract(data: dict[str, Any], *, focus: str, metric: str) 
         "gpu": "gpu_deep_telemetry_available",
     }.get(focus)
     domain_supported = True if capability_key is None else bool(capabilities.get(capability_key))
+    if metric == "fan" and focus in {"cpu", "gpu"}:
+        domain_supported = bool(capabilities.get("thermal_sensor_availability")) or domain_supported
     available = _resource_metric_present(data, focus=focus, metric=metric) or bool(metric_source.get("available"))
     unsupported_reason = None
 
@@ -477,6 +533,8 @@ def _resource_telemetry_summary(data: dict[str, Any], *, focus: str, metric: str
     cpu = data.get("cpu", {}) if isinstance(data.get("cpu"), dict) else {}
     memory = data.get("memory", {}) if isinstance(data.get("memory"), dict) else {}
     gpu = _primary_gpu(data)
+    cpu_fan = _matched_thermal_fan(data, focus="cpu")
+    gpu_fan = _matched_thermal_fan(data, focus="gpu")
 
     if focus == "cpu":
         if metric in {"usage", "overview"}:
@@ -508,6 +566,11 @@ def _resource_telemetry_summary(data: dict[str, Any], *, focus: str, metric: str
             if power:
                 return f"CPU package power is {power} right now."
             return _resource_unavailable_summary(data, focus="cpu", metric="power")
+        if metric == "fan":
+            summary = _fan_summary(cpu_fan, focus_label="CPU")
+            if summary:
+                return summary
+            return _resource_unavailable_summary(data, focus="cpu", metric="fan")
 
     if focus == "gpu":
         if metric in {"usage", "overview"}:
@@ -551,6 +614,17 @@ def _resource_telemetry_summary(data: dict[str, Any], *, focus: str, metric: str
             if memory_clock:
                 return f"GPU memory clock is {memory_clock} right now."
             return _resource_unavailable_summary(data, focus="gpu", metric="clock")
+        if metric == "fan":
+            summary = _fan_summary(
+                {
+                    "rpm": gpu.get("fan_rpm") if _has_numeric_signal(gpu.get("fan_rpm")) else gpu_fan.get("rpm"),
+                    "duty_percent": gpu.get("fan_percent") if _has_numeric_signal(gpu.get("fan_percent")) else gpu_fan.get("duty_percent"),
+                },
+                focus_label="GPU",
+            )
+            if summary:
+                return summary
+            return _resource_unavailable_summary(data, focus="gpu", metric="fan")
 
     if focus == "ram":
         total = memory.get("total_bytes")
@@ -624,6 +698,8 @@ def _resource_diagnostic_summary(data: dict[str, Any], *, focus: str, metric: st
     gpu = _primary_gpu(data)
 
     if focus == "gpu":
+        if metric == "fan":
+            return _resource_telemetry_summary(data, focus="gpu", metric="fan")
         if metric == "temperature":
             temperature = _format_temperature(gpu.get("temperature_c"))
             level = _thermal_level_label(gpu.get("temperature_c"), focus="gpu")
@@ -637,6 +713,8 @@ def _resource_diagnostic_summary(data: dict[str, Any], *, focus: str, metric: st
         return _resource_unavailable_summary(data, focus="gpu", metric="usage")
 
     if focus == "cpu":
+        if metric == "fan":
+            return _resource_telemetry_summary(data, focus="cpu", metric="fan")
         if metric == "temperature":
             temperature = _format_temperature(cpu.get("package_temperature_c"))
             level = _thermal_level_label(cpu.get("package_temperature_c"), focus="cpu")
@@ -874,7 +952,7 @@ class ResourceStatusTool(BaseTool):
                 "query_kind": {"type": "string", "enum": ["telemetry", "identity", "diagnostic"], "default": "telemetry"},
                 "metric": {
                     "type": "string",
-                    "enum": ["overview", "identity", "usage", "temperature", "memory", "power", "clock", "free", "pressure"],
+                    "enum": ["overview", "identity", "usage", "temperature", "memory", "power", "clock", "fan", "free", "pressure"],
                     "default": "overview",
                 },
                 "present_in": {"type": "string", "enum": ["none", "deck"], "default": "none"},

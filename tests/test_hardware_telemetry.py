@@ -4,6 +4,8 @@ import subprocess
 
 from stormhelm.core.system.hardware_telemetry import (
     HardwareTelemetryHelperClient,
+    _merge_cpu_telemetry,
+    _merge_thermal_telemetry,
     _run_powershell_json,
     build_helper_unreachable_snapshot,
     merge_hardware_snapshots,
@@ -41,6 +43,17 @@ def test_helper_wrapper_and_provider_collectors_use_separate_timeouts(temp_confi
 
     assert calls[0][1] == 12.0
     assert calls[1][1] == 5.0
+
+
+def test_run_powershell_json_recovers_last_valid_json_line_after_console_noise(temp_config, monkeypatch) -> None:
+    def fake_run(command, **kwargs):
+        return subprocess.CompletedProcess(command, 1, "System.Management.ManagementException: Access denied\n{\"provider\":\"gigabyte_control_center\",\"state\":\"partial\"}\n", "")
+
+    monkeypatch.setattr("stormhelm.core.system.hardware_telemetry.subprocess.run", fake_run)
+
+    payload = _run_powershell_json(temp_config, "Write-Output 'noise'")
+
+    assert payload == {"provider": "gigabyte_control_center", "state": "partial"}
 
 
 def test_merge_hardware_snapshots_prefers_enrichment_values_without_dropping_existing_fields() -> None:
@@ -126,3 +139,152 @@ def test_overlay_resource_status_carries_helper_cpu_gpu_and_thermal_fields() -> 
     assert result["gpu"][0]["power_w"] == 140.5
     assert result["thermal"]["sensors"][0]["label"] == "CPU"
     assert result["capabilities"]["gpu_deep_telemetry_available"] is True
+
+
+def test_merge_cpu_telemetry_prefers_gigabyte_vendor_temperature_when_available() -> None:
+    snapshot = {"sources": {"metrics": {}}}
+    native_payload = {
+        "cpu": {
+            "base_clock_mhz": 2000,
+            "effective_clock_mhz": 3185,
+            "utilization_percent": 44.0,
+        }
+    }
+    lhm_payload = {
+        "cpu": {
+            "package_temperature_c": None,
+            "package_power_w": None,
+            "effective_clock_mhz": None,
+            "throttle_flags": [],
+        }
+    }
+    gigabyte_payload = {
+        "cpu": {"package_temperature_c": 68.5},
+        "metrics": {
+            "cpu.package_temperature_c": {
+                "provider": "gigabyte_control_center",
+                "available": True,
+                "source": "GccWmiTool.getCpuTemperature",
+                "sensor": "Gigabyte notebook WMI CPU temperature",
+            }
+        },
+    }
+
+    cpu = _merge_cpu_telemetry(snapshot, native_payload, lhm_payload, gigabyte_payload, {"cpu": {}, "metrics": {}})
+
+    assert cpu["package_temperature_c"] == 68.5
+    assert snapshot["sources"]["metrics"]["cpu.package_temperature_c"]["provider"] == "gigabyte_control_center"
+    assert snapshot["sources"]["metrics"]["cpu.package_temperature_c"]["source"] == "GccWmiTool.getCpuTemperature"
+
+
+def test_merge_thermal_telemetry_includes_gigabyte_fan_channels_and_reasoning() -> None:
+    snapshot = {"sources": {"metrics": {}}}
+    native_payload = {"thermal": {"sensors": [], "fans": []}}
+    lhm_payload = {"thermal": {"sensors": [], "fans": []}}
+    gigabyte_payload = {
+        "thermal": {
+            "fans": [
+                {"label": "CPU Fan", "rpm": 3125, "duty_percent": 58, "source": "gigabyte_control_center"},
+                {"label": "GPU Fan", "rpm": 2980, "duty_percent": 55, "source": "gigabyte_control_center"},
+            ]
+        },
+        "metrics": {
+            "thermal.cpu_fan_rpm": {
+                "provider": "gigabyte_control_center",
+                "available": True,
+                "source": "GccWmiTool.GetFanSpeed(1)",
+            },
+            "thermal.cpu_fan_duty_percent": {
+                "provider": "gigabyte_control_center",
+                "available": True,
+                "source": "CWMI.getCPUFanDuty",
+            },
+            "thermal.gpu_fan_rpm": {
+                "provider": "gigabyte_control_center",
+                "available": True,
+                "source": "GccWmiTool.GetFanSpeed(2)",
+            },
+        },
+    }
+
+    thermal = _merge_thermal_telemetry(snapshot, native_payload, lhm_payload, gigabyte_payload, {"thermal": {"sensors": [], "fans": []}, "metrics": {}})
+
+    assert len(thermal["fans"]) == 2
+    assert thermal["fans"][0]["label"] == "CPU Fan"
+    assert thermal["fans"][0]["rpm"] == 3125
+    assert thermal["fans"][0]["duty_percent"] == 58
+    assert snapshot["sources"]["metrics"]["thermal.cpu_fan_rpm"]["provider"] == "gigabyte_control_center"
+    assert snapshot["sources"]["metrics"]["thermal.gpu_fan_rpm"]["source"] == "GccWmiTool.GetFanSpeed(2)"
+
+
+def test_merge_cpu_telemetry_prefers_amd_stack_reason_when_vendor_stack_is_installed_but_not_bootstrapped() -> None:
+    snapshot = {"sources": {"metrics": {}}}
+    native_payload = {
+        "cpu": {
+            "base_clock_mhz": 2000,
+            "effective_clock_mhz": 3185,
+            "utilization_percent": 44.0,
+        }
+    }
+    lhm_payload = {
+        "cpu": {
+            "package_temperature_c": None,
+            "package_power_w": None,
+            "effective_clock_mhz": None,
+            "throttle_flags": [],
+        },
+        "metrics": {
+            "cpu.package_temperature_c": {
+                "provider": "libre_hardware_monitor",
+                "available": False,
+                "unsupported_reason": "LibreHardwareMonitor sees the AMD CPU temperature sensor on this machine, but it is only returning 0.",
+            }
+        },
+    }
+    gigabyte_payload = {"cpu": {}, "thermal": {"fans": []}}
+    amd_payload = {
+        "cpu": {},
+        "metrics": {
+            "cpu.package_temperature_c": {
+                "provider": "amd_ryzen_master",
+                "available": False,
+                "unsupported_reason": "AMD Performance Profile Client is installed, but Global\\AMDRyzenMasterSemaphore is missing in the current helper context, so Ryzen Master temperature sampling cannot bootstrap.",
+            },
+            "cpu.package_power_w": {
+                "provider": "amd_ryzen_master",
+                "available": False,
+                "unsupported_reason": "AMD Performance Profile Client is installed, but Global\\AMDRyzenMasterSemaphore is missing in the current helper context, so Ryzen Master power sampling cannot bootstrap.",
+            },
+        },
+    }
+
+    cpu = _merge_cpu_telemetry(snapshot, native_payload, lhm_payload, gigabyte_payload, amd_payload)
+
+    assert cpu["package_temperature_c"] is None
+    assert snapshot["sources"]["metrics"]["cpu.package_temperature_c"]["provider"] == "amd_ryzen_master"
+    assert "AMDRyzenMasterSemaphore" in snapshot["sources"]["metrics"]["cpu.package_temperature_c"]["unsupported_reason"]
+    assert "only returning 0" in snapshot["sources"]["metrics"]["cpu.package_temperature_c"]["unsupported_reason"]
+    assert snapshot["sources"]["metrics"]["cpu.package_power_w"]["provider"] == "amd_ryzen_master"
+
+
+def test_merge_thermal_telemetry_uses_amd_reason_when_no_fan_channels_are_readable() -> None:
+    snapshot = {"sources": {"metrics": {}}}
+    native_payload = {"thermal": {"sensors": [], "fans": []}}
+    lhm_payload = {"thermal": {"sensors": [], "fans": []}}
+    gigabyte_payload = {"thermal": {"sensors": [], "fans": []}, "metrics": {}}
+    amd_payload = {
+        "thermal": {"sensors": [], "fans": []},
+        "metrics": {
+            "thermal.cpu_fan_rpm": {
+                "provider": "amd_ryzen_master",
+                "available": False,
+                "unsupported_reason": "AMD Performance Profile Client did not expose a readable CPU fan sample because the Ryzen Master bootstrap objects were unavailable from the helper context.",
+            }
+        },
+    }
+
+    thermal = _merge_thermal_telemetry(snapshot, native_payload, lhm_payload, gigabyte_payload, amd_payload)
+
+    assert thermal["fans"] == []
+    assert snapshot["sources"]["metrics"]["thermal.fan_count"]["provider"] == "amd_ryzen_master"
+    assert "Ryzen Master bootstrap objects" in snapshot["sources"]["metrics"]["thermal.fan_count"]["unsupported_reason"]

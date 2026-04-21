@@ -1302,6 +1302,119 @@ def test_planner_routes_lookup_phrase_to_web_search_open() -> None:
     assert decision.structured_query.slots["search_provider"] == "web"
 
 
+def test_planner_routes_known_destination_search_phrase_to_site_search_open() -> None:
+    planner = DeterministicPlanner()
+
+    decision = planner.plan(
+        "search OpenAI for pricing",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "browser_search"
+    assert decision.tool_requests[0].tool_name == "external_open_url"
+    assert decision.tool_requests[0].arguments["url"] == "https://www.google.com/search?q=site%3Aopenai.com+pricing"
+    assert decision.structured_query is not None
+    assert decision.structured_query.query_shape.value == "search_browser_destination"
+    assert decision.structured_query.execution_type == "resolve_search_url_then_open_in_browser"
+    assert decision.structured_query.slots["search_provider"] == "openai"
+
+
+def test_planner_routes_domain_phrase_to_site_search_open() -> None:
+    planner = DeterministicPlanner()
+
+    decision = planner.plan(
+        "search docs.python.org for pathlib glob",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "browser_search"
+    assert decision.tool_requests[0].tool_name == "external_open_url"
+    assert decision.tool_requests[0].arguments["url"] == "https://www.google.com/search?q=site%3Adocs.python.org+pathlib+glob"
+    assert decision.structured_query is not None
+    assert decision.structured_query.query_shape.value == "search_browser_destination"
+    assert decision.structured_query.slots["search_provider"] == "docs.python.org"
+
+
+def test_planner_routes_browser_destination_with_explicit_browser_target() -> None:
+    planner = DeterministicPlanner()
+
+    decision = planner.plan(
+        "open Gmail in Firefox",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "direct_action"
+    assert decision.tool_requests[0].tool_name == "external_open_url"
+    assert decision.tool_requests[0].arguments["url"] == "https://mail.google.com/mail/u/0/#inbox"
+    assert decision.tool_requests[0].arguments["browser_target"] == "firefox"
+    assert decision.structured_query is not None
+    assert decision.structured_query.query_shape.value == "open_browser_destination"
+    assert decision.structured_query.slots["browser_preference"] == "firefox"
+
+
+def test_planner_routes_browser_search_with_explicit_browser_target() -> None:
+    planner = DeterministicPlanner()
+
+    decision = planner.plan(
+        "search github for issue templates in chrome",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "browser_search"
+    assert decision.tool_requests[0].tool_name == "external_open_url"
+    assert decision.tool_requests[0].arguments["url"] == "https://github.com/search?q=issue+templates"
+    assert decision.tool_requests[0].arguments["browser_target"] == "chrome"
+    assert decision.structured_query is not None
+    assert decision.structured_query.query_shape.value == "search_browser_destination"
+    assert decision.structured_query.slots["browser_preference"] == "chrome"
+
+
+def test_planner_reports_unknown_browser_search_provider_specifically() -> None:
+    planner = DeterministicPlanner()
+
+    decision = planner.plan(
+        "search orbitz for flights",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "browser_search"
+    assert decision.tool_requests == []
+    assert decision.assistant_message == "I couldn't determine which browser search route to use for that request."
+    assert decision.structured_query is not None
+    assert decision.structured_query.query_shape.value == "search_browser_destination"
+    assert decision.structured_query.slots["browser_search_failure_reason"] == "search_provider_unresolved"
+
+
 def test_planner_reports_browser_open_capability_unavailable_specifically() -> None:
     planner = DeterministicPlanner()
 

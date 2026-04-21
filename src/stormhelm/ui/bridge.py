@@ -62,6 +62,7 @@ class UiBridge(QtCore.QObject):
         self._events: list[dict[str, Any]] = []
         self._notes: list[dict[str, Any]] = []
         self._settings: dict[str, Any] = {}
+        self._tools: list[dict[str, Any]] = []
         self._command_rail_items: list[dict[str, Any]] = []
         self._workspace_rail_items: list[dict[str, Any]] = []
         self._workspace_sections: list[dict[str, Any]] = []
@@ -674,6 +675,16 @@ class UiBridge(QtCore.QObject):
         self._rebuild_surface_models()
         self.collectionsChanged.emit()
 
+    def set_operation_error(self, error: str) -> None:
+        self._pending_activity = None
+        self._pending_chat_echo = None
+        self._pending_chat_anchor_message_id = None
+        self._set_assistant_state("warning")
+        self._status_line = f"Operation issue: {error}"
+        self.statusChanged.emit()
+        self._rebuild_surface_models()
+        self.collectionsChanged.emit()
+
     def set_status_line(self, text: str) -> None:
         self._status_line = text
         self.statusChanged.emit()
@@ -754,6 +765,14 @@ class UiBridge(QtCore.QObject):
         settings = payload.get("settings")
         if isinstance(settings, dict):
             self._settings = dict(settings)
+
+        tools = payload.get("tools")
+        if isinstance(tools, list):
+            self._tools = [dict(item) for item in tools if isinstance(item, dict)]
+
+        active_workspace = payload.get("active_workspace")
+        if isinstance(active_workspace, dict):
+            self._apply_active_workspace_summary(active_workspace)
 
         if self._pending_activity == "chat":
             pending_response = self._pending_chat_response_message(self._history)
@@ -838,13 +857,7 @@ class UiBridge(QtCore.QObject):
         if not isinstance(item, dict):
             return
 
-        normalized_item = dict(item)
-        normalized_item.setdefault("itemId", str(uuid4()))
-        normalized_item.setdefault("kind", "text")
-        normalized_item.setdefault("viewer", normalized_item.get("kind", "text"))
-        normalized_item.setdefault("title", "Untitled")
-        normalized_item.setdefault("subtitle", "")
-        normalized_item["module"] = module
+        normalized_item = self._normalize_workspace_item(item, module=module, section=section)
 
         self._upsert_opened_item(normalized_item)
         self._active_module_key = module
@@ -926,6 +939,13 @@ class UiBridge(QtCore.QObject):
         }
 
     def _apply_workspace_restore(self, action: dict[str, Any]) -> None:
+        self._restore_workspace_state(action)
+        self.modeChanged.emit()
+        self.statusChanged.emit()
+        self._rebuild_surface_models()
+        self.collectionsChanged.emit()
+
+    def _restore_workspace_state(self, action: dict[str, Any]) -> None:
         module = str(action.get("module", "chartroom")).strip().lower() or "chartroom"
         section = str(action.get("section", self._default_workspace_section_key(module))).strip().lower()
         workspace = action.get("workspace")
@@ -937,13 +957,7 @@ class UiBridge(QtCore.QObject):
             for item in items:
                 if not isinstance(item, dict):
                     continue
-                normalized_item = dict(item)
-                normalized_item.setdefault("itemId", str(uuid4()))
-                normalized_item.setdefault("kind", "text")
-                normalized_item.setdefault("viewer", normalized_item.get("kind", "text"))
-                normalized_item.setdefault("title", "Untitled")
-                normalized_item.setdefault("subtitle", "")
-                normalized_item["module"] = str(normalized_item.get("module", module)).strip().lower() or module
+                normalized_item = self._normalize_workspace_item(item, module=module, section=section)
                 self._opened_items.append(normalized_item)
         active_item_id = str(action.get("active_item_id", "")).strip()
         if active_item_id and any(item.get("itemId") == active_item_id for item in self._opened_items):
@@ -955,10 +969,56 @@ class UiBridge(QtCore.QObject):
         self._mode = "deck"
         workspace_name = str(self._workspace_focus.get("name", "workspace")).strip() or "workspace"
         self._status_line = f"Holding {workspace_name} in the Deck."
-        self.modeChanged.emit()
-        self.statusChanged.emit()
-        self._rebuild_surface_models()
-        self.collectionsChanged.emit()
+
+    def _apply_active_workspace_summary(self, summary: dict[str, Any]) -> None:
+        workspace = summary.get("workspace")
+        if not isinstance(workspace, dict) or not workspace:
+            return
+
+        current_workspace_id = str(self._workspace_focus.get("workspaceId", "")).strip()
+        incoming_workspace_id = str(workspace.get("workspaceId", "")).strip()
+        if not current_workspace_id and not self._opened_items:
+            action = summary.get("action")
+            if isinstance(action, dict):
+                self._restore_workspace_state(action)
+                return
+
+        if current_workspace_id and incoming_workspace_id and current_workspace_id != incoming_workspace_id:
+            return
+
+        self._workspace_focus = dict(workspace)
+        if self._opened_items:
+            return
+
+        action = summary.get("action") if isinstance(summary.get("action"), dict) else {}
+        module = str(action.get("module", "chartroom")).strip().lower() or "chartroom"
+        section = str(action.get("section", self._default_workspace_section_key(module))).strip().lower()
+        opened_items = summary.get("opened_items")
+        if not isinstance(opened_items, list):
+            return
+
+        self._opened_items = [
+            self._normalize_workspace_item(item, module=module, section=section)
+            for item in opened_items
+            if isinstance(item, dict)
+        ]
+        active_item = summary.get("active_item") if isinstance(summary.get("active_item"), dict) else {}
+        active_item_id = str(active_item.get("itemId", "")).strip() or str(action.get("active_item_id", "")).strip()
+        if active_item_id and any(item.get("itemId") == active_item_id for item in self._opened_items):
+            self._active_opened_item_id = active_item_id
+        elif self._opened_items and self._active_opened_item_id is None:
+            self._active_opened_item_id = str(self._opened_items[0].get("itemId", "")).strip() or None
+
+    def _normalize_workspace_item(self, item: dict[str, Any], *, module: str, section: str) -> dict[str, Any]:
+        normalized_item = dict(item)
+        normalized_item.setdefault("itemId", str(uuid4()))
+        normalized_item.setdefault("kind", "text")
+        normalized_item.setdefault("viewer", normalized_item.get("kind", "text"))
+        normalized_item.setdefault("title", "Untitled")
+        normalized_item.setdefault("subtitle", "")
+        normalized_item["module"] = str(normalized_item.get("module", module)).strip().lower() or module
+        normalized_item["section"] = str(normalized_item.get("section", section)).strip().lower() or section
+        return normalized_item
 
     def _workspace_surface_cluster(self, surface: str) -> dict[str, Any]:
         surface_content = self._workspace_focus.get("surfaceContent", {})
@@ -1691,6 +1751,9 @@ class UiBridge(QtCore.QObject):
             if subtitle:
                 return subtitle
         if self._active_module_key == "helm":
+            if self._active_workspace_section_key == "safety":
+                shell_label = self._shell_command_label().lower()
+                return f"Read access stays allowlisted to {self._read_scope_label().lower()}, and shell actions remain {shell_label}."
             background_state = str(self._ghost_adaptive_diagnostics.get("backgroundState", "unknown")).replace("-", " ").strip()
             placement_state = str(self._ghost_placement.get("state", "holding")).replace("_", " ").strip()
             anchor_key = str(self._ghost_placement.get("anchorKey", "center")).replace("-", " ").strip()
@@ -1709,6 +1772,8 @@ class UiBridge(QtCore.QObject):
             kind = str(active_item.get("kind", "item")).replace("-", " ")
             return f"Holding a {kind} surface inside the current Stormhelm workspace."
         if self._active_module_key == "helm":
+            if self._active_workspace_section_key == "safety":
+                return f"{self._read_scope_detail()} {self._shell_command_detail()}"
             placement_state = str(self._ghost_placement.get("state", "holding")).replace("_", " ").strip()
             return (
                 "Helm is Stormhelm's integrated settings direction: behavior, presence, shortcuts, "
@@ -1734,9 +1799,15 @@ class UiBridge(QtCore.QObject):
         if self._active_module_key == "signals":
             return "Signals surfaces the most meaningful recent signal without becoming a debug wall."
         if self._active_module_key == "files":
-            return "Files remains a scaffold for curated working sets and native hand-offs in later phases."
+            return (
+                "Files keeps the working set, deck-held documents, and native apps hand-off choices aligned "
+                "for the current mission."
+            )
         if self._active_module_key == "browser":
-            return "Browser remains a future research surface. For now, Stormhelm prepares the structure."
+            return (
+                "Browser keeps research pages, references, and supporting sources close to the current workspace "
+                "while leaving native browser hand-off available when that is the better surface."
+            )
         return "Visual Context remains a reserved tactical surface until screen-aware behavior arrives later."
 
     def _workspace_canvas_chips(self) -> list[dict[str, str]]:
@@ -1755,6 +1826,16 @@ class UiBridge(QtCore.QObject):
                 chips.append({"label": "Source", "value": str(active_item.get("url"))})
             return chips
         if self._active_module_key == "helm":
+            if self._active_workspace_section_key == "safety":
+                return [
+                    {"label": "Read Scope", "value": self._read_scope_label()},
+                    {"label": "Shell Command", "value": self._shell_command_label()},
+                    {"label": "Config Fallback", "value": "portable.toml / user.toml"},
+                    {
+                        "label": "Ghost Contrast",
+                        "value": str(self._ghost_adaptive_diagnostics.get("backgroundState", "unknown")).replace("-", " ").title(),
+                    },
+                ]
             return [
                 {"label": "Ghost Shortcut", "value": self.config.ui.ghost_shortcut},
                 {"label": "Tray Close", "value": "Dormant fade" if self._hide_to_tray_on_close else "Window close"},
@@ -1806,6 +1887,10 @@ class UiBridge(QtCore.QObject):
         if module == "systems":
             return "facts"
         if module == "watch":
+            if section == "timeline":
+                return "signals"
+            if section == "tools":
+                return "collection"
             return "watch"
         if module == "signals":
             return "signals"
@@ -1836,6 +1921,16 @@ class UiBridge(QtCore.QObject):
                 {"label": "Workers", "value": str(watch.get("worker_capacity", self.config.concurrency.max_workers))},
             ]
         if self._active_module_key == "watch":
+            if self._active_workspace_section_key == "tools":
+                catalog = self._tool_inventory_catalog()
+                enabled = sum(1 for tool in catalog if tool["enabled"])
+                categories = {tool["category"] for tool in catalog if tool["category"]}
+                async_count = sum(1 for tool in catalog if tool["execution_mode"] == "async")
+                return [
+                    {"label": "Enabled", "value": str(enabled)},
+                    {"label": "Categories", "value": str(len(categories))},
+                    {"label": "Async", "value": str(async_count)},
+                ]
             watch = self._watch_state()
             return [
                 {"label": "Active Jobs", "value": str(watch.get("active_jobs", 0))},
@@ -2088,6 +2183,8 @@ class UiBridge(QtCore.QObject):
             return self._signal_timeline_entries()
         if self._active_module_key == "logbook":
             return self._logbook_timeline_entries()
+        if self._active_module_key == "watch" and self._active_workspace_section_key == "timeline":
+            return self._watch_timeline_entries()
         if self._active_module_key == "chartroom" and self._active_workspace_section_key == "active-thread":
             return [
                 {
@@ -2108,6 +2205,8 @@ class UiBridge(QtCore.QObject):
         return []
 
     def _workspace_canvas_items(self) -> list[dict[str, Any]]:
+        if self._active_module_key == "watch" and self._active_workspace_section_key == "tools":
+            return self._tool_inventory_items()
         if self._active_module_key == "files":
             surface_items = self._workspace_surface_items("files")
             if surface_items:
@@ -2328,6 +2427,35 @@ class UiBridge(QtCore.QObject):
         tools = self._status.get("tool_state", {})
         return tools if isinstance(tools, dict) else {}
 
+    def _tool_catalog(self) -> dict[str, dict[str, Any]]:
+        catalog: dict[str, dict[str, Any]] = {}
+        for tool in self._tools:
+            if not isinstance(tool, dict):
+                continue
+            name = str(tool.get("name", "")).strip()
+            if not name:
+                continue
+            catalog[name] = dict(tool)
+        return catalog
+
+    def _enabled_tool_names(self) -> set[str]:
+        enabled = self._tool_state().get("enabled_tools", [])
+        if not isinstance(enabled, list):
+            return set()
+        return {str(name).strip() for name in enabled if str(name).strip()}
+
+    def _tool_state_is_explicit(self) -> bool:
+        tool_state = self._tool_state()
+        return "enabled_tools" in tool_state or "enabled_count" in tool_state
+
+    def _tool_enabled(self, tool_name: str) -> bool:
+        enabled_names = self._enabled_tool_names()
+        if enabled_names:
+            return tool_name in enabled_names
+        if self._tool_state_is_explicit():
+            return False
+        return True
+
     def _watch_state(self) -> dict[str, Any]:
         watch = self._status.get("watch_state", {})
         return watch if isinstance(watch, dict) else {}
@@ -2454,6 +2582,8 @@ class UiBridge(QtCore.QObject):
         cpu = resources.get("cpu", {})
         if not isinstance(cpu, dict):
             return ""
+        thermal = resources.get("thermal", {})
+        fans = thermal.get("fans", []) if isinstance(thermal, dict) and isinstance(thermal.get("fans"), list) else []
         cores = int(cpu.get("cores") or 0)
         logical = int(cpu.get("logical_processors") or 0)
         parts = []
@@ -2470,6 +2600,12 @@ class UiBridge(QtCore.QObject):
             parts.append(f"{float(effective_clock):.0f} MHz")
         if isinstance(utilization, (int, float)):
             parts.append(f"{float(utilization):.0f}% load")
+        cpu_fan = next((fan for fan in fans if isinstance(fan, dict) and "cpu" in str(fan.get("label", "")).lower()), None)
+        if isinstance(cpu_fan, dict):
+            if isinstance(cpu_fan.get("rpm"), (int, float)):
+                parts.append(f"{float(cpu_fan['rpm']):.0f} RPM")
+            elif isinstance(cpu_fan.get("duty_percent"), (int, float)):
+                parts.append(f"{float(cpu_fan['duty_percent']):.0f}% fan")
         return " - ".join(parts)
 
     def _gpu_detail_text(self, resources: dict[str, Any]) -> str:
@@ -2477,6 +2613,8 @@ class UiBridge(QtCore.QObject):
         if not isinstance(adapters, list) or not adapters:
             return "No active GPU telemetry"
         primary = adapters[0] if isinstance(adapters[0], dict) else {}
+        thermal = resources.get("thermal", {})
+        fans = thermal.get("fans", []) if isinstance(thermal, dict) and isinstance(thermal.get("fans"), list) else []
         detail_parts: list[str] = []
         if primary.get("driver_version"):
             detail_parts.append(str(primary.get("driver_version")))
@@ -2486,6 +2624,17 @@ class UiBridge(QtCore.QObject):
             detail_parts.append(f"{float(primary['utilization_percent']):.0f}% load")
         if isinstance(primary.get("power_w"), (int, float)):
             detail_parts.append(f"{float(primary['power_w']):.1f} W")
+        if isinstance(primary.get("fan_rpm"), (int, float)):
+            detail_parts.append(f"{float(primary['fan_rpm']):.0f} RPM")
+        elif isinstance(primary.get("fan_percent"), (int, float)):
+            detail_parts.append(f"{float(primary['fan_percent']):.0f}% fan")
+        else:
+            gpu_fan = next((fan for fan in fans if isinstance(fan, dict) and "gpu" in str(fan.get("label", "")).lower()), None)
+            if isinstance(gpu_fan, dict):
+                if isinstance(gpu_fan.get("rpm"), (int, float)):
+                    detail_parts.append(f"{float(gpu_fan['rpm']):.0f} RPM")
+                elif isinstance(gpu_fan.get("duty_percent"), (int, float)):
+                    detail_parts.append(f"{float(gpu_fan['duty_percent']):.0f}% fan")
         return " - ".join(detail_parts)
 
     def _telemetry_status_label(self, hardware: dict[str, Any]) -> str:
@@ -2510,6 +2659,8 @@ class UiBridge(QtCore.QObject):
                 enabled_domains.append("Thermals")
             if capabilities.get("power_current_available"):
                 enabled_domains.append("Power")
+            if capabilities.get("gigabyte_control_center_available") or capabilities.get("amd_ryzen_master_available"):
+                enabled_domains.append("Vendor")
             if enabled_domains:
                 detail_parts.append(", ".join(enabled_domains))
         reason = freshness.get("reason")
@@ -2696,13 +2847,111 @@ class UiBridge(QtCore.QObject):
             return f"Planner {planner} - Reasoner {reasoner}"
         return planner or reasoner or "Provider ready"
 
+    def _tool_display_name(self, tool: dict[str, Any]) -> str:
+        name = str(tool.get("name", "")).strip()
+        display_name = str(tool.get("display_name", "")).strip()
+        if display_name:
+            return display_name
+        return self._module_label(name) if name else "Tool"
+
+    def _tool_classification_label(self, value: str) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized == "read_only":
+            return "Read Only"
+        if normalized == "action":
+            return "Action"
+        if normalized == "development":
+            return "Development"
+        return "General"
+
+    def _tool_category_label(self, value: str) -> str:
+        normalized = str(value or "").replace("_", " ").strip()
+        return normalized.title() if normalized else "General"
+
+    def _tool_inventory_detail(self, tool: dict[str, Any]) -> str:
+        execution_mode = str(tool.get("execution_mode", "sync")).strip().lower() or "sync"
+        recent_jobs = [
+            job
+            for job in self._jobs
+            if str(job.get("tool_name", "")).strip() == str(tool.get("name", "")).strip()
+        ]
+        parts = [f"{execution_mode.title()} execution"]
+        timeout = tool.get("timeout_seconds")
+        if isinstance(timeout, (int, float)) and timeout > 0:
+            parts.append(f"timeout {float(timeout):g}s")
+        if recent_jobs:
+            last_job = recent_jobs[0]
+            last_status = str(last_job.get("status", "unknown")).replace("_", " ").strip().lower() or "unknown"
+            last_time = self._short_time(str(last_job.get("finished_at") or last_job.get("started_at") or last_job.get("created_at", "")))
+            activity = f"{len(recent_jobs)} recent job{'s' if len(recent_jobs) != 1 else ''}"
+            if last_time:
+                parts.append(f"{activity}; last {last_status} at {last_time}")
+            else:
+                parts.append(f"{activity}; last {last_status}")
+        else:
+            parts.append("No recent jobs")
+        if not bool(tool.get("enabled", False)):
+            parts.append("Disabled in this runtime")
+        return ". ".join(parts) + "."
+
+    def _safety_settings(self) -> dict[str, Any]:
+        safety = self._settings.get("safety", {})
+        return dict(safety) if isinstance(safety, dict) else {}
+
+    def _allowed_read_dirs(self) -> list[str]:
+        safety = self._safety_settings()
+        configured = safety.get("allowed_read_dirs")
+        if isinstance(configured, list):
+            paths = [str(path).strip() for path in configured if str(path).strip()]
+            if paths:
+                return paths
+        return [str(path) for path in self.config.safety.allowed_read_dirs if str(path).strip()]
+
+    def _read_scope_label(self) -> str:
+        allowed = self._allowed_read_dirs()
+        count = len(allowed)
+        if count <= 0:
+            return "No allowlisted roots"
+        return f"{count} allowlisted root{'s' if count != 1 else ''}"
+
+    def _read_scope_detail(self) -> str:
+        allowed = self._allowed_read_dirs()
+        if not allowed:
+            return "Stormhelm does not currently hold any configured read roots."
+        shown = ", ".join(allowed[:3])
+        if len(allowed) > 3:
+            shown = f"{shown}, +{len(allowed) - 3} more"
+        return f"Stormhelm can read inside {shown}."
+
+    def _shell_command_label(self) -> str:
+        safety = self._safety_settings()
+        if "allow_shell_stub" in safety:
+            enabled = bool(safety.get("allow_shell_stub"))
+        else:
+            enabled = bool(self.config.safety.allow_shell_stub)
+        return "Stub only" if enabled else "Disabled"
+
+    def _shell_command_detail(self) -> str:
+        if self._shell_command_label() == "Stub only":
+            return "Shell requests stay behind the stub gate and do not enable unrestricted execution."
+        return "Shell execution stays unavailable unless the safety policy explicitly enables the stub."
+
     def _tools_detail(self, tool_state: dict[str, Any]) -> str:
         if not isinstance(tool_state, dict):
             return "No enabled tools"
-        enabled = tool_state.get("enabled_tools", [])
-        if not isinstance(enabled, list) or not enabled:
+        enabled = [str(name).strip() for name in tool_state.get("enabled_tools", []) if str(name).strip()]
+        if not enabled:
             return "No enabled tools"
-        return ", ".join(str(tool) for tool in enabled[:3])
+        catalog = self._tool_catalog()
+        labels = [
+            self._tool_display_name(catalog.get(name, {"name": name}))
+            for name in enabled[:3]
+        ]
+        detail = ", ".join(label for label in labels if label)
+        remaining = max(0, len(enabled) - len(labels))
+        if remaining > 0:
+            detail = f"{detail}, +{remaining} more"
+        return detail or "No enabled tools"
 
     def _job_lane_entries(self, statuses: set[str]) -> list[dict[str, Any]]:
         entries = [
@@ -2892,6 +3141,41 @@ class UiBridge(QtCore.QObject):
 
     def _workspace_canvas_columns(self) -> list[dict[str, Any]]:
         if self._active_module_key == "helm":
+            if self._active_workspace_section_key == "safety":
+                return [
+                    self._workspace_column(
+                        "Access Policy",
+                        "Backend-provided read boundaries and shell posture.",
+                        [
+                            {
+                                "primary": "Read Scope",
+                                "secondary": self._read_scope_label(),
+                                "detail": self._read_scope_detail(),
+                            },
+                            {
+                                "primary": "Shell Command",
+                                "secondary": self._shell_command_label(),
+                                "detail": self._shell_command_detail(),
+                            },
+                        ],
+                    ),
+                    self._workspace_column(
+                        "Control Surface",
+                        "How policy changes reach the running shell.",
+                        [
+                            {
+                                "primary": "Config Fallback",
+                                "secondary": "portable.toml / user.toml",
+                                "detail": "Advanced policy still lives in config files for deliberate edits.",
+                            },
+                            {
+                                "primary": "Close Behavior",
+                                "secondary": "Fade to tray" if self._hide_to_tray_on_close else "Exit window",
+                                "detail": "Quick controls stay in the tray while Helm carries the fuller posture.",
+                            },
+                        ],
+                    ),
+                ]
             return [
                 self._workspace_column(
                     "Presence",
@@ -3014,10 +3298,11 @@ class UiBridge(QtCore.QObject):
             return [
                 self._workspace_column(
                     "Working Set",
-                    "Curated files will gather here later.",
+                    "Held files, safe reads, and hand-off posture for the current mission.",
                     [
                         {"primary": "Safe Reads", "secondary": "Enabled", "detail": "The file reader remains allowlist-bound."},
-                        {"primary": "Native Hand-off", "secondary": "Preferred", "detail": "Stormhelm should still lean on Explorer and default apps when appropriate."},
+                        {"primary": "Deck Working Set", "secondary": "Active", "detail": "Files opened inside Stormhelm stay attached to the current workspace."},
+                        {"primary": "Native Hand-off", "secondary": "Available", "detail": "Stormhelm should still lean on Explorer and default apps when appropriate."},
                     ],
                 )
             ]
@@ -3026,10 +3311,11 @@ class UiBridge(QtCore.QObject):
             return [
                 self._workspace_column(
                     "Research Bearings",
-                    "Reference work remains intentionally lightweight in this phase.",
+                    "Research pages, cited material, and browser hand-off posture for the active workspace.",
                     [
-                        {"primary": "External Browser", "secondary": "Current path", "detail": "Stormhelm opens and accompanies the native browser instead of replacing it yet."},
-                        {"primary": "Sources", "secondary": "Future surface", "detail": "A fuller cited workspace will arrive in a later pass."},
+                        {"primary": "Deck Pages", "secondary": "Held Internally", "detail": "Stormhelm can keep the pages that matter inside the Deck for active work."},
+                        {"primary": "External Browser", "secondary": "Still Available", "detail": "Native browser hand-off remains the better path when the full external surface is needed."},
+                        {"primary": "Sources", "secondary": "Workspace Support", "detail": "References and evidence travel with the workspace instead of disappearing into a tab strip."},
                     ],
                 )
             ]
@@ -3109,10 +3395,15 @@ class UiBridge(QtCore.QObject):
                 "title": "Helm",
                 "eyebrow": "Configuration",
                 "headline": "Stormhelm behavior, presence, and settings direction",
-                "body": "Helm is where behavior, presence, hotkeys, and user-facing configuration will live. The tray stays reserved for quick controls, while config files remain the advanced fallback.",
+                "body": (
+                    "Helm is where behavior, presence, hotkeys, and policy surface in the deck. "
+                    f"Read scope is {self._read_scope_label().lower()} and shell command access is {self._shell_command_label().lower()}."
+                ),
                 "entries": [
                     {"primary": "Ghost Shortcut", "secondary": self.config.ui.ghost_shortcut, "detail": "Summons Ghost text capture from anywhere."},
                     {"primary": "Tray Close", "secondary": "Fade to dormant" if self._hide_to_tray_on_close else "Close window", "detail": "Quick controls belong in the tray, not a full settings dashboard."},
+                    {"primary": "Read Scope", "secondary": self._read_scope_label(), "detail": self._read_scope_detail()},
+                    {"primary": "Shell Command", "secondary": self._shell_command_label(), "detail": self._shell_command_detail()},
                     {"primary": "Config Fallback", "secondary": "portable.toml / user.toml", "detail": "Advanced and power-user behavior remains file-backed."},
                 ],
             }
@@ -3314,6 +3605,75 @@ class UiBridge(QtCore.QObject):
             "sections": self._workspace_canvas_watch_lanes(),
             "entries": watch_entries,
         }
+
+    def _tool_inventory_catalog(self) -> list[dict[str, Any]]:
+        catalog = self._tool_catalog()
+        tool_names = set(catalog)
+        tool_names.update(self._enabled_tool_names())
+        inventory: list[dict[str, Any]] = []
+        for name in tool_names:
+            metadata = dict(catalog.get(name, {"name": name}))
+            metadata.setdefault("display_name", self._module_label(name))
+            inventory.append(
+                {
+                    "name": name,
+                    "display_name": self._tool_display_name(metadata),
+                    "description": str(metadata.get("description", "")).strip(),
+                    "category": str(metadata.get("category", "")).strip(),
+                    "classification": str(metadata.get("classification", "")).strip(),
+                    "execution_mode": str(metadata.get("execution_mode", "sync")).strip() or "sync",
+                    "timeout_seconds": metadata.get("timeout_seconds"),
+                    "enabled": self._tool_enabled(name),
+                }
+            )
+        inventory.sort(key=lambda item: (not item["enabled"], item["display_name"].lower()))
+        return inventory
+
+    def _tool_inventory_items(self) -> list[dict[str, Any]]:
+        catalog = self._tool_inventory_catalog()
+        if not catalog:
+            return [
+                {
+                    "title": "No tool catalog yet",
+                    "badge": "Unavailable",
+                    "subtitle": "Watch Tools",
+                    "role": "Stormhelm has not received any tool metadata from the backend snapshot yet.",
+                    "detail": "A fresh snapshot should repopulate the capability inventory.",
+                }
+            ]
+        return [
+            {
+                "title": tool["display_name"],
+                "badge": self._tool_classification_label(tool["classification"]),
+                "subtitle": f"{self._tool_category_label(tool['category'])} - {'Enabled' if tool['enabled'] else 'Disabled'}",
+                "role": tool["description"] or "No description available.",
+                "detail": self._tool_inventory_detail(tool),
+            }
+            for tool in catalog
+        ]
+
+    def _watch_timeline_entries(self) -> list[dict[str, Any]]:
+        if self._jobs:
+            catalog = self._tool_catalog()
+            return [
+                {
+                    "title": self._tool_display_name(catalog.get(str(job.get("tool_name", "")).strip(), {"name": str(job.get("tool_name", ""))})),
+                    "eyebrow": str(job.get("status", "pending")).replace("_", " ").title(),
+                    "meta": self._short_time(str(job.get("finished_at") or job.get("started_at") or job.get("created_at", ""))),
+                    "detail": self._job_detail(job),
+                    "severity": self._job_severity(str(job.get("status", ""))),
+                }
+                for job in self._jobs[:10]
+            ]
+        return [
+            {
+                "title": "No recent jobs",
+                "eyebrow": "Watch",
+                "meta": "",
+                "detail": "Recent tool executions will appear here once the worker deck has movement.",
+                "severity": "steady",
+            }
+        ]
 
     def _build_files_module(self) -> dict[str, Any]:
         active_title = str(self._get_active_opened_item().get("title", "No active item"))

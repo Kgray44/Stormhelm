@@ -98,6 +98,49 @@ class InputContextProvider(AssistantProvider):
         return ProviderTurnResult(response_id="resp_ctx", output_text="Summarized the selection.", tool_calls=[])
 
 
+class BrowserSearchFallbackProvider(AssistantProvider):
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def generate(
+        self,
+        *,
+        instructions: str,
+        input_items: str | list[dict[str, object]],
+        previous_response_id: str | None,
+        tools: list[dict[str, object]],
+        model: str | None = None,
+        max_output_tokens: int | None = None,
+    ) -> ProviderTurnResult:
+        self.calls.append(
+            {
+                "instructions": instructions,
+                "input_items": input_items,
+                "previous_response_id": previous_response_id,
+                "tool_names": [tool["name"] for tool in tools],
+                "model": model,
+                "max_output_tokens": max_output_tokens,
+            }
+        )
+        return ProviderTurnResult(
+            response_id="resp_browser_search_fallback",
+            output_text="",
+            tool_calls=[
+                ProviderToolCall(
+                    call_id="call_browser_search_fallback",
+                    name="browser_search_fallback_resolve",
+                    arguments={
+                        "resolved_url": "https://www.google.com/search?q=site%3Aorbitz.com+flights",
+                        "title": "Orbitz search",
+                        "resolution_kind": "site_search",
+                        "provider_phrase": "orbitz",
+                        "reason": "Resolved the provider to orbitz.com and built a site search URL.",
+                    },
+                )
+            ],
+        )
+
+
 class FakeConversationRecord:
     def __init__(self, *, role: str, content: str, metadata: dict[str, object] | None = None) -> None:
         self.role = role
@@ -2242,3 +2285,44 @@ def test_assistant_orchestrator_keeps_app_launch_and_web_search_distinct_from_br
     assert search_payload["actions"][0]["type"] == "open_external"
     assert search_payload["actions"][0]["url"] == "https://www.youtube.com/results?search_query=cats"
     assert search_obedience["authority_enforced"] is True
+
+
+def test_assistant_orchestrator_uses_nano_browser_search_fallback_for_unresolved_provider(temp_config) -> None:
+    provider = BrowserSearchFallbackProvider()
+    temp_config.openai.enabled = True
+    temp_config.openai.planner_model = "gpt-5.4-nano"
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+    assistant.provider = provider
+
+    payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="search orbitz for flights in chrome",
+        surface_mode="ghost",
+        active_module="chartroom",
+    )
+    planner_debug = _planner_debug(payload)
+    planner_obedience = _planner_obedience(payload)
+    metadata = payload["assistant_message"]["metadata"]
+
+    assert planner_debug["structured_query"]["query_shape"] == "search_browser_destination"
+    assert planner_debug["execution_plan"]["plan_type"] == "resolve_search_url_then_open_in_browser"
+    assert planner_debug["structured_query"]["slots"]["browser_search_failure_reason"] == "search_provider_unresolved"
+    assert planner_debug["structured_query"]["slots"]["browser_search_fallback"]["used"] is True
+    assert planner_debug["structured_query"]["slots"]["browser_search_fallback"]["resolution_kind"] == "site_search"
+    assert payload["jobs"][0]["tool_name"] == "external_open_url"
+    assert payload["jobs"][0]["arguments"]["url"] == "https://www.google.com/search?q=site%3Aorbitz.com+flights"
+    assert payload["jobs"][0]["arguments"]["browser_target"] == "chrome"
+    assert payload["actions"][0]["type"] == "open_external"
+    assert payload["actions"][0]["url"] == "https://www.google.com/search?q=site%3Aorbitz.com+flights"
+    assert payload["actions"][0]["browser_target"] == "chrome"
+    assert metadata["bearing_title"] == "Orbitz search opened"
+    assert metadata["micro_response"] == "Opened Orbitz search in the browser."
+    assert metadata["full_response"] == "Resolved the search URL and opened it in the browser."
+    assert planner_obedience["actual_tool_names"] == ["external_open_url"]
+    assert planner_obedience["authority_enforced"] is True
+    assert provider.calls
+    assert provider.calls[0]["model"] == "gpt-5.4-nano"
+    assert provider.calls[0]["previous_response_id"] is None
+    assert provider.calls[0]["tool_names"] == ["browser_search_fallback_resolve"]

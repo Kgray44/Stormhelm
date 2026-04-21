@@ -27,6 +27,7 @@ class QueryShape(StrEnum):
     IDENTITY_LOOKUP = "identity_lookup"
     CONTROL_COMMAND = "control_command"
     OPEN_BROWSER_DESTINATION = "open_browser_destination"
+    SEARCH_BROWSER_DESTINATION = "search_browser_destination"
     REPAIR_REQUEST = "repair_request"
     SEARCH_REQUEST = "search_request"
     SEARCH_AND_OPEN = "search_and_open"

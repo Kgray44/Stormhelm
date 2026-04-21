@@ -8,6 +8,7 @@ from stormhelm.core.intelligence.language import normalize_phrase
 from stormhelm.core.orchestrator.browser_destinations import BrowserDestinationResolver
 from stormhelm.core.orchestrator.browser_destinations import BrowserIntentType
 from stormhelm.core.orchestrator.browser_destinations import BrowserOpenFailureReason
+from stormhelm.core.orchestrator.browser_destinations import BrowserSearchFailureReason
 from stormhelm.core.orchestrator.planner_models import CapabilityPlan
 from stormhelm.core.orchestrator.planner_models import ClarificationReason
 from stormhelm.core.orchestrator.planner_models import ExecutionPlan
@@ -772,6 +773,9 @@ class DeterministicPlanner:
         browser_destination = self._browser_destination_request(message, lower, surface_mode=normalized.surface_mode)
         if browser_destination is not None:
             return browser_destination
+        browser_search = self._browser_search_request(message, lower, surface_mode=normalized.surface_mode)
+        if browser_search is not None:
+            return browser_search
         search_request = self._desktop_search_request(message, lower, surface_mode=normalized.surface_mode)
         if search_request is not None:
             action = str(search_request.get("action") or "search")
@@ -1408,6 +1412,10 @@ class DeterministicPlanner:
             output_mode = output_mode or ResponseMode.ACTION_RESULT.value
             output_type = output_type or "action"
             execution_type = execution_type or "resolve_url_then_open_in_browser"
+        elif query_shape == QueryShape.SEARCH_BROWSER_DESTINATION:
+            output_mode = output_mode or ResponseMode.ACTION_RESULT.value
+            output_type = output_type or "action"
+            execution_type = execution_type or "resolve_search_url_then_open_in_browser"
         elif query_shape == QueryShape.REPAIR_REQUEST:
             output_mode = output_mode or ResponseMode.ACTION_RESULT.value
             output_type = output_type or "action"
@@ -1452,7 +1460,7 @@ class DeterministicPlanner:
             capability_requirements.append("diagnostic_telemetry")
         elif query_shape == QueryShape.HISTORY_TREND:
             capability_requirements.append("history_telemetry")
-        elif query_shape == QueryShape.OPEN_BROWSER_DESTINATION:
+        elif query_shape in {QueryShape.OPEN_BROWSER_DESTINATION, QueryShape.SEARCH_BROWSER_DESTINATION}:
             capability_requirements.append("browser_open")
         elif query_shape in {QueryShape.CONTROL_COMMAND, QueryShape.REPAIR_REQUEST, QueryShape.WORKFLOW_REQUEST, QueryShape.ROUTINE_REQUEST, QueryShape.MAINTENANCE_REQUEST, QueryShape.FILE_OPERATION, QueryShape.CONTEXT_ACTION}:
             capability_requirements.append("action_execution")
@@ -1552,7 +1560,7 @@ class DeterministicPlanner:
             missing_capabilities.append(tool_name)
             unsupported_code = "tool_unavailable"
             unsupported_message = f"{tool_name} isn't available in the current environment."
-            if structured_query.query_shape == QueryShape.OPEN_BROWSER_DESTINATION:
+            if structured_query.query_shape in {QueryShape.OPEN_BROWSER_DESTINATION, QueryShape.SEARCH_BROWSER_DESTINATION}:
                 unsupported_code = "browser_opening_unavailable"
                 unsupported_message = "Browser opening isn't available in the current environment."
             return CapabilityPlan(
@@ -1826,6 +1834,7 @@ class DeterministicPlanner:
             "deterministic_diagnostic_request",
             "follow_up_grounded",
             "direct_action",
+            "browser_search",
             "unsupported_capability",
             "clarification_request",
             "guardrail_clarify",
@@ -2768,6 +2777,95 @@ class DeterministicPlanner:
             evidence=evidence,
             assistant_message=response_contract["full_response"],
             execution_type="resolve_url_then_open_in_browser",
+            output_mode=ResponseMode.ACTION_RESULT.value,
+            slots=slots,
+        )
+
+    def _browser_search_request(
+        self,
+        message: str,
+        lower: str,
+        *,
+        surface_mode: str,
+    ) -> SemanticParseProposal | None:
+        if self._browser_destination_resolver.intent_type(lower) != BrowserIntentType.SEARCH_REQUEST:
+            return None
+        request = self._browser_destination_resolver.parse_search(message, surface_mode=surface_mode)
+        if request is None:
+            return None
+
+        resolution = self._browser_destination_resolver.resolve_search(request)
+        failure_reason = resolution.failure_reason or BrowserSearchFailureReason.SEARCH_PROVIDER_UNRESOLVED
+        response_contract = (
+            self._browser_destination_resolver.response_contract_for_search_success(resolution)
+            if resolution.success
+            else self._browser_destination_resolver.response_contract_for_search_failure(failure_reason)
+        )
+        slots: dict[str, Any] = {
+            "target_scope": "browser",
+            "browser_intent_type": request.intent_type.value,
+            "search_provider": request.provider_key or "unresolved",
+            "requested_search_provider_phrase": request.provider_phrase or request.provider_key or "",
+            "search_query": request.query,
+            "browser_preference": request.browser_preference,
+            "open_target": request.open_target,
+            "browser_search_request": request.to_dict(),
+            "search_resolution": resolution.to_dict(),
+            "response_contract": dict(response_contract),
+            "unsupported_response_contract": self._browser_destination_resolver.response_contract_for_search_failure(
+                BrowserSearchFailureReason.BROWSER_OPEN_UNAVAILABLE
+            ),
+            "legacy_routes_bypassed": {
+                "desktop_search": True,
+                "app_control": True,
+                "browser_destination": True,
+            },
+        }
+        evidence = [
+            "browser search intent detected",
+            "desktop-search route bypassed",
+            "app-control route bypassed",
+            "browser-destination route bypassed",
+            *resolution.notes,
+        ]
+        if resolution.success and resolution.provider is not None:
+            open_plan = self._browser_destination_resolver.build_search_open_plan(resolution)
+            slots.update(
+                {
+                    "known_search_provider_mapping": resolution.provider.to_dict(),
+                    "search_resolution_kind": resolution.resolution_kind,
+                    "search_site_domain": resolution.site_domain,
+                    "browser_open_plan": open_plan.to_dict(),
+                }
+            )
+            return self._tool_proposal(
+                query_shape=QueryShape.SEARCH_BROWSER_DESTINATION,
+                domain="browser",
+                tool_name=open_plan.tool_name,
+                tool_arguments=open_plan.tool_arguments,
+                request_type_hint="browser_search",
+                family="browser_search",
+                subject=resolution.provider.key,
+                requested_action="search_browser_destination",
+                confidence=0.96,
+                evidence=evidence,
+                execution_type="resolve_search_url_then_open_in_browser",
+                output_mode=ResponseMode.ACTION_RESULT.value,
+                slots=slots,
+            )
+
+        slots["browser_search_failure_reason"] = failure_reason.value
+        return self._tool_proposal(
+            query_shape=QueryShape.SEARCH_BROWSER_DESTINATION,
+            domain="browser",
+            request_type_hint="browser_search",
+            family="browser_search",
+            subject=request.query or request.provider_key or "browser_search",
+            requested_action="search_browser_destination",
+            confidence=0.9,
+            evidence=evidence,
+            assistant_message=response_contract["full_response"],
+            execution_type="resolve_search_url_then_open_in_browser",
             output_mode=ResponseMode.ACTION_RESULT.value,
             slots=slots,
         )

@@ -117,6 +117,87 @@ def test_ui_bridge_applies_snapshot_to_context_cards_and_modules(temp_config) ->
     assert bridge.workspaceCanvas["columns"][0]["title"] == "Active Thread"
 
 
+def test_ui_bridge_applies_snapshot_active_workspace_restore_on_cold_start(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+    active_workspace = {
+        "workspace": {
+            "workspaceId": "ws-research",
+            "name": "Research Workspace",
+            "topic": "research",
+            "summary": "Hold active references and findings together.",
+        },
+        "opened_items": [
+            {
+                "itemId": "page-1",
+                "kind": "browser",
+                "viewer": "browser",
+                "title": "OpenAI Docs",
+                "url": "https://platform.openai.com/docs",
+                "module": "browser",
+                "section": "open-pages",
+            },
+            {
+                "itemId": "file-1",
+                "kind": "markdown",
+                "viewer": "markdown",
+                "title": "notes.md",
+                "path": "C:/Stormhelm/notes.md",
+                "module": "files",
+                "section": "opened-items",
+            },
+        ],
+        "active_item": {
+            "itemId": "page-1",
+            "kind": "browser",
+            "viewer": "browser",
+            "title": "OpenAI Docs",
+            "url": "https://platform.openai.com/docs",
+            "module": "browser",
+            "section": "open-pages",
+        },
+        "action": {
+            "type": "workspace_restore",
+            "module": "browser",
+            "section": "open-pages",
+            "workspace": {
+                "workspaceId": "ws-research",
+                "name": "Research Workspace",
+                "topic": "research",
+                "summary": "Hold active references and findings together.",
+            },
+            "items": [
+                {
+                    "itemId": "page-1",
+                    "kind": "browser",
+                    "viewer": "browser",
+                    "title": "OpenAI Docs",
+                    "url": "https://platform.openai.com/docs",
+                    "module": "browser",
+                    "section": "open-pages",
+                },
+                {
+                    "itemId": "file-1",
+                    "kind": "markdown",
+                    "viewer": "markdown",
+                    "title": "notes.md",
+                    "path": "C:/Stormhelm/notes.md",
+                    "module": "files",
+                    "section": "opened-items",
+                },
+            ],
+            "active_item_id": "page-1",
+        },
+    }
+
+    bridge.apply_snapshot({"active_workspace": active_workspace})
+
+    assert bridge.mode_value == "deck"
+    assert bridge.active_module_key == "browser"
+    assert bridge.workspaceCanvas["title"] == "Research Workspace"
+    assert bridge.activeOpenedItem["itemId"] == "page-1"
+    assert bridge.workspace_context_payload()["workspace"]["workspaceId"] == "ws-research"
+
+
 def test_ui_bridge_systems_uses_machine_runtime_state_slice(temp_config) -> None:
     bridge = UiBridge(temp_config)
     bridge.apply_snapshot(
@@ -605,6 +686,30 @@ def test_ui_bridge_workspace_open_actions_create_opened_items(temp_config) -> No
     assert bridge.workspaceCanvas["openedItems"][0]["title"] == "OpenAI Docs"
 
 
+def test_ui_bridge_workspace_open_actions_preserve_surface_section_in_context(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+
+    bridge.apply_action(
+        {
+            "type": "workspace_open",
+            "module": "browser",
+            "section": "open-pages",
+            "item": {
+                "itemId": "page-1",
+                "kind": "browser",
+                "viewer": "browser",
+                "title": "OpenAI Docs",
+                "url": "https://platform.openai.com/docs",
+            },
+        }
+    )
+
+    context = bridge.workspace_context_payload()
+
+    assert context["opened_items"][0]["section"] == "open-pages"
+    assert context["active_item"]["section"] == "open-pages"
+
+
 def test_ui_bridge_workspace_restore_replaces_opened_items_and_tracks_focus(temp_config) -> None:
     bridge = UiBridge(temp_config)
 
@@ -888,6 +993,22 @@ def test_ui_bridge_signals_prefer_structured_signal_state_when_available(temp_co
 
     assert bridge.workspaceCanvas["timeline"][0]["title"] == "Wi-Fi instability detected"
     assert "local link" in bridge.workspaceCanvas["timeline"][0]["detail"].lower()
+
+
+def test_ui_bridge_browser_and_files_surfaces_describe_live_deck_capabilities(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+
+    bridge.activateModule("browser")
+    browser_body = bridge.workspaceCanvas["body"].lower()
+    assert "future" not in browser_body
+    assert "references" in browser_body
+    assert "browser hand-off" in browser_body
+
+    bridge.activateModule("files")
+    files_body = bridge.workspaceCanvas["body"].lower()
+    assert "scaffold" not in files_body
+    assert "working set" in files_body
+    assert "native apps" in files_body
 
 
 def test_ui_bridge_workspace_local_sections_are_materially_distinct(temp_config) -> None:

@@ -21,6 +21,8 @@ NATIVE_PROVIDER_NAME = "windows_native"
 HWINFO_PROVIDER_NAME = "hwinfo_enrichment"
 NVIDIA_SMI_PROVIDER_NAME = "nvidia_smi"
 LIBRE_HARDWARE_MONITOR_PROVIDER_NAME = "libre_hardware_monitor"
+GIGABYTE_CONTROL_CENTER_PROVIDER_NAME = "gigabyte_control_center"
+AMD_RYZEN_MASTER_PROVIDER_NAME = "amd_ryzen_master"
 
 
 def helper_cache_ttl_seconds(config: AppConfig, sampling_tier: str) -> float:
@@ -46,6 +48,8 @@ def build_disabled_snapshot(*, sampling_tier: str = "idle", reason: str = "disab
             "hwinfo_enrichment_active": False,
             "nvidia_smi_available": False,
             "libre_hardware_monitor_available": False,
+            "gigabyte_control_center_available": False,
+            "amd_ryzen_master_available": False,
         }
     )
     snapshot["freshness"]["reason"] = reason
@@ -73,6 +77,8 @@ def build_helper_unreachable_snapshot(
             "hwinfo_enrichment_active": False,
             "nvidia_smi_available": False,
             "libre_hardware_monitor_available": False,
+            "gigabyte_control_center_available": False,
+            "amd_ryzen_master_available": False,
         }
     )
     snapshot["freshness"]["reason"] = reason
@@ -376,6 +382,8 @@ def collect_helper_snapshot(config: AppConfig, *, sampling_tier: str = "active")
         NATIVE_PROVIDER_NAME: lambda: _run_provider_collector(NATIVE_PROVIDER_NAME, lambda: _collect_windows_native(config)),
         NVIDIA_SMI_PROVIDER_NAME: lambda: _run_provider_collector(NVIDIA_SMI_PROVIDER_NAME, lambda: _collect_nvidia_gpu(config)),
         LIBRE_HARDWARE_MONITOR_PROVIDER_NAME: lambda: _run_provider_collector(LIBRE_HARDWARE_MONITOR_PROVIDER_NAME, lambda: _collect_libre_hardware_monitor(config)),
+        GIGABYTE_CONTROL_CENTER_PROVIDER_NAME: lambda: _run_provider_collector(GIGABYTE_CONTROL_CENTER_PROVIDER_NAME, lambda: _collect_gigabyte_control_center(config)),
+        AMD_RYZEN_MASTER_PROVIDER_NAME: lambda: _run_provider_collector(AMD_RYZEN_MASTER_PROVIDER_NAME, lambda: _collect_amd_ryzen_master(config)),
     }
     provider_results: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
     with ThreadPoolExecutor(max_workers=len(provider_jobs)) as executor:
@@ -385,19 +393,32 @@ def collect_helper_snapshot(config: AppConfig, *, sampling_tier: str = "active")
     native_payload, native_debug = provider_results[NATIVE_PROVIDER_NAME]
     nvidia_payload, nvidia_debug = provider_results[NVIDIA_SMI_PROVIDER_NAME]
     lhm_payload, lhm_debug = provider_results[LIBRE_HARDWARE_MONITOR_PROVIDER_NAME]
+    gigabyte_payload, gigabyte_debug = provider_results[GIGABYTE_CONTROL_CENTER_PROVIDER_NAME]
+    amd_payload, amd_debug = provider_results[AMD_RYZEN_MASTER_PROVIDER_NAME]
 
     snapshot["debug"]["providers"] = {
         NATIVE_PROVIDER_NAME: native_debug,
         NVIDIA_SMI_PROVIDER_NAME: nvidia_debug,
         LIBRE_HARDWARE_MONITOR_PROVIDER_NAME: lhm_debug,
+        GIGABYTE_CONTROL_CENTER_PROVIDER_NAME: gigabyte_debug,
+        AMD_RYZEN_MASTER_PROVIDER_NAME: amd_debug,
+    }
+    snapshot["debug"]["provider_payloads"] = {
+        NATIVE_PROVIDER_NAME: _provider_debug_payload(native_payload),
+        NVIDIA_SMI_PROVIDER_NAME: _provider_debug_payload(nvidia_payload),
+        LIBRE_HARDWARE_MONITOR_PROVIDER_NAME: _provider_debug_payload(lhm_payload),
+        GIGABYTE_CONTROL_CENTER_PROVIDER_NAME: _provider_debug_payload(gigabyte_payload),
+        AMD_RYZEN_MASTER_PROVIDER_NAME: _provider_debug_payload(amd_payload),
     }
     snapshot["sources"][NATIVE_PROVIDER_NAME] = _provider_source_entry(native_payload, native_debug)
     snapshot["sources"][NVIDIA_SMI_PROVIDER_NAME] = _provider_source_entry(nvidia_payload, nvidia_debug)
     snapshot["sources"][LIBRE_HARDWARE_MONITOR_PROVIDER_NAME] = _provider_source_entry(lhm_payload, lhm_debug)
+    snapshot["sources"][GIGABYTE_CONTROL_CENTER_PROVIDER_NAME] = _provider_source_entry(gigabyte_payload, gigabyte_debug)
+    snapshot["sources"][AMD_RYZEN_MASTER_PROVIDER_NAME] = _provider_source_entry(amd_payload, amd_debug)
 
-    snapshot["cpu"] = _merge_cpu_telemetry(snapshot, native_payload, lhm_payload)
+    snapshot["cpu"] = _merge_cpu_telemetry(snapshot, native_payload, lhm_payload, gigabyte_payload, amd_payload)
     snapshot["gpu"] = _merge_gpu_telemetry(snapshot, native_payload, nvidia_payload, lhm_payload)
-    snapshot["thermal"] = _merge_thermal_telemetry(snapshot, native_payload, lhm_payload)
+    snapshot["thermal"] = _merge_thermal_telemetry(snapshot, native_payload, lhm_payload, gigabyte_payload, amd_payload)
     snapshot["power"] = _merge_power_telemetry(snapshot, native_payload)
 
     history = _load_history(config)
@@ -447,6 +468,8 @@ def collect_helper_snapshot(config: AppConfig, *, sampling_tier: str = "active")
             "power_current_available": _metric_available(snapshot, "power.battery_current_ma"),
             "nvidia_smi_available": str(nvidia_debug.get("state") or "").strip().lower() == "ready",
             "libre_hardware_monitor_available": str(lhm_debug.get("state") or "").strip().lower() == "ready",
+            "gigabyte_control_center_available": str(gigabyte_debug.get("state") or "").strip().lower() in {"ready", "partial"},
+            "amd_ryzen_master_available": str(amd_debug.get("state") or "").strip().lower() in {"ready", "partial"},
             "hwinfo_enrichment_available": bool(hwinfo_path and hwinfo_path.exists()),
             "hwinfo_enrichment_active": False,
         }
@@ -486,6 +509,8 @@ def _empty_snapshot(*, sampling_tier: str) -> dict[str, Any]:
             "hwinfo_enrichment_active": False,
             "nvidia_smi_available": False,
             "libre_hardware_monitor_available": False,
+            "gigabyte_control_center_available": False,
+            "amd_ryzen_master_available": False,
         },
         "sources": {"metrics": {}},
         "freshness": {"sampled_at": datetime.now(UTC).isoformat(), "sample_age_seconds": 0.0, "sampling_tier": str(sampling_tier or "active").strip().lower() or "active", "rolling_window_available": False},
@@ -521,6 +546,49 @@ def _provider_source_entry(payload: dict[str, Any], debug: dict[str, Any]) -> di
     }
 
 
+def _provider_debug_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    debug_payload: dict[str, Any] = {
+        "provider": str(payload.get("provider") or "").strip(),
+        "state": str(payload.get("state") or "").strip(),
+        "detail": str(payload.get("detail") or "").strip(),
+    }
+    for key in ("metrics", "cpu", "gpu", "thermal", "power", "platform"):
+        value = payload.get(key)
+        if isinstance(value, (dict, list)) and value:
+            debug_payload[key] = deepcopy(value)
+    inventory = payload.get("inventory")
+    if isinstance(inventory, dict):
+        hardware = inventory.get("hardware")
+        sensors = inventory.get("sensors")
+        methods = inventory.get("methods")
+        artifacts = inventory.get("artifacts")
+        global_objects = inventory.get("global_objects")
+        getter_status = inventory.get("getter_status")
+        callback_messages = inventory.get("callback_messages")
+        inventory_debug: dict[str, Any] = {}
+        if isinstance(hardware, list) and hardware:
+            inventory_debug["hardware"] = deepcopy(hardware[:16])
+            inventory_debug["hardware_count"] = len(hardware)
+        if isinstance(sensors, list) and sensors:
+            inventory_debug["sensor_preview"] = deepcopy(sensors[:32])
+            inventory_debug["sensor_count"] = len(sensors)
+        if isinstance(methods, list) and methods:
+            inventory_debug["methods"] = deepcopy(methods)
+        if isinstance(artifacts, list) and artifacts:
+            inventory_debug["artifacts"] = deepcopy(artifacts[:16])
+        if isinstance(global_objects, dict) and global_objects:
+            inventory_debug["global_objects"] = deepcopy(global_objects)
+        if isinstance(getter_status, dict) and getter_status:
+            inventory_debug["getter_status"] = deepcopy(getter_status)
+        if isinstance(callback_messages, list) and callback_messages:
+            inventory_debug["callback_messages"] = deepcopy(callback_messages[:16])
+        if inventory_debug:
+            debug_payload["inventory"] = inventory_debug
+    return debug_payload
+
+
 def _metric_entry(
     *,
     provider: str,
@@ -537,6 +605,60 @@ def _metric_entry(
     if unsupported_reason:
         entry["unsupported_reason"] = unsupported_reason
     return entry
+
+
+def _payload_metric_entry(payload: dict[str, Any], metric_key: str) -> dict[str, Any]:
+    metrics = payload.get("metrics")
+    if not isinstance(metrics, dict):
+        return {}
+    metric = metrics.get(metric_key)
+    return dict(metric) if isinstance(metric, dict) else {}
+
+
+def _preferred_metric_reason(metric_key: str, *payloads: dict[str, Any], fallback: str) -> str:
+    for payload in payloads:
+        metric = _payload_metric_entry(payload, metric_key)
+        reason = str(metric.get("unsupported_reason") or "").strip()
+        if reason:
+            return reason
+    return fallback
+
+
+def _selected_metric_metadata(metric_key: str, provider: str | None, *payloads: dict[str, Any]) -> dict[str, Any]:
+    selected_provider = str(provider or "").strip()
+    if not selected_provider:
+        return {}
+    for payload in payloads:
+        metric = _payload_metric_entry(payload, metric_key)
+        metric_provider = str(metric.get("provider") or payload.get("provider") or "").strip()
+        if metric and metric_provider == selected_provider:
+            return metric
+    return {}
+
+
+def _combined_metric_reason(metric_key: str, *payloads: dict[str, Any], fallback: str, max_reasons: int = 2) -> str:
+    reasons: list[str] = []
+    for payload in payloads:
+        metric = _payload_metric_entry(payload, metric_key)
+        reason = str(metric.get("unsupported_reason") or "").strip()
+        if reason and reason not in reasons:
+            reasons.append(reason)
+        if len(reasons) >= max_reasons:
+            break
+    if not reasons:
+        return fallback
+    if len(reasons) == 1:
+        return reasons[0]
+    return f"{reasons[0]} Also, {reasons[1]}"
+
+
+def _preferred_metric_provider(metric_key: str, *payloads: dict[str, Any], fallback: str) -> str:
+    for payload in payloads:
+        metric = _payload_metric_entry(payload, metric_key)
+        provider = str(metric.get("provider") or payload.get("provider") or "").strip()
+        if provider:
+            return provider
+    return fallback
 
 
 def _metric_available(snapshot: dict[str, Any], metric_key: str) -> bool:
@@ -600,9 +722,17 @@ def _collect_windows_native(config: AppConfig) -> dict[str, Any]:
     }
 
 
-def _merge_cpu_telemetry(snapshot: dict[str, Any], native_payload: dict[str, Any], lhm_payload: dict[str, Any]) -> dict[str, Any]:
+def _merge_cpu_telemetry(
+    snapshot: dict[str, Any],
+    native_payload: dict[str, Any],
+    lhm_payload: dict[str, Any],
+    gigabyte_payload: dict[str, Any],
+    amd_payload: dict[str, Any],
+) -> dict[str, Any]:
     native_cpu = native_payload.get("cpu", {}) if isinstance(native_payload.get("cpu"), dict) else {}
     lhm_cpu = lhm_payload.get("cpu", {}) if isinstance(lhm_payload.get("cpu"), dict) else {}
+    gigabyte_cpu = gigabyte_payload.get("cpu", {}) if isinstance(gigabyte_payload.get("cpu"), dict) else {}
+    amd_cpu = amd_payload.get("cpu", {}) if isinstance(amd_payload.get("cpu"), dict) else {}
     cpu = {
         "package_temperature_c": None,
         "package_power_w": None,
@@ -623,11 +753,14 @@ def _merge_cpu_telemetry(snapshot: dict[str, Any], native_payload: dict[str, Any
         sanitize=_sanitize_percent,
     )
     cpu["package_temperature_c"], temperature_provider = _select_metric(
+        (GIGABYTE_CONTROL_CENTER_PROVIDER_NAME, gigabyte_cpu.get("package_temperature_c")),
+        (AMD_RYZEN_MASTER_PROVIDER_NAME, amd_cpu.get("package_temperature_c")),
         (LIBRE_HARDWARE_MONITOR_PROVIDER_NAME, lhm_cpu.get("package_temperature_c")),
         (NATIVE_PROVIDER_NAME, native_cpu.get("package_temperature_c")),
         sanitize=_sanitize_temperature,
     )
     cpu["package_power_w"], power_provider = _select_metric(
+        (AMD_RYZEN_MASTER_PROVIDER_NAME, amd_cpu.get("package_power_w")),
         (LIBRE_HARDWARE_MONITOR_PROVIDER_NAME, lhm_cpu.get("package_power_w")),
         (NATIVE_PROVIDER_NAME, native_cpu.get("package_power_w")),
         sanitize=_sanitize_power,
@@ -638,8 +771,78 @@ def _merge_cpu_telemetry(snapshot: dict[str, Any], native_payload: dict[str, Any
     metrics["cpu.base_clock_mhz"] = _metric_entry(provider=base_provider or NATIVE_PROVIDER_NAME, value=cpu["base_clock_mhz"], source="Win32_Processor.MaxClockSpeed", unsupported_reason="Windows is not exposing the CPU base clock on this machine." if cpu["base_clock_mhz"] is None else None)
     metrics["cpu.effective_clock_mhz"] = _metric_entry(provider=clock_provider or NATIVE_PROVIDER_NAME, value=cpu["effective_clock_mhz"], source="Current CPU clock", unsupported_reason="A current CPU clock sample was not exposed by the available providers." if cpu["effective_clock_mhz"] is None else None)
     metrics["cpu.utilization_percent"] = _metric_entry(provider=utilization_provider or NATIVE_PROVIDER_NAME, value=cpu["utilization_percent"], source="Current CPU utilization", unsupported_reason="A current CPU utilization sample was not exposed by the available providers." if cpu["utilization_percent"] is None else None)
-    metrics["cpu.package_temperature_c"] = _metric_entry(provider=temperature_provider or LIBRE_HARDWARE_MONITOR_PROVIDER_NAME, value=cpu["package_temperature_c"], source="CPU package temperature", unsupported_reason="No valid CPU package temperature sensor is exposed by the available non-HWiNFO providers on this machine." if cpu["package_temperature_c"] is None else None)
-    metrics["cpu.package_power_w"] = _metric_entry(provider=power_provider or LIBRE_HARDWARE_MONITOR_PROVIDER_NAME, value=cpu["package_power_w"], source="CPU package power", unsupported_reason="No valid CPU package power sensor is exposed by the available non-HWiNFO providers on this machine." if cpu["package_power_w"] is None else None)
+    temperature_metadata = _selected_metric_metadata(
+        "cpu.package_temperature_c",
+        temperature_provider,
+        gigabyte_payload,
+        amd_payload,
+        lhm_payload,
+        native_payload,
+    ) or _payload_metric_entry(gigabyte_payload, "cpu.package_temperature_c") or _payload_metric_entry(amd_payload, "cpu.package_temperature_c") or _payload_metric_entry(lhm_payload, "cpu.package_temperature_c") or _payload_metric_entry(native_payload, "cpu.package_temperature_c")
+    power_metadata = _selected_metric_metadata(
+        "cpu.package_power_w",
+        power_provider,
+        gigabyte_payload,
+        amd_payload,
+        lhm_payload,
+        native_payload,
+    ) or _payload_metric_entry(gigabyte_payload, "cpu.package_power_w") or _payload_metric_entry(amd_payload, "cpu.package_power_w") or _payload_metric_entry(lhm_payload, "cpu.package_power_w") or _payload_metric_entry(native_payload, "cpu.package_power_w")
+    metrics["cpu.package_temperature_c"] = _metric_entry(
+        provider=temperature_provider or str(
+            temperature_metadata.get("provider")
+            or _preferred_metric_provider(
+                "cpu.package_temperature_c",
+                gigabyte_payload,
+                amd_payload,
+                lhm_payload,
+                native_payload,
+                fallback=GIGABYTE_CONTROL_CENTER_PROVIDER_NAME,
+            )
+        ),
+        value=cpu["package_temperature_c"],
+        source=str(temperature_metadata.get("source") or "CPU package temperature"),
+        sensor=str(temperature_metadata.get("sensor") or "").strip() or None,
+        unsupported_reason=(
+            _combined_metric_reason(
+                "cpu.package_temperature_c",
+                gigabyte_payload,
+                amd_payload,
+                lhm_payload,
+                native_payload,
+                fallback="No valid CPU package temperature sensor is exposed by the available non-HWiNFO providers on this machine.",
+            )
+            if cpu["package_temperature_c"] is None
+            else None
+        ),
+    )
+    metrics["cpu.package_power_w"] = _metric_entry(
+        provider=power_provider or str(
+            power_metadata.get("provider")
+            or _preferred_metric_provider(
+                "cpu.package_power_w",
+                gigabyte_payload,
+                amd_payload,
+                lhm_payload,
+                native_payload,
+                fallback=LIBRE_HARDWARE_MONITOR_PROVIDER_NAME,
+            )
+        ),
+        value=cpu["package_power_w"],
+        source=str(power_metadata.get("source") or "CPU package power"),
+        sensor=str(power_metadata.get("sensor") or "").strip() or None,
+        unsupported_reason=(
+            _combined_metric_reason(
+                "cpu.package_power_w",
+                gigabyte_payload,
+                amd_payload,
+                lhm_payload,
+                native_payload,
+                fallback="No valid CPU package power sensor is exposed by the available non-HWiNFO providers on this machine.",
+            )
+            if cpu["package_power_w"] is None
+            else None
+        ),
+    )
     metrics["cpu.throttle_flags"] = _metric_entry(provider=LIBRE_HARDWARE_MONITOR_PROVIDER_NAME if cpu["throttle_flags"] else NATIVE_PROVIDER_NAME, value=cpu["throttle_flags"] if cpu["throttle_flags"] else None, source="CPU throttle flags", unsupported_reason="No CPU throttle or thermal limit flags were exposed by the available providers." if not cpu["throttle_flags"] else None)
     return cpu
 
@@ -711,12 +914,20 @@ def _merge_gpu_telemetry(
     return {"adapters": adapters}
 
 
-def _merge_thermal_telemetry(snapshot: dict[str, Any], native_payload: dict[str, Any], lhm_payload: dict[str, Any]) -> dict[str, Any]:
+def _merge_thermal_telemetry(
+    snapshot: dict[str, Any],
+    native_payload: dict[str, Any],
+    lhm_payload: dict[str, Any],
+    gigabyte_payload: dict[str, Any],
+    amd_payload: dict[str, Any],
+) -> dict[str, Any]:
     native_thermal = native_payload.get("thermal", {}) if isinstance(native_payload.get("thermal"), dict) else {}
     lhm_thermal = lhm_payload.get("thermal", {}) if isinstance(lhm_payload.get("thermal"), dict) else {}
+    gigabyte_thermal = gigabyte_payload.get("thermal", {}) if isinstance(gigabyte_payload.get("thermal"), dict) else {}
+    amd_thermal = amd_payload.get("thermal", {}) if isinstance(amd_payload.get("thermal"), dict) else {}
     sensors: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
-    for source_sensors in (lhm_thermal.get("sensors", []), native_thermal.get("sensors", [])):
+    for source_sensors in (gigabyte_thermal.get("sensors", []), amd_thermal.get("sensors", []), lhm_thermal.get("sensors", []), native_thermal.get("sensors", [])):
         if not isinstance(source_sensors, list):
             continue
         for sensor in source_sensors:
@@ -733,18 +944,101 @@ def _merge_thermal_telemetry(snapshot: dict[str, Any], native_payload: dict[str,
             seen.add(key)
             sensors.append({"label": label, "temperature_c": temperature, "source": source_name})
     fans: list[dict[str, Any]] = []
-    for source_fans in (lhm_thermal.get("fans", []), native_thermal.get("fans", [])):
+    seen_fans: set[tuple[str, str]] = set()
+    for source_fans in (gigabyte_thermal.get("fans", []), amd_thermal.get("fans", []), lhm_thermal.get("fans", []), native_thermal.get("fans", [])):
         if not isinstance(source_fans, list):
             continue
         for fan in source_fans:
             if not isinstance(fan, dict):
                 continue
             rpm = _sanitize_rpm(fan.get("rpm"))
-            if rpm is None:
+            duty_percent = _sanitize_percent(fan.get("duty_percent"))
+            if rpm is None and duty_percent is None:
                 continue
-            fans.append({"label": str(fan.get("label") or "Fan").strip() or "Fan", "rpm": rpm, "source": str(fan.get("source") or LIBRE_HARDWARE_MONITOR_PROVIDER_NAME).strip() or LIBRE_HARDWARE_MONITOR_PROVIDER_NAME})
-    snapshot["sources"]["metrics"]["thermal.sensor_count"] = _metric_entry(provider=LIBRE_HARDWARE_MONITOR_PROVIDER_NAME if sensors else NATIVE_PROVIDER_NAME, value=len(sensors) if sensors else None, source="Thermal sensor inventory", unsupported_reason="No thermal sensors were exposed by the available providers." if not sensors else None)
-    snapshot["sources"]["metrics"]["thermal.fan_count"] = _metric_entry(provider=LIBRE_HARDWARE_MONITOR_PROVIDER_NAME, value=len(fans) if fans else None, source="Fan sensor inventory", unsupported_reason="No fan sensors were exposed by the available non-HWiNFO providers on this machine." if not fans else None)
+            label = str(fan.get("label") or "Fan").strip() or "Fan"
+            source_name = str(fan.get("source") or LIBRE_HARDWARE_MONITOR_PROVIDER_NAME).strip() or LIBRE_HARDWARE_MONITOR_PROVIDER_NAME
+            key = (label.lower(), source_name.lower())
+            if key in seen_fans:
+                continue
+            seen_fans.add(key)
+            item = {"label": label, "source": source_name}
+            if rpm is not None:
+                item["rpm"] = rpm
+            if duty_percent is not None:
+                item["duty_percent"] = duty_percent
+            fans.append(item)
+
+    thermal_metrics = snapshot["sources"]["metrics"]
+    no_fan_provider = _preferred_metric_provider(
+        "thermal.cpu_fan_rpm",
+        gigabyte_payload,
+        amd_payload,
+        lhm_payload,
+        native_payload,
+        fallback=LIBRE_HARDWARE_MONITOR_PROVIDER_NAME,
+    )
+    thermal_metrics["thermal.sensor_count"] = _metric_entry(
+        provider=GIGABYTE_CONTROL_CENTER_PROVIDER_NAME if any(str(sensor.get("source") or "").strip() == GIGABYTE_CONTROL_CENTER_PROVIDER_NAME for sensor in sensors) else AMD_RYZEN_MASTER_PROVIDER_NAME if any(str(sensor.get("source") or "").strip() == AMD_RYZEN_MASTER_PROVIDER_NAME for sensor in sensors) else LIBRE_HARDWARE_MONITOR_PROVIDER_NAME if sensors else NATIVE_PROVIDER_NAME,
+        value=len(sensors) if sensors else None,
+        source="Thermal sensor inventory",
+        unsupported_reason="No thermal sensors were exposed by the available providers." if not sensors else None,
+    )
+    thermal_metrics["thermal.fan_count"] = _metric_entry(
+        provider=GIGABYTE_CONTROL_CENTER_PROVIDER_NAME if any(str(fan.get("source") or "").strip() == GIGABYTE_CONTROL_CENTER_PROVIDER_NAME for fan in fans) else AMD_RYZEN_MASTER_PROVIDER_NAME if any(str(fan.get("source") or "").strip() == AMD_RYZEN_MASTER_PROVIDER_NAME for fan in fans) else no_fan_provider,
+        value=len(fans) if fans else None,
+        source="Fan sensor inventory",
+        unsupported_reason=(
+            _combined_metric_reason(
+                "thermal.cpu_fan_rpm",
+                gigabyte_payload,
+                amd_payload,
+                lhm_payload,
+                native_payload,
+                fallback="No fan sensors were exposed by the available non-HWiNFO providers on this machine.",
+            )
+            if not fans
+            else None
+        ),
+    )
+    for metric_key in (
+        "thermal.cpu_fan_rpm",
+        "thermal.cpu_fan_duty_percent",
+        "thermal.gpu_fan_rpm",
+        "thermal.gpu_fan_duty_percent",
+        "thermal.fan3_rpm",
+        "thermal.fan3_duty_percent",
+        "thermal.fan4_rpm",
+        "thermal.fan4_duty_percent",
+    ):
+        metric = _payload_metric_entry(gigabyte_payload, metric_key)
+        if metric:
+            thermal_metrics[metric_key] = dict(metric)
+            continue
+        metric = _payload_metric_entry(amd_payload, metric_key)
+        if metric:
+            thermal_metrics[metric_key] = dict(metric)
+    for token, rpm_key, duty_key, fallback_label in (
+        ("cpu", "thermal.cpu_fan_rpm", "thermal.cpu_fan_duty_percent", "CPU fan telemetry"),
+        ("gpu", "thermal.gpu_fan_rpm", "thermal.gpu_fan_duty_percent", "GPU fan telemetry"),
+    ):
+        matched = next((fan for fan in fans if token in str(fan.get("label") or "").strip().lower()), None)
+        if not isinstance(matched, dict):
+            continue
+        provider = str(matched.get("source") or LIBRE_HARDWARE_MONITOR_PROVIDER_NAME).strip() or LIBRE_HARDWARE_MONITOR_PROVIDER_NAME
+        if rpm_key not in thermal_metrics:
+            thermal_metrics[rpm_key] = _metric_entry(
+                provider=provider,
+                value=_sanitize_rpm(matched.get("rpm")),
+                source=str(matched.get("label") or fallback_label),
+                unsupported_reason=None,
+            )
+        if duty_key not in thermal_metrics:
+            thermal_metrics[duty_key] = _metric_entry(
+                provider=provider,
+                value=_sanitize_percent(matched.get("duty_percent")),
+                source=str(matched.get("label") or fallback_label),
+                unsupported_reason=None,
+            )
     return {"sensors": sensors, "fans": fans, "pump_rpm": _sanitize_rpm(lhm_thermal.get("pump_rpm")), "recent_trend_c": []}
 
 
@@ -1053,6 +1347,506 @@ def _collect_nvidia_gpu(config: AppConfig) -> dict[str, Any]:
     }
 
 
+def _collect_amd_ryzen_master(config: AppConfig) -> dict[str, Any]:
+    client_dir = _resolve_amd_performance_profile_client_dir()
+    payload: dict[str, Any] = {
+        "provider": AMD_RYZEN_MASTER_PROVIDER_NAME,
+        "available": False,
+        "state": "unavailable",
+        "detail": "AMD Performance Profile Client is not installed in the expected local path.",
+        "cpu": {"package_temperature_c": None, "package_power_w": None},
+        "thermal": {"sensors": [], "fans": [], "pump_rpm": None},
+        "platform": {
+            "supported_processor": None,
+            "supported_processor_result": None,
+            "supported_processor_code": None,
+            "is_apu": None,
+            "is_apu_result": None,
+            "vbs_check_required": None,
+            "vbs_check_required_result": None,
+        },
+        "metrics": {},
+        "inventory": {"artifacts": [], "global_objects": {}, "getter_status": {}, "callback_messages": []},
+    }
+    if client_dir is None:
+        return payload
+
+    device_path = client_dir / "device.dll"
+    platform_path = client_dir / "platform.dll"
+    driver_path = client_dir / "AMDRyzenMasterDriver.sys"
+    payload["inventory"]["artifacts"] = [
+        {"path": str(client_dir / "AUEPMaster.exe"), "exists": (client_dir / "AUEPMaster.exe").exists()},
+        {"path": str(device_path), "exists": device_path.exists()},
+        {"path": str(platform_path), "exists": platform_path.exists()},
+        {"path": str(driver_path), "exists": driver_path.exists()},
+    ]
+    if not device_path.exists() or not platform_path.exists():
+        payload["detail"] = "AMD Performance Profile Client is installed, but device.dll or platform.dll is missing."
+        return payload
+
+    semaphore_state = _open_named_sync_object("Global\\AMDRyzenMasterSemaphore", kind="semaphore")
+    mutex_state = _open_named_sync_object("Global\\AMDRyzenMasterMutex", kind="mutex")
+    payload["inventory"]["global_objects"] = {"semaphore": semaphore_state, "mutex": mutex_state}
+
+    callback_messages: list[str] = []
+    getter_status: dict[str, Any] = {}
+    dll_dir_handle = None
+    callback_ref = None
+    try:
+        if hasattr(os, "add_dll_directory"):
+            dll_dir_handle = os.add_dll_directory(str(client_dir))
+        device = ctypes.WinDLL(str(device_path))
+        platform = ctypes.WinDLL(str(platform_path))
+
+        callback_type = ctypes.CFUNCTYPE(None, ctypes.c_int, ctypes.c_char_p, ctypes.c_char_p)
+
+        @callback_type
+        def reporter(_code, text, extra):
+            for raw in (text, extra):
+                message = _clean_amd_callback_message(raw)
+                if message and message not in callback_messages:
+                    callback_messages.append(message)
+
+        callback_ref = reporter
+        try:
+            set_error = getattr(device, "?SetErrorReportFunc@@YAXP6AXHQEBDPEAD@Z@Z")
+            set_error.argtypes = [callback_type]
+            set_error.restype = None
+            set_error(callback_ref)
+        except Exception:
+            pass
+
+        get_platform = getattr(platform, "?GetPlatform@@YAAEAVIPlatform@@XZ")
+        get_platform.restype = ctypes.c_void_p
+        platform_ptr_value = get_platform()
+        getter_status["GetPlatform"] = {"pointer": hex(platform_ptr_value) if platform_ptr_value else None}
+        platform_ptr = ctypes.c_void_p(platform_ptr_value)
+
+        supported_primary = ctypes.c_int(-1)
+        supported_secondary = ctypes.c_int(-1)
+        try:
+            is_supported = getattr(platform, "IsSupportedProcessor")
+            is_supported.restype = ctypes.c_int
+            supported_result = int(is_supported(ctypes.byref(supported_primary), ctypes.byref(supported_secondary)))
+            payload["platform"]["supported_processor_result"] = supported_result
+            payload["platform"]["supported_processor_code"] = int(supported_secondary.value)
+            if supported_result == 0 and supported_primary.value in (0, 1):
+                payload["platform"]["supported_processor"] = bool(supported_primary.value)
+            getter_status["IsSupportedProcessor"] = {
+                "return_code": supported_result,
+                "supported": payload["platform"]["supported_processor"],
+                "code": int(supported_secondary.value),
+            }
+        except Exception as exc:
+            getter_status["IsSupportedProcessor"] = {"error": str(exc)}
+
+        for export_name, field_name in (
+            ("IsAPU", "is_apu"),
+            ("IsVBSCheckRequired", "vbs_check_required"),
+        ):
+            try:
+                fn = getattr(platform, export_name)
+                fn.restype = ctypes.c_int
+                result = int(fn())
+                payload["platform"][f"{field_name}_result"] = result
+                if result in (0, 1):
+                    payload["platform"][field_name] = bool(result)
+                getter_status[export_name] = {"return_code": result, "value": payload["platform"][field_name]}
+            except Exception as exc:
+                getter_status[export_name] = {"error": str(exc)}
+
+        for export_name in ("GetCapabilities", "GetCurrentFMaxCPU", "GetCurrentFMaxGPU", "GetRmCpuParameters"):
+            buffer = ctypes.create_string_buffer(256)
+            status_code = ctypes.c_int(-1)
+            try:
+                fn = getattr(platform, export_name)
+                fn.restype = ctypes.c_int
+                return_code = int(fn(platform_ptr, buffer, ctypes.byref(status_code)))
+                getter_status[export_name] = {
+                    "return_code": return_code,
+                    "status_code": int(status_code.value),
+                    "buffer_nonzero": any(buffer.raw),
+                }
+            except Exception as exc:
+                getter_status[export_name] = {"error": str(exc)}
+    except Exception as exc:
+        payload["state"] = "failed"
+        payload["detail"] = str(exc)
+        return payload
+    finally:
+        payload["inventory"]["callback_messages"] = callback_messages
+        payload["inventory"]["getter_status"] = getter_status
+        if dll_dir_handle is not None:
+            try:
+                dll_dir_handle.close()
+            except Exception:
+                pass
+        callback_ref = None
+
+    bootstrap_reason = _amd_bootstrap_reason(payload["platform"], semaphore_state, mutex_state, callback_messages)
+    temperature_reason = (
+        f"{bootstrap_reason} No CPU temperature sample was returned."
+        if bootstrap_reason
+        else "AMD Performance Profile Client did not return a readable CPU temperature sample from its callable local Ryzen Master exports."
+    )
+    power_reason = (
+        f"{bootstrap_reason} No CPU power sample was returned."
+        if bootstrap_reason
+        else "AMD Performance Profile Client did not return a readable CPU power sample from its callable local Ryzen Master exports."
+    )
+    fan_reason = (
+        f"AMD Performance Profile Client did not expose a readable CPU fan sample because the Ryzen Master bootstrap objects were unavailable from the helper context. {bootstrap_reason}"
+        if bootstrap_reason
+        else "AMD Performance Profile Client did not expose a readable CPU fan sample from its callable local Ryzen Master exports."
+    )
+
+    payload["metrics"] = {
+        "cpu.package_temperature_c": _metric_entry(
+            provider=AMD_RYZEN_MASTER_PROVIDER_NAME,
+            value=None,
+            source="platform.dll / Ryzen Master SDK",
+            sensor="AMD Ryzen Master CPU temperature",
+            unsupported_reason=temperature_reason,
+        ),
+        "cpu.package_power_w": _metric_entry(
+            provider=AMD_RYZEN_MASTER_PROVIDER_NAME,
+            value=None,
+            source="platform.dll / Ryzen Master SDK",
+            sensor="AMD Ryzen Master package power",
+            unsupported_reason=power_reason,
+        ),
+        "thermal.cpu_fan_rpm": _metric_entry(
+            provider=AMD_RYZEN_MASTER_PROVIDER_NAME,
+            value=None,
+            source="device.dll / Ryzen Master SDK",
+            sensor="AMD Ryzen Master CPU fan",
+            unsupported_reason=fan_reason,
+        ),
+    }
+
+    supported_processor = payload["platform"].get("supported_processor")
+    if supported_processor is False:
+        payload["state"] = "unavailable"
+        payload["detail"] = "AMD Performance Profile Client reports that the current processor is not supported by the local Ryzen Master SDK path."
+        return payload
+
+    payload["available"] = bool(payload["platform"].get("supported_processor") is not None or payload["inventory"]["callback_messages"])
+    payload["state"] = "partial" if payload["available"] else "unavailable"
+    payload["detail"] = bootstrap_reason or "AMD Performance Profile Client support checks completed, but no readable CPU telemetry was returned by the local Ryzen Master exports."
+    return payload
+
+
+def _collect_gigabyte_control_center(config: AppConfig) -> dict[str, Any]:
+    notebook_dir = _resolve_gigabyte_notebook_lib_dir()
+    if notebook_dir is None:
+        return {
+            "provider": GIGABYTE_CONTROL_CENTER_PROVIDER_NAME,
+            "available": False,
+            "state": "unavailable",
+            "detail": "Gigabyte Control Center notebook libraries are not installed in a known local path.",
+            "cpu": {},
+            "thermal": {"sensors": [], "fans": [], "pump_rpm": None},
+            "power": {},
+            "platform": {},
+            "metrics": {},
+            "inventory": {"methods": []},
+        }
+
+    escaped_dir = str(notebook_dir).replace("'", "''")
+    payload = _run_powershell_json(
+        config,
+        f"""
+        $ErrorActionPreference = 'Continue'
+        $dllDir = '{escaped_dir}'
+        $ucNotebookDll = Join-Path $dllDir 'ucNotebook.dll'
+        $commDll = Join-Path $dllDir 'GBT_Comm_Fun.dll'
+        $devicesDll = Join-Path $dllDir 'Gigabyte.NB.Devices.dll'
+        $result = [ordered]@{{
+            provider = '{GIGABYTE_CONTROL_CENTER_PROVIDER_NAME}'
+            available = $false
+            state = 'unavailable'
+            detail = ''
+            cpu = [ordered]@{{ package_temperature_c = $null }}
+            thermal = [ordered]@{{ sensors = @(); fans = @(); pump_rpm = $null; fan_health = $null }}
+            power = [ordered]@{{ health_percent = $null }}
+            platform = [ordered]@{{ cpu_info = $null; fn_lock = $null; mux_enabled = $null }}
+            metrics = [ordered]@{{}}
+            inventory = [ordered]@{{ methods = @('GccWmiTool.getCpuInfo','GccWmiTool.getCpuTemperature','GccWmiTool.getGpu1Temperature','GccWmiTool.GetFanSpeed(1)','GccWmiTool.GetFanSpeed(2)','GccWmiTool.GetFanSpeed(3)','GccWmiTool.GetFanSpeed(4)','CWMI.getCPUFanDuty','CWMI.getGPUFanDuty','CWMI.getFan3Duty','CWMI.getFan4Duty','CWMI.GetFnLock','CWMI.GetMuxStatus','CWMI.getBatteryHealth','CWMI.GetFanHealth') }}
+        }}
+        if (-not (Test-Path $ucNotebookDll)) {{
+            $result.detail = 'Gigabyte Control Center notebook DLLs were not found.'
+            $result | ConvertTo-Json -Compress -Depth 10
+            return
+        }}
+        try {{
+            [System.IO.Directory]::SetCurrentDirectory($dllDir)
+            foreach ($assemblyPath in @($devicesDll, $commDll, $ucNotebookDll)) {{
+                if (Test-Path $assemblyPath) {{
+                    [System.Reflection.Assembly]::LoadFrom($assemblyPath) | Out-Null
+                }}
+            }}
+        }} catch {{
+            $result.state = 'failed'
+            $result.detail = $_.Exception.Message
+            $result | ConvertTo-Json -Compress -Depth 10
+            return
+        }}
+        function To-IntOrNull($value) {{
+            if ($null -eq $value) {{ return $null }}
+            $text = [string]$value
+            if ([string]::IsNullOrWhiteSpace($text)) {{ return $null }}
+            [int]$parsed = 0
+            if ([int]::TryParse($text, [ref]$parsed)) {{
+                if ($parsed -gt 0) {{ return $parsed }}
+            }}
+            return $null
+        }}
+        function To-PercentOrNull($value) {{
+            if ($null -eq $value) {{ return $null }}
+            $text = [string]$value
+            if ([string]::IsNullOrWhiteSpace($text)) {{ return $null }}
+            [double]$parsed = 0
+            if ([double]::TryParse($text, [ref]$parsed)) {{
+                if ($parsed -ge 0 -and $parsed -le 100) {{ return [math]::Round($parsed, 2) }}
+            }}
+            return $null
+        }}
+        function To-TemperatureOrNull($value) {{
+            if ($null -eq $value) {{ return $null }}
+            $text = [string]$value
+            if ([string]::IsNullOrWhiteSpace($text)) {{ return $null }}
+            [double]$parsed = 0
+            if ([double]::TryParse($text, [ref]$parsed)) {{
+                if ($parsed -gt 0 -and $parsed -lt 200) {{ return [math]::Round($parsed, 1) }}
+            }}
+            return $null
+        }}
+        function Invoke-Call([scriptblock]$block) {{
+            $originalOut = [Console]::Out
+            $originalErr = [Console]::Error
+            $writer = New-Object System.IO.StringWriter
+            [Console]::SetOut($writer)
+            [Console]::SetError($writer)
+            try {{
+                $value = (& $block)
+                $ok = $true
+                $errorText = $null
+            }} catch {{
+                $ok = $false
+                $value = $null
+                $errorText = [string]$_.Exception.Message
+                if ([string]::IsNullOrWhiteSpace($errorText)) {{
+                    $errorText = [string]$_
+                }}
+            }} finally {{
+                [Console]::SetOut($originalOut)
+                [Console]::SetError($originalErr)
+            }}
+            return [ordered]@{{ ok = $ok; value = $value; error = $errorText; noise = $writer.ToString() }}
+        }}
+        function Failure-Reason([string]$metricLabel, $callResult, [string]$fallbackText) {{
+            $detail = [string]$callResult.error
+            if ([string]::IsNullOrWhiteSpace($detail)) {{
+                $detail = [string]$callResult.noise
+            }}
+            if ($detail -match 'Access denied') {{
+                return "Gigabyte Control Center notebook WMI returned Access denied for $metricLabel from the current helper context."
+            }}
+            if (-not [string]::IsNullOrWhiteSpace($detail)) {{
+                $detail = $detail.Trim()
+            }}
+            if ([string]::IsNullOrWhiteSpace($detail)) {{
+                return $fallbackText
+            }}
+            return "Gigabyte Control Center notebook telemetry failed for ${{metricLabel}}: $detail"
+        }}
+        function Has-AccessDenied($callResult) {{
+            $detail = [string]$callResult.error
+            if ([string]::IsNullOrWhiteSpace($detail)) {{
+                $detail = [string]$callResult.noise
+            }}
+            return ($detail -match 'Access denied')
+        }}
+        function Set-Metric([string]$metricKey, [string]$source, [string]$sensor, $value, [string]$reason) {{
+            $entry = [ordered]@{{
+                provider = '{GIGABYTE_CONTROL_CENTER_PROVIDER_NAME}'
+                available = $null -ne $value
+                source = $source
+            }}
+            if (-not [string]::IsNullOrWhiteSpace($sensor)) {{
+                $entry.sensor = $sensor
+            }}
+            if (-not [string]::IsNullOrWhiteSpace($reason)) {{
+                $entry.unsupported_reason = $reason
+            }}
+            $result.metrics[$metricKey] = $entry
+        }}
+
+        $cwmi = $null
+        $cwmiCall = Invoke-Call {{ New-Object 'ucNotebook.Helper.CWMI' }}
+        if ($cwmiCall.ok) {{
+            $cwmi = $cwmiCall.value
+        }}
+
+        $cpuInfo = Invoke-Call {{ [ucNotebook.Service.GccWmiTool]::getCpuInfo() }}
+        if ($cpuInfo.ok) {{
+            $text = [string]$cpuInfo.value
+            if (-not [string]::IsNullOrWhiteSpace($text)) {{
+                $result.platform.cpu_info = $text.Trim()
+            }}
+        }}
+
+        $cpuTempCall = Invoke-Call {{ [ucNotebook.Service.GccWmiTool]::getCpuTemperature() }}
+        $cpuTemp = $null
+        $cpuTempReason = $null
+        if ($cpuTempCall.ok) {{
+            $cpuTemp = To-TemperatureOrNull $cpuTempCall.value
+            if ($null -eq $cpuTemp -or (Has-AccessDenied $cpuTempCall)) {{
+                $cpuTemp = $null
+                $cpuTempReason = Failure-Reason 'CPU temperature' $cpuTempCall 'Gigabyte Control Center did not return a non-zero CPU temperature sample on this machine.'
+            }}
+        }} else {{
+            $cpuTempReason = Failure-Reason 'CPU temperature' $cpuTempCall 'Gigabyte Control Center did not return a non-zero CPU temperature sample on this machine.'
+        }}
+        if ($null -ne $cpuTemp) {{
+            $result.cpu.package_temperature_c = $cpuTemp
+            $result.thermal.sensors += [ordered]@{{ label = 'Gigabyte CPU Package'; temperature_c = $cpuTemp; source = '{GIGABYTE_CONTROL_CENTER_PROVIDER_NAME}' }}
+        }}
+        Set-Metric 'cpu.package_temperature_c' 'GccWmiTool.getCpuTemperature' 'Gigabyte notebook WMI CPU temperature' $cpuTemp $cpuTempReason
+
+        $gpuTempCall = Invoke-Call {{ [ucNotebook.Service.GccWmiTool]::getGpu1Temperature() }}
+        $gpuTemp = $null
+        if ($gpuTempCall.ok) {{
+            $gpuTemp = To-TemperatureOrNull $gpuTempCall.value
+        }}
+        if ($null -ne $gpuTemp) {{
+            $result.thermal.sensors += [ordered]@{{ label = 'Gigabyte GPU 1'; temperature_c = $gpuTemp; source = '{GIGABYTE_CONTROL_CENTER_PROVIDER_NAME}' }}
+            Set-Metric 'thermal.gpu1_temperature_c' 'GccWmiTool.getGpu1Temperature' 'Gigabyte notebook WMI GPU1 temperature' $gpuTemp $null
+        }} else {{
+            Set-Metric 'thermal.gpu1_temperature_c' 'GccWmiTool.getGpu1Temperature' 'Gigabyte notebook WMI GPU1 temperature' $null (Failure-Reason 'GPU temperature' $gpuTempCall 'Gigabyte Control Center did not return a non-zero GPU temperature sample on this machine.')
+        }}
+
+        $fanMap = @(
+            [ordered]@{{ Label = 'CPU Fan'; SpeedSource = 'GccWmiTool.GetFanSpeed(1)'; SpeedIndex = 1; DutyMethod = 'getCPUFanDuty'; DutySource = 'CWMI.getCPUFanDuty'; MetricRpm = 'thermal.cpu_fan_rpm'; MetricDuty = 'thermal.cpu_fan_duty_percent'; MetricLabel = 'CPU fan telemetry' }},
+            [ordered]@{{ Label = 'GPU Fan'; SpeedSource = 'GccWmiTool.GetFanSpeed(2)'; SpeedIndex = 2; DutyMethod = 'getGPUFanDuty'; DutySource = 'CWMI.getGPUFanDuty'; MetricRpm = 'thermal.gpu_fan_rpm'; MetricDuty = 'thermal.gpu_fan_duty_percent'; MetricLabel = 'GPU fan telemetry' }},
+            [ordered]@{{ Label = 'Fan 3'; SpeedSource = 'GccWmiTool.GetFanSpeed(3)'; SpeedIndex = 3; DutyMethod = 'getFan3Duty'; DutySource = 'CWMI.getFan3Duty'; MetricRpm = 'thermal.fan3_rpm'; MetricDuty = 'thermal.fan3_duty_percent'; MetricLabel = 'fan 3 telemetry' }},
+            [ordered]@{{ Label = 'Fan 4'; SpeedSource = 'GccWmiTool.GetFanSpeed(4)'; SpeedIndex = 4; DutyMethod = 'getFan4Duty'; DutySource = 'CWMI.getFan4Duty'; MetricRpm = 'thermal.fan4_rpm'; MetricDuty = 'thermal.fan4_duty_percent'; MetricLabel = 'fan 4 telemetry' }}
+        )
+        foreach ($fanDef in $fanMap) {{
+            $speedCall = Invoke-Call {{ [ucNotebook.Service.GccWmiTool]::GetFanSpeed([int]$fanDef.SpeedIndex) }}
+            $rpm = $null
+            $rpmReason = $null
+            if ($speedCall.ok) {{
+                $rpm = To-IntOrNull $speedCall.value
+                if ($null -eq $rpm) {{
+                    $rpmReason = Failure-Reason $fanDef.MetricLabel $speedCall "Gigabyte Control Center did not return a fan-speed sample for $($fanDef.Label) on this machine."
+                }}
+            }} else {{
+                $rpmReason = Failure-Reason $fanDef.MetricLabel $speedCall "Gigabyte Control Center did not return a fan-speed sample for $($fanDef.Label) on this machine."
+            }}
+
+            $duty = $null
+            $dutyReason = $null
+            if ($null -ne $cwmi) {{
+                $dutyCall = Invoke-Call {{
+                    [byte]$value = 0
+                    switch ($fanDef.DutyMethod) {{
+                        'getCPUFanDuty' {{ $null = $cwmi.getCPUFanDuty([ref]$value) }}
+                        'getGPUFanDuty' {{ $null = $cwmi.getGPUFanDuty([ref]$value) }}
+                        'getFan3Duty' {{ $null = $cwmi.getFan3Duty([ref]$value) }}
+                        'getFan4Duty' {{ $null = $cwmi.getFan4Duty([ref]$value) }}
+                        default {{ throw "Unknown duty method: $($fanDef.DutyMethod)" }}
+                    }}
+                    [int]$value
+                }}
+                if ($dutyCall.ok) {{
+                    $duty = To-PercentOrNull $dutyCall.value
+                    if ($null -eq $duty -or (Has-AccessDenied $dutyCall)) {{
+                        $duty = $null
+                        $dutyReason = Failure-Reason $fanDef.MetricLabel $dutyCall "Gigabyte Control Center did not return a fan-duty sample for $($fanDef.Label) on this machine."
+                    }}
+                }} else {{
+                    $dutyReason = Failure-Reason $fanDef.MetricLabel $dutyCall "Gigabyte Control Center did not return a fan-duty sample for $($fanDef.Label) on this machine."
+                }}
+            }} else {{
+                $dutyReason = 'Gigabyte Control Center CWMI helper could not be instantiated from the current helper context.'
+            }}
+
+            if ($null -ne $rpm -or $null -ne $duty) {{
+                $fan = [ordered]@{{ label = $fanDef.Label; source = '{GIGABYTE_CONTROL_CENTER_PROVIDER_NAME}' }}
+                if ($null -ne $rpm) {{ $fan.rpm = $rpm }}
+                if ($null -ne $duty) {{ $fan.duty_percent = $duty }}
+                $result.thermal.fans += $fan
+            }}
+            Set-Metric $fanDef.MetricRpm $fanDef.SpeedSource "$($fanDef.Label) RPM" $rpm $rpmReason
+            Set-Metric $fanDef.MetricDuty $fanDef.DutySource "$($fanDef.Label) duty" $duty $dutyReason
+        }}
+
+        if ($null -ne $cwmi) {{
+            $fnLockCall = Invoke-Call {{ $cwmi.GetFnLock() }}
+            if ($fnLockCall.ok) {{ $result.platform.fn_lock = [bool]$fnLockCall.value }}
+            $muxCall = Invoke-Call {{ $cwmi.GetMuxStatus() }}
+            if ($muxCall.ok) {{ $result.platform.mux_enabled = [bool]$muxCall.value }}
+        }}
+
+        $batteryHealthCall = Invoke-Call {{
+            [byte]$value = 0
+            $null = [ucNotebook.Helper.CWMI]::getBatteryHealth([ref]$value)
+            [int]$value
+        }}
+        if ($batteryHealthCall.ok) {{
+            $health = To-PercentOrNull $batteryHealthCall.value
+            if ($null -ne $health -and -not (Has-AccessDenied $batteryHealthCall)) {{
+                $result.power.health_percent = $health
+            }} else {{
+                $health = $null
+            }}
+            Set-Metric 'power.health_percent' 'CWMI.getBatteryHealth' 'Gigabyte notebook battery health' $health $(if ($null -eq $health) {{ Failure-Reason 'battery health telemetry' $batteryHealthCall 'Gigabyte Control Center did not return a battery health percentage on this machine.' }} else {{ $null }})
+        }} else {{
+            Set-Metric 'power.health_percent' 'CWMI.getBatteryHealth' 'Gigabyte notebook battery health' $null (Failure-Reason 'battery health telemetry' $batteryHealthCall 'Gigabyte Control Center did not return a battery health percentage on this machine.')
+        }}
+
+        $fanHealthCall = Invoke-Call {{ [ucNotebook.Helper.CWMI]::GetFanHealth() }}
+        if ($fanHealthCall.ok) {{
+            $fanHealth = [string]$fanHealthCall.value
+            if (-not [string]::IsNullOrWhiteSpace($fanHealth)) {{
+                $result.thermal.fan_health = $fanHealth.Trim()
+            }}
+        }}
+
+        $availableSignals = @($result.platform.cpu_info, $result.platform.fn_lock, $result.platform.mux_enabled, $result.power.health_percent) + @($result.thermal.sensors) + @($result.thermal.fans)
+        $hasAccessDenied = @($result.metrics.GetEnumerator() | Where-Object {{ $_.Value.unsupported_reason -match 'Access denied' }}).Count -gt 0
+        $hasSignals = @($availableSignals | Where-Object {{ $null -ne $_ -and $_ -ne '' }}).Count -gt 0
+        $result.available = $hasSignals
+        if ($hasSignals -and $hasAccessDenied) {{
+            $result.state = 'partial'
+            $result.detail = 'Gigabyte Control Center notebook telemetry returned partial read access.'
+        }} elseif ($hasSignals) {{
+            $result.state = 'ready'
+            $result.detail = 'Gigabyte Control Center notebook telemetry returned live readouts.'
+        }} else {{
+            $result.state = 'unavailable'
+            $result.detail = 'Gigabyte Control Center notebook telemetry did not yield readable live metrics from the current helper context.'
+        }}
+        $result | ConvertTo-Json -Compress -Depth 10
+        """,
+    )
+    if not isinstance(payload, dict):
+        return {
+            "provider": GIGABYTE_CONTROL_CENTER_PROVIDER_NAME,
+            "available": False,
+            "state": "failed",
+            "detail": "Gigabyte Control Center did not return a valid telemetry payload.",
+            "cpu": {},
+            "thermal": {"sensors": [], "fans": [], "pump_rpm": None},
+            "power": {},
+            "platform": {},
+            "metrics": {},
+            "inventory": {"methods": []},
+        }
+    return payload
+
+
 def _collect_libre_hardware_monitor(config: AppConfig) -> dict[str, Any]:
     dll_path = _resolve_libre_hardware_monitor_path()
     if dll_path is None:
@@ -1064,6 +1858,8 @@ def _collect_libre_hardware_monitor(config: AppConfig) -> dict[str, Any]:
             "cpu": {},
             "adapters": [],
             "thermal": {"sensors": [], "fans": [], "pump_rpm": None},
+            "metrics": {},
+            "inventory": {"hardware": [], "sensors": []},
         }
     escaped_dll = str(dll_path).replace("'", "''")
     payload = _run_powershell_json(
@@ -1071,7 +1867,7 @@ def _collect_libre_hardware_monitor(config: AppConfig) -> dict[str, Any]:
         f"""
         $dll = '{escaped_dll}'
         if (-not (Test-Path $dll)) {{
-            [pscustomobject]@{{ provider = '{LIBRE_HARDWARE_MONITOR_PROVIDER_NAME}'; available = $false; state = 'unavailable'; detail = 'LibreHardwareMonitor DLL not found.'; cpu = $null; adapters = @(); thermal = [pscustomobject]@{{ sensors = @(); fans = @(); pump_rpm = $null }} }} | ConvertTo-Json -Compress -Depth 8
+            [pscustomobject]@{{ provider = '{LIBRE_HARDWARE_MONITOR_PROVIDER_NAME}'; available = $false; state = 'unavailable'; detail = 'LibreHardwareMonitor DLL not found.'; cpu = $null; adapters = @(); thermal = [pscustomobject]@{{ sensors = @(); fans = @(); pump_rpm = $null }}; metrics = @{{}}; inventory = [pscustomobject]@{{ hardware = @(); sensors = @() }} }} | ConvertTo-Json -Compress -Depth 10
             return
         }}
         try {{
@@ -1083,26 +1879,52 @@ def _collect_libre_hardware_monitor(config: AppConfig) -> dict[str, Any]:
             $computer.IsControllerEnabled = $true
             $computer.Open()
         }} catch {{
-            [pscustomobject]@{{ provider = '{LIBRE_HARDWARE_MONITOR_PROVIDER_NAME}'; available = $false; state = 'failed'; detail = $_.Exception.Message; cpu = $null; adapters = @(); thermal = [pscustomobject]@{{ sensors = @(); fans = @(); pump_rpm = $null }} }} | ConvertTo-Json -Compress -Depth 8
+            [pscustomobject]@{{ provider = '{LIBRE_HARDWARE_MONITOR_PROVIDER_NAME}'; available = $false; state = 'failed'; detail = $_.Exception.Message; cpu = $null; adapters = @(); thermal = [pscustomobject]@{{ sensors = @(); fans = @(); pump_rpm = $null }}; metrics = @{{}}; inventory = [pscustomobject]@{{ hardware = @(); sensors = @() }} }} | ConvertTo-Json -Compress -Depth 10
             return
         }}
         function Update-HardwareTree($hardware) {{
+            if ($null -eq $hardware) {{ return }}
             $hardware.Update()
             foreach ($sub in @($hardware.SubHardware)) {{
-                Update-HardwareTree $sub
+                if ($null -ne $sub) {{
+                    Update-HardwareTree $sub
+                }}
+            }}
+        }}
+        $script:hardwareItems = @()
+        $script:seenHardware = @{{}}
+        function Add-HardwareTree($hardware) {{
+            if ($null -eq $hardware) {{ return }}
+            $identifier = [string]$hardware.Identifier
+            if (-not [string]::IsNullOrWhiteSpace($identifier) -and $script:seenHardware.ContainsKey($identifier)) {{
+                return
+            }}
+            if (-not [string]::IsNullOrWhiteSpace($identifier)) {{
+                $script:seenHardware[$identifier] = $true
+            }}
+            Update-HardwareTree $hardware
+            $script:hardwareItems += $hardware
+            foreach ($sub in @($hardware.SubHardware)) {{
+                if ($null -ne $sub) {{
+                    Add-HardwareTree $sub
+                }}
             }}
         }}
         foreach ($hardware in @($computer.Hardware)) {{
-            Update-HardwareTree $hardware
+            Add-HardwareTree $hardware
         }}
         $cpuPayload = $null
         $gpuPayloads = @()
         $thermalSensors = @()
         $fanSensors = @()
-        foreach ($hardware in @($computer.Hardware)) {{
+        $hardwareInventory = @()
+        $sensorInventory = @()
+        $fanDutyByLabel = @{{}}
+        foreach ($hardware in @($script:hardwareItems)) {{
             $hardwareName = [string]$hardware.Name
             $hardwareType = [string]$hardware.HardwareType
             $sensors = @($hardware.Sensors)
+            $hardwareInventory += [pscustomobject]@{{ name = $hardwareName; hardware_type = $hardwareType; sensor_count = $sensors.Count; subhardware_count = @($hardware.SubHardware).Count }}
             if ($hardwareType -eq 'Cpu') {{
                 $cpuPayload = [pscustomobject]@{{ name = $hardwareName; utilization_percent = $null; package_temperature_c = $null; package_power_w = $null; effective_clock_mhz = $null; throttle_flags = @() }}
                 $cpuUtilSensor = $sensors | Where-Object {{ [string]$_.SensorType -eq 'Load' -and [string]$_.Name -eq 'CPU Total' }} | Select-Object -First 1
@@ -1112,6 +1934,9 @@ def _collect_libre_hardware_monitor(config: AppConfig) -> dict[str, Any]:
                 $cpuPowerSensor = $sensors | Where-Object {{ [string]$_.SensorType -eq 'Power' -and ([string]$_.Name -match 'Package|CPU Package') -and $_.Value -gt 0 }} | Select-Object -First 1
                 if ($cpuPowerSensor -and $cpuPowerSensor.Value -ne $null) {{ $cpuPayload.package_power_w = [math]::Round([double]$cpuPowerSensor.Value, 2) }}
                 $cpuClockSensor = $sensors | Where-Object {{ [string]$_.SensorType -eq 'Clock' -and ([string]$_.Name -match 'Core Average|Bus Speed|Core #') -and $_.Value -gt 0 }} | Sort-Object Value -Descending | Select-Object -First 1
+                if (-not $cpuClockSensor) {{
+                    $cpuClockSensor = $sensors | Where-Object {{ [string]$_.SensorType -eq 'Clock' -and [string]$_.Identifier -match '/amdcpu/.+/clock/' -and $_.Value -gt 0 }} | Sort-Object Value -Descending | Select-Object -First 1
+                }}
                 if ($cpuClockSensor -and $cpuClockSensor.Value -ne $null) {{ $cpuPayload.effective_clock_mhz = [math]::Round([double]$cpuClockSensor.Value, 0) }}
             }}
             if ($hardwareType -match '^Gpu') {{
@@ -1140,20 +1965,37 @@ def _collect_libre_hardware_monitor(config: AppConfig) -> dict[str, Any]:
             }}
             foreach ($sensor in $sensors) {{
                 $sensorType = [string]$sensor.SensorType
+                $sensorInventory += [pscustomobject]@{{ hardware_name = $hardwareName; hardware_type = $hardwareType; name = [string]$sensor.Name; type = $sensorType; identifier = [string]$sensor.Identifier; value = $sensor.Value; min = $sensor.Min; max = $sensor.Max }}
                 if ($sensorType -eq 'Temperature' -and $sensor.Value -gt 0 -and $sensor.Value -lt 200) {{
                     $thermalSensors += [pscustomobject]@{{ label = if ($hardwareName) {{ "$hardwareName - $($sensor.Name)" }} else {{ [string]$sensor.Name }}; temperature_c = [math]::Round([double]$sensor.Value, 1); source = '{LIBRE_HARDWARE_MONITOR_PROVIDER_NAME}' }}
                 }}
+                if ($sensorType -eq 'Control' -and $sensor.Value -ge 0 -and $sensor.Value -le 100) {{
+                    $fanDutyByLabel[[string]$sensor.Name] = [math]::Round([double]$sensor.Value, 2)
+                }}
                 if ($sensorType -eq 'Fan' -and $sensor.Value -gt 0) {{
-                    $fanSensors += [pscustomobject]@{{ label = if ($hardwareName) {{ "$hardwareName - $($sensor.Name)" }} else {{ [string]$sensor.Name }}; rpm = [int]([math]::Round([double]$sensor.Value, 0)); source = '{LIBRE_HARDWARE_MONITOR_PROVIDER_NAME}' }}
+                    $fanLabel = if ($hardwareName) {{ "$hardwareName - $($sensor.Name)" }} else {{ [string]$sensor.Name }}
+                    $fan = [ordered]@{{ label = $fanLabel; rpm = [int]([math]::Round([double]$sensor.Value, 0)); source = '{LIBRE_HARDWARE_MONITOR_PROVIDER_NAME}' }}
+                    if ($fanDutyByLabel.ContainsKey([string]$sensor.Name)) {{
+                        $fan.duty_percent = $fanDutyByLabel[[string]$sensor.Name]
+                    }}
+                    $fanSensors += [pscustomobject]$fan
                 }}
             }}
         }}
         try {{ $computer.Close() }} catch {{}}
-        [pscustomobject]@{{ provider = '{LIBRE_HARDWARE_MONITOR_PROVIDER_NAME}'; available = $true; state = 'ready'; detail = "LibreHardwareMonitor sensors loaded from $dll"; cpu = $cpuPayload; adapters = @($gpuPayloads); thermal = [pscustomobject]@{{ sensors = @($thermalSensors); fans = @($fanSensors); pump_rpm = $null }} }} | ConvertTo-Json -Compress -Depth 8
+        $cpuTempCandidates = @($sensorInventory | Where-Object {{ $_.hardware_type -eq 'Cpu' -and $_.type -eq 'Temperature' -and $_.name -match 'Package|Tctl|Tdie' }})
+        $cpuPowerCandidates = @($sensorInventory | Where-Object {{ $_.hardware_type -eq 'Cpu' -and $_.type -eq 'Power' -and $_.name -match 'Package|SMU|CPU Package' }})
+        $cpuClockCandidates = @($sensorInventory | Where-Object {{ $_.hardware_type -eq 'Cpu' -and $_.type -eq 'Clock' -and $_.name -match 'Core Average|Bus Speed|Core #' }})
+        $metrics = [ordered]@{{
+            'cpu.package_temperature_c' = [ordered]@{{ provider = '{LIBRE_HARDWARE_MONITOR_PROVIDER_NAME}'; available = ($null -ne $cpuPayload.package_temperature_c); source = 'LibreHardwareMonitor CPU temperature'; sensor = '/amdcpu/0/temperature/2'; unsupported_reason = $(if ($null -ne $cpuPayload.package_temperature_c) {{ $null }} elseif ($cpuTempCandidates.Count -gt 0) {{ 'LibreHardwareMonitor sees the AMD CPU temperature sensor on this machine, but it is only returning 0.' }} else {{ 'LibreHardwareMonitor did not expose a CPU package temperature sensor on this machine.' }}) }}
+            'cpu.package_power_w' = [ordered]@{{ provider = '{LIBRE_HARDWARE_MONITOR_PROVIDER_NAME}'; available = ($null -ne $cpuPayload.package_power_w); source = 'LibreHardwareMonitor CPU package power'; unsupported_reason = $(if ($null -ne $cpuPayload.package_power_w) {{ $null }} elseif ($cpuPowerCandidates.Count -gt 0) {{ 'LibreHardwareMonitor sees AMD CPU power sensors on this machine, but they are only returning 0.' }} else {{ 'LibreHardwareMonitor did not expose a CPU package power sensor on this machine.' }}) }}
+            'cpu.effective_clock_mhz' = [ordered]@{{ provider = '{LIBRE_HARDWARE_MONITOR_PROVIDER_NAME}'; available = ($null -ne $cpuPayload.effective_clock_mhz); source = 'LibreHardwareMonitor effective clock'; unsupported_reason = $(if ($null -ne $cpuPayload.effective_clock_mhz) {{ $null }} elseif ($cpuClockCandidates.Count -gt 0) {{ 'LibreHardwareMonitor sees AMD CPU clock sensors on this machine, but they are only returning 0.' }} else {{ 'LibreHardwareMonitor did not expose CPU effective clock sensors on this machine.' }}) }}
+        }}
+        [pscustomobject]@{{ provider = '{LIBRE_HARDWARE_MONITOR_PROVIDER_NAME}'; available = $true; state = 'ready'; detail = "LibreHardwareMonitor sensors loaded from $dll"; cpu = $cpuPayload; adapters = @($gpuPayloads); thermal = [pscustomobject]@{{ sensors = @($thermalSensors); fans = @($fanSensors); pump_rpm = $null }}; metrics = $metrics; inventory = [pscustomobject]@{{ hardware = @($hardwareInventory); sensors = @($sensorInventory) }} }} | ConvertTo-Json -Compress -Depth 10
         """,
     )
     if not isinstance(payload, dict):
-        return {"provider": LIBRE_HARDWARE_MONITOR_PROVIDER_NAME, "available": False, "state": "failed", "detail": "LibreHardwareMonitor did not return a valid payload.", "cpu": {}, "adapters": [], "thermal": {"sensors": [], "fans": [], "pump_rpm": None}}
+        return {"provider": LIBRE_HARDWARE_MONITOR_PROVIDER_NAME, "available": False, "state": "failed", "detail": "LibreHardwareMonitor did not return a valid payload.", "cpu": {}, "adapters": [], "thermal": {"sensors": [], "fans": [], "pump_rpm": None}, "metrics": {}, "inventory": {"hardware": [], "sensors": []}}
     adapters = payload.get("adapters")
     if isinstance(adapters, dict):
         payload["adapters"] = [adapters]
@@ -1173,11 +2015,27 @@ def _run_powershell_json(config: AppConfig, script: str) -> Any:
         )
     except Exception:
         return None
-    if completed.returncode != 0 or not completed.stdout.strip():
+    if not completed.stdout.strip():
+        return None
+    if completed.returncode != 0:
+        for line in reversed([item.strip() for item in completed.stdout.splitlines() if item.strip()]):
+            if line[:1] not in {"{", "["}:
+                continue
+            try:
+                return json.loads(line)
+            except json.JSONDecodeError:
+                continue
         return None
     try:
         return json.loads(completed.stdout)
     except json.JSONDecodeError:
+        for line in reversed([item.strip() for item in completed.stdout.splitlines() if item.strip()]):
+            if line[:1] not in {"{", "["}:
+                continue
+            try:
+                return json.loads(line)
+            except json.JSONDecodeError:
+                continue
         return None
 
 
@@ -1342,6 +2200,97 @@ def _resolve_libre_hardware_monitor_path() -> Path | None:
         if str(candidate).strip() and candidate.exists():
             return candidate
     return None
+
+
+def _resolve_amd_performance_profile_client_dir() -> Path | None:
+    candidates = [
+        Path(os.environ.get("ProgramFiles", "")) / "AMD" / "Performance Profile Client",
+        Path(os.environ.get("ProgramW6432", "")) / "AMD" / "Performance Profile Client",
+        Path(os.environ.get("ProgramFiles(x86)", "")) / "AMD" / "Performance Profile Client",
+    ]
+    for candidate in candidates:
+        if str(candidate).strip() and candidate.exists():
+            return candidate
+    return None
+
+
+def _resolve_gigabyte_notebook_lib_dir() -> Path | None:
+    candidates = [
+        Path(os.environ.get("ProgramFiles", "")) / "GIGABYTE" / "Control Center" / "Lib" / "GBT_Notebook",
+        Path(os.environ.get("ProgramFiles(x86)", "")) / "GIGABYTE" / "Control Center" / "Lib" / "GBT_Notebook",
+    ]
+    for candidate in candidates:
+        if str(candidate).strip() and candidate.exists() and (candidate / "ucNotebook.dll").exists():
+            return candidate
+    return None
+
+
+def _clean_amd_callback_message(raw: Any) -> str | None:
+    if raw in {None, b"", ""}:
+        return None
+    if isinstance(raw, bytes):
+        text = raw.decode("utf-8", "ignore")
+    else:
+        text = str(raw)
+    cleaned = "".join(char for char in text if char.isprintable() or char in {" ", "\t"}).strip()
+    return cleaned or None
+
+
+def _amd_bootstrap_reason(
+    platform_state: dict[str, Any],
+    semaphore_state: dict[str, Any],
+    mutex_state: dict[str, Any],
+    callback_messages: list[str],
+) -> str:
+    missing_objects = [
+        state["name"]
+        for state in (semaphore_state, mutex_state)
+        if isinstance(state, dict) and not state.get("exists")
+    ]
+    if missing_objects:
+        if len(missing_objects) == 1:
+            object_text = missing_objects[0]
+            verb = "is"
+        else:
+            object_text = f"{missing_objects[0]} and {missing_objects[1]}"
+            verb = "are"
+        return (
+            f"AMD Performance Profile Client is installed, but {object_text} {verb} missing in the current helper context, "
+            "so its local Ryzen Master telemetry path cannot bootstrap."
+        )
+    if any("OpenSemaphore" in message for message in callback_messages):
+        return (
+            "AMD Performance Profile Client reached the local Ryzen Master SDK path, but it still failed its OpenSemaphore bootstrap step from the current helper context."
+        )
+    if platform_state.get("supported_processor") is False:
+        return "AMD Performance Profile Client reports that the current processor is not supported by the local Ryzen Master SDK path."
+    if platform_state.get("vbs_check_required") is True:
+        return "AMD Performance Profile Client reports that additional VBS handling is required before the local Ryzen Master SDK path can sample this processor."
+    return ""
+
+
+def _open_named_sync_object(name: str, *, kind: str) -> dict[str, Any]:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    if str(kind).strip().lower() == "mutex":
+        opener = kernel32.OpenMutexW
+        access_mask = 0x00100000
+    else:
+        opener = kernel32.OpenSemaphoreW
+        access_mask = 0x00100000
+    opener.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_wchar_p]
+    opener.restype = ctypes.c_void_p
+    handle = opener(access_mask, False, name)
+    error_code = ctypes.get_last_error()
+    state = {
+        "name": name,
+        "kind": kind,
+        "exists": bool(handle),
+        "error_code": int(error_code),
+        "error_detail": "" if handle else ctypes.FormatError(error_code).strip(),
+    }
+    if handle:
+        ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(handle))
+    return state
 
 
 def _parse_vendor_number(value: Any) -> float | None:

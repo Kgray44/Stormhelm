@@ -34,12 +34,14 @@ class FakeTelemetryProbe:
         cpu: dict[str, object] | None = None,
         memory: dict[str, object] | None = None,
         gpu: list[dict[str, object]] | None = None,
+        thermal: dict[str, object] | None = None,
         sources: dict[str, object] | None = None,
         freshness: dict[str, object] | None = None,
     ) -> None:
         self._cpu = cpu or {}
         self._memory = memory or {}
         self._gpu = gpu or []
+        self._thermal = thermal or {}
         self._sources = sources or {}
         self._freshness = freshness or {"sampling_tier": "active", "sample_age_seconds": 2.0}
 
@@ -48,6 +50,7 @@ class FakeTelemetryProbe:
             "cpu": dict(self._cpu),
             "memory": dict(self._memory),
             "gpu": [dict(adapter) for adapter in self._gpu],
+            "thermal": dict(self._thermal),
             "capabilities": {
                 "helper_reachable": True,
                 "cpu_deep_telemetry_available": isinstance(self._cpu.get("utilization_percent"), (int, float))
@@ -257,6 +260,87 @@ def test_resource_status_tool_uses_metric_level_provider_and_reason_contract(tem
     assert result.success is True
     assert "non-HWiNFO providers" in result.summary
     assert result.data["metric_contract"]["provider"] == "libre_hardware_monitor"
+
+
+def test_resource_status_tool_reports_cpu_fan_telemetry_from_gigabyte_provider(temp_config) -> None:
+    context = ToolContext(
+        job_id="test-job",
+        config=temp_config,
+        events=EventBuffer(),
+        notes=DummyNotesRepository(),
+        preferences=DummyPreferencesRepository(),
+        safety_policy=SafetyPolicy(temp_config),
+        system_probe=FakeTelemetryProbe(
+            cpu={"name": "AMD Ryzen AI 7 350", "logical_processors": 16, "utilization_percent": 31.0},
+            thermal={
+                "fans": [
+                    {"label": "CPU Fan", "rpm": 3125, "duty_percent": 58, "source": "gigabyte_control_center"},
+                    {"label": "GPU Fan", "rpm": 2980, "duty_percent": 55, "source": "gigabyte_control_center"},
+                ]
+            },
+            sources={
+                "helper": {"provider": "stormhelm_hardware_helper", "state": "reachable"},
+                "thermal": {"provider": "gigabyte_control_center"},
+                "metrics": {
+                    "thermal.cpu_fan_rpm": {
+                        "provider": "gigabyte_control_center",
+                        "available": True,
+                        "source": "GccWmiTool.GetFanSpeed(1)",
+                    },
+                    "thermal.cpu_fan_duty_percent": {
+                        "provider": "gigabyte_control_center",
+                        "available": True,
+                        "source": "CWMI.getCPUFanDuty",
+                    },
+                },
+            },
+        ),
+    )
+
+    result = ResourceStatusTool().execute_sync(
+        context,
+        {"focus": "cpu", "query_kind": "telemetry", "metric": "fan", "present_in": "none"},
+    )
+
+    assert result.success is True
+    assert "fan" in result.summary.lower()
+    assert "3125" in result.summary or "58%" in result.summary
+    assert result.data["metric_contract"]["provider"] == "gigabyte_control_center"
+
+
+def test_resource_status_tool_reports_precise_cpu_fan_access_denied_reason(temp_config) -> None:
+    context = ToolContext(
+        job_id="test-job",
+        config=temp_config,
+        events=EventBuffer(),
+        notes=DummyNotesRepository(),
+        preferences=DummyPreferencesRepository(),
+        safety_policy=SafetyPolicy(temp_config),
+        system_probe=FakeTelemetryProbe(
+            cpu={"name": "AMD Ryzen AI 7 350", "logical_processors": 16, "utilization_percent": 29.0},
+            thermal={"fans": []},
+            sources={
+                "helper": {"provider": "stormhelm_hardware_helper", "state": "reachable"},
+                "thermal": {"provider": "gigabyte_control_center"},
+                "metrics": {
+                    "thermal.cpu_fan_rpm": {
+                        "provider": "gigabyte_control_center",
+                        "available": False,
+                        "unsupported_reason": "Gigabyte Control Center notebook WMI returned Access denied for CPU fan telemetry from the current helper context.",
+                    }
+                },
+            },
+        ),
+    )
+
+    result = ResourceStatusTool().execute_sync(
+        context,
+        {"focus": "cpu", "query_kind": "telemetry", "metric": "fan", "present_in": "none"},
+    )
+
+    assert result.success is True
+    assert "access denied" in result.summary.lower()
+    assert result.data["metric_contract"]["provider"] == "gigabyte_control_center"
 
 
 def test_power_status_tool_overview_surfaces_detailed_battery_fields(temp_config) -> None:

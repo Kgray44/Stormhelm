@@ -330,7 +330,15 @@ class ObservedThroughputProvider:
 
     def _matching_counter(self, alias: str) -> dict[str, Any] | None:
         normalized_alias = alias.strip().lower()
-        counters = self._probe._network_interface_counters()
+        counter_reader = getattr(self._probe, "_network_interface_counters", None)
+        if not callable(counter_reader):
+            return None
+        try:
+            counters = counter_reader()
+        except Exception:
+            return None
+        if not isinstance(counters, list):
+            return None
         for counter in counters:
             if not isinstance(counter, dict):
                 continue

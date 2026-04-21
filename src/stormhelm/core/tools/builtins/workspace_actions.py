@@ -199,6 +199,7 @@ class ExternalOpenUrlTool(BaseTool):
             "properties": {
                 "url": {"type": "string", "description": "The http or https URL to open externally."},
                 "label": {"type": "string", "description": "Optional human-readable destination label."},
+                "browser_target": {"type": "string", "description": "Optional explicit browser target such as chrome or firefox."},
                 "response_contract": {
                     "type": "object",
                     "properties": {
@@ -217,6 +218,7 @@ class ExternalOpenUrlTool(BaseTool):
         return {
             "url": _validate_external_url(str(arguments.get("url", ""))),
             "label": str(arguments.get("label", "")).strip() or None,
+            "browser_target": str(arguments.get("browser_target", "")).strip().lower() or None,
             "response_contract": _validate_response_contract(arguments.get("response_contract")),
         }
 
@@ -234,6 +236,7 @@ class ExternalOpenUrlTool(BaseTool):
                     "kind": "url",
                     "url": url,
                     "title": title,
+                    **({"browser_target": arguments["browser_target"]} if arguments.get("browser_target") else {}),
                     **(response_contract or {}),
                 }
             },

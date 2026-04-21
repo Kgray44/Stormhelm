@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from typing import Any
+from urllib.parse import urlparse
 
 from stormhelm.config.models import AppConfig
 from stormhelm.core.context.service import ActiveContextService
@@ -258,6 +259,15 @@ class AssistantOrchestrator:
                         for tool in self.tool_registry.all_tools()
                         if self.config.tools.enabled.is_enabled(tool.name)
                     },
+                )
+                planned = await self._maybe_apply_browser_search_fallback(
+                    planned=planned,
+                    message=message,
+                    session_id=session_id,
+                    surface_mode=surface_mode,
+                    active_module=active_module,
+                    workspace_context=resolved_workspace_context,
+                    active_context=active_context,
                 )
                 planned_decision = planned
                 planner_debug = dict(planned.debug)
@@ -535,6 +545,178 @@ class AssistantOrchestrator:
         if reasoning_response.output_text:
             return self.persona.report(reasoning_response.output_text)
         return self.persona.report(self._merge_job_summaries([], [action.get("type", "") for action in actions]))
+
+    async def _maybe_apply_browser_search_fallback(
+        self,
+        *,
+        planned: PlannerDecision,
+        message: str,
+        session_id: str,
+        surface_mode: str,
+        active_module: str,
+        workspace_context: dict[str, Any] | None,
+        active_context: dict[str, Any] | None,
+    ) -> PlannerDecision:
+        del session_id, message, surface_mode, active_module, workspace_context, active_context
+        if self.provider is None or not self.config.openai.enabled:
+            return planned
+        if planned.structured_query is None or planned.execution_plan is None:
+            return planned
+        if planned.structured_query.query_shape.value != "search_browser_destination":
+            return planned
+        if planned.request_type != "browser_search" or planned.tool_requests:
+            return planned
+        slots = planned.structured_query.slots if isinstance(planned.structured_query.slots, dict) else {}
+        if str(slots.get("browser_search_failure_reason") or "").strip() != "search_provider_unresolved":
+            return planned
+        if not planned.assistant_message:
+            return planned
+
+        provider_phrase = str(
+            slots.get("search_provider")
+            or slots.get("requested_search_provider_phrase")
+            or slots.get("browser_search_request", {}).get("provider_phrase")
+            or ""
+        ).strip()
+        search_query = str(slots.get("search_query") or "").strip()
+        browser_target = str(slots.get("browser_preference") or "").strip()
+        open_target = str(slots.get("open_target") or "external").strip() or "external"
+        fallback_model = self._browser_search_fallback_model()
+        fallback_metadata: dict[str, Any] = {
+            "attempted": True,
+            "used": False,
+            "model": fallback_model,
+            "provider_phrase": provider_phrase,
+        }
+
+        result = await self.provider.generate(
+            instructions=(
+                "Resolve an unresolved browser-search provider into one credible http or https URL. "
+                "Return exactly one browser_search_fallback_resolve function call. "
+                "Prefer a native search URL when obvious; otherwise return a Google site: search URL. "
+                "If no credible URL can be inferred, return resolved_url as an empty string."
+            ),
+            input_items=json.dumps(
+                {
+                    "provider_phrase": provider_phrase,
+                    "search_query": search_query,
+                    "browser_target": browser_target,
+                    "open_target": open_target,
+                }
+            ),
+            previous_response_id=None,
+            tools=[self._browser_search_fallback_tool_definition()],
+            model=fallback_model,
+            max_output_tokens=self.config.openai.planner_max_output_tokens,
+        )
+
+        tool_call = next((call for call in result.tool_calls if call.name == "browser_search_fallback_resolve"), None)
+        if tool_call is None:
+            fallback_metadata["failure"] = "no_tool_call"
+            slots["browser_search_fallback"] = fallback_metadata
+            self._refresh_planned_debug(planned)
+            return planned
+
+        arguments = tool_call.arguments if isinstance(tool_call.arguments, dict) else {}
+        resolved_url = str(arguments.get("resolved_url") or "").strip()
+        if not self._is_http_url(resolved_url):
+            fallback_metadata["failure"] = "invalid_url"
+            fallback_metadata["reason"] = str(arguments.get("reason") or "").strip()
+            slots["browser_search_fallback"] = fallback_metadata
+            self._refresh_planned_debug(planned)
+            return planned
+
+        title = str(arguments.get("title") or self._default_browser_search_title(provider_phrase)).strip()
+        resolution_kind = str(arguments.get("resolution_kind") or "fallback_url").strip() or "fallback_url"
+        fallback_provider_phrase = str(arguments.get("provider_phrase") or provider_phrase).strip() or provider_phrase
+        reason = str(arguments.get("reason") or "").strip()
+        resolver = getattr(self.planner, "_browser_destination_resolver", None)
+        if resolver is not None and hasattr(resolver, "response_contract_for_search_title"):
+            response_contract = resolver.response_contract_for_search_title(title, open_target=open_target)
+        else:
+            response_contract = {
+                "bearing_title": f"{title} opened",
+                "micro_response": f"Opened {title} in the browser.",
+                "full_response": "Resolved the search URL and opened it in the browser.",
+            }
+        tool_name = "deck_open_url" if open_target == "deck" else "external_open_url"
+        tool_arguments: dict[str, Any] = {
+            "url": resolved_url,
+            "label": title,
+            "response_contract": dict(response_contract),
+        }
+        if tool_name == "external_open_url" and browser_target and browser_target != "default":
+            tool_arguments["browser_target"] = browser_target
+
+        planned.tool_requests = [ToolRequest(tool_name, dict(tool_arguments))]
+        planned.assistant_message = None
+        planned.execution_plan.tool_name = tool_name
+        planned.execution_plan.tool_arguments = dict(tool_arguments)
+        planned.execution_plan.assistant_message = None
+
+        slots["response_contract"] = dict(response_contract)
+        slots["browser_open_plan"] = {
+            "tool_name": tool_name,
+            "tool_arguments": dict(tool_arguments),
+            "response_contract": dict(response_contract),
+            "open_target": open_target,
+        }
+        slots["browser_search_fallback"] = {
+            **fallback_metadata,
+            "used": True,
+            "resolution_kind": resolution_kind,
+            "provider_phrase": fallback_provider_phrase,
+            "resolved_url": resolved_url,
+            "reason": reason,
+        }
+
+        if hasattr(self.planner, "_active_request_state_from_structured_query"):
+            planned.active_request_state = self.planner._active_request_state_from_structured_query(
+                planned.structured_query,
+                planned.execution_plan,
+            )
+        self._refresh_planned_debug(planned)
+        return planned
+
+    def _browser_search_fallback_model(self) -> str:
+        return "gpt-5.4-nano"
+
+    def _browser_search_fallback_tool_definition(self) -> dict[str, Any]:
+        return {
+            "type": "function",
+            "name": "browser_search_fallback_resolve",
+            "description": "Resolve a browser-search provider phrase into a credible URL to open.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "resolved_url": {"type": "string"},
+                    "title": {"type": "string"},
+                    "resolution_kind": {"type": "string"},
+                    "provider_phrase": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["resolved_url", "title", "resolution_kind", "provider_phrase", "reason"],
+                "additionalProperties": False,
+            },
+        }
+
+    def _refresh_planned_debug(self, planned: PlannerDecision) -> None:
+        if planned.structured_query is not None:
+            planned.debug["structured_query"] = planned.structured_query.to_dict()
+        if planned.execution_plan is not None:
+            planned.debug["execution_plan"] = planned.execution_plan.to_dict()
+
+    def _default_browser_search_title(self, provider_phrase: str) -> str:
+        phrase = " ".join(str(provider_phrase or "").split()).strip()
+        if not phrase:
+            return "Search"
+        if "." in phrase:
+            return f"{phrase} search"
+        return f"{phrase[:1].upper()}{phrase[1:]} search"
+
+    def _is_http_url(self, candidate: str) -> bool:
+        parsed = urlparse(str(candidate or "").strip())
+        return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
     async def _handle_provider_turn(
         self,

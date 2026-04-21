@@ -82,8 +82,11 @@ class MainController(QtCore.QObject):
     def _handle_error(self, purpose: str, error: str) -> None:
         if str(purpose).startswith("/snapshot"):
             self._complete_snapshot_request()
-        self._core_online = False
-        self.bridge.set_connection_error(f"{purpose}: {error}")
+        if self._is_connection_disruption(purpose, error):
+            self._core_online = False
+            self.bridge.set_connection_error(f"{purpose}: {error}")
+            return
+        self.bridge.set_operation_error(f"{purpose}: {error}")
 
     def _handle_health(self, payload: dict) -> None:
         if payload.get("status") == "ok" and not self._core_online:
@@ -119,7 +122,27 @@ class MainController(QtCore.QObject):
         target = str(action.get("url") or action.get("path") or "").strip()
         if not target:
             return
+        browser_target = str(action.get("browser_target", "")).strip().lower()
+        if browser_target and str(action.get("kind", "url")).strip().lower() == "url":
+            self._open_in_browser_target(browser_target, target)
+            return
         QtGui.QDesktopServices.openUrl(QtCore.QUrl(target))
+
+    def _open_in_browser_target(self, browser_target: str, url: str) -> None:
+        browser_commands = {
+            "msedge": "msedge",
+            "edge": "msedge",
+            "microsoft edge": "msedge",
+            "chrome": "chrome",
+            "google chrome": "chrome",
+            "firefox": "firefox",
+            "brave": "brave",
+            "opera": "opera",
+            "vivaldi": "vivaldi",
+        }
+        command = browser_commands.get((browser_target or "").strip().lower())
+        if not command or not QtCore.QProcess.startDetached(command, [url]):
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl(url))
 
     def _request_snapshot(self, *, force: bool = False) -> None:
         if self._snapshot_in_flight:
@@ -135,3 +158,20 @@ class MainController(QtCore.QObject):
             return
         self._snapshot_refresh_queued = False
         self._request_snapshot()
+
+    def _is_connection_disruption(self, purpose: str, error: str) -> bool:
+        normalized_purpose = str(purpose or "").strip().lower()
+        if normalized_purpose.startswith("/snapshot") or normalized_purpose.startswith("/health"):
+            return True
+        normalized_error = str(error or "").strip().lower()
+        disruption_markers = (
+            "connection refused",
+            "connection closed",
+            "connection timed out",
+            "host not found",
+            "network unreachable",
+            "timed out",
+            "timeout",
+            "remote host closed",
+        )
+        return any(marker in normalized_error for marker in disruption_markers)

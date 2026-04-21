@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from PySide6 import QtCore
+from PySide6 import QtGui
 
 from stormhelm.ui.bridge import UiBridge
 from stormhelm.ui.controllers.main_controller import MainController
@@ -204,3 +205,47 @@ def test_main_controller_chat_queues_one_refresh_behind_inflight_snapshot(temp_c
     controller._handle_snapshot({})
 
     assert client.snapshot_calls == 2
+
+
+def test_main_controller_opens_external_url_in_requested_browser(monkeypatch, temp_config) -> None:
+    bridge = UiBridge(temp_config)
+    client = DummyClient()
+    controller = MainController(config=temp_config, bridge=bridge, client=client)
+    targeted_launches: list[tuple[str, str]] = []
+    default_launches: list[str] = []
+
+    monkeypatch.setattr(
+        controller,
+        "_open_in_browser_target",
+        lambda browser_target, url: targeted_launches.append((browser_target, url)),
+        raising=False,
+    )
+    monkeypatch.setattr(QtGui.QDesktopServices, "openUrl", lambda url: default_launches.append(url.toString()))
+
+    controller._handle_chat(
+        {
+            "actions": [
+                {
+                    "type": "open_external",
+                    "kind": "url",
+                    "url": "https://github.com/search?q=issue+templates",
+                    "title": "GitHub search",
+                    "browser_target": "firefox",
+                }
+            ],
+            "assistant_message": {
+                "message_id": "assistant-browser-1",
+                "role": "assistant",
+                "content": "Opened GitHub search in the browser.",
+                "created_at": "2026-04-21T19:10:00Z",
+                "metadata": {
+                    "bearing_title": "GitHub search opened",
+                    "micro_response": "Opened GitHub search in the browser.",
+                    "full_response": "Resolved the search URL and opened it in the browser.",
+                },
+            },
+        }
+    )
+
+    assert targeted_launches == [("firefox", "https://github.com/search?q=issue+templates")]
+    assert default_launches == []
