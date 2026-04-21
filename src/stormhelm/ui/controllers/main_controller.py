@@ -38,6 +38,7 @@ class MainController(QtCore.QObject):
             started = ensure_core_running(self.config)
             if not started:
                 self.bridge.set_status_line("Standing watch.")
+            self.client.fetch_health()
         except Exception as error:
             self.bridge.set_connection_error(str(error))
             self.bridge.set_status_line(f"Core startup issue: {error}")
@@ -123,12 +124,13 @@ class MainController(QtCore.QObject):
         if not target:
             return
         browser_target = str(action.get("browser_target", "")).strip().lower()
+        browser_command = str(action.get("browser_command", "")).strip()
         if browser_target and str(action.get("kind", "url")).strip().lower() == "url":
-            self._open_in_browser_target(browser_target, target)
+            self._open_in_browser_target(browser_target, target, browser_command=browser_command or None)
             return
         QtGui.QDesktopServices.openUrl(QtCore.QUrl(target))
 
-    def _open_in_browser_target(self, browser_target: str, url: str) -> None:
+    def _open_in_browser_target(self, browser_target: str, url: str, *, browser_command: str | None = None) -> None:
         browser_commands = {
             "msedge": "msedge",
             "edge": "msedge",
@@ -140,7 +142,7 @@ class MainController(QtCore.QObject):
             "opera": "opera",
             "vivaldi": "vivaldi",
         }
-        command = browser_commands.get((browser_target or "").strip().lower())
+        command = browser_command or browser_commands.get((browser_target or "").strip().lower())
         if not command or not QtCore.QProcess.startDetached(command, [url]):
             QtGui.QDesktopServices.openUrl(QtCore.QUrl(url))
 

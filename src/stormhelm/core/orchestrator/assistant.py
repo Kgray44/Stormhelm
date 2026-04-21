@@ -16,8 +16,11 @@ from stormhelm.core.memory.repositories import ConversationRepository, NotesRepo
 from stormhelm.core.orchestrator.persona import PersonaContract
 from stormhelm.core.orchestrator.planner import DeterministicPlanner
 from stormhelm.core.orchestrator.planner import PlannerDecision
+from stormhelm.core.orchestrator.planner_models import QueryShape
 from stormhelm.core.orchestrator.router import IntentRouter
 from stormhelm.core.orchestrator.router import ToolRequest
+from stormhelm.core.screen_awareness import ScreenAwarenessSubsystem
+from stormhelm.core.screen_awareness import ScreenIntentType
 from stormhelm.core.orchestrator.session_state import ConversationStateStore
 from stormhelm.core.providers.base import AssistantProvider, ProviderToolCall
 from stormhelm.core.tools.registry import ToolRegistry
@@ -41,6 +44,7 @@ class AssistantOrchestrator:
         persona: PersonaContract,
         workspace_service: WorkspaceService | None = None,
         provider: AssistantProvider | None = None,
+        screen_awareness: ScreenAwarenessSubsystem | None = None,
     ) -> None:
         self.config = config
         self.conversations = conversations
@@ -54,6 +58,7 @@ class AssistantOrchestrator:
         self.workspace_service = workspace_service
         self._fallback_workspace_service: WorkspaceService | None = None
         self.provider = provider
+        self.screen_awareness = screen_awareness
         self.active_context_service = ActiveContextService(session_state)
         self.judgment = JudgmentService(config=config, session_state=session_state)
 
@@ -271,6 +276,10 @@ class AssistantOrchestrator:
                 )
                 planned_decision = planned
                 planner_debug = dict(planned.debug)
+                self._publish_screen_awareness_event(
+                    session_id=session_id,
+                    screen_awareness_debug=planner_debug.get("screen_awareness"),
+                )
                 if planned.tool_requests:
                     pre_action = self.judgment.assess_pre_action(
                         session_id=session_id,
@@ -328,6 +337,45 @@ class AssistantOrchestrator:
                         )
                     self.session_state.clear_previous_response_id(session_id, role="planner")
                     self.session_state.clear_previous_response_id(session_id, role="reasoner")
+                elif (
+                    planned.execution_plan is not None
+                    and planned.structured_query is not None
+                    and planned.structured_query.query_shape == QueryShape.SCREEN_AWARENESS_REQUEST
+                    and planned.execution_plan.plan_type == "screen_awareness_analyze"
+                    and self.screen_awareness is not None
+                ):
+                    screen_debug = planned.structured_query.slots.get("screen_awareness")
+                    debug_payload = dict(screen_debug) if isinstance(screen_debug, dict) else {}
+                    intent_value = str(
+                        debug_payload.get("intent")
+                        or planned.structured_query.requested_action
+                        or ScreenIntentType.INSPECT_VISIBLE_STATE.value
+                    ).strip()
+                    try:
+                        screen_intent = ScreenIntentType(intent_value)
+                    except ValueError:
+                        screen_intent = ScreenIntentType.INSPECT_VISIBLE_STATE
+                    screen_response = self.screen_awareness.handle_request(
+                        session_id=session_id,
+                        operator_text=message,
+                        intent=screen_intent,
+                        surface_mode=surface_mode,
+                        active_module=active_module,
+                        active_context=active_context,
+                        workspace_context=resolved_workspace_context,
+                    )
+                    assistant_text = self.persona.report(screen_response.assistant_response)
+                    planned.structured_query.slots["response_contract"] = dict(screen_response.response_contract)
+                    if planned.active_request_state:
+                        self.session_state.set_active_request_state(session_id, planned.active_request_state)
+                    screen_awareness_debug = dict(planner_debug.get("screen_awareness") or {})
+                    screen_awareness_debug["analysis_result"] = screen_response.analysis.to_dict()
+                    screen_awareness_debug["telemetry"] = dict(screen_response.telemetry)
+                    planner_debug["screen_awareness"] = screen_awareness_debug
+                    self._publish_screen_awareness_event(
+                        session_id=session_id,
+                        screen_awareness_debug=screen_awareness_debug,
+                    )
                 elif planned.assistant_message:
                     if planned.active_request_state:
                         self.session_state.set_active_request_state(session_id, planned.active_request_state)
@@ -1019,6 +1067,54 @@ class AssistantOrchestrator:
         if planner_obedience:
             metadata["planner_obedience"] = dict(planner_obedience)
         return metadata
+
+    def _publish_screen_awareness_event(
+        self,
+        *,
+        session_id: str,
+        screen_awareness_debug: object,
+    ) -> None:
+        debug_events_enabled = False
+        if self.screen_awareness is not None:
+            debug_events_enabled = self.screen_awareness.config.debug_events_enabled
+        elif hasattr(self.config, "screen_awareness"):
+            debug_events_enabled = bool(self.config.screen_awareness.debug_events_enabled)
+        if not debug_events_enabled:
+            return
+        if not isinstance(screen_awareness_debug, dict) or not screen_awareness_debug.get("candidate"):
+            return
+        disposition = str(screen_awareness_debug.get("disposition") or "").strip()
+        message = "Screen-awareness request detected."
+        if disposition == "phase0_scaffold":
+            message = "Screen-awareness request routed to the Phase 0 scaffold."
+        elif disposition == "phase1_analyze":
+            message = "Screen-awareness request routed to Phase 1 observe-and-describe analysis."
+        elif disposition == "phase2_ground":
+            message = "Screen-awareness request routed to Phase 2 grounding and disambiguation."
+        elif disposition in {"feature_disabled", "routing_disabled"}:
+            message = "Screen-awareness request detected but not activated."
+        self.events.publish(
+            level="DEBUG",
+            source="screen_awareness",
+            message=message,
+            payload={
+                "session_id": session_id,
+                "disposition": disposition,
+                "intent": str(screen_awareness_debug.get("intent") or ""),
+                "route_confidence": float(screen_awareness_debug.get("route_confidence") or 0.0),
+                "feature_enabled": bool(screen_awareness_debug.get("feature_enabled", False)),
+                "planner_routing_enabled": bool(screen_awareness_debug.get("planner_routing_enabled", False)),
+                "input_signals": dict(screen_awareness_debug.get("input_signals") or {})
+                if isinstance(screen_awareness_debug.get("input_signals"), dict)
+                else {},
+                "analysis_result": dict(screen_awareness_debug.get("analysis_result") or {})
+                if isinstance(screen_awareness_debug.get("analysis_result"), dict)
+                else {},
+                "telemetry": dict(screen_awareness_debug.get("telemetry") or {})
+                if isinstance(screen_awareness_debug.get("telemetry"), dict)
+                else {},
+            },
+        )
 
     def _planner_response_contract(self, planned_decision: PlannerDecision | None) -> dict[str, Any]:
         if planned_decision is None or planned_decision.structured_query is None:

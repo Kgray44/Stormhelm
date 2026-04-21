@@ -207,8 +207,9 @@ class SystemProbe:
             freshness["sampling_tier"] = tier
             freshness["sample_age_seconds"] = 0.0
 
+        completed_at = monotonic()
         self._hardware_telemetry_cache[tier] = deepcopy(snapshot)
-        self._hardware_telemetry_cached_at[tier] = now
+        self._hardware_telemetry_cached_at[tier] = completed_at
         return snapshot
 
     def power_status(self) -> dict[str, Any]:

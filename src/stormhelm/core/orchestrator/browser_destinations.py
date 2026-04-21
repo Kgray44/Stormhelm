@@ -110,6 +110,7 @@ class BrowserDestinationRequest:
     destination_phrase: str
     scope: DestinationScope
     open_target: str
+    raw_destination_phrase: str = ""
     browser_preference: str = "default"
     explicit_browser: bool = False
 
@@ -119,6 +120,7 @@ class BrowserDestinationRequest:
             "normalized_text": self.normalized_text,
             "intent_type": self.intent_type.value,
             "destination_phrase": self.destination_phrase,
+            "raw_destination_phrase": self.raw_destination_phrase,
             "scope": self.scope.value,
             "open_target": self.open_target,
             "browser_preference": self.browser_preference,
@@ -158,6 +160,9 @@ class DestinationResolutionResult:
     request: BrowserDestinationRequest
     destination: KnownWebDestination | None = None
     url: str | None = None
+    display_title: str | None = None
+    resolution_kind: str | None = None
+    site_domain: str | None = None
     matched_alias: str | None = None
     failure_reason: BrowserOpenFailureReason | None = None
     notes: list[str] = field(default_factory=list)
@@ -168,6 +173,9 @@ class DestinationResolutionResult:
             "request": self.request.to_dict(),
             "destination": self.destination.to_dict() if self.destination is not None else None,
             "url": self.url,
+            "display_title": self.display_title,
+            "resolution_kind": self.resolution_kind,
+            "site_domain": self.site_domain,
             "matched_alias": self.matched_alias,
             "failure_reason": self.failure_reason.value if self.failure_reason is not None else None,
             "notes": list(self.notes),
@@ -290,6 +298,28 @@ KNOWN_BROWSER_DESTINATIONS: tuple[KnownWebDestination, ...] = (
         personal_aliases=("my onedrive",),
         requires_signed_in_session=True,
     ),
+    KnownWebDestination(key="amazon", title="Amazon", url="https://www.amazon.com/", aliases=("amazon",)),
+    KnownWebDestination(key="ebay", title="eBay", url="https://www.ebay.com/", aliases=("ebay", "e bay")),
+    KnownWebDestination(key="etsy", title="Etsy", url="https://www.etsy.com/", aliases=("etsy",)),
+    KnownWebDestination(key="walmart", title="Walmart", url="https://www.walmart.com/", aliases=("walmart",)),
+    KnownWebDestination(key="best_buy", title="Best Buy", url="https://www.bestbuy.com/", aliases=("best buy", "bestbuy")),
+    KnownWebDestination(key="spotify", title="Spotify", url="https://open.spotify.com/", aliases=("spotify",)),
+    KnownWebDestination(key="soundcloud", title="SoundCloud", url="https://soundcloud.com/", aliases=("soundcloud", "sound cloud")),
+    KnownWebDestination(key="twitch", title="Twitch", url="https://www.twitch.tv/", aliases=("twitch",)),
+    KnownWebDestination(key="hacker_news", title="Hacker News", url="https://news.ycombinator.com/", aliases=("hacker news", "hn")),
+    KnownWebDestination(key="quora", title="Quora", url="https://www.quora.com/", aliases=("quora",)),
+    KnownWebDestination(key="stack_overflow", title="Stack Overflow", url="https://stackoverflow.com/", aliases=("stack overflow", "stackoverflow")),
+    KnownWebDestination(key="booking", title="Booking.com", url="https://www.booking.com/", aliases=("booking", "booking.com")),
+    KnownWebDestination(key="tripadvisor", title="Tripadvisor", url="https://www.tripadvisor.com/", aliases=("tripadvisor", "trip advisor")),
+    KnownWebDestination(key="airbnb", title="Airbnb", url="https://www.airbnb.com/", aliases=("airbnb", "air bnb")),
+    KnownWebDestination(key="expedia", title="Expedia", url="https://www.expedia.com/", aliases=("expedia",)),
+    KnownWebDestination(
+        key="python_docs",
+        title="Python docs",
+        url="https://docs.python.org/",
+        aliases=("python docs", "python documentation", "python docs site"),
+    ),
+    KnownWebDestination(key="mdn", title="MDN", url="https://developer.mozilla.org/", aliases=("mdn", "mozilla developer network")),
 )
 
 
@@ -331,6 +361,30 @@ KNOWN_WEB_SEARCH_PROVIDERS: tuple[KnownWebSearchProvider, ...] = (
         aliases=("amazon",),
     ),
     KnownWebSearchProvider(
+        key="ebay",
+        title="eBay",
+        url_template="https://www.ebay.com/sch/i.html?_nkw={query}",
+        aliases=("ebay", "e bay"),
+    ),
+    KnownWebSearchProvider(
+        key="etsy",
+        title="Etsy",
+        url_template="https://www.etsy.com/search?q={query}",
+        aliases=("etsy",),
+    ),
+    KnownWebSearchProvider(
+        key="walmart",
+        title="Walmart",
+        url_template="https://www.walmart.com/search?q={query}",
+        aliases=("walmart",),
+    ),
+    KnownWebSearchProvider(
+        key="best_buy",
+        title="Best Buy",
+        url_template="https://www.bestbuy.com/site/searchpage.jsp?st={query}",
+        aliases=("best buy", "bestbuy"),
+    ),
+    KnownWebSearchProvider(
         key="linkedin",
         title="LinkedIn",
         url_template="https://www.linkedin.com/search/results/all/?keywords={query}",
@@ -359,6 +413,90 @@ KNOWN_WEB_SEARCH_PROVIDERS: tuple[KnownWebSearchProvider, ...] = (
         title="PyPI",
         url_template="https://pypi.org/search/?q={query}",
         aliases=("pypi", "py pi"),
+    ),
+    KnownWebSearchProvider(
+        key="arxiv",
+        title="arXiv",
+        url_template="https://arxiv.org/search/?query={query}&searchtype=all",
+        aliases=("arxiv", "ar x i v"),
+    ),
+    KnownWebSearchProvider(
+        key="pubmed",
+        title="PubMed",
+        url_template="https://pubmed.ncbi.nlm.nih.gov/?term={query}",
+        aliases=("pubmed", "pub med"),
+    ),
+    KnownWebSearchProvider(
+        key="python_docs",
+        title="Python docs",
+        url_template="https://docs.python.org/3/search.html?q={query}",
+        aliases=("python docs", "python documentation"),
+    ),
+    KnownWebSearchProvider(
+        key="spotify",
+        title="Spotify",
+        url_template="https://open.spotify.com/search/{query}",
+        aliases=("spotify",),
+    ),
+    KnownWebSearchProvider(
+        key="soundcloud",
+        title="SoundCloud",
+        url_template="https://soundcloud.com/search?q={query}",
+        aliases=("soundcloud", "sound cloud"),
+    ),
+    KnownWebSearchProvider(
+        key="twitch",
+        title="Twitch",
+        url_template="https://www.twitch.tv/search?term={query}",
+        aliases=("twitch",),
+    ),
+    KnownWebSearchProvider(
+        key="imdb",
+        title="IMDb",
+        url_template="https://www.imdb.com/find/?q={query}",
+        aliases=("imdb", "i m d b"),
+    ),
+    KnownWebSearchProvider(
+        key="hacker_news",
+        title="Hacker News",
+        url_template="https://hn.algolia.com/?q={query}",
+        aliases=("hacker news", "hn"),
+    ),
+    KnownWebSearchProvider(
+        key="quora",
+        title="Quora",
+        url_template="https://www.quora.com/search?q={query}",
+        aliases=("quora",),
+    ),
+    KnownWebSearchProvider(
+        key="stack_exchange",
+        title="Stack Exchange",
+        url_template="https://stackexchange.com/search?q={query}",
+        aliases=("stack exchange", "stackexchange"),
+    ),
+    KnownWebSearchProvider(
+        key="booking",
+        title="Booking.com",
+        url_template="https://www.booking.com/searchresults.html?ss={query}",
+        aliases=("booking", "booking.com"),
+    ),
+    KnownWebSearchProvider(
+        key="tripadvisor",
+        title="Tripadvisor",
+        url_template="https://www.tripadvisor.com/Search?q={query}",
+        aliases=("tripadvisor", "trip advisor"),
+    ),
+    KnownWebSearchProvider(
+        key="airbnb",
+        title="Airbnb",
+        url_template="https://www.airbnb.com/s/{query}/homes",
+        aliases=("airbnb", "air bnb"),
+    ),
+    KnownWebSearchProvider(
+        key="expedia",
+        title="Expedia",
+        url_template="https://www.expedia.com/Hotel-Search?destination={query}",
+        aliases=("expedia",),
     ),
     KnownWebSearchProvider(
         key="web",
@@ -418,6 +556,66 @@ LOCAL_SEARCH_PROVIDER_BLOCKLIST = frozenset(
         "music",
         "clipboard",
         "selection",
+    }
+)
+
+FILE_STYLE_DOMAIN_SUFFIX_BLOCKLIST = frozenset(
+    {
+        "7z",
+        "bat",
+        "bmp",
+        "c",
+        "cfg",
+        "cmd",
+        "cpp",
+        "css",
+        "csv",
+        "doc",
+        "docx",
+        "flac",
+        "gif",
+        "go",
+        "h",
+        "hpp",
+        "html",
+        "ini",
+        "jar",
+        "java",
+        "jpeg",
+        "jpg",
+        "js",
+        "json",
+        "jsx",
+        "log",
+        "md",
+        "mkv",
+        "mov",
+        "mp3",
+        "mp4",
+        "pdf",
+        "png",
+        "ppt",
+        "pptx",
+        "ps1",
+        "py",
+        "rar",
+        "rs",
+        "sh",
+        "sql",
+        "svg",
+        "tar",
+        "toml",
+        "ts",
+        "tsx",
+        "txt",
+        "wav",
+        "webp",
+        "xls",
+        "xlsx",
+        "xml",
+        "yaml",
+        "yml",
+        "zip",
     }
 )
 
@@ -505,6 +703,8 @@ class BrowserDestinationResolver:
         destination_phrase = self._extract_destination_phrase(stripped_text)
         if not destination_phrase:
             return None
+        raw_without_browser = self._strip_trailing_browser_clauses_raw(text)
+        raw_destination_phrase = self._extract_destination_phrase_raw(raw_without_browser) or destination_phrase
         scope = DestinationScope.PERSONAL if self._is_personal_scope(stripped_text) else DestinationScope.GENERAL
         open_target = self._resolve_open_target(
             normalized_text=normalized,
@@ -519,6 +719,7 @@ class BrowserDestinationResolver:
             destination_phrase=destination_phrase,
             scope=scope,
             open_target=open_target,
+            raw_destination_phrase=raw_destination_phrase,
             browser_preference=browser_preference,
             explicit_browser=explicit_browser,
         )
@@ -561,21 +762,40 @@ class BrowserDestinationResolver:
         matched = lookup.get(request.destination_phrase)
         if matched is None and request.scope == DestinationScope.PERSONAL:
             matched = self._destination_general_alias_index.get(request.destination_phrase)
-        if matched is None:
+        if matched is not None:
+            destination, matched_alias = matched
+            host = destination.host()
+            site_domain = None
+            if host:
+                site_domain = host[4:] if host.startswith("www.") else host
             return DestinationResolutionResult(
-                success=False,
+                success=True,
                 request=request,
-                failure_reason=BrowserOpenFailureReason.DESTINATION_UNRESOLVED,
-                notes=["browser destination unresolved"],
+                destination=destination,
+                url=destination.url,
+                display_title=destination.title,
+                resolution_kind="known_destination",
+                site_domain=site_domain,
+                matched_alias=matched_alias,
+                notes=[f"known destination mapped to {destination.key}"],
             )
-        destination, matched_alias = matched
+        direct_domain = self._resolve_direct_domain_destination(request.raw_destination_phrase or request.destination_phrase)
+        if direct_domain is not None:
+            url, site_domain, display_title = direct_domain
+            return DestinationResolutionResult(
+                success=True,
+                request=request,
+                url=url,
+                display_title=display_title,
+                resolution_kind="direct_domain",
+                site_domain=site_domain,
+                notes=[f"direct domain resolved to {site_domain}"],
+            )
         return DestinationResolutionResult(
-            success=True,
+            success=False,
             request=request,
-            destination=destination,
-            url=destination.url,
-            matched_alias=matched_alias,
-            notes=[f"known destination mapped to {destination.key}"],
+            failure_reason=BrowserOpenFailureReason.DESTINATION_UNRESOLVED,
+            notes=["browser destination unresolved"],
         )
 
     def resolve_search(self, request: BrowserSearchRequest) -> SearchResolutionResult:
@@ -618,14 +838,14 @@ class BrowserDestinationResolver:
         )
 
     def build_open_plan(self, resolution: DestinationResolutionResult) -> BrowserOpenPlan:
-        destination = resolution.destination
-        if destination is None or resolution.url is None:
+        if not resolution.success or resolution.url is None:
             raise ValueError("A successful destination resolution is required before building an open plan.")
+        title = resolution.display_title or (resolution.destination.title if resolution.destination is not None else "Browser destination")
         response_contract = self.response_contract_for_success(resolution)
         tool_name = "deck_open_url" if resolution.request.open_target == "deck" else "external_open_url"
         tool_arguments: dict[str, Any] = {
             "url": resolution.url,
-            "label": destination.title,
+            "label": title,
             "response_contract": dict(response_contract),
         }
         if tool_name == "external_open_url" and resolution.request.browser_preference != "default":
@@ -657,7 +877,7 @@ class BrowserDestinationResolver:
         )
 
     def response_contract_for_success(self, resolution: DestinationResolutionResult) -> dict[str, str]:
-        title = resolution.destination.title if resolution.destination is not None else "Browser destination"
+        title = resolution.display_title or (resolution.destination.title if resolution.destination is not None else "Browser destination")
         return self._response_contract(
             title=f"{title} opened",
             micro=f"Opened {title} in {self._open_surface_label(resolution.request.open_target)}.",
@@ -769,6 +989,8 @@ class BrowserDestinationResolver:
             return False
         if self._destination_for_phrase(destination_phrase, include_personal=True) is not None:
             return True
+        if self._looks_like_direct_domain_destination(destination_phrase):
+            return True
         if self._has_browser_surface_cue(normalized_text) and self._looks_like_webish_unknown_destination(
             destination_phrase,
             stripped_text=stripped_text,
@@ -800,6 +1022,13 @@ class BrowserDestinationResolver:
         candidate = re.sub(r"^(?:my\s+personal|my|personal)\s+", "", candidate).strip()
         candidate = re.sub(r"\s+(?:site|website|web site|homepage|home page|page)$", "", candidate).strip()
         return normalize_phrase(candidate)
+
+    def _extract_destination_phrase_raw(self, stripped_text: str) -> str:
+        candidate = re.sub(r"^(?:open|show|bring up|pull up|go to|navigate to)\s+", "", str(stripped_text or "").strip(), flags=re.IGNORECASE)
+        candidate = re.sub(r"^(?:the\s+)", "", candidate, flags=re.IGNORECASE).strip()
+        candidate = re.sub(r"^(?:my\s+personal|my|personal)\s+", "", candidate, flags=re.IGNORECASE).strip()
+        candidate = re.sub(r"\s+(?:site|website|web site|homepage|home page|page)$", "", candidate, flags=re.IGNORECASE).strip()
+        return " ".join(candidate.split()).strip(" .")
 
     def _extract_search_provider_and_query(self, *, raw_text: str, normalized_text: str) -> tuple[str | None, str | None, str]:
         raw_text = " ".join(str(raw_text or "").split()).strip(" .")
@@ -871,8 +1100,10 @@ class BrowserDestinationResolver:
         normalized_phrase = normalize_phrase(provider_phrase)
         if not normalized_phrase:
             return None
-        if self._looks_like_domain(normalized_phrase):
-            return normalized_phrase
+        direct_domain = self._resolve_direct_domain_destination(provider_phrase)
+        if direct_domain is not None:
+            _, site_domain, _ = direct_domain
+            return site_domain
         matched = self._destination_general_alias_index.get(normalized_phrase)
         if matched is None:
             return None
@@ -885,10 +1116,48 @@ class BrowserDestinationResolver:
         return host[4:] if host.startswith("www.") else host
 
     def _looks_like_domain(self, value: str) -> bool:
-        normalized = normalize_phrase(value)
-        if not normalized or " " in normalized:
-            return False
-        return bool(re.fullmatch(r"(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/[^\s]*)?", normalized))
+        return self._normalize_direct_domain_phrase(value) is not None
+
+    def _looks_like_direct_domain_destination(self, value: str) -> bool:
+        return self._normalize_direct_domain_phrase(value) is not None
+
+    def _resolve_direct_domain_destination(self, phrase: str) -> tuple[str, str, str] | None:
+        normalized_phrase = self._normalize_direct_domain_phrase(phrase)
+        if not normalized_phrase:
+            return None
+        parsed = urlparse(f"https://{normalized_phrase}")
+        host = str(parsed.netloc or "").strip().lower()
+        if not host:
+            return None
+        site_domain = host[4:] if host.startswith("www.") else host
+        url = f"https://{normalized_phrase}"
+        if not parsed.path and not parsed.params and not parsed.query and not parsed.fragment:
+            url = f"{url}/"
+        display_title = normalized_phrase.rstrip("/") or site_domain
+        return url, site_domain, display_title
+
+    def _normalize_direct_domain_phrase(self, value: str) -> str | None:
+        candidate = " ".join(str(value or "").split()).strip().strip(".,;:!?")
+        if not candidate:
+            return None
+        candidate = re.sub(r"^https?://", "", candidate, flags=re.IGNORECASE).lstrip("/")
+        if not candidate:
+            return None
+        parsed = urlparse(f"https://{candidate}")
+        host = str(parsed.netloc or "").strip().lower()
+        if not host or not re.fullmatch(r"(?:[a-z0-9-]+\.)+[a-z]{2,}", host):
+            return None
+        top_level_suffix = host.rsplit(".", 1)[-1]
+        if top_level_suffix in FILE_STYLE_DOMAIN_SUFFIX_BLOCKLIST:
+            return None
+        suffix = parsed.path or ""
+        if parsed.params:
+            suffix = f"{suffix};{parsed.params}"
+        if parsed.query:
+            suffix = f"{suffix}?{parsed.query}"
+        if parsed.fragment:
+            suffix = f"{suffix}#{parsed.fragment}"
+        return f"{host}{suffix}"
 
     def _display_name_for_provider_phrase(self, provider_phrase: str) -> str:
         normalized_phrase = normalize_phrase(provider_phrase)
@@ -898,8 +1167,9 @@ class BrowserDestinationResolver:
         matched = self._destination_general_alias_index.get(normalized_phrase) or self._destination_personal_alias_index.get(normalized_phrase)
         if matched is not None:
             return matched[0].title
-        if self._looks_like_domain(normalized_phrase):
-            return normalized_phrase
+        direct_domain = self._resolve_direct_domain_destination(provider_phrase)
+        if direct_domain is not None:
+            return direct_domain[2]
         return " ".join(part.capitalize() for part in normalized_phrase.split())
 
     def _response_contract(self, *, title: str, micro: str, full: str) -> dict[str, str]:

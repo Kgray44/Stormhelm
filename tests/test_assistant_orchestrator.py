@@ -16,8 +16,10 @@ from stormhelm.core.orchestrator.router import IntentRouter
 from stormhelm.core.orchestrator.session_state import ConversationStateStore
 from stormhelm.core.providers.base import AssistantProvider, ProviderToolCall, ProviderTurnResult
 from stormhelm.core.safety.policy import SafetyPolicy
+from stormhelm.core.screen_awareness import build_screen_awareness_subsystem
 from stormhelm.core.tools.base import ToolContext
 from stormhelm.core.tools.builtins import register_builtin_tools
+from stormhelm.core.tools.builtins import workspace_actions
 from stormhelm.core.tools.executor import ToolExecutor
 from stormhelm.core.tools.registry import ToolRegistry
 from stormhelm.core.workspace.indexer import WorkspaceIndexer
@@ -725,10 +727,14 @@ def _build_assistant(temp_config, *, system_probe=None) -> tuple[AssistantOrches
         events=events,
         tool_registry=registry,
         session_state=session_state,
-        planner=DeterministicPlanner(),
+        planner=DeterministicPlanner(screen_awareness_config=temp_config.screen_awareness),
         persona=PersonaContract(temp_config),
         workspace_service=None,
         provider=None,
+        screen_awareness=build_screen_awareness_subsystem(
+            temp_config.screen_awareness,
+            system_probe=system_probe,
+        ),
     )
     return assistant, jobs, executor, session_state
 
@@ -795,10 +801,14 @@ def _build_assistant_with_workspace(
         events=events,
         tool_registry=registry,
         session_state=session_state,
-        planner=DeterministicPlanner(),
+        planner=DeterministicPlanner(screen_awareness_config=temp_config.screen_awareness),
         persona=PersonaContract(temp_config),
         workspace_service=workspace_service,
         provider=None,
+        screen_awareness=build_screen_awareness_subsystem(
+            temp_config.screen_awareness,
+            system_probe=system_probe,
+        ),
     )
     return assistant, jobs, executor, session_state, workspace_service
 
@@ -829,6 +839,135 @@ def _run_assistant_once(
             executor.shutdown()
 
     return asyncio.run(runner())
+
+
+def test_assistant_orchestrator_handles_phase1_screen_awareness_analysis_and_debug_event(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase1"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+    payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="what am I looking at",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context={
+            "workspace": {"workspaceId": "ws-1", "title": "PyInstaller Research"},
+            "module": "browser",
+            "section": "open-pages",
+            "opened_items": [
+                {
+                    "itemId": "page-1",
+                    "title": "PyInstaller Docs",
+                    "url": "https://pyinstaller.org/en/stable/",
+                    "kind": "browser-tab",
+                }
+            ],
+            "active_item": {
+                "itemId": "page-1",
+                "title": "PyInstaller Docs",
+                "url": "https://pyinstaller.org/en/stable/",
+                "kind": "browser-tab",
+            },
+        },
+        input_context={
+            "selection": {
+                "kind": "text",
+                "value": "PyInstaller bundles a Python application into a single package.",
+                "preview": "PyInstaller bundles a Python application into a single package.",
+            }
+        },
+    )
+    planner_debug = _planner_debug(payload)
+    planner_obedience = _planner_obedience(payload)
+    screen_events = [event for event in assistant.events.recent(limit=50) if event.get("source") == "screen_awareness"]
+
+    assert payload["jobs"] == []
+    assert payload["actions"] == []
+    assert planner_debug["structured_query"]["query_shape"] == "screen_awareness_request"
+    assert planner_debug["execution_plan"]["plan_type"] == "screen_awareness_analyze"
+    assert planner_debug["screen_awareness"]["disposition"] == "phase1_analyze"
+    assert planner_obedience["actual_result_mode"] == "summary_result"
+    assert planner_obedience["authority_enforced"] is True
+    assert "pyinstaller" in payload["assistant_message"]["content"].lower()
+    assert "clicked" not in payload["assistant_message"]["content"].lower()
+    assert screen_events
+    assert screen_events[-1]["payload"]["disposition"] == "phase1_analyze"
+    assert screen_events[-1]["payload"]["analysis_result"]["current_screen_context"]["summary"]
+
+
+def test_assistant_orchestrator_handles_phase2_grounding_and_emits_grounding_debug_event(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase2"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    temp_config.screen_awareness.grounding_enabled = True
+
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+    payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="what does this warning mean",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context={
+            "workspace": {"workspaceId": "ws-1", "title": "Deployment Troubleshooting"},
+            "module": "browser",
+            "section": "open-pages",
+            "opened_items": [
+                {
+                    "itemId": "warning-1",
+                    "title": "Warning: Token expired",
+                    "kind": "warning-banner",
+                    "color": "red",
+                },
+                {
+                    "itemId": "button-1",
+                    "title": "Save",
+                    "kind": "button",
+                },
+            ],
+            "active_item": {
+                "itemId": "settings-page",
+                "title": "Deploy Settings",
+                "url": "https://example.test/settings/deploy",
+                "kind": "settings-page",
+            },
+        },
+        input_context={
+            "selection": {
+                "kind": "text",
+                "value": "Warning: Token expired",
+                "preview": "Warning: Token expired",
+            }
+        },
+    )
+    planner_debug = _planner_debug(payload)
+    planner_obedience = _planner_obedience(payload)
+    screen_events = [event for event in assistant.events.recent(limit=50) if event.get("source") == "screen_awareness"]
+
+    assert payload["jobs"] == []
+    assert payload["actions"] == []
+    assert planner_debug["structured_query"]["query_shape"] == "screen_awareness_request"
+    assert planner_debug["execution_plan"]["plan_type"] == "screen_awareness_analyze"
+    assert planner_debug["screen_awareness"]["disposition"] == "phase2_ground"
+    assert planner_debug["screen_awareness"]["analysis_result"]["grounding_result"]["winning_target"]["role"] == "warning"
+    assert planner_debug["screen_awareness"]["telemetry"]["grounding"]["candidate_count"] >= 2
+    assert planner_debug["screen_awareness"]["telemetry"]["grounding"]["outcome"] == "resolved"
+    assert planner_obedience["actual_result_mode"] == "summary_result"
+    assert planner_obedience["authority_enforced"] is True
+    assert "warning" in payload["assistant_message"]["content"].lower()
+    assert "clicked" not in payload["assistant_message"]["content"].lower()
+    assert screen_events
+    assert screen_events[-1]["payload"]["disposition"] == "phase2_ground"
+    assert screen_events[-1]["payload"]["telemetry"]["grounding"]["winning_candidate_id"]
 
 
 def test_assistant_orchestrator_routes_deck_open_url_without_provider(temp_config) -> None:
@@ -1650,7 +1789,7 @@ def test_assistant_orchestrator_routes_machine_slowdown_question_to_resource_dia
             "retrieve_live_metric",
             "numeric_metric",
             "resource_status",
-            "gpu telemetry",
+            "gpu usage is",
             "gpu is test gpu",
         ),
         (
@@ -1659,7 +1798,7 @@ def test_assistant_orchestrator_routes_machine_slowdown_question_to_resource_dia
             "diagnose_from_telemetry",
             "diagnostic_summary",
             "resource_status",
-            "gpu telemetry",
+            "gpu load is",
             "gpu is test gpu",
         ),
         (
@@ -2287,7 +2426,20 @@ def test_assistant_orchestrator_keeps_app_launch_and_web_search_distinct_from_br
     assert search_obedience["authority_enforced"] is True
 
 
-def test_assistant_orchestrator_uses_nano_browser_search_fallback_for_unresolved_provider(temp_config) -> None:
+def test_assistant_orchestrator_uses_nano_browser_search_fallback_for_unresolved_provider(monkeypatch, temp_config) -> None:
+    monkeypatch.setattr(
+        workspace_actions,
+        "probe_browser_target",
+        lambda browser_target: workspace_actions.BrowserTargetProbeResult(
+            requested_target=browser_target,
+            resolved_target=browser_target,
+            browser_title="Chrome",
+            available=True,
+            launch_command="C:/Program Files/Google/Chrome/Application/chrome.exe",
+            fallback_to_default=False,
+            reason="launcher_found_in_common_install_path",
+        ),
+    )
     provider = BrowserSearchFallbackProvider()
     temp_config.openai.enabled = True
     temp_config.openai.planner_model = "gpt-5.4-nano"
@@ -2317,6 +2469,7 @@ def test_assistant_orchestrator_uses_nano_browser_search_fallback_for_unresolved
     assert payload["actions"][0]["type"] == "open_external"
     assert payload["actions"][0]["url"] == "https://www.google.com/search?q=site%3Aorbitz.com+flights"
     assert payload["actions"][0]["browser_target"] == "chrome"
+    assert payload["actions"][0]["browser_command"] == "C:/Program Files/Google/Chrome/Application/chrome.exe"
     assert metadata["bearing_title"] == "Orbitz search opened"
     assert metadata["micro_response"] == "Opened Orbitz search in the browser."
     assert metadata["full_response"] == "Resolved the search URL and opened it in the browser."
@@ -2326,3 +2479,90 @@ def test_assistant_orchestrator_uses_nano_browser_search_fallback_for_unresolved
     assert provider.calls[0]["model"] == "gpt-5.4-nano"
     assert provider.calls[0]["previous_response_id"] is None
     assert provider.calls[0]["tool_names"] == ["browser_search_fallback_resolve"]
+
+
+def test_assistant_orchestrator_opens_direct_domain_in_explicit_browser(monkeypatch, temp_config) -> None:
+    monkeypatch.setattr(
+        workspace_actions,
+        "probe_browser_target",
+        lambda browser_target: workspace_actions.BrowserTargetProbeResult(
+            requested_target=browser_target,
+            resolved_target=browser_target,
+            browser_title="Firefox",
+            available=True,
+            launch_command="C:/Program Files/Mozilla Firefox/firefox.exe",
+            fallback_to_default=False,
+            reason="launcher_found_in_common_install_path",
+        ),
+    )
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+    payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="open docs.python.org in firefox",
+        surface_mode="ghost",
+        active_module="chartroom",
+    )
+    planner_debug = _planner_debug(payload)
+    metadata = payload["assistant_message"]["metadata"]
+    structured_slots = planner_debug["structured_query"]["slots"]
+
+    assert planner_debug["structured_query"]["query_shape"] == "open_browser_destination"
+    assert planner_debug["execution_plan"]["plan_type"] == "resolve_url_then_open_in_browser"
+    assert structured_slots["destination_type"] == "direct_domain"
+    assert structured_slots["destination_resolution_kind"] == "direct_domain"
+    assert structured_slots["destination_site_domain"] == "docs.python.org"
+    assert payload["jobs"][0]["tool_name"] == "external_open_url"
+    assert payload["jobs"][0]["arguments"]["url"] == "https://docs.python.org/"
+    assert payload["jobs"][0]["arguments"]["browser_target"] == "firefox"
+    assert payload["actions"][0]["type"] == "open_external"
+    assert payload["actions"][0]["url"] == "https://docs.python.org/"
+    assert payload["actions"][0]["browser_target"] == "firefox"
+    assert payload["actions"][0]["browser_command"] == "C:/Program Files/Mozilla Firefox/firefox.exe"
+    assert metadata["bearing_title"] == "docs.python.org opened"
+    assert metadata["micro_response"] == "Opened docs.python.org in the browser."
+    assert metadata["full_response"] == "Resolved the destination and opened it in the browser."
+
+
+def test_assistant_orchestrator_falls_back_to_default_browser_when_explicit_target_is_unavailable(
+    monkeypatch,
+    temp_config,
+) -> None:
+    monkeypatch.setattr(
+        workspace_actions,
+        "probe_browser_target",
+        lambda browser_target: workspace_actions.BrowserTargetProbeResult(
+            requested_target=browser_target,
+            resolved_target=browser_target,
+            browser_title="Firefox",
+            available=False,
+            launch_command=None,
+            fallback_to_default=True,
+            reason="browser_not_available",
+        ),
+    )
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+    payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="open docs.python.org in firefox",
+        surface_mode="ghost",
+        active_module="chartroom",
+    )
+    metadata = payload["assistant_message"]["metadata"]
+    action = payload["actions"][0]
+
+    assert payload["jobs"][0]["tool_name"] == "external_open_url"
+    assert payload["jobs"][0]["arguments"]["browser_target"] == "firefox"
+    assert action["type"] == "open_external"
+    assert action["url"] == "https://docs.python.org/"
+    assert "browser_target" not in action
+    assert action["browser_target_requested"] == "firefox"
+    assert action["browser_fallback_to_default"] is True
+    assert action["browser_target_probe"]["available"] is False
+    assert action["browser_target_probe"]["reason"] == "browser_not_available"
+    assert metadata["bearing_title"] == "docs.python.org opened"
+    assert metadata["micro_response"] == "Firefox wasn't available, so I opened docs.python.org in the default browser."
+    assert metadata["full_response"] == "Resolved docs.python.org, couldn't use Firefox on this machine, and fell back to the default browser."

@@ -10,6 +10,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 from time import monotonic
 from typing import Any
 
@@ -23,6 +24,10 @@ NVIDIA_SMI_PROVIDER_NAME = "nvidia_smi"
 LIBRE_HARDWARE_MONITOR_PROVIDER_NAME = "libre_hardware_monitor"
 GIGABYTE_CONTROL_CENTER_PROVIDER_NAME = "gigabyte_control_center"
 AMD_RYZEN_MASTER_PROVIDER_NAME = "amd_ryzen_master"
+
+
+def _helper_context_label(elevated: bool) -> str:
+    return "current elevated helper context" if elevated else "current non-elevated helper context"
 
 
 def helper_cache_ttl_seconds(config: AppConfig, sampling_tier: str) -> float:
@@ -247,6 +252,8 @@ def _overlay_power_metric_sources_from_status(status: dict[str, Any]) -> None:
 
 
 class HardwareTelemetryHelperClient:
+    _elevated_retry_blocked_until: float = 0.0
+
     def __init__(self, config: AppConfig) -> None:
         self.config = config
 
@@ -258,21 +265,196 @@ class HardwareTelemetryHelperClient:
         if not command:
             return build_helper_unreachable_snapshot(sampling_tier=sampling_tier, reason="helper_missing", installed=False)
 
-        env = os.environ.copy()
-        source_path = (self.config.project_root / "src").resolve()
-        if source_path.exists():
-            existing = str(env.get("PYTHONPATH", "")).strip()
-            env["PYTHONPATH"] = str(source_path) if not existing else os.pathsep.join([str(source_path), existing])
+        payload, wrapper_debug, reason = self._run_standard_helper(sampling_tier=sampling_tier)
+        if not isinstance(payload, dict):
+            return build_helper_unreachable_snapshot(
+                sampling_tier=sampling_tier,
+                reason=str(reason or "helper_unreachable"),
+                installed=self.helper_installed(),
+                debug={"wrapper": wrapper_debug, "providers": {}},
+            )
 
+        selected_path = "standard"
+        metric_keys, elevated_debug = self._elevated_retry_plan(payload, sampling_tier=sampling_tier)
+        if metric_keys and elevated_debug.get("state") == "eligible":
+            elevated_payload, elevated_debug, _ = self._run_elevated_helper(sampling_tier=sampling_tier)
+            if isinstance(elevated_payload, dict):
+                payload = elevated_payload
+                selected_path = "elevated"
+                self._clear_elevated_retry_cooldown()
+                helper_source = payload.get("sources", {}).get("helper")
+                if isinstance(helper_source, dict):
+                    helper_source["detail"] = "Bundled helper responded through the elevated helper lane."
+            else:
+                self._block_elevated_retry()
+                self._annotate_privilege_gated_metrics(payload, metric_keys, elevated_debug)
+        elif metric_keys and elevated_debug.get("state") in {"cooldown", "disabled"}:
+            self._annotate_privilege_gated_metrics(payload, metric_keys, elevated_debug)
+
+        wrapper_debug["selected_path"] = selected_path
+        wrapper_debug["elevated"] = elevated_debug
+        payload_debug = payload.get("debug")
+        if not isinstance(payload_debug, dict):
+            payload_debug = {}
+            payload["debug"] = payload_debug
+        payload_debug["wrapper"] = wrapper_debug
+        return payload
+
+    def _run_standard_helper(self, *, sampling_tier: str) -> tuple[dict[str, Any] | None, dict[str, Any], str | None]:
+        command = self._command(sampling_tier)
         timeout_seconds = max(float(self.config.hardware_telemetry.helper_timeout_seconds), 0.5)
-        started = monotonic()
         wrapper_debug = {
             "provider": HELPER_PROVIDER_NAME,
             "command": list(command),
             "timeout_seconds": timeout_seconds,
             "sampling_tier": sampling_tier,
             "cwd": str(self.config.project_root),
+            "mode": "standard",
         }
+        return self._run_helper_command(
+            command,
+            timeout_seconds=timeout_seconds,
+            env=self._helper_env(),
+            cwd=str(self.config.project_root),
+            wrapper_debug=wrapper_debug,
+        )
+
+    def _run_elevated_helper(self, *, sampling_tier: str) -> tuple[dict[str, Any] | None, dict[str, Any], str | None]:
+        timeout_seconds = max(float(self.config.hardware_telemetry.elevated_helper_timeout_seconds), 1.0)
+        started = monotonic()
+        debug: dict[str, Any] = {
+            "provider": HELPER_PROVIDER_NAME,
+            "state": "launching",
+            "timeout_seconds": timeout_seconds,
+            "sampling_tier": sampling_tier,
+            "cwd": str(self.config.project_root),
+            "mode": "elevated",
+        }
+        with tempfile.TemporaryDirectory(prefix="stormhelm-elevated-helper-") as temp_dir:
+            temp_root = Path(temp_dir)
+            output_path = temp_root / "snapshot.json"
+            launcher_path = temp_root / "run-helper-elevated.ps1"
+            debug["output_path"] = str(output_path)
+            debug["launcher_path"] = str(launcher_path)
+            try:
+                output_path.write_text("", encoding="utf-8")
+                launcher_path.write_text(
+                    self._build_elevated_launcher_script(sampling_tier=sampling_tier, output_path=output_path),
+                    encoding="utf-8",
+                )
+            except OSError as exc:
+                debug.update(
+                    {
+                        "state": "failed",
+                        "elapsed_seconds": round(max(monotonic() - started, 0.0), 2),
+                        "detail": str(exc),
+                    }
+                )
+                return None, debug, str(exc)
+
+            launch_command = [
+                "powershell",
+                "-NoLogo",
+                "-NoProfile",
+                "-Command",
+                self._elevated_launch_command(launcher_path),
+            ]
+            try:
+                completed = subprocess.run(
+                    launch_command,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_seconds,
+                    cwd=str(self.config.project_root),
+                    shell=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                debug.update(
+                    {
+                        "state": "timeout",
+                        "elapsed_seconds": round(max(monotonic() - started, 0.0), 2),
+                        "stdout_bytes": len(exc.stdout or ""),
+                        "stderr_preview": str(exc.stderr or "").strip()[:240],
+                        "detail": f"Timed out after {timeout_seconds:.1f}s waiting for an elevated helper sample.",
+                    }
+                )
+                return None, debug, f"elevated_helper_timeout_after_{timeout_seconds:.1f}s"
+            except Exception as exc:
+                debug.update(
+                    {
+                        "state": "failed",
+                        "elapsed_seconds": round(max(monotonic() - started, 0.0), 2),
+                        "detail": str(exc),
+                    }
+                )
+                return None, debug, str(exc)
+
+            debug.update(
+                {
+                    "elapsed_seconds": round(max(monotonic() - started, 0.0), 2),
+                    "returncode": int(completed.returncode),
+                    "stdout_bytes": len(completed.stdout or ""),
+                    "stderr_preview": completed.stderr.strip()[:240],
+                }
+            )
+            launch_payload = self._parse_json_text(completed.stdout)
+            launch_ok = bool(isinstance(launch_payload, dict) and launch_payload.get("ok"))
+            if not launch_ok:
+                detail = ""
+                if isinstance(launch_payload, dict):
+                    detail = str(launch_payload.get("detail") or "").strip()
+                if not detail:
+                    detail = completed.stderr.strip() or completed.stdout.strip() or "The elevated helper launch did not complete."
+                state = "denied" if "canceled by the user" in detail.lower() or "cancelled by the user" in detail.lower() else "failed"
+                debug.update({"state": state, "detail": detail})
+                return None, debug, "elevation_denied" if state == "denied" else detail
+
+            debug["child_exit_code"] = int(launch_payload.get("exit_code") or 0)
+            debug["child_pid"] = launch_payload.get("pid")
+            try:
+                child_stdout = output_path.read_text(encoding="utf-8")
+            except OSError as exc:
+                debug.update(
+                    {
+                        "state": "failed",
+                        "detail": f"Could not read the elevated helper payload file: {exc}",
+                    }
+                )
+                return None, debug, "elevated_helper_unreadable_output"
+            if not child_stdout.strip():
+                debug.update(
+                    {
+                        "state": "failed",
+                        "detail": "The elevated helper exited without emitting a telemetry payload.",
+                    }
+                )
+                return None, debug, "elevated_helper_missing_output"
+            payload = self._parse_json_text(child_stdout)
+            if not isinstance(payload, dict):
+                debug.update(
+                    {
+                        "state": "failed",
+                        "detail": "The elevated helper payload was not a JSON object.",
+                    }
+                )
+                return None, debug, "invalid_elevated_helper_payload"
+            debug["state"] = "succeeded"
+            if debug["child_exit_code"] == 0:
+                debug["detail"] = "The elevated helper returned a telemetry payload."
+            else:
+                debug["detail"] = f"The elevated helper returned a telemetry payload before exiting with code {debug['child_exit_code']}."
+            return payload, debug, None
+
+    def _run_helper_command(
+        self,
+        command: list[str],
+        *,
+        timeout_seconds: float,
+        env: dict[str, str],
+        cwd: str,
+        wrapper_debug: dict[str, Any],
+    ) -> tuple[dict[str, Any] | None, dict[str, Any], str | None]:
+        started = monotonic()
         try:
             completed = subprocess.run(
                 command,
@@ -280,7 +462,7 @@ class HardwareTelemetryHelperClient:
                 text=True,
                 timeout=timeout_seconds,
                 env=env,
-                cwd=str(self.config.project_root),
+                cwd=cwd,
                 shell=False,
             )
         except subprocess.TimeoutExpired as exc:
@@ -292,26 +474,16 @@ class HardwareTelemetryHelperClient:
                     "stderr_preview": str(exc.stderr or "").strip()[:240],
                 }
             )
-            return build_helper_unreachable_snapshot(
-                sampling_tier=sampling_tier,
-                reason=f"helper_timeout_after_{timeout_seconds:.1f}s",
-                installed=self.helper_installed(),
-                debug={"wrapper": wrapper_debug, "providers": {}},
-            )
+            return None, wrapper_debug, f"helper_timeout_after_{timeout_seconds:.1f}s"
         except Exception as exc:
             wrapper_debug.update(
                 {
                     "state": "failed",
                     "elapsed_seconds": round(max(monotonic() - started, 0.0), 2),
-                    "error": str(exc),
+                    "detail": str(exc),
                 }
             )
-            return build_helper_unreachable_snapshot(
-                sampling_tier=sampling_tier,
-                reason=str(exc),
-                installed=self.helper_installed(),
-                debug={"wrapper": wrapper_debug, "providers": {}},
-            )
+            return None, wrapper_debug, str(exc)
 
         wrapper_debug.update(
             {
@@ -325,44 +497,158 @@ class HardwareTelemetryHelperClient:
 
         if completed.returncode != 0:
             reason = completed.stderr.strip() or completed.stdout.strip() or f"helper_exit_{completed.returncode}"
-            return build_helper_unreachable_snapshot(
-                sampling_tier=sampling_tier,
-                reason=reason,
-                installed=self.helper_installed(),
-                debug={"wrapper": wrapper_debug, "providers": {}},
-            )
+            return None, wrapper_debug, reason
 
         try:
             payload = json.loads(completed.stdout)
         except json.JSONDecodeError as exc:
-            return build_helper_unreachable_snapshot(
-                sampling_tier=sampling_tier,
-                reason=f"invalid_helper_json:{exc}",
-                installed=self.helper_installed(),
-                debug={"wrapper": wrapper_debug, "providers": {}},
-            )
+            return None, wrapper_debug, f"invalid_helper_json:{exc}"
         if not isinstance(payload, dict):
-            return build_helper_unreachable_snapshot(
-                sampling_tier=sampling_tier,
-                reason="invalid_helper_payload",
-                installed=self.helper_installed(),
-                debug={"wrapper": wrapper_debug, "providers": {}},
-            )
-        payload_debug = payload.get("debug")
-        if not isinstance(payload_debug, dict):
-            payload_debug = {}
-            payload["debug"] = payload_debug
-        payload_debug["wrapper"] = wrapper_debug
-        return payload
+            return None, wrapper_debug, "invalid_helper_payload"
+        return payload, wrapper_debug, None
+
+    def _helper_env(self) -> dict[str, str]:
+        env = os.environ.copy()
+        source_path = (self.config.project_root / "src").resolve()
+        if source_path.exists():
+            existing = str(env.get("PYTHONPATH", "")).strip()
+            env["PYTHONPATH"] = str(source_path) if not existing else os.pathsep.join([str(source_path), existing])
+        return env
+
+    def _elevated_retry_plan(self, payload: dict[str, Any], *, sampling_tier: str) -> tuple[list[str], dict[str, Any]]:
+        metric_keys = self._privilege_gated_metric_keys(payload)
+        if not metric_keys:
+            return [], {"state": "not_needed", "detail": "Primary helper payload did not report privilege-gated metrics."}
+        if not bool(self.config.hardware_telemetry.elevated_helper_enabled):
+            return metric_keys, {"state": "disabled", "detail": "Elevated helper retry is disabled in config.", "metric_keys": metric_keys}
+        if str(sampling_tier or "active").strip().lower() == "idle":
+            return metric_keys, {"state": "idle", "detail": "Elevated helper retry is only attempted during active or burst sampling tiers.", "metric_keys": metric_keys}
+        if _is_elevated():
+            return metric_keys, {"state": "already_elevated", "detail": "The current helper process is already elevated.", "metric_keys": metric_keys}
+        remaining = max(type(self)._elevated_retry_blocked_until - monotonic(), 0.0)
+        if remaining > 0:
+            return metric_keys, {
+                "state": "cooldown",
+                "detail": f"Elevated helper retry is cooling down for {remaining:.1f}s after a recent failure.",
+                "metric_keys": metric_keys,
+                "remaining_cooldown_seconds": round(remaining, 1),
+            }
+        return metric_keys, {"state": "eligible", "detail": "Privilege-gated metrics warrant an elevated helper retry.", "metric_keys": metric_keys}
+
+    def _privilege_gated_metric_keys(self, payload: dict[str, Any]) -> list[str]:
+        metrics = payload.get("sources", {}).get("metrics")
+        if not isinstance(metrics, dict):
+            return []
+        matches: list[str] = []
+        for metric_key, metric in metrics.items():
+            if not isinstance(metric, dict):
+                continue
+            reason = str(metric.get("unsupported_reason") or "").strip().lower()
+            if "access denied" not in reason:
+                continue
+            if "current non-elevated helper context" not in reason:
+                continue
+            matches.append(str(metric_key))
+        return matches
+
+    def _annotate_privilege_gated_metrics(self, payload: dict[str, Any], metric_keys: list[str], elevated_debug: dict[str, Any]) -> None:
+        suffix = self._elevated_retry_suffix(elevated_debug)
+        if not suffix:
+            return
+        metrics = payload.get("sources", {}).get("metrics")
+        if not isinstance(metrics, dict):
+            return
+        for metric_key in metric_keys:
+            metric = metrics.get(metric_key)
+            if not isinstance(metric, dict):
+                continue
+            reason = str(metric.get("unsupported_reason") or "").strip()
+            if not reason:
+                metric["unsupported_reason"] = suffix
+                continue
+            if suffix in reason:
+                continue
+            metric["unsupported_reason"] = f"{reason} Also, {suffix}"
+
+    def _elevated_retry_suffix(self, elevated_debug: dict[str, Any]) -> str:
+        state = str(elevated_debug.get("state") or "").strip().lower()
+        if state == "cooldown":
+            remaining = float(elevated_debug.get("remaining_cooldown_seconds") or 0.0)
+            return f"Stormhelm is waiting {remaining:.1f} more seconds before re-prompting for an elevated helper retry."
+        if state == "disabled":
+            return "Stormhelm's elevated helper retry is disabled in config."
+        if state in {"denied", "failed", "timeout"}:
+            detail = str(elevated_debug.get("detail") or "").strip()
+            return f"Stormhelm's elevated helper attempt failed: {detail}" if detail else "Stormhelm's elevated helper attempt failed."
+        return ""
+
+    def _block_elevated_retry(self) -> None:
+        cooldown_seconds = max(float(self.config.hardware_telemetry.elevated_helper_cooldown_seconds), 0.0)
+        if cooldown_seconds <= 0:
+            return
+        type(self)._elevated_retry_blocked_until = monotonic() + cooldown_seconds
+
+    def _clear_elevated_retry_cooldown(self) -> None:
+        type(self)._elevated_retry_blocked_until = 0.0
+
+    def _build_elevated_launcher_script(self, *, sampling_tier: str, output_path: Path) -> str:
+        command = self._command(sampling_tier, output_path=output_path)
+        env = self._helper_env()
+        command_text = " ".join(self._powershell_literal(part) for part in command[1:])
+        lines = ["$ErrorActionPreference = 'Stop'", f"Set-Location {self._powershell_literal(str(self.config.project_root))}"]
+        python_path = str(env.get("PYTHONPATH") or "").strip()
+        if python_path:
+            lines.append(f"$env:PYTHONPATH = {self._powershell_literal(python_path)}")
+        lines.append(f"& {self._powershell_literal(command[0])} {command_text}".rstrip())
+        lines.append("exit $LASTEXITCODE")
+        return "\n".join(lines)
+
+    def _elevated_launch_command(self, launcher_path: Path) -> str:
+        launcher_literal = self._powershell_literal(str(launcher_path))
+        return (
+            "$ErrorActionPreference = 'Stop'; "
+            "try { "
+            f"$process = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoLogo','-NoProfile','-ExecutionPolicy','Bypass','-File',{launcher_literal}) -Verb RunAs -PassThru -Wait; "
+            "[pscustomobject]@{ ok = $true; exit_code = $process.ExitCode; pid = $process.Id } | ConvertTo-Json -Compress "
+            "} catch { "
+            "$detail = $_.Exception.Message; "
+            "if ([string]::IsNullOrWhiteSpace($detail)) { $detail = [string]$_ }; "
+            "[pscustomobject]@{ ok = $false; detail = $detail } | ConvertTo-Json -Compress "
+            "}"
+        )
+
+    @staticmethod
+    def _powershell_literal(value: str) -> str:
+        return "'" + str(value).replace("'", "''") + "'"
+
+    @staticmethod
+    def _parse_json_text(text: str) -> Any:
+        if not str(text or "").strip():
+            return None
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            for line in reversed([item.strip() for item in str(text).splitlines() if item.strip()]):
+                if line[:1] not in {"{", "["}:
+                    continue
+                try:
+                    return json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+        return None
 
     def helper_installed(self) -> bool:
         return self._packaged_helper_path().exists() or (self.config.project_root / "src" / "stormhelm" / "entrypoints" / "telemetry_helper.py").exists()
 
-    def _command(self, sampling_tier: str) -> list[str]:
+    def _command(self, sampling_tier: str, *, output_path: Path | None = None) -> list[str]:
         packaged = self._packaged_helper_path()
         if packaged.exists():
-            return [str(packaged), "--tier", sampling_tier]
-        return [sys.executable, "-m", "stormhelm.entrypoints.telemetry_helper", "--tier", sampling_tier, "--project-root", str(self.config.project_root)]
+            command = [str(packaged), "--tier", sampling_tier]
+        else:
+            command = [sys.executable, "-m", "stormhelm.entrypoints.telemetry_helper", "--tier", sampling_tier, "--project-root", str(self.config.project_root)]
+        if output_path is not None:
+            command.extend(["--output-path", str(output_path)])
+        return command
 
     def _packaged_helper_path(self) -> Path:
         return self.config.runtime.install_root / "stormhelm-telemetry-helper.exe"
@@ -1553,11 +1839,13 @@ def _collect_gigabyte_control_center(config: AppConfig) -> dict[str, Any]:
         }
 
     escaped_dir = str(notebook_dir).replace("'", "''")
+    helper_context = _helper_context_label(_is_elevated()).replace("'", "''")
     payload = _run_powershell_json(
         config,
         f"""
         $ErrorActionPreference = 'Continue'
         $dllDir = '{escaped_dir}'
+        $helperContextLabel = '{helper_context}'
         $ucNotebookDll = Join-Path $dllDir 'ucNotebook.dll'
         $commDll = Join-Path $dllDir 'GBT_Comm_Fun.dll'
         $devicesDll = Join-Path $dllDir 'Gigabyte.NB.Devices.dll'
@@ -1650,7 +1938,7 @@ def _collect_gigabyte_control_center(config: AppConfig) -> dict[str, Any]:
                 $detail = [string]$callResult.noise
             }}
             if ($detail -match 'Access denied') {{
-                return "Gigabyte Control Center notebook WMI returned Access denied for $metricLabel from the current helper context."
+                return "Gigabyte Control Center notebook WMI returned Access denied for $metricLabel from the $helperContextLabel."
             }}
             if (-not [string]::IsNullOrWhiteSpace($detail)) {{
                 $detail = $detail.Trim()
@@ -1769,7 +2057,7 @@ def _collect_gigabyte_control_center(config: AppConfig) -> dict[str, Any]:
                     $dutyReason = Failure-Reason $fanDef.MetricLabel $dutyCall "Gigabyte Control Center did not return a fan-duty sample for $($fanDef.Label) on this machine."
                 }}
             }} else {{
-                $dutyReason = 'Gigabyte Control Center CWMI helper could not be instantiated from the current helper context.'
+                $dutyReason = "Gigabyte Control Center CWMI helper could not be instantiated from the $helperContextLabel."
             }}
 
             if ($null -ne $rpm -or $null -ne $duty) {{
@@ -1826,7 +2114,7 @@ def _collect_gigabyte_control_center(config: AppConfig) -> dict[str, Any]:
             $result.detail = 'Gigabyte Control Center notebook telemetry returned live readouts.'
         }} else {{
             $result.state = 'unavailable'
-            $result.detail = 'Gigabyte Control Center notebook telemetry did not yield readable live metrics from the current helper context.'
+            $result.detail = "Gigabyte Control Center notebook telemetry did not yield readable live metrics from the $helperContextLabel."
         }}
         $result | ConvertTo-Json -Compress -Depth 10
         """,

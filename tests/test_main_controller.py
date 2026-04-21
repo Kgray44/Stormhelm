@@ -19,7 +19,11 @@ class DummyClient(QtCore.QObject):
         self.sent_messages: list[str] = []
         self.sent_payloads: list[dict[str, str]] = []
         self.saved_notes: list[dict[str, str]] = []
+        self.health_calls = 0
         self.snapshot_calls = 0
+
+    def fetch_health(self) -> None:
+        self.health_calls += 1
 
     def fetch_snapshot(self) -> None:
         self.snapshot_calls += 1
@@ -207,6 +211,19 @@ def test_main_controller_chat_queues_one_refresh_behind_inflight_snapshot(temp_c
     assert client.snapshot_calls == 2
 
 
+def test_main_controller_start_requests_health_before_snapshot(monkeypatch, temp_config) -> None:
+    bridge = UiBridge(temp_config)
+    client = DummyClient()
+    controller = MainController(config=temp_config, bridge=bridge, client=client)
+
+    monkeypatch.setattr("stormhelm.ui.controllers.main_controller.ensure_core_running", lambda config: False)
+
+    controller.start()
+
+    assert client.health_calls == 1
+    assert client.snapshot_calls == 1
+
+
 def test_main_controller_opens_external_url_in_requested_browser(monkeypatch, temp_config) -> None:
     bridge = UiBridge(temp_config)
     client = DummyClient()
@@ -217,7 +234,7 @@ def test_main_controller_opens_external_url_in_requested_browser(monkeypatch, te
     monkeypatch.setattr(
         controller,
         "_open_in_browser_target",
-        lambda browser_target, url: targeted_launches.append((browser_target, url)),
+        lambda browser_target, url, browser_command=None: targeted_launches.append((browser_target, url, browser_command)),
         raising=False,
     )
     monkeypatch.setattr(QtGui.QDesktopServices, "openUrl", lambda url: default_launches.append(url.toString()))
@@ -247,5 +264,46 @@ def test_main_controller_opens_external_url_in_requested_browser(monkeypatch, te
         }
     )
 
-    assert targeted_launches == [("firefox", "https://github.com/search?q=issue+templates")]
+    assert targeted_launches == [("firefox", "https://github.com/search?q=issue+templates", None)]
     assert default_launches == []
+
+
+def test_main_controller_uses_explicit_browser_command_when_provided(monkeypatch, temp_config) -> None:
+    bridge = UiBridge(temp_config)
+    client = DummyClient()
+    controller = MainController(config=temp_config, bridge=bridge, client=client)
+    launches: list[tuple[str, list[str]]] = []
+    default_launches: list[str] = []
+
+    monkeypatch.setattr(QtCore.QProcess, "startDetached", lambda command, arguments: launches.append((command, list(arguments))) or True)
+    monkeypatch.setattr(QtGui.QDesktopServices, "openUrl", lambda url: default_launches.append(url.toString()))
+
+    controller._open_external(
+        {
+            "type": "open_external",
+            "kind": "url",
+            "url": "https://docs.python.org/",
+            "title": "docs.python.org",
+            "browser_target": "firefox",
+            "browser_command": "C:/Program Files/Mozilla Firefox/firefox.exe",
+        }
+    )
+
+    assert launches == [("C:/Program Files/Mozilla Firefox/firefox.exe", ["https://docs.python.org/"])]
+    assert default_launches == []
+
+
+def test_main_controller_falls_back_to_default_browser_when_explicit_target_launch_fails(monkeypatch, temp_config) -> None:
+    bridge = UiBridge(temp_config)
+    client = DummyClient()
+    controller = MainController(config=temp_config, bridge=bridge, client=client)
+    launches: list[tuple[str, list[str]]] = []
+    default_launches: list[str] = []
+
+    monkeypatch.setattr(QtCore.QProcess, "startDetached", lambda command, arguments: launches.append((command, list(arguments))) or False)
+    monkeypatch.setattr(QtGui.QDesktopServices, "openUrl", lambda url: default_launches.append(url.toString()))
+
+    controller._open_in_browser_target("firefox", "https://docs.python.org/")
+
+    assert launches == [("firefox", ["https://docs.python.org/"])]
+    assert default_launches == ["https://docs.python.org/"]

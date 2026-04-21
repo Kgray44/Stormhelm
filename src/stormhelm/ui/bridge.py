@@ -68,6 +68,7 @@ class UiBridge(QtCore.QObject):
         self._workspace_sections: list[dict[str, Any]] = []
         self._workspace_canvas: dict[str, Any] = {}
         self._workspace_focus: dict[str, Any] = {}
+        self._workspace_state_hint = ""
         self._opened_items: list[dict[str, Any]] = []
         self._active_opened_item_id: str | None = None
         self._ghost_messages: list[dict[str, Any]] = []
@@ -363,9 +364,9 @@ class UiBridge(QtCore.QObject):
     def commandRailItems(self) -> list[dict[str, Any]]:
         return list(self._command_rail_items)
 
-    @QtCore.Property("QVariantList", notify=collectionsChanged)
+    @QtCore.Property("QVariantList", notify=statusChanged)
     def statusStripItems(self) -> list[dict[str, Any]]:
-        return list(self._status_strip_items)
+        return self._build_status_strip_items()
 
     @QtCore.Slot(QtGui.QWindow)
     def attachWindow(self, window: QtGui.QWindow) -> None:
@@ -400,6 +401,7 @@ class UiBridge(QtCore.QObject):
         if not normalized:
             return
         self._active_module_key = normalized
+        self._workspace_state_hint = ""
         self._active_workspace_section_key = self._default_workspace_section_key(normalized)
         self._rebuild_surface_models()
         self.statusChanged.emit()
@@ -475,6 +477,7 @@ class UiBridge(QtCore.QObject):
         normalized = (key or "").strip().lower()
         if not normalized or normalized == self._active_workspace_section_key:
             return
+        self._workspace_state_hint = ""
         self._active_workspace_section_key = normalized
         self._rebuild_surface_models()
         self.collectionsChanged.emit()
@@ -739,40 +742,62 @@ class UiBridge(QtCore.QObject):
 
     def apply_snapshot(self, payload: dict[str, Any]) -> None:
         health = payload.get("health")
+        status_changed = False
         if isinstance(health, dict):
+            status_changed = status_changed or dict(health) != self._health
             self.apply_health(health)
 
         status = payload.get("status")
         if isinstance(status, dict):
+            status_changed = status_changed or dict(status) != self._status
             self.apply_status(status)
 
+        collections_changed = False
         history = payload.get("history")
         if isinstance(history, list):
-            self._history = [self._normalize_message(item) for item in history if isinstance(item, dict)]
+            normalized_history = [self._normalize_message(item) for item in history if isinstance(item, dict)]
+            if normalized_history != self._history:
+                self._history = normalized_history
+                collections_changed = True
 
         jobs = payload.get("jobs")
         if isinstance(jobs, list):
-            self._jobs = [dict(item) for item in jobs if isinstance(item, dict)]
+            normalized_jobs = [dict(item) for item in jobs if isinstance(item, dict)]
+            if normalized_jobs != self._jobs:
+                self._jobs = normalized_jobs
+                collections_changed = True
 
         events = payload.get("events")
         if isinstance(events, list):
-            self._events = [dict(item) for item in events if isinstance(item, dict)]
+            normalized_events = [dict(item) for item in events if isinstance(item, dict)]
+            if normalized_events != self._events:
+                self._events = normalized_events
+                collections_changed = True
 
         notes = payload.get("notes")
         if isinstance(notes, list):
-            self._notes = [dict(item) for item in notes if isinstance(item, dict)]
+            normalized_notes = [dict(item) for item in notes if isinstance(item, dict)]
+            if normalized_notes != self._notes:
+                self._notes = normalized_notes
+                collections_changed = True
 
         settings = payload.get("settings")
         if isinstance(settings, dict):
-            self._settings = dict(settings)
+            normalized_settings = dict(settings)
+            if normalized_settings != self._settings:
+                self._settings = normalized_settings
+                collections_changed = True
 
         tools = payload.get("tools")
         if isinstance(tools, list):
-            self._tools = [dict(item) for item in tools if isinstance(item, dict)]
+            normalized_tools = [dict(item) for item in tools if isinstance(item, dict)]
+            if normalized_tools != self._tools:
+                self._tools = normalized_tools
+                collections_changed = True
 
         active_workspace = payload.get("active_workspace")
         if isinstance(active_workspace, dict):
-            self._apply_active_workspace_summary(active_workspace)
+            collections_changed = self._apply_active_workspace_summary(active_workspace) or collections_changed
 
         if self._pending_activity == "chat":
             pending_response = self._pending_chat_response_message(self._history)
@@ -787,8 +812,9 @@ class UiBridge(QtCore.QObject):
             self._set_assistant_state("idle")
             self._status_line = "Logbook entry secured."
 
-        self._rebuild_surface_models()
-        self.collectionsChanged.emit()
+        if collections_changed or (status_changed and self._module_requires_live_status_refresh()):
+            self._rebuild_surface_models()
+            self.collectionsChanged.emit()
 
     def apply_chat_result(self, payload: dict[str, Any]) -> None:
         user_message = payload.get("user_message")
@@ -827,6 +853,7 @@ class UiBridge(QtCore.QObject):
             return
         if action_type == "workspace_clear":
             self._workspace_focus = {}
+            self._workspace_state_hint = ""
             self._opened_items = []
             self._active_opened_item_id = None
             self._active_module_key = "chartroom"
@@ -838,11 +865,17 @@ class UiBridge(QtCore.QObject):
             return
         if action_type == "workspace_focus":
             module = str(action.get("module", self._active_module_key)).strip().lower() or self._active_module_key
-            section = str(action.get("section", self._default_workspace_section_key(module))).strip().lower()
+            state_hint = self._normalize_workspace_state_hint(action.get("state_hint"))
+            section = self._resolved_workspace_section(
+                module=module,
+                section=action.get("section", self._default_workspace_section_key(module)),
+                state_hint=state_hint,
+            )
             self._active_module_key = module
+            self._workspace_state_hint = state_hint
             self._active_workspace_section_key = section or self._default_workspace_section_key(module)
             self._mode = "deck"
-            self._status_line = f"Holding {self._active_module_label()} in the Deck."
+            self._status_line = self._workspace_focus_status_line(self._active_module_label(), state_hint)
             self.modeChanged.emit()
             self.statusChanged.emit()
             self._rebuild_surface_models()
@@ -861,6 +894,7 @@ class UiBridge(QtCore.QObject):
 
         self._upsert_opened_item(normalized_item)
         self._active_module_key = module
+        self._workspace_state_hint = ""
         self._active_workspace_section_key = section or self._default_workspace_section_key(module)
         self._mode = "deck"
         self._status_line = f"Holding {normalized_item['title']} in the Deck."
@@ -947,10 +981,16 @@ class UiBridge(QtCore.QObject):
 
     def _restore_workspace_state(self, action: dict[str, Any]) -> None:
         module = str(action.get("module", "chartroom")).strip().lower() or "chartroom"
-        section = str(action.get("section", self._default_workspace_section_key(module))).strip().lower()
+        state_hint = self._normalize_workspace_state_hint(action.get("state_hint"))
+        section = self._resolved_workspace_section(
+            module=module,
+            section=action.get("section", self._default_workspace_section_key(module)),
+            state_hint=state_hint,
+        )
         workspace = action.get("workspace")
         if isinstance(workspace, dict):
             self._workspace_focus = dict(workspace)
+        self._workspace_state_hint = state_hint
         items = action.get("items", [])
         self._opened_items = []
         if isinstance(items, list):
@@ -970,44 +1010,56 @@ class UiBridge(QtCore.QObject):
         workspace_name = str(self._workspace_focus.get("name", "workspace")).strip() or "workspace"
         self._status_line = f"Holding {workspace_name} in the Deck."
 
-    def _apply_active_workspace_summary(self, summary: dict[str, Any]) -> None:
+    def _apply_active_workspace_summary(self, summary: dict[str, Any]) -> bool:
+        before_state = self._workspace_refresh_signature()
         workspace = summary.get("workspace")
         if not isinstance(workspace, dict) or not workspace:
-            return
+            return False
 
+        action = summary.get("action") if isinstance(summary.get("action"), dict) else {}
         current_workspace_id = str(self._workspace_focus.get("workspaceId", "")).strip()
         incoming_workspace_id = str(workspace.get("workspaceId", "")).strip()
         if not current_workspace_id and not self._opened_items:
-            action = summary.get("action")
-            if isinstance(action, dict):
+            if action:
                 self._restore_workspace_state(action)
-                return
+                return self._workspace_refresh_signature() != before_state
 
         if current_workspace_id and incoming_workspace_id and current_workspace_id != incoming_workspace_id:
-            return
+            return False
 
+        previous_module = self._active_module_key
         self._workspace_focus = dict(workspace)
-        if self._opened_items:
-            return
-
-        action = summary.get("action") if isinstance(summary.get("action"), dict) else {}
-        module = str(action.get("module", "chartroom")).strip().lower() or "chartroom"
-        section = str(action.get("section", self._default_workspace_section_key(module))).strip().lower()
-        opened_items = summary.get("opened_items")
-        if not isinstance(opened_items, list):
-            return
-
-        self._opened_items = [
-            self._normalize_workspace_item(item, module=module, section=section)
-            for item in opened_items
-            if isinstance(item, dict)
-        ]
         active_item = summary.get("active_item") if isinstance(summary.get("active_item"), dict) else {}
+        opened_items = summary.get("opened_items")
+        module = str(action.get("module", active_item.get("module", self._active_module_key))).strip().lower() or self._active_module_key
+        candidate_state_hint = self._normalize_workspace_state_hint(
+            summary.get("state_hint") or action.get("state_hint") or workspace.get("stateHint") or workspace.get("state_hint")
+        )
+        state_hint = candidate_state_hint or (self._workspace_state_hint if module == previous_module else "")
+        section = self._resolved_workspace_section(
+            module=module,
+            section=action.get("section", active_item.get("section", self._active_workspace_section_key)),
+            state_hint=state_hint,
+        )
+        self._active_module_key = module
+        self._workspace_state_hint = state_hint
+        self._active_workspace_section_key = section or self._default_workspace_section_key(module)
+
+        items_source = opened_items if isinstance(opened_items, list) else action.get("items")
+        if isinstance(items_source, list):
+            self._opened_items = [
+                self._normalize_workspace_item(item, module=module, section=section)
+                for item in items_source
+                if isinstance(item, dict)
+            ]
         active_item_id = str(active_item.get("itemId", "")).strip() or str(action.get("active_item_id", "")).strip()
         if active_item_id and any(item.get("itemId") == active_item_id for item in self._opened_items):
             self._active_opened_item_id = active_item_id
-        elif self._opened_items and self._active_opened_item_id is None:
+        elif self._opened_items:
             self._active_opened_item_id = str(self._opened_items[0].get("itemId", "")).strip() or None
+        else:
+            self._active_opened_item_id = None
+        return self._workspace_refresh_signature() != before_state
 
     def _normalize_workspace_item(self, item: dict[str, Any], *, module: str, section: str) -> dict[str, Any]:
         normalized_item = dict(item)
@@ -1020,6 +1072,46 @@ class UiBridge(QtCore.QObject):
         normalized_item["section"] = str(normalized_item.get("section", section)).strip().lower() or section
         return normalized_item
 
+    def _normalize_workspace_state_hint(self, value: Any) -> str:
+        normalized = str(value or "").strip().lower().replace("_", "-")
+        return normalized
+
+    def _workspace_state_hint_label(self, value: str) -> str:
+        normalized = self._normalize_workspace_state_hint(value)
+        if not normalized:
+            return ""
+        return normalized.replace("-", " ").title()
+
+    def _systems_section_from_state_hint(self, state_hint: str) -> str:
+        mapping = {
+            "machine": "runtime",
+            "power": "runtime",
+            "power-projection": "runtime",
+            "resources": "runtime",
+            "network": "network",
+            "network-throughput": "network",
+            "network-diagnosis": "network",
+            "power-diagnosis": "diagnostics",
+            "resource-diagnosis": "diagnostics",
+            "storage-diagnosis": "diagnostics",
+        }
+        return mapping.get(self._normalize_workspace_state_hint(state_hint), "")
+
+    def _resolved_workspace_section(self, *, module: str, section: Any, state_hint: str = "") -> str:
+        normalized_module = str(module or "").strip().lower() or "chartroom"
+        normalized_section = str(section or "").strip().lower()
+        if normalized_module == "systems" and normalized_section in {"", "overview"}:
+            hinted_section = self._systems_section_from_state_hint(state_hint)
+            if hinted_section:
+                return hinted_section
+        return normalized_section or self._default_workspace_section_key(normalized_module)
+
+    def _workspace_focus_status_line(self, module_label: str, state_hint: str = "") -> str:
+        hint_label = self._workspace_state_hint_label(state_hint)
+        if hint_label:
+            return f"Holding {module_label} in the Deck: {hint_label}."
+        return f"Holding {module_label} in the Deck."
+
     def _workspace_surface_cluster(self, surface: str) -> dict[str, Any]:
         surface_content = self._workspace_focus.get("surfaceContent", {})
         if not isinstance(surface_content, dict):
@@ -1031,6 +1123,19 @@ class UiBridge(QtCore.QObject):
         cluster = self._workspace_surface_cluster(surface)
         items = cluster.get("items", [])
         return [dict(item) for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+
+    def _workspace_refresh_signature(self) -> dict[str, Any]:
+        return {
+            "workspace_focus": copy.deepcopy(self._workspace_focus),
+            "workspace_state_hint": self._workspace_state_hint,
+            "opened_items": copy.deepcopy(self._opened_items),
+            "active_opened_item_id": self._active_opened_item_id,
+            "active_module_key": self._active_module_key,
+            "active_workspace_section_key": self._active_workspace_section_key,
+        }
+
+    def _module_requires_live_status_refresh(self) -> bool:
+        return self._active_module_key in {"systems", "watch", "signals"}
 
     def _rebuild_surface_models(self) -> None:
         display_history = self._display_history()
@@ -1850,11 +1955,15 @@ class UiBridge(QtCore.QObject):
                 },
             ]
         if self._active_module_key == "systems":
-            return [
+            chips = [
                 {"label": "Runtime", "value": self._runtime_mode_label.title()},
                 {"label": "Signal", "value": self.connectionLabel},
                 {"label": "Workers", "value": str(self._status.get("max_workers", self.config.concurrency.max_workers))},
             ]
+            focus_label = self._workspace_state_hint_label(self._workspace_state_hint)
+            if focus_label:
+                chips.insert(0, {"label": "Focus", "value": focus_label})
+            return chips
         if self._active_module_key == "signals":
             return [
                 {"label": "Mode", "value": self.modeTitle},

@@ -20,6 +20,7 @@ def _serialize(value: Any) -> Any:
 
 
 class QueryShape(StrEnum):
+    SCREEN_AWARENESS_REQUEST = "screen_awareness_request"
     CURRENT_METRIC = "current_metric"
     CURRENT_STATUS = "current_status"
     DIAGNOSTIC_CAUSAL = "diagnostic_causal"

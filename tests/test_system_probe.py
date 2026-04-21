@@ -128,6 +128,31 @@ def test_saved_home_location_prefers_persistent_memory_over_config(temp_config) 
     assert result["latitude"] == pytest.approx(40.6782)
 
 
+def test_hardware_telemetry_cache_uses_completion_time_for_freshness(temp_config, monkeypatch: pytest.MonkeyPatch) -> None:
+    probe = SystemProbe(temp_config)
+    temp_config.hardware_telemetry.active_cache_ttl_seconds = 8.0
+    call_count = 0
+
+    def fake_snapshot(self, *, sampling_tier: str = "active") -> dict[str, object]:
+        nonlocal call_count
+        call_count += 1
+        return {
+            "capabilities": {"helper_reachable": True},
+            "freshness": {"sampling_tier": sampling_tier, "sample_age_seconds": 0.0},
+        }
+
+    monotonic_values = iter([100.0, 109.0, 110.0])
+    monkeypatch.setattr("stormhelm.core.system.probe.monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr("stormhelm.core.system.probe.HardwareTelemetryHelperClient.snapshot", fake_snapshot)
+
+    first = probe.hardware_telemetry_snapshot(sampling_tier="active")
+    second = probe.hardware_telemetry_snapshot(sampling_tier="active")
+
+    assert call_count == 1
+    assert first["freshness"]["sample_age_seconds"] == 0.0
+    assert second["freshness"]["sample_age_seconds"] == pytest.approx(1.0)
+
+
 def test_saved_named_location_is_available_to_best_resolver(temp_config) -> None:
     database = SQLiteDatabase(temp_config.storage.database_path)
     database.initialize()

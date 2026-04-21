@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import inspect
+
 from fastapi.testclient import TestClient
+from fastapi.routing import APIRoute
 
 from stormhelm.core.api.app import create_app
 from stormhelm.core.events import EventBuffer
@@ -57,6 +60,15 @@ def _workspace_service(temp_config) -> tuple[
     return database, conversations, preferences, repository, state, service
 
 
+def _route_endpoint_map() -> dict[str, object]:
+    app = create_app()
+    return {
+        route.path: route.endpoint
+        for route in app.routes
+        if isinstance(route, APIRoute)
+    }
+
+
 def test_snapshot_exact_request_handles_legacy_workspace_posture(temp_config) -> None:
     database = _database(temp_config)
     preferences = PreferencesRepository(database)
@@ -81,6 +93,25 @@ def test_snapshot_exact_request_handles_legacy_workspace_posture(temp_config) ->
 
     assert response.status_code == 200
     assert response.json()["active_workspace"]["workspace"]["workspaceId"] == workspace.workspace_id
+
+
+def test_snapshot_and_status_routes_use_sync_handlers_for_threadpool_isolation() -> None:
+    endpoints = _route_endpoint_map()
+
+    for path in (
+        "/health",
+        "/status",
+        "/chat/history",
+        "/jobs",
+        "/events",
+        "/notes",
+        "/settings",
+        "/tools",
+        "/snapshot",
+    ):
+        assert inspect.iscoroutinefunction(endpoints[path]) is False
+
+    assert inspect.iscoroutinefunction(endpoints["/chat/send"]) is True
 
 
 def test_snapshot_tolerates_malformed_preference_rows(temp_config) -> None:

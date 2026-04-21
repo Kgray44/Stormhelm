@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import subprocess
+from copy import deepcopy
 
 from stormhelm.core.system.hardware_telemetry import (
     HardwareTelemetryHelperClient,
+    _helper_context_label,
     _merge_cpu_telemetry,
     _merge_thermal_telemetry,
     _run_powershell_json,
@@ -25,6 +27,58 @@ def test_helper_unreachable_snapshot_reports_fallback_capabilities() -> None:
     assert snapshot["capabilities"]["helper_reachable"] is False
     assert snapshot["freshness"]["reason"] == "helper_missing"
     assert snapshot["sources"]["helper"]["state"] == "unreachable"
+
+
+def _helper_payload(*, sampling_tier: str = "active") -> dict[str, object]:
+    return {
+        "cpu": {},
+        "gpu": {"adapters": []},
+        "thermal": {"sensors": [], "fans": [], "pump_rpm": None},
+        "power": {},
+        "capabilities": {
+            "helper_installed": True,
+            "helper_reachable": True,
+            "elevated_access_active": False,
+        },
+        "sources": {
+            "helper": {
+                "provider": "stormhelm_hardware_helper",
+                "state": "reachable",
+                "detail": "Bundled helper responded.",
+            },
+            "metrics": {},
+        },
+        "freshness": {
+            "sampling_tier": sampling_tier,
+            "sample_age_seconds": 0.0,
+        },
+        "monitoring": {"sampling_tier": sampling_tier},
+        "debug": {"providers": {}},
+    }
+
+
+def _gigabyte_access_denied_payload(*, sampling_tier: str = "active") -> dict[str, object]:
+    payload = _helper_payload(sampling_tier=sampling_tier)
+    payload["sources"]["metrics"] = {
+        "cpu.package_temperature_c": {
+            "provider": "gigabyte_control_center",
+            "available": False,
+            "source": "GccWmiTool.getCpuTemperature",
+            "unsupported_reason": "Gigabyte Control Center notebook WMI returned Access denied for CPU temperature from the current non-elevated helper context.",
+        },
+        "thermal.cpu_fan_rpm": {
+            "provider": "gigabyte_control_center",
+            "available": False,
+            "source": "GccWmiTool.GetFanSpeed(1)",
+            "unsupported_reason": "Gigabyte Control Center notebook WMI returned Access denied for CPU fan telemetry from the current non-elevated helper context.",
+        },
+    }
+    return payload
+
+
+def test_helper_context_label_distinguishes_elevation_state() -> None:
+    assert _helper_context_label(False) == "current non-elevated helper context"
+    assert _helper_context_label(True) == "current elevated helper context"
 
 
 def test_helper_wrapper_and_provider_collectors_use_separate_timeouts(temp_config, monkeypatch) -> None:
@@ -139,6 +193,118 @@ def test_overlay_resource_status_carries_helper_cpu_gpu_and_thermal_fields() -> 
     assert result["gpu"][0]["power_w"] == 140.5
     assert result["thermal"]["sensors"][0]["label"] == "CPU"
     assert result["capabilities"]["gpu_deep_telemetry_available"] is True
+
+
+def test_helper_wrapper_skips_elevated_retry_when_primary_payload_has_no_privilege_gated_metrics(temp_config, monkeypatch) -> None:
+    temp_config.hardware_telemetry.elevated_helper_enabled = True
+    primary_payload = _helper_payload()
+
+    def fake_standard(self, *, sampling_tier: str):
+        return deepcopy(primary_payload), {"state": "exited", "timeout_seconds": 12.0}, None
+
+    def fail_if_elevated(*args, **kwargs):
+        raise AssertionError("elevated helper retry should not run")
+
+    monkeypatch.setattr(HardwareTelemetryHelperClient, "_run_standard_helper", fake_standard)
+    monkeypatch.setattr(HardwareTelemetryHelperClient, "_run_elevated_helper", fail_if_elevated)
+
+    result = HardwareTelemetryHelperClient(temp_config).snapshot(sampling_tier="active")
+
+    assert result["debug"]["wrapper"]["selected_path"] == "standard"
+    assert result["debug"]["wrapper"]["elevated"]["state"] == "not_needed"
+    assert result["sources"]["helper"]["detail"] == "Bundled helper responded."
+
+
+def test_helper_wrapper_uses_elevated_payload_when_gigabyte_metrics_require_admin(temp_config, monkeypatch) -> None:
+    temp_config.hardware_telemetry.elevated_helper_enabled = True
+    primary_payload = _gigabyte_access_denied_payload()
+    elevated_payload = _helper_payload()
+    elevated_payload["capabilities"]["elevated_access_active"] = True
+    elevated_payload["cpu"] = {"package_temperature_c": 67.5}
+    elevated_payload["thermal"] = {
+        "sensors": [{"label": "Gigabyte CPU Package", "temperature_c": 67.5, "source": "gigabyte_control_center"}],
+        "fans": [{"label": "CPU Fan", "rpm": 3120, "source": "gigabyte_control_center"}],
+        "pump_rpm": None,
+    }
+    elevated_payload["sources"]["metrics"] = {
+        "cpu.package_temperature_c": {
+            "provider": "gigabyte_control_center",
+            "available": True,
+            "source": "GccWmiTool.getCpuTemperature",
+        },
+        "thermal.cpu_fan_rpm": {
+            "provider": "gigabyte_control_center",
+            "available": True,
+            "source": "GccWmiTool.GetFanSpeed(1)",
+        },
+    }
+
+    def fake_standard(self, *, sampling_tier: str):
+        return deepcopy(primary_payload), {"state": "exited", "timeout_seconds": 12.0}, None
+
+    def fake_elevated(self, *, sampling_tier: str):
+        return deepcopy(elevated_payload), {"state": "succeeded", "timeout_seconds": 20.0}, None
+
+    monkeypatch.setattr(HardwareTelemetryHelperClient, "_run_standard_helper", fake_standard)
+    monkeypatch.setattr(HardwareTelemetryHelperClient, "_run_elevated_helper", fake_elevated)
+
+    result = HardwareTelemetryHelperClient(temp_config).snapshot(sampling_tier="active")
+
+    assert result["cpu"]["package_temperature_c"] == 67.5
+    assert result["thermal"]["fans"][0]["rpm"] == 3120
+    assert result["capabilities"]["elevated_access_active"] is True
+    assert result["debug"]["wrapper"]["selected_path"] == "elevated"
+    assert result["debug"]["wrapper"]["elevated"]["state"] == "succeeded"
+    assert "elevated helper lane" in result["sources"]["helper"]["detail"].lower()
+
+
+def test_helper_wrapper_appends_exact_elevated_retry_failure_reason(temp_config, monkeypatch) -> None:
+    temp_config.hardware_telemetry.elevated_helper_enabled = True
+    primary_payload = _gigabyte_access_denied_payload()
+
+    def fake_standard(self, *, sampling_tier: str):
+        return deepcopy(primary_payload), {"state": "exited", "timeout_seconds": 12.0}, None
+
+    def fake_elevated(self, *, sampling_tier: str):
+        return None, {"state": "denied", "timeout_seconds": 20.0, "detail": "The operation was canceled by the user."}, "elevation_denied"
+
+    monkeypatch.setattr(HardwareTelemetryHelperClient, "_run_standard_helper", fake_standard)
+    monkeypatch.setattr(HardwareTelemetryHelperClient, "_run_elevated_helper", fake_elevated)
+
+    result = HardwareTelemetryHelperClient(temp_config).snapshot(sampling_tier="active")
+    cpu_reason = result["sources"]["metrics"]["cpu.package_temperature_c"]["unsupported_reason"]
+    fan_reason = result["sources"]["metrics"]["thermal.cpu_fan_rpm"]["unsupported_reason"]
+
+    assert result["debug"]["wrapper"]["selected_path"] == "standard"
+    assert result["debug"]["wrapper"]["elevated"]["state"] == "denied"
+    assert "current non-elevated helper context" in cpu_reason
+    assert "elevated helper attempt failed" in cpu_reason.lower()
+    assert "operation was canceled by the user" in cpu_reason.lower()
+    assert "elevated helper attempt failed" in fan_reason.lower()
+
+
+def test_helper_wrapper_skips_reprompt_during_elevated_retry_cooldown(temp_config, monkeypatch) -> None:
+    temp_config.hardware_telemetry.elevated_helper_enabled = True
+    temp_config.hardware_telemetry.elevated_helper_cooldown_seconds = 90.0
+    primary_payload = _gigabyte_access_denied_payload()
+
+    def fake_standard(self, *, sampling_tier: str):
+        return deepcopy(primary_payload), {"state": "exited", "timeout_seconds": 12.0}, None
+
+    def fail_if_elevated(*args, **kwargs):
+        raise AssertionError("elevated helper retry should be suppressed during cooldown")
+
+    monkeypatch.setattr(HardwareTelemetryHelperClient, "_run_standard_helper", fake_standard)
+    monkeypatch.setattr(HardwareTelemetryHelperClient, "_run_elevated_helper", fail_if_elevated)
+    monkeypatch.setattr("stormhelm.core.system.hardware_telemetry.monotonic", lambda: 100.0)
+    monkeypatch.setattr(HardwareTelemetryHelperClient, "_elevated_retry_blocked_until", 145.0)
+
+    result = HardwareTelemetryHelperClient(temp_config).snapshot(sampling_tier="active")
+    cpu_reason = result["sources"]["metrics"]["cpu.package_temperature_c"]["unsupported_reason"]
+
+    assert result["debug"]["wrapper"]["elevated"]["state"] == "cooldown"
+    assert result["debug"]["wrapper"]["elevated"]["remaining_cooldown_seconds"] == 45.0
+    assert "waiting 45.0 more seconds before re-prompting" in cpu_reason.lower()
 
 
 def test_merge_cpu_telemetry_prefers_gigabyte_vendor_temperature_when_available() -> None:

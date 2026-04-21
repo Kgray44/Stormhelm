@@ -34,6 +34,121 @@ def test_planner_routes_direct_weather_to_structured_tool_without_open() -> None
     assert decision.tool_requests[0].arguments["forecast_target"] == "current"
 
 
+def test_planner_records_screen_awareness_candidate_without_hijacking_when_routing_is_disabled(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.planner_routing_enabled = False
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    planner = DeterministicPlanner(screen_awareness_config=temp_config.screen_awareness)
+
+    decision = planner.plan(
+        "what am I looking at",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "unclassified"
+    assert decision.tool_requests == []
+    assert decision.debug["screen_awareness"]["candidate"] is True
+    assert decision.debug["screen_awareness"]["disposition"] == "routing_disabled"
+
+
+def test_planner_routes_screen_grounded_request_to_phase1_analysis_when_enabled(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase1"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    planner = DeterministicPlanner(screen_awareness_config=temp_config.screen_awareness)
+
+    decision = planner.plan(
+        "what am I looking at",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "screen_awareness_response"
+    assert decision.tool_requests == []
+    assert decision.structured_query is not None
+    assert decision.structured_query.query_shape.value == "screen_awareness_request"
+    assert decision.execution_plan is not None
+    assert decision.execution_plan.plan_type == "screen_awareness_analyze"
+    assert decision.response_mode == "summary_result"
+    assert decision.capability_plan is not None
+    assert decision.capability_plan.supported is True
+    assert decision.capability_plan.missing_capabilities == []
+    assert decision.unsupported_reason is None
+    assert decision.assistant_message is None
+    assert decision.debug["screen_awareness"]["disposition"] == "phase1_analyze"
+
+
+def test_planner_routes_grounding_disambiguation_request_to_phase2_screen_awareness_when_enabled(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase2"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    temp_config.screen_awareness.grounding_enabled = True
+    planner = DeterministicPlanner(screen_awareness_config=temp_config.screen_awareness)
+
+    decision = planner.plan(
+        "which button are you talking about",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "screen_awareness_response"
+    assert decision.tool_requests == []
+    assert decision.structured_query is not None
+    assert decision.structured_query.query_shape.value == "screen_awareness_request"
+    assert decision.execution_plan is not None
+    assert decision.execution_plan.plan_type == "screen_awareness_analyze"
+    assert decision.capability_plan is not None
+    assert "screen_grounding" in decision.capability_plan.required_capabilities
+    assert decision.debug["screen_awareness"]["disposition"] == "phase2_ground"
+
+
+def test_planner_does_not_hijack_unrelated_requests_when_screen_awareness_is_on(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase1"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    planner = DeterministicPlanner(screen_awareness_config=temp_config.screen_awareness)
+
+    decision = planner.plan(
+        "search GitHub for planner architecture",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "browser_search"
+    assert decision.tool_requests
+    assert decision.tool_requests[0].tool_name == "external_open_url"
+    assert decision.debug["screen_awareness"]["candidate"] is False
+    assert decision.debug["screen_awareness"]["disposition"] == "not_requested"
+
+
 def test_planner_routes_create_research_workspace_to_workspace_assembly() -> None:
     planner = DeterministicPlanner()
 
@@ -329,6 +444,59 @@ def test_planner_routes_cpu_temp_question_to_temperature_metric() -> None:
     assert decision.tool_requests[0].arguments["focus"] == "cpu"
     assert decision.tool_requests[0].arguments["query_kind"] == "telemetry"
     assert decision.tool_requests[0].arguments["metric"] == "temperature"
+
+
+def test_planner_routes_direct_domain_browser_open_to_external_url_plan() -> None:
+    planner = DeterministicPlanner()
+
+    decision = planner.plan(
+        "open docs.python.org in Firefox",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.structured_query is not None
+    assert decision.structured_query.query_shape == "open_browser_destination"
+    assert decision.execution_plan is not None
+    assert decision.execution_plan.plan_type == "resolve_url_then_open_in_browser"
+    assert len(decision.tool_requests) == 1
+    assert decision.tool_requests[0].tool_name == "external_open_url"
+    assert decision.tool_requests[0].arguments["url"] == "https://docs.python.org/"
+    assert decision.tool_requests[0].arguments["browser_target"] == "firefox"
+    assert decision.structured_query.slots["destination_type"] == "direct_domain"
+    assert decision.structured_query.slots["destination_resolution_kind"] == "direct_domain"
+    assert decision.structured_query.slots["destination_site_domain"] == "docs.python.org"
+
+
+def test_planner_routes_expanded_native_browser_search_provider_catalog() -> None:
+    planner = DeterministicPlanner()
+
+    decision = planner.plan(
+        "search tripadvisor for boston hotels in chrome",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.structured_query is not None
+    assert decision.structured_query.query_shape == "search_browser_destination"
+    assert decision.execution_plan is not None
+    assert decision.execution_plan.plan_type == "resolve_search_url_then_open_in_browser"
+    assert len(decision.tool_requests) == 1
+    assert decision.tool_requests[0].tool_name == "external_open_url"
+    assert decision.tool_requests[0].arguments["url"] == "https://www.tripadvisor.com/Search?q=boston+hotels"
+    assert decision.tool_requests[0].arguments["browser_target"] == "chrome"
+    assert decision.structured_query.slots["search_provider"] == "tripadvisor"
+    assert decision.structured_query.slots["search_resolution_kind"] == "native_provider"
 
 
 def test_planner_routes_gpu_under_load_question_to_resource_interpretation() -> None:

@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 import re
 from typing import Any
 
+from stormhelm.config.models import ScreenAwarenessConfig
 from stormhelm.core.intelligence.language import normalize_phrase
 from stormhelm.core.orchestrator.browser_destinations import BrowserDestinationResolver
 from stormhelm.core.orchestrator.browser_destinations import BrowserIntentType
@@ -19,6 +20,10 @@ from stormhelm.core.orchestrator.planner_models import SemanticParseProposal
 from stormhelm.core.orchestrator.planner_models import StructuredQuery
 from stormhelm.core.orchestrator.planner_models import UnsupportedReason
 from stormhelm.core.orchestrator.router import ToolRequest
+from stormhelm.core.screen_awareness import ScreenAwarenessPlannerSeam
+from stormhelm.core.screen_awareness import ScreenIntentType
+from stormhelm.core.screen_awareness import ScreenPlannerEvaluation
+from stormhelm.core.screen_awareness import ScreenRouteDisposition
 
 NOTE_EXTENSIONS = {".md", ".markdown", ".txt"}
 FILE_LOOKUP_PREFIXES = {"open ", "show ", "bring up ", "pull up "}
@@ -168,9 +173,18 @@ class RequestClassification:
 
 
 class DeterministicPlanner:
-    def __init__(self, *, available_tools: set[str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        available_tools: set[str] | None = None,
+        screen_awareness_config: ScreenAwarenessConfig | None = None,
+        screen_awareness_seam: ScreenAwarenessPlannerSeam | None = None,
+    ) -> None:
         self._available_tools = set(available_tools or DEFAULT_AVAILABLE_TOOLS)
         self._browser_destination_resolver = BrowserDestinationResolver()
+        self._screen_awareness_seam = screen_awareness_seam or ScreenAwarenessPlannerSeam(
+            screen_awareness_config or ScreenAwarenessConfig()
+        )
 
     def plan(
         self,
@@ -206,6 +220,15 @@ class DeterministicPlanner:
                 debug=debug,
             )
 
+        screen_awareness_evaluation = self._screen_awareness_seam.evaluate(
+            raw_text=message,
+            normalized_text=normalized.normalized_text,
+            surface_mode=surface_mode,
+            active_module=active_module,
+            active_context=active_context or {},
+        )
+        debug["screen_awareness"] = screen_awareness_evaluation.to_dict()
+
         semantic = self._semantic_parse_proposal(
             message,
             normalized=normalized,
@@ -216,6 +239,7 @@ class DeterministicPlanner:
             recent_tool_results=recent_tool_results or [],
             learned_preferences=learned_preferences or {},
             active_context=active_context or {},
+            screen_awareness_evaluation=screen_awareness_evaluation,
         )
         debug["semantic_parse_proposal"] = semantic.to_dict()
 
@@ -386,6 +410,7 @@ class DeterministicPlanner:
         recent_tool_results: list[dict[str, Any]],
         learned_preferences: dict[str, dict[str, object]],
         active_context: dict[str, Any],
+        screen_awareness_evaluation: ScreenPlannerEvaluation,
     ) -> SemanticParseProposal:
         del session_id
         lower = normalized.normalized_text
@@ -393,6 +418,66 @@ class DeterministicPlanner:
         weather_open_default = str(self._preference_value(learned_preferences, "weather", "open_target") or "none")
         weather_location_default = str(self._preference_value(learned_preferences, "weather", "location_mode") or "auto")
         present_in = "deck" if any(token in lower for token in {" in systems", " in the systems", "show in systems"}) else "none"
+
+        if screen_awareness_evaluation.disposition in {
+            ScreenRouteDisposition.PHASE1_ANALYZE,
+            ScreenRouteDisposition.PHASE2_GROUND,
+        }:
+            return self._tool_proposal(
+                query_shape=QueryShape.SCREEN_AWARENESS_REQUEST,
+                domain="screen_awareness",
+                request_type_hint="screen_awareness_response",
+                family="screen_awareness",
+                subject=str(screen_awareness_evaluation.intent.value if screen_awareness_evaluation.intent else "screen"),
+                requested_action=str(
+                    screen_awareness_evaluation.intent.value if screen_awareness_evaluation.intent is not None else ""
+                )
+                or None,
+                confidence=screen_awareness_evaluation.route_confidence,
+                evidence=list(screen_awareness_evaluation.reasons),
+                execution_type="screen_awareness_analyze",
+                output_mode=ResponseMode.SUMMARY_RESULT.value,
+                output_type="screen_analysis",
+                slots={
+                    "target_scope": "screen",
+                    "screen_awareness": screen_awareness_evaluation.to_dict(),
+                    "response_contract": dict(screen_awareness_evaluation.response_contract),
+                },
+            )
+
+        if screen_awareness_evaluation.disposition == ScreenRouteDisposition.PHASE0_SCAFFOLD:
+            response_contract = dict(screen_awareness_evaluation.response_contract)
+            analysis_result = (
+                screen_awareness_evaluation.analysis_result.to_dict()
+                if screen_awareness_evaluation.analysis_result is not None
+                else {}
+            )
+            return self._tool_proposal(
+                query_shape=QueryShape.SCREEN_AWARENESS_REQUEST,
+                domain="screen_awareness",
+                request_type_hint="screen_awareness_scaffold",
+                family="screen_awareness",
+                subject=str(screen_awareness_evaluation.intent.value if screen_awareness_evaluation.intent else "screen"),
+                requested_action=str(
+                    screen_awareness_evaluation.intent.value if screen_awareness_evaluation.intent is not None else ""
+                )
+                or None,
+                confidence=screen_awareness_evaluation.route_confidence,
+                evidence=list(screen_awareness_evaluation.reasons),
+                assistant_message=str(response_contract.get("full_response") or "").strip() or None,
+                execution_type="screen_awareness_scaffold",
+                output_mode=ResponseMode.UNSUPPORTED.value,
+                output_type="screen_analysis",
+                slots={
+                    "target_scope": "screen",
+                    "screen_awareness": screen_awareness_evaluation.to_dict(),
+                    "screen_analysis_result": analysis_result,
+                    "truthfulness_contract": analysis_result.get("truthfulness_contract", {}),
+                    "unsupported_reason_code": "screen_awareness_observation_unavailable",
+                    "unsupported_response_contract": response_contract,
+                    "response_contract": response_contract,
+                },
+            )
 
         location_source_message = self._location_source_follow_up_message(
             lower,
@@ -1404,6 +1489,10 @@ class DeterministicPlanner:
             output_mode = output_mode or ResponseMode.IDENTITY_SUMMARY.value
             output_type = output_type or "identity"
             execution_type = execution_type or "retrieve_identity"
+        elif query_shape == QueryShape.SCREEN_AWARENESS_REQUEST:
+            output_mode = output_mode or ResponseMode.SUMMARY_RESULT.value
+            output_type = output_type or "screen_analysis"
+            execution_type = execution_type or "screen_awareness_analyze"
         elif query_shape == QueryShape.CONTROL_COMMAND:
             output_mode = output_mode or ResponseMode.ACTION_RESULT.value
             output_type = output_type or "action"
@@ -1456,6 +1545,8 @@ class DeterministicPlanner:
             capability_requirements.append("status_fetch")
         elif query_shape == QueryShape.IDENTITY_LOOKUP:
             capability_requirements.append("identity_lookup")
+        elif query_shape == QueryShape.SCREEN_AWARENESS_REQUEST:
+            capability_requirements.extend(["screen_observation", "screen_interpretation"])
         elif query_shape == QueryShape.DIAGNOSTIC_CAUSAL:
             capability_requirements.append("diagnostic_telemetry")
         elif query_shape == QueryShape.HISTORY_TREND:
@@ -1537,8 +1628,56 @@ class DeterministicPlanner:
             freshness_expectation = "recent_history"
         elif structured_query.query_shape == QueryShape.CURRENT_STATUS:
             freshness_expectation = "current"
+        elif structured_query.query_shape == QueryShape.SCREEN_AWARENESS_REQUEST:
+            freshness_expectation = "current"
         elif structured_query.query_shape in {QueryShape.CONTROL_COMMAND, QueryShape.REPAIR_REQUEST}:
             freshness_expectation = "immediate"
+
+        if structured_query.query_shape == QueryShape.SCREEN_AWARENESS_REQUEST:
+            screen_config = self._screen_awareness_seam.config
+            ready_for_phase1 = (
+                screen_config.enabled
+                and screen_config.planner_routing_enabled
+                and screen_config.observation_enabled
+                and screen_config.interpretation_enabled
+                and screen_config.phase != "phase0"
+            )
+            if ready_for_phase1:
+                if screen_config.phase == "phase2" and screen_config.grounding_enabled and "screen_grounding" not in required_capabilities:
+                    required_capabilities.append("screen_grounding")
+                return CapabilityPlan(
+                    supported=True,
+                    available_tools=sorted(tool for tool in available_tools if tool in DEFAULT_AVAILABLE_TOOLS),
+                    required_tools=[],
+                    required_capabilities=required_capabilities,
+                    missing_capabilities=[],
+                    freshness_expectation=freshness_expectation,
+                    unsupported_reason=None,
+                    notes=[
+                        "Screen awareness uses layered native observation first and augments later only when needed.",
+                        "Phase 2 grounds referential requests only when evidence supports a truthful winner.",
+                    ],
+                )
+            missing_capabilities.append("screen_observation")
+            unsupported_contract = slots.get("unsupported_response_contract")
+            unsupported_message = "Screen bearings aren't available in the current phase yet."
+            if isinstance(unsupported_contract, dict):
+                unsupported_message = str(unsupported_contract.get("full_response") or unsupported_message)
+            return CapabilityPlan(
+                supported=False,
+                available_tools=sorted(tool for tool in available_tools if tool in DEFAULT_AVAILABLE_TOOLS),
+                required_tools=[],
+                required_capabilities=required_capabilities,
+                missing_capabilities=missing_capabilities,
+                freshness_expectation=freshness_expectation,
+                unsupported_reason=UnsupportedReason(
+                    code=str(slots.get("unsupported_reason_code") or "screen_awareness_observation_unavailable"),
+                    message=unsupported_message,
+                ),
+                notes=[
+                    "The screen-awareness planner route exists, but the runtime is not configured for live observation and interpretation.",
+                ],
+            )
 
         if structured_query.query_shape == QueryShape.COMPARISON_REQUEST and not tool_name:
             missing_capabilities.append("file_comparison")
@@ -2718,12 +2857,15 @@ class DeterministicPlanner:
         slots: dict[str, Any] = {
             "target_scope": "browser",
             "browser_intent_type": request.intent_type.value,
-            "destination_type": "known_web_destination",
+            "destination_type": resolution.resolution_kind or "known_web_destination",
             "destination_scope": request.scope.value,
             "browser_preference": request.browser_preference,
             "open_target": request.open_target,
             "browser_destination_request": request.to_dict(),
             "destination_resolution": resolution.to_dict(),
+            "destination_resolution_kind": resolution.resolution_kind,
+            "destination_site_domain": resolution.site_domain,
+            "resolved_destination_title": resolution.display_title,
             "response_contract": dict(response_contract),
             "unsupported_response_contract": self._browser_destination_resolver.response_contract_for_failure(
                 BrowserOpenFailureReason.BROWSER_OPEN_UNAVAILABLE
@@ -2739,15 +2881,14 @@ class DeterministicPlanner:
             "app-control route bypassed",
             *resolution.notes,
         ]
-        if resolution.success and resolution.destination is not None:
+        if resolution.success and resolution.url is not None:
             open_plan = self._browser_destination_resolver.build_open_plan(resolution)
-            slots.update(
-                {
-                    "destination_name": resolution.destination.key,
-                    "known_destination_mapping": resolution.destination.to_dict(),
-                    "browser_open_plan": open_plan.to_dict(),
-                }
-            )
+            slots["browser_open_plan"] = open_plan.to_dict()
+            if resolution.destination is not None:
+                slots["destination_name"] = resolution.destination.key
+                slots["known_destination_mapping"] = resolution.destination.to_dict()
+            elif resolution.site_domain:
+                slots["destination_name"] = resolution.site_domain
             return self._tool_proposal(
                 query_shape=QueryShape.OPEN_BROWSER_DESTINATION,
                 domain="browser",
@@ -2755,7 +2896,7 @@ class DeterministicPlanner:
                 tool_arguments=open_plan.tool_arguments,
                 request_type_hint="direct_action",
                 family="browser_destination",
-                subject=resolution.destination.key,
+                subject=slots.get("destination_name") or resolution.display_title or request.destination_phrase,
                 requested_action="open_browser_destination",
                 confidence=0.97,
                 evidence=evidence,

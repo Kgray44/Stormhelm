@@ -79,6 +79,35 @@ class FakeOperationalProbe:
         return {"resolved": True, "label": "Queens, New York", "source": "approximate"}
 
 
+class CountingOperationalProbe(FakeOperationalProbe):
+    def __init__(self) -> None:
+        self.power_calls = 0
+        self.resource_calls = 0
+        self.hardware_calls = 0
+        self.network_calls = 0
+        self.location_calls = 0
+
+    def power_status(self) -> dict[str, object]:
+        self.power_calls += 1
+        return super().power_status()
+
+    def resource_status(self) -> dict[str, object]:
+        self.resource_calls += 1
+        return super().resource_status()
+
+    def hardware_telemetry_snapshot(self, sampling_tier: str = "active") -> dict[str, object]:
+        self.hardware_calls += 1
+        return super().hardware_telemetry_snapshot(sampling_tier=sampling_tier)
+
+    def network_status(self) -> dict[str, object]:
+        self.network_calls += 1
+        return super().network_status()
+
+    def resolve_location(self) -> dict[str, object]:
+        self.location_calls += 1
+        return super().resolve_location()
+
+
 def test_core_container_status_snapshot_includes_operational_surface_state(temp_config) -> None:
     container = build_container(temp_config)
     container.system_probe = FakeOperationalProbe()  # type: ignore[assignment]
@@ -89,3 +118,62 @@ def test_core_container_status_snapshot_includes_operational_surface_state(temp_
     assert snapshot["watch_state"]["tasks"] == []
     assert any(signal["title"] == "Battery drain elevated" for signal in snapshot["signal_state"]["signals"])
     assert snapshot["system_state"]["network"]["throughput"]["download_mbps"] == 84.25
+
+
+def test_core_container_status_snapshot_includes_screen_awareness_phase1_state(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase1"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+
+    container = build_container(temp_config)
+    container.system_probe = FakeOperationalProbe()  # type: ignore[assignment]
+
+    snapshot = container.status_snapshot()
+
+    assert snapshot["screen_awareness"]["phase"] == "phase1"
+    assert snapshot["screen_awareness"]["enabled"] is True
+    assert snapshot["screen_awareness"]["planner_routing_enabled"] is True
+    assert snapshot["screen_awareness"]["capabilities"]["observation_enabled"] is True
+    assert snapshot["screen_awareness"]["capabilities"]["interpretation_enabled"] is True
+    assert snapshot["screen_awareness"]["capabilities"]["action_enabled"] is False
+    assert snapshot["screen_awareness"]["truthfulness_contract"]["observation_vs_inference"] == "separate"
+    assert snapshot["screen_awareness"]["extension_points"]["verification"] is True
+
+
+def test_core_container_status_snapshot_includes_phase2_grounding_runtime_hooks(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase2"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    temp_config.screen_awareness.grounding_enabled = True
+
+    container = build_container(temp_config)
+    container.system_probe = FakeOperationalProbe()  # type: ignore[assignment]
+
+    snapshot = container.status_snapshot()
+
+    assert snapshot["screen_awareness"]["phase"] == "phase2"
+    assert snapshot["screen_awareness"]["capabilities"]["grounding_enabled"] is True
+    assert snapshot["screen_awareness"]["runtime_hooks"]["grounding_engine_ready"] is True
+
+
+def test_core_container_system_state_cache_uses_completed_snapshot_time(temp_config, monkeypatch) -> None:
+    container = build_container(temp_config)
+    probe = CountingOperationalProbe()
+    container.system_probe = probe  # type: ignore[assignment]
+    monotonic_values = iter([100.0, 116.0, 117.0])
+    monkeypatch.setattr("stormhelm.core.container.monotonic", lambda: next(monotonic_values))
+
+    first = container._system_state_snapshot()
+    second = container._system_state_snapshot()
+
+    assert first["network"]["throughput"]["download_mbps"] == 84.25
+    assert second["network"]["throughput"]["download_mbps"] == 84.25
+    assert probe.power_calls == 1
+    assert probe.resource_calls == 1
+    assert probe.hardware_calls == 1
+    assert probe.location_calls == 1
+    assert probe.network_calls == 1

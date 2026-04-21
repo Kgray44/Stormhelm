@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from stormhelm.core.orchestrator.browser_destinations import BrowserDestinationResolver
 from stormhelm.core.orchestrator.browser_destinations import BrowserIntentType
 from stormhelm.core.orchestrator.browser_destinations import DestinationScope
@@ -161,6 +163,84 @@ def test_browser_destination_resolver_extracts_explicit_browser_target_from_sear
     assert request.query == "issue templates"
     assert request.browser_preference == "chrome"
     assert request.explicit_browser is True
+
+
+def test_browser_destination_resolver_maps_direct_domain_open_request_to_https_url() -> None:
+    resolver = BrowserDestinationResolver()
+
+    request = resolver.parse("open docs.python.org in firefox", surface_mode="ghost")
+
+    assert request is not None
+    assert request.intent_type == BrowserIntentType.OPEN_DESTINATION
+    assert request.destination_phrase == "docs.python.org"
+    assert request.browser_preference == "firefox"
+    assert request.explicit_browser is True
+
+    resolution = resolver.resolve(request)
+
+    assert resolution.success is True
+    assert resolution.destination is None
+    assert resolution.url == "https://docs.python.org/"
+    assert resolution.resolution_kind == "direct_domain"
+    assert resolution.site_domain == "docs.python.org"
+    assert resolution.display_title == "docs.python.org"
+
+
+def test_browser_destination_resolver_maps_direct_domain_with_path_to_https_url() -> None:
+    resolver = BrowserDestinationResolver()
+
+    request = resolver.parse("open developer.mozilla.org/en-US/docs in chrome", surface_mode="ghost")
+
+    assert request is not None
+    assert request.intent_type == BrowserIntentType.OPEN_DESTINATION
+    assert request.destination_phrase == "developer.mozilla.org/en-us/docs"
+    assert request.browser_preference == "chrome"
+
+    resolution = resolver.resolve(request)
+
+    assert resolution.success is True
+    assert resolution.destination is None
+    assert resolution.url == "https://developer.mozilla.org/en-US/docs"
+    assert resolution.resolution_kind == "direct_domain"
+    assert resolution.site_domain == "developer.mozilla.org"
+    assert resolution.display_title == "developer.mozilla.org/en-US/docs"
+
+
+def test_browser_destination_resolver_does_not_treat_file_like_names_as_direct_domains() -> None:
+    resolver = BrowserDestinationResolver()
+
+    assert resolver.parse("open report.pdf in firefox", surface_mode="ghost") is None
+
+
+@pytest.mark.parametrize(
+    ("message", "expected_provider", "expected_url"),
+    [
+        ("search ebay for thinkpad t14", "ebay", "https://www.ebay.com/sch/i.html?_nkw=thinkpad+t14"),
+        ("search arxiv for diffusion transformers", "arxiv", "https://arxiv.org/search/?query=diffusion+transformers&searchtype=all"),
+        ("search spotify for lo-fi beats", "spotify", "https://open.spotify.com/search/lo-fi+beats"),
+        ("search hacker news for llm agents", "hacker_news", "https://hn.algolia.com/?q=llm+agents"),
+        ("search tripadvisor for boston hotels", "tripadvisor", "https://www.tripadvisor.com/Search?q=boston+hotels"),
+    ],
+)
+def test_browser_destination_resolver_maps_expanded_native_search_provider_catalog(
+    message: str,
+    expected_provider: str,
+    expected_url: str,
+) -> None:
+    resolver = BrowserDestinationResolver()
+
+    request = resolver.parse_search(message, surface_mode="ghost")
+
+    assert request is not None
+    assert request.intent_type == BrowserIntentType.SEARCH_REQUEST
+
+    resolution = resolver.resolve_search(request)
+
+    assert resolution.success is True
+    assert resolution.provider is not None
+    assert resolution.provider.key == expected_provider
+    assert resolution.url == expected_url
+    assert resolution.resolution_kind == "native_provider"
 
 
 def test_browser_destination_resolver_reports_unknown_search_provider_as_unresolved() -> None:

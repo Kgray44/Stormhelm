@@ -54,8 +54,25 @@ provider_timeout_seconds = 5.0
 idle_cache_ttl_seconds = 30
 active_cache_ttl_seconds = 8
 burst_cache_ttl_seconds = 2
+elevated_helper_enabled = false
+elevated_helper_timeout_seconds = 20.0
+elevated_helper_cooldown_seconds = 120.0
 hwinfo_enabled = true
 hwinfo_executable_path = ""
+
+[screen_awareness]
+enabled = true
+phase = "phase2"
+planner_routing_enabled = true
+debug_events_enabled = true
+observation_enabled = true
+interpretation_enabled = true
+grounding_enabled = true
+guidance_enabled = false
+action_enabled = false
+verification_enabled = false
+memory_enabled = false
+adapters_enabled = false
 
 [openai]
 enabled = false

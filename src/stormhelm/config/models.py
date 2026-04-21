@@ -71,8 +71,39 @@ class HardwareTelemetryConfig:
     idle_cache_ttl_seconds: float
     active_cache_ttl_seconds: float
     burst_cache_ttl_seconds: float
+    elevated_helper_enabled: bool
+    elevated_helper_timeout_seconds: float
+    elevated_helper_cooldown_seconds: float
     hwinfo_enabled: bool
     hwinfo_executable_path: str | None
+
+
+@dataclass(slots=True)
+class ScreenAwarenessConfig:
+    enabled: bool = True
+    phase: str = "phase2"
+    planner_routing_enabled: bool = True
+    debug_events_enabled: bool = True
+    observation_enabled: bool = True
+    interpretation_enabled: bool = True
+    grounding_enabled: bool = True
+    guidance_enabled: bool = False
+    action_enabled: bool = False
+    verification_enabled: bool = False
+    memory_enabled: bool = False
+    adapters_enabled: bool = False
+
+    def capability_flags(self) -> dict[str, bool]:
+        return {
+            "observation_enabled": self.observation_enabled,
+            "interpretation_enabled": self.interpretation_enabled,
+            "grounding_enabled": self.grounding_enabled,
+            "guidance_enabled": self.guidance_enabled,
+            "action_enabled": self.action_enabled,
+            "verification_enabled": self.verification_enabled,
+            "memory_enabled": self.memory_enabled,
+            "adapters_enabled": self.adapters_enabled,
+        }
 
 
 @dataclass(slots=True)
@@ -198,6 +229,7 @@ class AppConfig:
     location: LocationConfig
     weather: WeatherConfig
     hardware_telemetry: HardwareTelemetryConfig
+    screen_awareness: ScreenAwarenessConfig
     openai: OpenAIConfig
     safety: SafetyConfig
     tools: ToolConfig

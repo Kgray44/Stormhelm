@@ -26,6 +26,8 @@ from stormhelm.core.orchestrator.session_state import ConversationStateStore
 from stormhelm.core.providers.openai_responses import OpenAIResponsesProvider
 from stormhelm.core.runtime_state import RuntimeBootstrapResult, clear_runtime_state, initialize_runtime_state
 from stormhelm.core.safety.policy import SafetyPolicy
+from stormhelm.core.screen_awareness import ScreenAwarenessSubsystem
+from stormhelm.core.screen_awareness import build_screen_awareness_subsystem
 from stormhelm.core.system.probe import SystemProbe
 from stormhelm.core.tools.base import ToolContext
 from stormhelm.core.tools.builtins import register_builtin_tools
@@ -52,6 +54,7 @@ class CoreContainer:
     tool_executor: ToolExecutor
     jobs: JobManager
     assistant: AssistantOrchestrator
+    screen_awareness: ScreenAwarenessSubsystem
     network_monitor: NetworkMonitor | None = None
     runtime_bootstrap: RuntimeBootstrapResult | None = None
     operational_awareness: OperationalAwarenessService = field(default_factory=OperationalAwarenessService)
@@ -138,6 +141,7 @@ class CoreContainer:
                     )
                 ]
             },
+            "screen_awareness": self.screen_awareness.status_snapshot(),
             "provider_state": self._provider_state_snapshot(),
             "tool_state": self._tool_state_snapshot(),
             "watch_state": watch_state,
@@ -147,10 +151,7 @@ class CoreContainer:
     def _system_state_snapshot(self) -> dict[str, Any]:
         now = monotonic()
         if self._system_state_cache is not None and (now - self._system_state_cached_at) < 15.0:
-            cached = dict(self._system_state_cache)
-            cached["network"] = self.system_probe.network_status()
-            self._system_state_cache = cached
-            return cached
+            return dict(self._system_state_cache)
 
         snapshot = {
             "machine": self.system_probe.machine_status(),
@@ -161,8 +162,9 @@ class CoreContainer:
             "network": self.system_probe.network_status(),
             "location": self.system_probe.resolve_location(),
         }
+        completed_at = monotonic()
         self._system_state_cache = snapshot
-        self._system_state_cached_at = now
+        self._system_state_cached_at = completed_at
         return snapshot
 
     def _provider_state_snapshot(self) -> dict[str, Any]:
@@ -204,9 +206,8 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
     tool_runs = ToolRunRepository(database)
     session_state = ConversationStateStore(preferences)
     persona = PersonaContract(app_config)
-    planner = DeterministicPlanner()
-    safety = SafetyPolicy(app_config)
     system_probe = SystemProbe(app_config, preferences=preferences)
+    safety = SafetyPolicy(app_config)
     network_monitor = NetworkMonitor(
         probe=system_probe,
         events=events,
@@ -218,6 +219,15 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
     register_builtin_tools(registry)
     executor = ToolExecutor(registry, max_sync_workers=app_config.concurrency.max_workers)
     provider = OpenAIResponsesProvider(app_config.openai) if app_config.openai.enabled else None
+    screen_awareness = build_screen_awareness_subsystem(
+        app_config.screen_awareness,
+        system_probe=system_probe,
+        provider=provider,
+    )
+    planner = DeterministicPlanner(
+        screen_awareness_config=app_config.screen_awareness,
+        screen_awareness_seam=screen_awareness.planner_seam,
+    )
     workspace_repository = WorkspaceRepository(database)
     workspace_service = WorkspaceService(
         config=app_config,
@@ -258,6 +268,7 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
         persona=persona,
         workspace_service=workspace_service,
         provider=provider,
+        screen_awareness=screen_awareness,
     )
     return CoreContainer(
         config=app_config,
@@ -273,5 +284,6 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
         tool_executor=executor,
         jobs=jobs,
         assistant=assistant,
+        screen_awareness=screen_awareness,
         network_monitor=network_monitor,
     )

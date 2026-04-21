@@ -143,7 +143,8 @@ class CoreApiClient(QtCore.QObject):
     ) -> None:
         try:
             if reply.error() != QtNetwork.QNetworkReply.NetworkError.NoError:
-                self.error_occurred.emit(purpose, reply.errorString())
+                raw = bytes(reply.readAll()).decode("utf-8")
+                self.error_occurred.emit(purpose, self._error_message_from_body(raw) or reply.errorString())
                 return
 
             raw = bytes(reply.readAll()).decode("utf-8")
@@ -153,3 +154,34 @@ class CoreApiClient(QtCore.QObject):
             self.error_occurred.emit(purpose, str(error))
         finally:
             reply.deleteLater()
+
+    def _error_message_from_body(self, raw: str) -> str:
+        if not raw:
+            return ""
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            return ""
+        if isinstance(payload, dict):
+            detail = payload.get("detail")
+            if isinstance(detail, str):
+                return detail.strip()
+            if isinstance(detail, list):
+                messages = [self._error_message_from_detail_item(item) for item in detail]
+                return "; ".join(message for message in messages if message)
+        return ""
+
+    def _error_message_from_detail_item(self, item: object) -> str:
+        if isinstance(item, str):
+            return item.strip()
+        if not isinstance(item, dict):
+            return ""
+        message = str(item.get("msg", "")).strip()
+        location = item.get("loc")
+        if not message:
+            return ""
+        if isinstance(location, list):
+            path = ".".join(str(part).strip() for part in location if str(part).strip())
+            if path:
+                return f"{path}: {message}"
+        return message

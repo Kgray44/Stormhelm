@@ -46,6 +46,9 @@ def test_load_config_applies_environment_overrides(temp_project_root: Path) -> N
     assert config.hardware_telemetry.helper_timeout_seconds == pytest.approx(12.0)
     assert config.hardware_telemetry.provider_timeout_seconds == pytest.approx(5.0)
     assert config.hardware_telemetry.active_cache_ttl_seconds == pytest.approx(8)
+    assert config.hardware_telemetry.elevated_helper_enabled is False
+    assert config.hardware_telemetry.elevated_helper_timeout_seconds == pytest.approx(20.0)
+    assert config.hardware_telemetry.elevated_helper_cooldown_seconds == pytest.approx(120.0)
 
 
 def test_load_config_defaults_to_nano_planner_and_full_reasoner(temp_project_root: Path) -> None:
@@ -58,6 +61,9 @@ def test_load_config_defaults_to_nano_planner_and_full_reasoner(temp_project_roo
     assert config.hardware_telemetry.provider_timeout_seconds == pytest.approx(5.0)
     assert config.hardware_telemetry.hwinfo_enabled is True
     assert config.hardware_telemetry.hwinfo_executable_path is None
+    assert config.hardware_telemetry.elevated_helper_enabled is False
+    assert config.hardware_telemetry.elevated_helper_timeout_seconds == pytest.approx(20.0)
+    assert config.hardware_telemetry.elevated_helper_cooldown_seconds == pytest.approx(120.0)
 
 
 def test_load_config_applies_hardware_telemetry_environment_overrides(temp_project_root: Path) -> None:
@@ -70,6 +76,9 @@ def test_load_config_applies_hardware_telemetry_environment_overrides(temp_proje
             "STORMHELM_HARDWARE_TELEMETRY_IDLE_CACHE_TTL_SECONDS": "40",
             "STORMHELM_HARDWARE_TELEMETRY_ACTIVE_CACHE_TTL_SECONDS": "10",
             "STORMHELM_HARDWARE_TELEMETRY_BURST_CACHE_TTL_SECONDS": "1.5",
+            "STORMHELM_HARDWARE_TELEMETRY_ELEVATED_HELPER_ENABLED": "false",
+            "STORMHELM_HARDWARE_TELEMETRY_ELEVATED_HELPER_TIMEOUT_SECONDS": "30",
+            "STORMHELM_HARDWARE_TELEMETRY_ELEVATED_HELPER_COOLDOWN_SECONDS": "300",
             "STORMHELM_HARDWARE_TELEMETRY_HWINFO_ENABLED": "false",
             "STORMHELM_HARDWARE_TELEMETRY_HWINFO_PATH": "C:/Tools/HWiNFO64.EXE",
         },
@@ -81,8 +90,45 @@ def test_load_config_applies_hardware_telemetry_environment_overrides(temp_proje
     assert config.hardware_telemetry.idle_cache_ttl_seconds == pytest.approx(40)
     assert config.hardware_telemetry.active_cache_ttl_seconds == pytest.approx(10)
     assert config.hardware_telemetry.burst_cache_ttl_seconds == pytest.approx(1.5)
+    assert config.hardware_telemetry.elevated_helper_enabled is False
+    assert config.hardware_telemetry.elevated_helper_timeout_seconds == pytest.approx(30)
+    assert config.hardware_telemetry.elevated_helper_cooldown_seconds == pytest.approx(300)
     assert config.hardware_telemetry.hwinfo_enabled is False
     assert config.hardware_telemetry.hwinfo_executable_path == "C:/Tools/HWiNFO64.EXE"
+
+
+def test_load_config_defaults_screen_awareness_to_phase2_grounding_flags(temp_project_root: Path) -> None:
+    config = load_config(project_root=temp_project_root, env={})
+
+    assert config.screen_awareness.phase == "phase2"
+    assert config.screen_awareness.enabled is True
+    assert config.screen_awareness.planner_routing_enabled is True
+    assert config.screen_awareness.debug_events_enabled is True
+    assert config.screen_awareness.observation_enabled is True
+    assert config.screen_awareness.interpretation_enabled is True
+    assert config.screen_awareness.grounding_enabled is True
+    assert config.screen_awareness.guidance_enabled is False
+    assert config.screen_awareness.action_enabled is False
+    assert config.screen_awareness.verification_enabled is False
+    assert config.screen_awareness.memory_enabled is False
+    assert config.screen_awareness.adapters_enabled is False
+
+
+def test_load_config_applies_screen_awareness_environment_overrides(temp_project_root: Path) -> None:
+    config = load_config(
+        project_root=temp_project_root,
+        env={
+            "STORMHELM_SCREEN_AWARENESS_ENABLED": "true",
+            "STORMHELM_SCREEN_AWARENESS_PHASE": "phase1",
+            "STORMHELM_SCREEN_AWARENESS_PLANNER_ROUTING_ENABLED": "true",
+            "STORMHELM_SCREEN_AWARENESS_DEBUG_EVENTS_ENABLED": "false",
+        },
+    )
+
+    assert config.screen_awareness.enabled is True
+    assert config.screen_awareness.phase == "phase1"
+    assert config.screen_awareness.planner_routing_enabled is True
+    assert config.screen_awareness.debug_events_enabled is False
 
 
 def test_load_config_uses_install_root_when_packaged(monkeypatch: pytest.MonkeyPatch, workspace_temp_dir: Path) -> None:

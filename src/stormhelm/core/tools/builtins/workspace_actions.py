@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import mimetypes
+import os
 from pathlib import Path
+import shutil
 from typing import Any
 from urllib.parse import urlparse
 
@@ -43,6 +46,145 @@ TEXT_EXTENSIONS = {
     ".go",
 }
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg"}
+
+BROWSER_TARGET_COMMANDS = {
+    "edge": "msedge",
+    "chrome": "chrome",
+    "firefox": "firefox",
+    "brave": "brave",
+    "opera": "opera",
+    "vivaldi": "vivaldi",
+}
+
+BROWSER_TARGET_TITLES = {
+    "edge": "Microsoft Edge",
+    "chrome": "Chrome",
+    "firefox": "Firefox",
+    "brave": "Brave",
+    "opera": "Opera",
+    "vivaldi": "Vivaldi",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class BrowserTargetProbeResult:
+    requested_target: str
+    resolved_target: str
+    browser_title: str
+    available: bool
+    launch_command: str | None
+    fallback_to_default: bool
+    reason: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "requested_target": self.requested_target,
+            "resolved_target": self.resolved_target,
+            "browser_title": self.browser_title,
+            "available": self.available,
+            "launch_command": self.launch_command,
+            "fallback_to_default": self.fallback_to_default,
+            "reason": self.reason,
+        }
+
+
+def _common_browser_install_paths(target: str) -> tuple[str, ...]:
+    program_files = os.environ.get("ProgramFiles", "")
+    program_files_x86 = os.environ.get("ProgramFiles(x86)", "")
+    local_app_data = os.environ.get("LocalAppData", "")
+
+    candidates: dict[str, tuple[str, ...]] = {
+        "edge": (
+            str(Path(program_files_x86) / "Microsoft" / "Edge" / "Application" / "msedge.exe"),
+            str(Path(program_files) / "Microsoft" / "Edge" / "Application" / "msedge.exe"),
+        ),
+        "chrome": (
+            str(Path(program_files_x86) / "Google" / "Chrome" / "Application" / "chrome.exe"),
+            str(Path(program_files) / "Google" / "Chrome" / "Application" / "chrome.exe"),
+            str(Path(local_app_data) / "Google" / "Chrome" / "Application" / "chrome.exe"),
+        ),
+        "firefox": (
+            str(Path(program_files) / "Mozilla Firefox" / "firefox.exe"),
+            str(Path(program_files_x86) / "Mozilla Firefox" / "firefox.exe"),
+        ),
+        "brave": (
+            str(Path(program_files_x86) / "BraveSoftware" / "Brave-Browser" / "Application" / "brave.exe"),
+            str(Path(program_files) / "BraveSoftware" / "Brave-Browser" / "Application" / "brave.exe"),
+        ),
+        "opera": (
+            str(Path(local_app_data) / "Programs" / "Opera" / "opera.exe"),
+            str(Path(program_files_x86) / "Opera" / "launcher.exe"),
+            str(Path(program_files) / "Opera" / "launcher.exe"),
+        ),
+        "vivaldi": (
+            str(Path(local_app_data) / "Vivaldi" / "Application" / "vivaldi.exe"),
+            str(Path(program_files_x86) / "Vivaldi" / "Application" / "vivaldi.exe"),
+            str(Path(program_files) / "Vivaldi" / "Application" / "vivaldi.exe"),
+        ),
+    }
+    return tuple(path for path in candidates.get(target, ()) if path and Path(path).exists())
+
+
+def probe_browser_target(browser_target: str) -> BrowserTargetProbeResult:
+    requested_target = str(browser_target or "").strip().lower()
+    resolved_target = requested_target
+    browser_title = BROWSER_TARGET_TITLES.get(resolved_target, requested_target.title() or "Browser")
+    launcher = BROWSER_TARGET_COMMANDS.get(resolved_target)
+    if not launcher:
+        return BrowserTargetProbeResult(
+            requested_target=requested_target,
+            resolved_target=resolved_target,
+            browser_title=browser_title,
+            available=False,
+            launch_command=None,
+            fallback_to_default=True,
+            reason="unknown_browser_target",
+        )
+    direct_launcher = shutil.which(launcher)
+    if direct_launcher:
+        return BrowserTargetProbeResult(
+            requested_target=requested_target,
+            resolved_target=resolved_target,
+            browser_title=browser_title,
+            available=True,
+            launch_command=direct_launcher,
+            fallback_to_default=False,
+            reason="launcher_found_on_path",
+        )
+    install_candidates = _common_browser_install_paths(resolved_target)
+    if install_candidates:
+        return BrowserTargetProbeResult(
+            requested_target=requested_target,
+            resolved_target=resolved_target,
+            browser_title=browser_title,
+            available=True,
+            launch_command=install_candidates[0],
+            fallback_to_default=False,
+            reason="launcher_found_in_common_install_path",
+        )
+    return BrowserTargetProbeResult(
+        requested_target=requested_target,
+        resolved_target=resolved_target,
+        browser_title=browser_title,
+        available=False,
+        launch_command=None,
+        fallback_to_default=True,
+        reason="browser_not_available",
+    )
+
+
+def _fallback_response_contract_for_default_browser(
+    *,
+    title: str,
+    browser_title: str,
+    base_contract: dict[str, str] | None,
+) -> dict[str, str]:
+    bearing_title = str((base_contract or {}).get("bearing_title") or f"{title} opened").strip()
+    return {
+        "bearing_title": bearing_title,
+        "micro_response": f"{browser_title} wasn't available, so I opened {title} in the default browser.",
+        "full_response": f"Resolved {title}, couldn't use {browser_title} on this machine, and fell back to the default browser.",
+    }
 
 
 def _validate_http_url(raw_url: str) -> str:
@@ -227,6 +369,33 @@ class ExternalOpenUrlTool(BaseTool):
         parsed = urlparse(url)
         title = str(arguments.get("label") or parsed.netloc or parsed.path or url).strip()
         response_contract = arguments.get("response_contract") if isinstance(arguments.get("response_contract"), dict) else None
+        requested_browser_target = str(arguments.get("browser_target") or "").strip().lower()
+        browser_target = requested_browser_target or None
+        browser_command: str | None = None
+        browser_probe: BrowserTargetProbeResult | None = None
+        if requested_browser_target:
+            browser_probe = probe_browser_target(requested_browser_target)
+            if browser_probe.available:
+                browser_target = browser_probe.resolved_target
+                browser_command = browser_probe.launch_command
+            else:
+                browser_target = None
+                response_contract = _fallback_response_contract_for_default_browser(
+                    title=title,
+                    browser_title=browser_probe.browser_title,
+                    base_contract=response_contract,
+                )
+            context.events.publish(
+                level="DEBUG",
+                source="tool.external_open_url",
+                message="Resolved external browser target.",
+                payload={
+                    "url": url,
+                    "title": title,
+                    "requested_browser_target": requested_browser_target,
+                    "browser_target_probe": browser_probe.to_dict(),
+                },
+            )
         return ToolResult(
             success=True,
             summary=str(response_contract.get("full_response") if response_contract else "") or f"Opened {title} externally.",
@@ -236,7 +405,11 @@ class ExternalOpenUrlTool(BaseTool):
                     "kind": "url",
                     "url": url,
                     "title": title,
-                    **({"browser_target": arguments["browser_target"]} if arguments.get("browser_target") else {}),
+                    **({"browser_target": browser_target} if browser_target else {}),
+                    **({"browser_command": browser_command} if browser_command else {}),
+                    **({"browser_target_requested": requested_browser_target} if requested_browser_target else {}),
+                    **({"browser_target_probe": browser_probe.to_dict()} if browser_probe is not None else {}),
+                    **({"browser_fallback_to_default": True} if browser_probe is not None and browser_probe.fallback_to_default else {}),
                     **(response_contract or {}),
                 }
             },

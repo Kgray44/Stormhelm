@@ -13,6 +13,7 @@ from stormhelm.config.models import (
     LoggingConfig,
     NetworkConfig,
     OpenAIConfig,
+    ScreenAwarenessConfig,
     WeatherConfig,
     RuntimePathConfig,
     SafetyConfig,
@@ -136,8 +137,27 @@ def _build_app_config(
         idle_cache_ttl_seconds=float(hardware_telemetry_data.get("idle_cache_ttl_seconds", 30)),
         active_cache_ttl_seconds=float(hardware_telemetry_data.get("active_cache_ttl_seconds", 8)),
         burst_cache_ttl_seconds=float(hardware_telemetry_data.get("burst_cache_ttl_seconds", 2)),
+        elevated_helper_enabled=bool(hardware_telemetry_data.get("elevated_helper_enabled", False)),
+        elevated_helper_timeout_seconds=float(hardware_telemetry_data.get("elevated_helper_timeout_seconds", 20.0)),
+        elevated_helper_cooldown_seconds=float(hardware_telemetry_data.get("elevated_helper_cooldown_seconds", 120.0)),
         hwinfo_enabled=bool(hardware_telemetry_data.get("hwinfo_enabled", True)),
         hwinfo_executable_path=str(hardware_telemetry_data.get("hwinfo_executable_path", "")).strip() or None,
+    )
+
+    screen_awareness_data = data.get("screen_awareness", {})
+    screen_awareness_config = ScreenAwarenessConfig(
+        enabled=bool(screen_awareness_data.get("enabled", True)),
+        phase=str(screen_awareness_data.get("phase", "phase2")).strip() or "phase2",
+        planner_routing_enabled=bool(screen_awareness_data.get("planner_routing_enabled", True)),
+        debug_events_enabled=bool(screen_awareness_data.get("debug_events_enabled", True)),
+        observation_enabled=bool(screen_awareness_data.get("observation_enabled", True)),
+        interpretation_enabled=bool(screen_awareness_data.get("interpretation_enabled", True)),
+        grounding_enabled=bool(screen_awareness_data.get("grounding_enabled", True)),
+        guidance_enabled=bool(screen_awareness_data.get("guidance_enabled", False)),
+        action_enabled=bool(screen_awareness_data.get("action_enabled", False)),
+        verification_enabled=bool(screen_awareness_data.get("verification_enabled", False)),
+        memory_enabled=bool(screen_awareness_data.get("memory_enabled", False)),
+        adapters_enabled=bool(screen_awareness_data.get("adapters_enabled", False)),
     )
 
     openai_data = data.get("openai", {})
@@ -259,6 +279,7 @@ def _build_app_config(
         location=location_config,
         weather=weather_config,
         hardware_telemetry=hardware_telemetry_config,
+        screen_awareness=screen_awareness_config,
         openai=openai_config,
         safety=safety_config,
         tools=tool_config,
@@ -335,8 +356,23 @@ def _apply_env_overrides(data: ConfigDict, env: Mapping[str, str]) -> ConfigDict
         "STORMHELM_HARDWARE_TELEMETRY_IDLE_CACHE_TTL_SECONDS": ("hardware_telemetry.idle_cache_ttl_seconds", float),
         "STORMHELM_HARDWARE_TELEMETRY_ACTIVE_CACHE_TTL_SECONDS": ("hardware_telemetry.active_cache_ttl_seconds", float),
         "STORMHELM_HARDWARE_TELEMETRY_BURST_CACHE_TTL_SECONDS": ("hardware_telemetry.burst_cache_ttl_seconds", float),
+        "STORMHELM_HARDWARE_TELEMETRY_ELEVATED_HELPER_ENABLED": ("hardware_telemetry.elevated_helper_enabled", _parse_bool),
+        "STORMHELM_HARDWARE_TELEMETRY_ELEVATED_HELPER_TIMEOUT_SECONDS": ("hardware_telemetry.elevated_helper_timeout_seconds", float),
+        "STORMHELM_HARDWARE_TELEMETRY_ELEVATED_HELPER_COOLDOWN_SECONDS": ("hardware_telemetry.elevated_helper_cooldown_seconds", float),
         "STORMHELM_HARDWARE_TELEMETRY_HWINFO_ENABLED": ("hardware_telemetry.hwinfo_enabled", _parse_bool),
         "STORMHELM_HARDWARE_TELEMETRY_HWINFO_PATH": ("hardware_telemetry.hwinfo_executable_path", str),
+        "STORMHELM_SCREEN_AWARENESS_ENABLED": ("screen_awareness.enabled", _parse_bool),
+        "STORMHELM_SCREEN_AWARENESS_PHASE": ("screen_awareness.phase", str),
+        "STORMHELM_SCREEN_AWARENESS_PLANNER_ROUTING_ENABLED": ("screen_awareness.planner_routing_enabled", _parse_bool),
+        "STORMHELM_SCREEN_AWARENESS_DEBUG_EVENTS_ENABLED": ("screen_awareness.debug_events_enabled", _parse_bool),
+        "STORMHELM_SCREEN_AWARENESS_OBSERVATION_ENABLED": ("screen_awareness.observation_enabled", _parse_bool),
+        "STORMHELM_SCREEN_AWARENESS_INTERPRETATION_ENABLED": ("screen_awareness.interpretation_enabled", _parse_bool),
+        "STORMHELM_SCREEN_AWARENESS_GROUNDING_ENABLED": ("screen_awareness.grounding_enabled", _parse_bool),
+        "STORMHELM_SCREEN_AWARENESS_GUIDANCE_ENABLED": ("screen_awareness.guidance_enabled", _parse_bool),
+        "STORMHELM_SCREEN_AWARENESS_ACTION_ENABLED": ("screen_awareness.action_enabled", _parse_bool),
+        "STORMHELM_SCREEN_AWARENESS_VERIFICATION_ENABLED": ("screen_awareness.verification_enabled", _parse_bool),
+        "STORMHELM_SCREEN_AWARENESS_MEMORY_ENABLED": ("screen_awareness.memory_enabled", _parse_bool),
+        "STORMHELM_SCREEN_AWARENESS_ADAPTERS_ENABLED": ("screen_awareness.adapters_enabled", _parse_bool),
     }
 
     for env_key, (path, parser) in overrides.items():
