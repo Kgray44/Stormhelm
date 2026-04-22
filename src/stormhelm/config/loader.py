@@ -12,6 +12,7 @@ from stormhelm.config.models import (
     DiscordRelayConfig,
     DiscordTrustedAliasConfig,
     default_discord_trusted_aliases,
+    EventStreamConfig,
     HardwareTelemetryConfig,
     LocationConfig,
     LoggingConfig,
@@ -20,6 +21,7 @@ from stormhelm.config.models import (
     ScreenAwarenessConfig,
     SoftwareControlConfig,
     SoftwareRecoveryConfig,
+    TrustConfig,
     WeatherConfig,
     RuntimePathConfig,
     SafetyConfig,
@@ -114,6 +116,14 @@ def _build_app_config(
         ghost_shortcut=str(ui_data.get("ghost_shortcut", "Ctrl+Space")),
     )
 
+    event_stream_data = data.get("event_stream", {})
+    event_stream_config = EventStreamConfig(
+        enabled=bool(event_stream_data.get("enabled", True)),
+        retention_capacity=int(event_stream_data.get("retention_capacity", 500)),
+        replay_limit=int(event_stream_data.get("replay_limit", 128)),
+        heartbeat_seconds=float(event_stream_data.get("heartbeat_seconds", 15.0)),
+    )
+
     location_data = data.get("location", {})
     location_config = LocationConfig(
         allow_approximate_lookup=bool(location_data.get("allow_approximate_lookup", True)),
@@ -153,7 +163,7 @@ def _build_app_config(
     screen_awareness_data = data.get("screen_awareness", {})
     screen_awareness_config = ScreenAwarenessConfig(
         enabled=bool(screen_awareness_data.get("enabled", True)),
-        phase=str(screen_awareness_data.get("phase", "phase9")).strip() or "phase9",
+        phase=str(screen_awareness_data.get("phase", "phase12")).strip() or "phase12",
         planner_routing_enabled=bool(screen_awareness_data.get("planner_routing_enabled", True)),
         debug_events_enabled=bool(screen_awareness_data.get("debug_events_enabled", True)),
         observation_enabled=bool(screen_awareness_data.get("observation_enabled", True)),
@@ -168,6 +178,8 @@ def _build_app_config(
         adapters_enabled=bool(screen_awareness_data.get("adapters_enabled", True)),
         problem_solving_enabled=bool(screen_awareness_data.get("problem_solving_enabled", True)),
         workflow_learning_enabled=bool(screen_awareness_data.get("workflow_learning_enabled", True)),
+        brain_integration_enabled=bool(screen_awareness_data.get("brain_integration_enabled", True)),
+        power_features_enabled=bool(screen_awareness_data.get("power_features_enabled", True)),
     )
 
     calculations_data = data.get("calculations", {})
@@ -201,6 +213,16 @@ def _build_app_config(
             str(software_recovery_data.get("cloud_fallback_model", "gpt-5.4-nano")).strip() or "gpt-5.4-nano"
         ),
         redaction_enabled=bool(software_recovery_data.get("redaction_enabled", True)),
+    )
+
+    trust_data = data.get("trust", {})
+    trust_config = TrustConfig(
+        enabled=bool(trust_data.get("enabled", True)),
+        debug_events_enabled=bool(trust_data.get("debug_events_enabled", True)),
+        session_grant_ttl_seconds=float(trust_data.get("session_grant_ttl_seconds", 14400.0)),
+        once_grant_ttl_seconds=float(trust_data.get("once_grant_ttl_seconds", 900.0)),
+        pending_request_ttl_seconds=float(trust_data.get("pending_request_ttl_seconds", 3600.0)),
+        audit_recent_limit=int(trust_data.get("audit_recent_limit", 24)),
     )
 
     discord_relay_data = data.get("discord_relay", {})
@@ -359,6 +381,7 @@ def _build_app_config(
         logging=logging_config,
         concurrency=concurrency_config,
         ui=ui_config,
+        event_stream=event_stream_config,
         location=location_config,
         weather=weather_config,
         hardware_telemetry=hardware_telemetry_config,
@@ -366,6 +389,7 @@ def _build_app_config(
         calculations=calculations_config,
         software_control=software_control_config,
         software_recovery=software_recovery_config,
+        trust=trust_config,
         discord_relay=discord_relay_config,
         openai=openai_config,
         safety=safety_config,
@@ -467,6 +491,14 @@ def _apply_env_overrides(data: ConfigDict, env: Mapping[str, str]) -> ConfigDict
             ),
             "STORMHELM_SCREEN_AWARENESS_WORKFLOW_LEARNING_ENABLED": (
                 "screen_awareness.workflow_learning_enabled",
+                _parse_bool,
+            ),
+            "STORMHELM_SCREEN_AWARENESS_BRAIN_INTEGRATION_ENABLED": (
+                "screen_awareness.brain_integration_enabled",
+                _parse_bool,
+            ),
+            "STORMHELM_SCREEN_AWARENESS_POWER_FEATURES_ENABLED": (
+                "screen_awareness.power_features_enabled",
                 _parse_bool,
             ),
         "STORMHELM_CALCULATIONS_ENABLED": ("calculations.enabled", _parse_bool),

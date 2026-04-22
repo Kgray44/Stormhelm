@@ -18,14 +18,30 @@ class CoreApiClient(QtCore.QObject):
     notes_received = QtCore.Signal(list)
     settings_received = QtCore.Signal(dict)
     note_saved = QtCore.Signal(dict)
+    stream_event_received = QtCore.Signal(dict)
+    stream_state_received = QtCore.Signal(dict)
+    stream_gap_received = QtCore.Signal(dict)
 
     def __init__(self, base_url: str, parent: QtCore.QObject | None = None) -> None:
         super().__init__(parent)
         self.base_url = base_url.rstrip("/")
         self.manager = QtNetwork.QNetworkAccessManager(self)
+        self._stream_reply: QtNetwork.QNetworkReply | None = None
+        self._stream_buffer = ""
+        self._stream_requested_session_id = "default"
+        self._stream_last_cursor: int | None = None
+        self._stream_reconnect_attempt = 0
+        self._stream_manual_stop = False
+        self._stream_reconnect_timer = QtCore.QTimer(self)
+        self._stream_reconnect_timer.setSingleShot(True)
+        self._stream_reconnect_timer.timeout.connect(self._reconnect_event_stream)
 
     def fetch_health(self) -> None:
         self._send_json("GET", "/health", None, self.health_received.emit)
+
+    @property
+    def last_event_cursor(self) -> int | None:
+        return self._stream_last_cursor
 
     def fetch_status(self) -> None:
         self._send_json("GET", "/status", None, self.status_received.emit)
@@ -48,6 +64,22 @@ class CoreApiClient(QtCore.QObject):
             None,
             lambda payload: self.events_received.emit(payload.get("events", [])),
         )
+
+    def start_event_stream(self, *, session_id: str = "default", cursor: int | None = None) -> None:
+        self._stream_requested_session_id = str(session_id or "default").strip() or "default"
+        self._stream_manual_stop = False
+        self._stream_reconnect_timer.stop()
+        if cursor is not None:
+            self._stream_last_cursor = max(0, int(cursor))
+        self._stop_stream_reply()
+        self._emit_client_stream_state("connecting", cursor=self._stream_last_cursor)
+        self._open_event_stream(cursor=self._stream_last_cursor)
+
+    def stop_event_stream(self) -> None:
+        self._stream_manual_stop = True
+        self._stream_reconnect_timer.stop()
+        self._stop_stream_reply()
+        self._emit_client_stream_state("stopped", cursor=self._stream_last_cursor)
 
     def fetch_notes(self, limit: int = 50) -> None:
         self._send_json("GET", f"/notes?limit={limit}", None, lambda payload: self.notes_received.emit(payload.get("notes", [])))
@@ -134,6 +166,135 @@ class CoreApiClient(QtCore.QObject):
             reply = self.manager.post(request, QtCore.QByteArray(data))
 
         reply.finished.connect(lambda reply=reply, cb=callback, purpose=path: self._handle_reply(reply, cb, purpose))
+
+    def _open_event_stream(self, *, cursor: int | None) -> None:
+        query = f"?session_id={self._stream_requested_session_id}"
+        if cursor is not None:
+            query += f"&cursor={max(0, int(cursor))}"
+        request = QtNetwork.QNetworkRequest(QtCore.QUrl(f"{self.base_url}/events/stream{query}"))
+        request.setRawHeader(b"Accept", b"text/event-stream")
+        request.setRawHeader(b"Cache-Control", b"no-cache")
+        reply = self.manager.get(request)
+        self._stream_reply = reply
+        reply.readyRead.connect(lambda reply=reply: self._handle_stream_ready_read(reply))
+        reply.finished.connect(lambda reply=reply: self._handle_stream_finished(reply))
+
+    def _handle_stream_ready_read(self, reply: QtNetwork.QNetworkReply) -> None:
+        if reply is not self._stream_reply:
+            return
+        self._consume_stream_chunk(bytes(reply.readAll()))
+
+    def _handle_stream_finished(self, reply: QtNetwork.QNetworkReply) -> None:
+        if reply is not self._stream_reply:
+            return
+        self._consume_stream_chunk(bytes(reply.readAll()))
+        error = reply.error()
+        error_text = reply.errorString()
+        self._stream_reply = None
+        reply.deleteLater()
+        if self._stream_manual_stop:
+            return
+        self._schedule_stream_reconnect(error_text if error_text else "stream closed")
+
+    def _schedule_stream_reconnect(self, reason: str) -> None:
+        self._stream_reconnect_attempt += 1
+        delay_ms = min(5_000, 750 * self._stream_reconnect_attempt)
+        self._emit_client_stream_state(
+            "reconnecting",
+            cursor=self._stream_last_cursor,
+            reason=reason,
+            reconnect_attempt=self._stream_reconnect_attempt,
+        )
+        self._stream_reconnect_timer.start(delay_ms)
+
+    def _reconnect_event_stream(self) -> None:
+        if self._stream_manual_stop:
+            return
+        self._emit_client_stream_state(
+            "connecting",
+            cursor=self._stream_last_cursor,
+            reconnect_attempt=self._stream_reconnect_attempt,
+        )
+        self._open_event_stream(cursor=self._stream_last_cursor)
+
+    def _stop_stream_reply(self) -> None:
+        reply = self._stream_reply
+        self._stream_reply = None
+        self._stream_buffer = ""
+        if reply is None:
+            return
+        reply.abort()
+        reply.deleteLater()
+
+    def _consume_stream_chunk(self, raw: bytes) -> None:
+        if not raw:
+            return
+        self._stream_buffer += raw.decode("utf-8", errors="ignore").replace("\r\n", "\n").replace("\r", "\n")
+        while "\n\n" in self._stream_buffer:
+            block, self._stream_buffer = self._stream_buffer.split("\n\n", 1)
+            self._process_stream_block(block)
+
+    def _process_stream_bytes(self, raw: bytes) -> None:
+        self._consume_stream_chunk(raw)
+
+    def _process_stream_block(self, block: str) -> None:
+        if not block.strip():
+            return
+        event_name = "message"
+        data_lines: list[str] = []
+        for raw_line in block.split("\n"):
+            line = raw_line.strip("\n")
+            if not line or line.startswith(":"):
+                continue
+            if line.startswith("event:"):
+                event_name = line.partition(":")[2].strip() or "message"
+                continue
+            if line.startswith("data:"):
+                data_lines.append(line.partition(":")[2].lstrip())
+        if not data_lines:
+            return
+        try:
+            payload = json.loads("\n".join(data_lines))
+        except Exception as error:
+            self.error_occurred.emit("/events/stream", f"Malformed stream frame: {error}")
+            return
+
+        if event_name == "stormhelm.event":
+            cursor = payload.get("cursor")
+            if isinstance(cursor, int):
+                self._stream_last_cursor = cursor
+            self.stream_event_received.emit(payload)
+            return
+
+        if event_name == "stormhelm.replay_gap":
+            self.stream_gap_received.emit(payload)
+            return
+
+        latest_cursor = payload.get("latest_cursor")
+        if isinstance(latest_cursor, int) and self._stream_last_cursor is None:
+            self._stream_last_cursor = latest_cursor
+        if payload.get("phase") == "connected":
+            self._stream_reconnect_attempt = 0
+        self.stream_state_received.emit(payload)
+
+    def _emit_client_stream_state(
+        self,
+        phase: str,
+        *,
+        cursor: int | None,
+        reason: str = "",
+        reconnect_attempt: int | None = None,
+    ) -> None:
+        self.stream_state_received.emit(
+            {
+                "phase": phase,
+                "source": "client",
+                "session_id": self._stream_requested_session_id,
+                "cursor": cursor,
+                "reason": reason,
+                "reconnect_attempt": reconnect_attempt if reconnect_attempt is not None else self._stream_reconnect_attempt,
+            }
+        )
 
     def _handle_reply(
         self,

@@ -13,6 +13,9 @@ class DummyClient(QtCore.QObject):
     health_received = QtCore.Signal(dict)
     chat_received = QtCore.Signal(dict)
     note_saved = QtCore.Signal(dict)
+    stream_event_received = QtCore.Signal(dict)
+    stream_state_received = QtCore.Signal(dict)
+    stream_gap_received = QtCore.Signal(dict)
 
     def __init__(self) -> None:
         super().__init__()
@@ -21,12 +24,20 @@ class DummyClient(QtCore.QObject):
         self.saved_notes: list[dict[str, str]] = []
         self.health_calls = 0
         self.snapshot_calls = 0
+        self.started_streams: list[dict[str, object]] = []
+        self.stopped_streams = 0
 
     def fetch_health(self) -> None:
         self.health_calls += 1
 
     def fetch_snapshot(self) -> None:
         self.snapshot_calls += 1
+
+    def start_event_stream(self, *, session_id: str = "default", cursor: int | None = None) -> None:
+        self.started_streams.append({"session_id": session_id, "cursor": cursor})
+
+    def stop_event_stream(self) -> None:
+        self.stopped_streams += 1
 
     def send_message(
         self,
@@ -221,6 +232,46 @@ def test_main_controller_start_requests_health_before_snapshot(monkeypatch, temp
     controller.start()
 
     assert client.health_calls == 1
+    assert client.snapshot_calls == 1
+    assert client.started_streams == [{"session_id": "default", "cursor": None}]
+
+
+def test_main_controller_requests_snapshot_when_live_event_needs_reconciliation(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+    client = DummyClient()
+    controller = MainController(config=temp_config, bridge=bridge, client=client)
+
+    controller._handle_stream_event(
+        {
+            "cursor": 14,
+            "event_id": 14,
+            "event_family": "job",
+            "event_type": "job.completed",
+            "severity": "info",
+            "subsystem": "job_manager",
+            "visibility_scope": "watch_surface",
+            "message": "Workspace restore completed.",
+            "payload": {"job_id": "job-14", "status": "completed"},
+        }
+    )
+
+    assert client.snapshot_calls == 1
+
+
+def test_main_controller_requests_snapshot_when_stream_gap_is_reported(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+    client = DummyClient()
+    controller = MainController(config=temp_config, bridge=bridge, client=client)
+
+    controller._handle_stream_gap(
+        {
+            "requested_cursor": 4,
+            "earliest_cursor": 10,
+            "latest_cursor": 14,
+            "reason": "cursor_outside_retention_window",
+        }
+    )
+
     assert client.snapshot_calls == 1
 
 

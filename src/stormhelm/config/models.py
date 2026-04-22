@@ -43,6 +43,14 @@ class UIConfig:
 
 
 @dataclass(slots=True)
+class EventStreamConfig:
+    enabled: bool = True
+    retention_capacity: int = 500
+    replay_limit: int = 128
+    heartbeat_seconds: float = 15.0
+
+
+@dataclass(slots=True)
 class LocationConfig:
     allow_approximate_lookup: bool
     lookup_timeout_seconds: float
@@ -81,7 +89,7 @@ class HardwareTelemetryConfig:
 @dataclass(slots=True)
 class ScreenAwarenessConfig:
     enabled: bool = True
-    phase: str = "phase9"
+    phase: str = "phase12"
     planner_routing_enabled: bool = True
     debug_events_enabled: bool = True
     observation_enabled: bool = True
@@ -95,6 +103,8 @@ class ScreenAwarenessConfig:
     adapters_enabled: bool = True
     problem_solving_enabled: bool = True
     workflow_learning_enabled: bool = True
+    brain_integration_enabled: bool = True
+    power_features_enabled: bool = True
 
     def _phase_at_least(self, minimum_phase: int) -> bool:
         phase_name = str(self.phase or "").strip().lower()
@@ -109,6 +119,9 @@ class ScreenAwarenessConfig:
             "phase7": 7,
             "phase8": 8,
             "phase9": 9,
+            "phase10": 10,
+            "phase11": 11,
+            "phase12": 12,
         }
         return phase_order.get(phase_name, 0) >= minimum_phase
 
@@ -125,6 +138,9 @@ class ScreenAwarenessConfig:
             "adapters_enabled": self.adapters_enabled and self._phase_at_least(7),
             "problem_solving_enabled": self.problem_solving_enabled and self._phase_at_least(8),
             "workflow_learning_enabled": self.workflow_learning_enabled and self._phase_at_least(9),
+            "brain_integration_enabled": self.brain_integration_enabled and self._phase_at_least(10),
+            "power_features_enabled": self.power_features_enabled and self._phase_at_least(11),
+            "hardening_enabled": self._phase_at_least(12),
         }
 
 
@@ -157,6 +173,16 @@ class SoftwareRecoveryConfig:
     cloud_fallback_enabled: bool = False
     cloud_fallback_model: str = "gpt-5.4-nano"
     redaction_enabled: bool = True
+
+
+@dataclass(slots=True)
+class TrustConfig:
+    enabled: bool = True
+    debug_events_enabled: bool = True
+    session_grant_ttl_seconds: float = 14400.0
+    once_grant_ttl_seconds: float = 900.0
+    pending_request_ttl_seconds: float = 3600.0
+    audit_recent_limit: int = 24
 
 
 def default_discord_trusted_aliases() -> dict[str, "DiscordTrustedAliasConfig"]:
@@ -323,6 +349,7 @@ class AppConfig:
     logging: LoggingConfig
     concurrency: ConcurrencyConfig
     ui: UIConfig
+    event_stream: EventStreamConfig
     location: LocationConfig
     weather: WeatherConfig
     hardware_telemetry: HardwareTelemetryConfig
@@ -330,6 +357,7 @@ class AppConfig:
     calculations: CalculationsConfig
     software_control: SoftwareControlConfig
     software_recovery: SoftwareRecoveryConfig
+    trust: TrustConfig
     discord_relay: DiscordRelayConfig
     openai: OpenAIConfig
     safety: SafetyConfig

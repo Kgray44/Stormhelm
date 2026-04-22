@@ -57,3 +57,40 @@ def test_core_api_client_falls_back_to_transport_error_text_when_detail_is_missi
 
     assert errors == [("/snapshot?session_id=default", "Connection refused")]
     assert reply.deleted is True
+
+
+def test_core_api_client_parses_stream_frames_and_tracks_cursor() -> None:
+    client = CoreApiClient("http://stormhelm.test")
+    events: list[dict] = []
+    states: list[dict] = []
+    gaps: list[dict] = []
+    client.stream_event_received.connect(events.append)
+    client.stream_state_received.connect(states.append)
+    client.stream_gap_received.connect(gaps.append)
+
+    client._consume_stream_chunk(
+        (
+            'event: stormhelm.stream_state\n'
+            'data: {"phase":"connected","latest_cursor":4}\n'
+            "\n"
+            'event: stormhelm.event\n'
+            'data: {"cursor":5,"event_id":5,"event_family":"job","event_type":"job.completed","severity":"info"}\n'
+            "\n"
+            'event: stormhelm.replay_gap\n'
+            'data: {"requested_cursor":1,"earliest_cursor":4,"latest_cursor":5}\n'
+            "\n"
+        ).encode("utf-8")
+    )
+
+    assert states == [{"phase": "connected", "latest_cursor": 4}]
+    assert events == [
+        {
+            "cursor": 5,
+            "event_id": 5,
+            "event_family": "job",
+            "event_type": "job.completed",
+            "severity": "info",
+        }
+    ]
+    assert gaps == [{"requested_cursor": 1, "earliest_cursor": 4, "latest_cursor": 5}]
+    assert client._stream_last_cursor == 5

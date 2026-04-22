@@ -158,13 +158,21 @@ class LocalDiscordClientAdapter:
         send_key_issued = False
         navigation_submission_emitted = False
         dispatch_side_effects_emitted = False
+        failure_stage = "route_navigation"
         try:
             self._ensure_discord_shell()
-            if destination.thread_uri:
+            focused_window = self._focused_window()
+            destination_check = self._verify_destination_focus(destination=destination, focused_window=focused_window)
+            if bool(destination_check.get("matched", False)):
+                route_basis = "already_focused"
+                evidence.append("Discord was already focused on the trusted destination thread.")
+            elif destination.thread_uri:
                 route_basis = "deep_link"
                 self._open_route(destination.thread_uri)
                 evidence.append("Opened the Discord destination through a deep link.")
                 self.driver.sleep(self.route_settle_seconds)
+                focused_window = self._focused_window()
+                destination_check = self._verify_destination_focus(destination=destination, focused_window=focused_window)
             else:
                 search_query = str(destination.search_query or destination.label or "").strip()
                 if not search_query:
@@ -183,9 +191,9 @@ class LocalDiscordClientAdapter:
                 navigation_submission_emitted = self._quick_switch(search_query)
                 evidence.append(f'Used Discord quick switch for "{search_query}".')
                 self.driver.sleep(self.route_settle_seconds)
+                focused_window = self._focused_window()
+                destination_check = self._verify_destination_focus(destination=destination, focused_window=focused_window)
 
-            focused_window = self._focused_window()
-            destination_check = self._verify_destination_focus(destination=destination, focused_window=focused_window)
             evidence.extend(destination_check.get("evidence") or [])
             if not bool(destination_check.get("matched", False)):
                 return DiscordDispatchAttempt(
@@ -210,6 +218,7 @@ class LocalDiscordClientAdapter:
 
             body_text = self._message_body(preview)
             if body_text:
+                failure_stage = "payload_insertion"
                 self.clipboard.set_text(body_text)
                 self.driver.hotkey(["ctrl", "v"])
                 evidence.append("Pasted the composed message body into Discord.")
@@ -217,30 +226,36 @@ class LocalDiscordClientAdapter:
                 dispatch_side_effects_emitted = True
 
             if preview.payload.kind == DiscordPayloadKind.FILE and preview.payload.path:
+                failure_stage = "payload_insertion"
                 self.clipboard.set_file_paths([preview.payload.path])
                 self.driver.hotkey(["ctrl", "v"])
                 evidence.append("Pasted a file attachment into Discord.")
                 self.driver.sleep(self.route_settle_seconds)
                 dispatch_side_effects_emitted = True
 
+            failure_stage = "send_submission"
             self._submit_send()
             send_key_issued = True
             dispatch_side_effects_emitted = True
             evidence.append("Issued the Discord send key.")
         except Exception as error:
+            classified_failure = self._classify_failure(error=error, failure_stage=failure_stage)
             return DiscordDispatchAttempt(
                 state=DiscordDispatchState.FAILED,
                 route_mode=DiscordRouteMode.LOCAL_CLIENT_AUTOMATION,
                 route_basis=route_basis,
                 verification_evidence=evidence,
                 verification_strength="none",
-                failure_reason=str(error),
+                failure_reason=str(classified_failure["failure_reason"]),
+                send_summary=classified_failure["send_summary"],
                 debug={
                     "destination": destination.to_dict(),
                     "preview": preview.to_dict(),
                     "dispatch_side_effects_emitted": dispatch_side_effects_emitted,
                     "send_key_issued": send_key_issued,
                     "navigation_submission_emitted": navigation_submission_emitted,
+                    "failure_stage": classified_failure["failure_stage"],
+                    "transport_failure_kind": classified_failure["transport_failure_kind"],
                 },
             )
 
@@ -298,6 +313,26 @@ class LocalDiscordClientAdapter:
                 "navigation_submission_emitted": navigation_submission_emitted,
             },
         )
+
+    def _classify_failure(self, *, error: Exception, failure_stage: str) -> dict[str, Any]:
+        failure_kind = str(error).strip() or error.__class__.__name__
+        if failure_kind.startswith("clipboard_"):
+            if failure_stage == "route_navigation":
+                send_summary = "Discord routing stopped because clipboard access failed during destination entry."
+            else:
+                send_summary = "Payload prepared, but clipboard access failed during the local Discord send path."
+            return {
+                "failure_reason": "clipboard_transport_failed",
+                "send_summary": send_summary,
+                "failure_stage": failure_stage,
+                "transport_failure_kind": failure_kind,
+            }
+        return {
+            "failure_reason": failure_kind,
+            "send_summary": None,
+            "failure_stage": failure_stage,
+            "transport_failure_kind": None,
+        }
 
     def _ensure_discord_shell(self) -> None:
         app_control = getattr(self.system_probe, "app_control", None) if self.system_probe is not None else None

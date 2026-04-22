@@ -37,6 +37,7 @@ _SECRET_PATTERNS = [
     re.compile(r"\bpassword\b", flags=re.IGNORECASE),
     re.compile(r"\bsecret\b", flags=re.IGNORECASE),
 ]
+_PRIOR_CONTEXT_PATTERN = re.compile(r"\b(previous|prior|last|recent|earlier|yesterday|before)\b", flags=re.IGNORECASE)
 _DEFAULT_PREVIEW_TTL_SECONDS = 120.0
 _DEFAULT_DUPLICATE_WINDOW_SECONDS = 15.0
 
@@ -86,6 +87,30 @@ def _coerce_destination_kind(
         return DiscordDestinationKind(str(value or "").strip())
     except ValueError:
         return fallback
+
+
+def _payload_source_details(payload: DiscordPayloadCandidate) -> dict[str, str]:
+    if payload.provenance == "active_selection":
+        if payload.kind == DiscordPayloadKind.PAGE_LINK:
+            return {"label": "selected page", "strength": "strong_current"}
+        if payload.kind == DiscordPayloadKind.FILE:
+            return {"label": "selected file", "strength": "strong_current"}
+        return {"label": "current selection", "strength": "strong_current"}
+    if payload.provenance == "workspace_active_item":
+        if payload.kind == DiscordPayloadKind.PAGE_LINK:
+            return {"label": "current page", "strength": "strong_current"}
+        if payload.kind == DiscordPayloadKind.FILE:
+            return {"label": "current file", "strength": "strong_current"}
+        if payload.kind == DiscordPayloadKind.NOTE_ARTIFACT:
+            return {"label": "current note", "strength": "strong_current"}
+        return {"label": "current active item", "strength": "strong_current"}
+    if payload.provenance == "clipboard":
+        return {"label": "clipboard", "strength": "supporting_hint"}
+    if payload.provenance == "recent_entity":
+        return {"label": "recent session artifact", "strength": "stale_artifact"}
+    if payload.provenance == "operator_request":
+        return {"label": "operator request", "strength": "explicit_request"}
+    return {"label": "unknown source", "strength": "unknown"}
 
 
 @dataclass(slots=True)
@@ -278,6 +303,7 @@ class DiscordRelaySubsystem:
                     "destination": preview.destination.to_dict(),
                     "preview": preview.to_dict(),
                     "attempt": attempt.to_dict(),
+                    "payload_source": _payload_source_details(preview.payload),
                 },
                 active_request_state=self._pending_preview_request_state(preview)
                 if bool(attempt.debug.get("wrong_thread_refusal"))
@@ -342,6 +368,7 @@ class DiscordRelaySubsystem:
                     "screen_awareness_used": bool(resolution.get("screen_awareness_used", False)),
                     "ambiguity_reason": ambiguity_reason,
                     "ambiguity_choices": choices,
+                    "stale_candidates_suppressed": bool(resolution.get("stale_candidates_suppressed", False)),
                 },
                 active_request_state=self._clarification_request_state(
                     destination=destination,
@@ -388,6 +415,7 @@ class DiscordRelaySubsystem:
                     "request_stage": stage,
                     "destination": destination.to_dict(),
                     "preview": preview.to_dict(),
+                    "payload_source": _payload_source_details(preview.payload),
                 },
                 active_request_state={},
             )
@@ -410,6 +438,7 @@ class DiscordRelaySubsystem:
                 "preview": preview.to_dict(),
                 "screen_awareness_used": preview.screen_awareness_used,
                 "payload_candidates": list(resolution.get("candidate_summaries") or []),
+                "payload_source": _payload_source_details(preview.payload),
             },
             active_request_state=self._pending_preview_request_state(preview),
         )
@@ -510,13 +539,21 @@ class DiscordRelaySubsystem:
     ) -> dict[str, Any]:
         candidates = self._payload_candidates(active_context=active_context, workspace_context=workspace_context)
         filtered = self._filter_candidates(candidates, payload_hint=payload_hint, operator_text=operator_text)
+        stale_candidates_suppressed = False
+        if self._prefers_current_context(operator_text=operator_text, payload_hint=payload_hint):
+            filtered, stale_candidates_suppressed = self._suppress_stale_recent_candidates(filtered)
         if not filtered:
             return {
                 "payload": None,
                 "candidate_summaries": [candidate.summary for candidate in candidates],
-                "ambiguity_reason": "I couldn't find a supported current page, file, selected text, or note payload to preview.",
+                "ambiguity_reason": (
+                    "I only found stale session artifacts for “this,” not a current visible, active, or selected payload I can trust yet."
+                    if stale_candidates_suppressed
+                    else "I couldn't find a supported current page, file, selected text, or note payload to preview."
+                ),
                 "ambiguity_choices": [],
                 "screen_awareness_used": False,
+                "stale_candidates_suppressed": stale_candidates_suppressed,
             }
 
         chosen, ambiguous = self._choose_candidate(filtered)
@@ -540,6 +577,7 @@ class DiscordRelaySubsystem:
                 "ambiguity_reason": "I found more than one plausible payload for “this,” and I can't truthfully choose yet.",
                 "ambiguity_choices": self._ambiguity_choices(filtered) if ambiguous else [],
                 "screen_awareness_used": any(candidate.screen_awareness_used for candidate in filtered),
+                "stale_candidates_suppressed": stale_candidates_suppressed,
             }
         return {
             "payload": chosen,
@@ -547,6 +585,7 @@ class DiscordRelaySubsystem:
             "ambiguity_reason": None,
             "ambiguity_choices": [],
             "screen_awareness_used": chosen.screen_awareness_used,
+            "stale_candidates_suppressed": stale_candidates_suppressed,
         }
 
     def _payload_candidates(
@@ -661,7 +700,7 @@ class DiscordRelaySubsystem:
                         kind=DiscordPayloadKind.PAGE_LINK,
                         summary=f"Recent page: {entity_title or entity_url}",
                         provenance="recent_entity",
-                        confidence=0.74,
+                        confidence=0.42,
                         title=entity_title,
                         url=entity_url,
                         preview_text=_preview_text(entity_url),
@@ -673,7 +712,7 @@ class DiscordRelaySubsystem:
                         kind=DiscordPayloadKind.FILE,
                         summary=f"Recent file: {entity_path}",
                         provenance="recent_entity",
-                        confidence=0.72,
+                        confidence=0.4,
                         path=entity_path,
                         preview_text=entity_path,
                     )
@@ -749,6 +788,18 @@ class DiscordRelaySubsystem:
                 ),
             )
         return filtered
+
+    def _prefers_current_context(self, *, operator_text: str, payload_hint: str) -> bool:
+        if payload_hint not in {"contextual", "page_link", "file", "selected_text", "note_artifact"}:
+            return False
+        return _PRIOR_CONTEXT_PATTERN.search(operator_text or "") is None
+
+    def _suppress_stale_recent_candidates(
+        self,
+        candidates: list[DiscordPayloadCandidate],
+    ) -> tuple[list[DiscordPayloadCandidate], bool]:
+        filtered = [candidate for candidate in candidates if candidate.provenance != "recent_entity"]
+        return filtered, len(filtered) != len(candidates)
 
     def _choose_candidate(
         self,
@@ -1118,11 +1169,13 @@ class DiscordRelaySubsystem:
 
     def _preview_contract(self, preview: DiscordDispatchPreview) -> tuple[str, dict[str, Any]]:
         payload_line = self._payload_summary_line(preview.payload)
+        payload_source = _payload_source_details(preview.payload)
         warning_text = ""
         if preview.policy.warnings:
             warning_text = " Warning: " + " ".join(preview.policy.warnings)
         assistant_response = (
             f"Ready to send {payload_line} to {preview.destination.label}. "
+            f"Source: {payload_source['label']}. "
             f"Route: {preview.route_mode.value}. "
             f"I haven't sent anything yet. Reply \"send it\" to continue.{warning_text}"
         )
@@ -1139,6 +1192,7 @@ class DiscordRelaySubsystem:
         attempt: DiscordDispatchAttempt,
     ) -> tuple[str, dict[str, Any]]:
         evidence = " ".join(attempt.verification_evidence[:2]).strip()
+        transport_failure_kind = _clean_text(attempt.debug.get("transport_failure_kind"))
         if attempt.state == DiscordDispatchState.VERIFIED:
             assistant_response = (
                 f"I verified that the message appears in {preview.destination.label}'s thread. "
@@ -1172,14 +1226,25 @@ class DiscordRelaySubsystem:
                     f"I opened Discord, but I could not verify {preview.destination.label}'s thread safely enough to send. "
                     f"Route: {attempt.route_mode.value}."
                 )
+                title = "Discord Failed"
+                micro = f"Failed to send to {preview.destination.label}."
+            elif attempt.send_summary:
+                assistant_response = f"{attempt.send_summary} Route: {attempt.route_mode.value}."
+                if transport_failure_kind:
+                    assistant_response += f" Transport failure: {transport_failure_kind}."
+                    title = "Discord Transport Issue"
+                    micro = f"Transport issue prevented sending to {preview.destination.label}."
+                else:
+                    title = "Discord Failed"
+                    micro = f"Failed to send to {preview.destination.label}."
             else:
                 reason = _clean_text(attempt.failure_reason) or "The relay attempt failed."
                 assistant_response = (
-                    f"Discord dispatch to {preview.destination.label} failed. "
+                    f"Discord dispatch to {preview.destination.label} stopped. "
                     f"Route: {attempt.route_mode.value}. {reason}"
                 )
-            title = "Discord Failed"
-            micro = f"Failed to send to {preview.destination.label}."
+                title = "Discord Failed"
+                micro = f"Failed to send to {preview.destination.label}."
         return assistant_response, {
             "bearing_title": title,
             "micro_response": micro,

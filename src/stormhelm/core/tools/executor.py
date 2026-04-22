@@ -32,10 +32,20 @@ class ToolExecutor:
 
             validated_arguments = tool.validate(dict(arguments))
             context.events.publish(
-                level="INFO",
-                source="tool_executor",
+                event_family="tool",
+                event_type="tool.execution_started",
+                severity="info",
+                subsystem="tool_executor",
+                subject=context.job_id,
+                visibility_scope="watch_surface",
+                retention_class="operator_relevant",
+                provenance={"channel": "tool_executor", "kind": "direct_system_fact"},
                 message=f"Executing tool '{tool.name}'.",
-                payload={"job_id": context.job_id, "execution_mode": tool.execution_mode.value},
+                payload={
+                    "job_id": context.job_id,
+                    "tool_name": tool.name,
+                    "execution_mode": tool.execution_mode.value,
+                },
             )
 
             if tool.execution_mode == ExecutionMode.ASYNC:

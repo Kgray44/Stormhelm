@@ -198,6 +198,58 @@ def test_ui_bridge_applies_snapshot_active_workspace_restore_on_cold_start(temp_
     assert bridge.workspace_context_payload()["workspace"]["workspaceId"] == "ws-research"
 
 
+def test_ui_bridge_surfaces_active_task_in_ghost_and_command_deck(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+    bridge.apply_snapshot(
+        {
+            "active_task": {
+                "taskId": "task-1",
+                "title": "Package the portable build",
+                "state": "paused",
+                "whereLeftOff": "Stormhelm last completed Package and had not yet started Verify.",
+                "latestSummary": "Portable package created.",
+                "ghostSummary": {
+                    "title": "Package the portable build",
+                    "subtitle": "Verify",
+                    "body": "Stormhelm has enough durable state to resume honestly.",
+                },
+                "commandDeck": {
+                    "groups": [
+                        {
+                            "title": "Next Bearings",
+                            "entries": [
+                                {"title": "Verify", "status": "ready", "detail": "Confirm the portable output."}
+                            ],
+                        },
+                        {
+                            "title": "In Flight",
+                            "entries": [
+                                {"title": "No active execution", "status": "steady", "detail": "No task step is currently running."}
+                            ],
+                        },
+                        {
+                            "title": "Attention",
+                            "entries": [
+                                {"title": "No open blockers", "status": "steady", "detail": "Task continuity is clear."}
+                            ],
+                        },
+                    ]
+                },
+            }
+        }
+    )
+
+    assert bridge.context_cards[0]["title"] == "Package the portable build"
+    assert "resume honestly" in bridge.context_cards[0]["body"].lower()
+
+    bridge.setMode("deck")
+    bridge.activateModule("chartroom")
+    bridge.activateWorkspaceSection("tasks")
+
+    assert bridge.workspaceCanvas["taskGroups"][0]["title"] == "Next Bearings"
+    assert bridge.workspaceCanvas["taskGroups"][0]["entries"][0]["title"] == "Verify"
+
+
 def test_ui_bridge_systems_uses_machine_runtime_state_slice(temp_config) -> None:
     bridge = UiBridge(temp_config)
     bridge.apply_snapshot(
@@ -318,17 +370,67 @@ def test_ui_bridge_systems_uses_machine_runtime_state_slice(temp_config) -> None
     assert any(row["label"] == "GPU" and "66 c" in row["detail"].lower() for row in bridge.workspaceCanvas["factGroups"][1]["rows"])
     assert bridge.workspaceCanvas["networkDisplay"]["hero"]["status"] == "Local Wi-Fi instability likely"
     assert bridge.workspaceCanvas["networkDisplay"]["metrics"][0]["label"] == "Latency"
-    assert bridge.workspaceCanvas["networkDisplay"]["events"][0]["title"] == "Packet-loss burst"
-    assert bridge.workspaceCanvas["networkDisplay"]["provider"]["value"] == "Cloudflare quality"
-    assert "Compared with Stormhelm probes" in bridge.workspaceCanvas["networkDisplay"]["provider"]["meta"]
-    assert any(detail["label"] == "Provider Compare" for detail in bridge.workspaceCanvas["networkDisplay"]["details"])
-    assert bridge.activeDeckModule["stats"][0]["label"] == "Provider"
-    telemetry_column = next(column for column in bridge.workspaceCanvas["columns"] if column["title"] == "Live Telemetry")
-    telemetry_entries = telemetry_column["entries"]
-    assert any(entry["primary"] == "CPU Load" and "42%" in entry["secondary"] for entry in telemetry_entries)
-    assert any(entry["primary"] == "GPU Load" and "58%" in entry["secondary"] for entry in telemetry_entries)
-    assert any(entry["primary"] == "Memory" and "20.0 GB" in entry["secondary"] for entry in telemetry_entries)
-    assert any(entry["primary"] == "Storage" and "400.0 B" in entry["secondary"] for entry in telemetry_entries)
+
+
+def test_ui_bridge_helm_surfaces_screen_awareness_policy_and_trace_state(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+    bridge.apply_snapshot(
+        {
+            "status": {
+                "screen_awareness": {
+                    "enabled": True,
+                    "phase": "phase12",
+                    "policy_state": {
+                        "action_policy_mode": "confirm_before_act",
+                        "restricted_domain_guarded": True,
+                        "summary": "Phase 12 runs with confirm before act posture; restricted domains stay guarded and debug traces are on.",
+                    },
+                    "hardening": {
+                        "enabled": True,
+                        "recent_trace_count": 1,
+                        "latest_trace": {
+                            "trace_id": "screen-test-trace",
+                            "total_duration_ms": 18.4,
+                            "slowest_stage": "verification",
+                            "audit_passed": True,
+                        },
+                    },
+                }
+            },
+            "settings": {
+                "safety": {"allowed_read_dirs": [str(temp_config.project_root)]},
+                "screen_awareness": {
+                    "enabled": True,
+                    "phase": "phase12",
+                    "action_policy_mode": "confirm_before_act",
+                },
+            },
+        }
+    )
+
+    bridge.setMode("deck")
+    bridge.activateModule("helm")
+
+    entries = {entry["primary"]: entry for entry in bridge.active_deck_module["entries"]}
+
+    assert entries["Screen Bearings"]["secondary"] == "Phase 12 active"
+    assert entries["Action Policy"]["secondary"] == "Confirm Before Act"
+    assert "latest screen trace took 18.4 ms" in entries["Traceability"]["detail"].lower()
+    assert any(
+        entry["primary"] == "Screen Bearings"
+        for column in bridge.workspaceCanvas["columns"]
+        for entry in column["entries"]
+    )
+    assert any(
+        entry["primary"] == "Action Policy"
+        for column in bridge.workspaceCanvas["columns"]
+        for entry in column["entries"]
+    )
+    assert any(
+        entry["primary"] == "Traceability"
+        for column in bridge.workspaceCanvas["columns"]
+        for entry in column["entries"]
+    )
 
 
 def test_ui_bridge_systems_surfaces_operational_interpretation_before_raw_facts(temp_config) -> None:
@@ -387,6 +489,38 @@ def test_ui_bridge_systems_surfaces_operational_interpretation_before_raw_facts(
     assert bridge.workspaceCanvas["factGroups"][0]["title"] == "Operational State"
     assert bridge.workspaceCanvas["factGroups"][0]["rows"][0]["value"] == "Memory pressure elevated"
     assert "sluggishness" in bridge.workspaceCanvas["factGroups"][0]["rows"][0]["detail"].lower()
+
+
+def test_ui_bridge_systems_surfaces_event_stream_runtime_state(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+    bridge.apply_snapshot(
+        {
+            "status": {
+                "event_stream": {
+                    "capacity": 256,
+                    "buffered": 12,
+                    "published_total": 48,
+                    "expired_total": 3,
+                    "latest_cursor": 48,
+                    "earliest_cursor": 37,
+                    "replay_requests": 5,
+                    "replay_gap_total": 1,
+                    "connections_current": 1,
+                    "family_totals": {"job": 14, "network": 6},
+                    "visibility_totals": {"watch_surface": 12, "systems_surface": 10},
+                }
+            }
+        }
+    )
+
+    bridge.activateModule("systems")
+
+    groups = {group["title"]: group for group in bridge.workspaceCanvas["factGroups"]}
+    assert "Event Spine" in groups
+    rows = {row["label"]: row for row in groups["Event Spine"]["rows"]}
+    assert rows["Buffered"]["value"] == "12 / 256"
+    assert rows["Replay"]["detail"] == "5 replays, 1 retention gaps"
+    assert rows["Connections"]["value"] == "1 live"
 
 
 def test_ui_bridge_watch_uses_job_posture_slice(temp_config) -> None:

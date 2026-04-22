@@ -244,8 +244,18 @@ class NetworkMonitor:
             self._persist_history_locked()
         if self._events is not None:
             self._events.publish(
-                level="WARNING" if str(payload.get("severity", "")).lower() == "warning" else "INFO",
-                source="network",
+                event_family="network",
+                event_type=f"network.{str(payload.get('kind') or 'signal').strip().lower()}",
+                severity="warning" if str(payload.get("severity", "")).lower() == "warning" else "info",
+                subsystem="network",
+                subject=str(payload.get("kind") or "network_signal"),
+                visibility_scope="systems_surface",
+                retention_class="operator_relevant",
+                provenance={
+                    "channel": "network_monitor",
+                    "kind": "subsystem_interpretation",
+                    "detail": "Derived from local probe history and bounded network monitoring.",
+                },
                 message=str(payload.get("title") or "Network event"),
                 payload=payload,
             )

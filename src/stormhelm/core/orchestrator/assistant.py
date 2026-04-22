@@ -36,6 +36,7 @@ from stormhelm.core.software_control import SoftwareOperationType
 from stormhelm.core.software_control import SoftwareControlSubsystem
 from stormhelm.core.software_recovery import SoftwareRecoverySubsystem
 from stormhelm.core.tools.registry import ToolRegistry
+from stormhelm.core.tasks import DurableTaskService
 from stormhelm.core.workspace.indexer import WorkspaceIndexer
 from stormhelm.core.workspace.repository import WorkspaceRepository
 from stormhelm.core.workspace.service import WorkspaceService
@@ -55,6 +56,7 @@ class AssistantOrchestrator:
         planner: DeterministicPlanner,
         persona: PersonaContract,
         workspace_service: WorkspaceService | None = None,
+        task_service: DurableTaskService | None = None,
         provider: AssistantProvider | None = None,
         calculations: CalculationsSubsystem | None = None,
         software_control: SoftwareControlSubsystem | None = None,
@@ -72,6 +74,7 @@ class AssistantOrchestrator:
         self.planner = planner
         self.persona = persona
         self.workspace_service = workspace_service
+        self.task_service = task_service
         self._fallback_workspace_service: WorkspaceService | None = None
         self.provider = provider
         self.calculations = calculations
@@ -106,6 +109,9 @@ class AssistantOrchestrator:
         requests: list[ToolRequest] | list[ProviderToolCall],
         *,
         session_id: str,
+        prompt: str,
+        surface_mode: str,
+        active_module: str,
     ) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]] | None:
         normalized_requests = [
             (
@@ -130,11 +136,21 @@ class AssistantOrchestrator:
             return None
 
         service = self._workspace_service_for_tools()
+        task_plan = None
+        if self.task_service is not None:
+            task_plan = self.task_service.begin_execution(
+                session_id=session_id,
+                prompt=prompt,
+                requests=requests,
+                surface_mode=surface_mode,
+                active_module=active_module,
+                workspace_context=service.active_workspace_summary(session_id),
+            )
         jobs: list[dict[str, Any]] = []
         actions: list[dict[str, Any]] = []
         summaries: list[str] = []
 
-        for tool_name, arguments in normalized_requests:
+        for index, (tool_name, arguments) in enumerate(normalized_requests):
             arguments = dict(arguments)
             if tool_name == "workspace_restore":
                 data = service.restore_workspace(str(arguments.get("query", "")), session_id=session_id)
@@ -159,9 +175,17 @@ class AssistantOrchestrator:
                     archived_only=bool(arguments.get("archived_only", False)),
                 )
             elif tool_name == "workspace_where_left_off":
-                data = service.where_we_left_off(session_id=session_id)
+                data = (
+                    self.task_service.where_we_left_off(session_id=session_id)
+                    if self.task_service is not None
+                    else None
+                ) or service.where_we_left_off(session_id=session_id)
             else:
-                data = service.next_steps(session_id=session_id)
+                data = (
+                    self.task_service.next_steps(session_id=session_id)
+                    if self.task_service is not None
+                    else None
+                ) or service.next_steps(session_id=session_id)
 
             summary = str(data.get("summary", "")).strip() if isinstance(data, dict) else ""
             if summary:
@@ -173,6 +197,15 @@ class AssistantOrchestrator:
                 action_list = data.get("actions")
                 if isinstance(action_list, list):
                     actions.extend(item for item in action_list if isinstance(item, dict))
+            if task_plan is not None and index < len(task_plan.step_ids) and self.task_service is not None:
+                self.task_service.record_direct_tool_result(
+                    task_id=task_plan.task_id,
+                    step_id=task_plan.step_ids[index],
+                    tool_name=tool_name,
+                    arguments=dict(arguments),
+                    result={"summary": summary, "data": data} if isinstance(data, dict) else {"summary": summary},
+                    success=True,
+                )
             jobs.append(
                 {
                     "job_id": f"direct-{tool_name}",
@@ -543,7 +576,14 @@ class AssistantOrchestrator:
                     planned.execution_plan is not None
                     and planned.structured_query is not None
                     and planned.structured_query.query_shape == QueryShape.SCREEN_AWARENESS_REQUEST
-                    and planned.execution_plan.plan_type in {"screen_awareness_analyze", "screen_awareness_act", "screen_awareness_continue", "screen_awareness_workflow"}
+                    and planned.execution_plan.plan_type in {
+                        "screen_awareness_analyze",
+                        "screen_awareness_act",
+                        "screen_awareness_continue",
+                        "screen_awareness_workflow",
+                        "screen_awareness_brain",
+                        "screen_awareness_power",
+                    }
                     and self.screen_awareness is not None
                 ):
                     screen_debug = planned.structured_query.slots.get("screen_awareness")
@@ -657,8 +697,14 @@ class AssistantOrchestrator:
         except Exception as error:
             assistant_text = self.persona.error(str(error))
             self.events.publish(
-                level="WARNING",
-                source="assistant",
+                event_family="runtime",
+                event_type="runtime.assistant_request_failed",
+                severity="warning",
+                subsystem="assistant",
+                session_id=session_id,
+                visibility_scope="ghost_hint",
+                retention_class="operator_relevant",
+                provenance={"channel": "assistant", "kind": "operator_summary"},
                 message="Failed to handle assistant request.",
                 payload={"error": str(error), "surface_mode": surface_mode, "active_module": active_module},
             )
@@ -703,15 +749,32 @@ class AssistantOrchestrator:
             },
         )
         self.events.publish(
-            level="INFO",
-            source="assistant",
+            event_family="runtime",
+            event_type="runtime.assistant_response_ready",
+            severity="info",
+            subsystem="assistant",
+            session_id=session_id,
+            visibility_scope="internal_only",
+            retention_class="bounded_recent",
+            provenance={"channel": "assistant", "kind": "operator_summary"},
             message=f"Handled message in session '{session_id}'.",
-            payload={"job_count": len(jobs), "action_count": len(actions), "surface_mode": surface_mode},
+            payload={
+                "job_count": len(jobs),
+                "action_count": len(actions),
+                "surface_mode": surface_mode,
+                "active_module": active_module,
+            },
         )
         if planner_obedience:
             self.events.publish(
-                level="DEBUG",
-                source="planner",
+                event_family="runtime",
+                event_type="runtime.planner_obedience_evaluated",
+                severity="debug",
+                subsystem="planner",
+                session_id=session_id,
+                visibility_scope="internal_only",
+                retention_class="ephemeral",
+                provenance={"channel": "planner", "kind": "heuristic_status"},
                 message="Verified planner obedience for handled message.",
                 payload={
                     "session_id": session_id,
@@ -730,8 +793,14 @@ class AssistantOrchestrator:
         next_suggestion = response_metadata.get("next_suggestion") if isinstance(response_metadata.get("next_suggestion"), dict) else {}
         if judgment_metadata or next_suggestion:
             self.events.publish(
-                level="DEBUG",
-                source="judgment",
+                event_family="verification",
+                event_type="verification.response_judgment",
+                severity="debug",
+                subsystem="judgment",
+                session_id=session_id,
+                visibility_scope="internal_only",
+                retention_class="ephemeral",
+                provenance={"channel": "judgment", "kind": "subsystem_interpretation"},
                 message="Evaluated post-action judgment.",
                 payload={
                     "session_id": session_id,
@@ -750,6 +819,7 @@ class AssistantOrchestrator:
             "actions": actions,
             "active_request_state": self.session_state.get_active_request_state(session_id),
             "recent_context_resolutions": self.session_state.get_recent_context_resolutions(session_id),
+            "active_task": self.task_service.active_task_summary(session_id) if self.task_service is not None else {},
         }
 
     async def _execute_tool_requests(
@@ -764,16 +834,31 @@ class AssistantOrchestrator:
         direct_workspace_result = await self._maybe_execute_workspace_requests_directly(
             requests,
             session_id=session_id,
+            prompt=prompt,
+            surface_mode=surface_mode,
+            active_module=active_module,
         )
         if direct_workspace_result is not None:
             return direct_workspace_result
+        task_plan = None
+        if self.task_service is not None:
+            task_plan = self.task_service.begin_execution(
+                session_id=session_id,
+                prompt=prompt,
+                requests=requests,
+                surface_mode=surface_mode,
+                active_module=active_module,
+                workspace_context=self.workspace_service.active_workspace_summary(session_id) if self.workspace_service is not None else {},
+            )
         submitted_jobs = await asyncio.gather(
             *[
                 self.jobs.submit(
                     request.tool_name if isinstance(request, ToolRequest) else request.name,
                     request.arguments,
+                    task_id=task_plan.task_id if task_plan is not None else None,
+                    task_step_id=task_plan.step_ids[index] if task_plan is not None and index < len(task_plan.step_ids) else None,
                 )
-                for request in requests
+                for index, request in enumerate(requests)
             ]
         )
         completed_jobs = await asyncio.gather(*[self.jobs.wait(job.job_id) for job in submitted_jobs])
@@ -1363,11 +1448,21 @@ class AssistantOrchestrator:
             message = "Screen-awareness request routed to Phase 8 problem solving and teaching."
         elif disposition == "phase9_workflow_reuse":
             message = "Screen-awareness request routed to Phase 9 workflow learning and reuse."
+        elif disposition == "phase10_brain_integration":
+            message = "Screen-awareness request routed to Phase 10 brain integration and long-term intelligence."
+        elif disposition == "phase11_power":
+            message = "Screen-awareness request routed to Phase 11 multi-monitor, accessibility, and power features."
         elif disposition in {"feature_disabled", "routing_disabled"}:
             message = "Screen-awareness request detected but not activated."
         self.events.publish(
-            level="DEBUG",
-            source="screen_awareness",
+            event_family="screen_awareness",
+            event_type=f"screen_awareness.{disposition or 'routed'}",
+            severity="debug",
+            subsystem="screen_awareness",
+            session_id=session_id,
+            visibility_scope="deck_context",
+            retention_class="bounded_recent",
+            provenance={"channel": "screen_awareness", "kind": "subsystem_interpretation"},
             message=message,
             payload={
                 "session_id": session_id,
@@ -1406,8 +1501,14 @@ class AssistantOrchestrator:
         result = software_debug.get("result") if isinstance(software_debug.get("result"), dict) else {}
         trace = software_debug.get("trace") if isinstance(software_debug.get("trace"), dict) else {}
         self.events.publish(
-            level="DEBUG",
-            source="software_control",
+            event_family="tool",
+            event_type="tool.software_control_routed",
+            severity="debug",
+            subsystem="software_control",
+            session_id=session_id,
+            visibility_scope="internal_only",
+            retention_class="ephemeral",
+            provenance={"channel": "software_control", "kind": "subsystem_interpretation"},
             message="Software-control request handled.",
             payload={
                 "session_id": session_id,
@@ -1440,8 +1541,14 @@ class AssistantOrchestrator:
         if not recovery_plan and not recovery_result:
             return
         self.events.publish(
-            level="DEBUG",
-            source="software_recovery",
+            event_family="runtime",
+            event_type="runtime.software_recovery_engaged",
+            severity="debug",
+            subsystem="software_recovery",
+            session_id=session_id,
+            visibility_scope="internal_only",
+            retention_class="ephemeral",
+            provenance={"channel": "software_recovery", "kind": "subsystem_interpretation"},
             message="Software recovery route engaged.",
             payload={
                 "session_id": session_id,
@@ -1474,8 +1581,14 @@ class AssistantOrchestrator:
         if not trace and not preview and not attempt:
             return
         self.events.publish(
-            level="DEBUG",
-            source="discord_relay",
+            event_family="discord_relay",
+            event_type=f"discord_relay.{str((attempt.get('state') or trace.get('state') or 'updated')).strip().lower() or 'updated'}",
+            severity="debug",
+            subsystem="discord_relay",
+            session_id=session_id,
+            visibility_scope="deck_context",
+            retention_class="bounded_recent",
+            provenance={"channel": "discord_relay", "kind": "subsystem_interpretation"},
             message="Discord relay request handled.",
             payload={
                 "session_id": session_id,
@@ -1511,8 +1624,20 @@ class AssistantOrchestrator:
         elif failure:
             message = "Calculation request failed honestly in the deterministic local lane."
         self.events.publish(
-            level="DEBUG",
-            source="calculations",
+            event_family="verification",
+            event_type=(
+                "verification.calculation_succeeded"
+                if trace.get("parse_success") is True and trace.get("result")
+                else "verification.calculation_failed"
+                if failure
+                else "verification.calculation_detected"
+            ),
+            severity="debug",
+            subsystem="calculations",
+            session_id=session_id,
+            visibility_scope="deck_context",
+            retention_class="bounded_recent",
+            provenance={"channel": "calculations", "kind": "subsystem_interpretation"},
             message=message,
             payload={
                 "session_id": session_id,

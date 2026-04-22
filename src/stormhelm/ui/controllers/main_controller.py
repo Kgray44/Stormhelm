@@ -17,6 +17,7 @@ class MainController(QtCore.QObject):
         self._core_online = False
         self._snapshot_in_flight = False
         self._snapshot_refresh_queued = False
+        self._stream_last_cursor: int | None = None
 
         self.refresh_timer = QtCore.QTimer(self)
         self.refresh_timer.setInterval(self.config.ui.poll_interval_ms)
@@ -30,6 +31,12 @@ class MainController(QtCore.QObject):
         self.client.health_received.connect(self._handle_health)
         self.client.chat_received.connect(self._handle_chat)
         self.client.note_saved.connect(self._handle_note_saved)
+        if hasattr(self.client, "stream_event_received"):
+            self.client.stream_event_received.connect(self._handle_stream_event)
+        if hasattr(self.client, "stream_state_received"):
+            self.client.stream_state_received.connect(self._handle_stream_state)
+        if hasattr(self.client, "stream_gap_received"):
+            self.client.stream_gap_received.connect(self._handle_stream_gap)
 
     def start(self) -> None:
         self.bridge.setHideToTrayOnClose(self.config.ui.hide_to_tray_on_close)
@@ -39,6 +46,8 @@ class MainController(QtCore.QObject):
             if not started:
                 self.bridge.set_status_line("Standing watch.")
             self.client.fetch_health()
+            if hasattr(self.client, "start_event_stream"):
+                self.client.start_event_stream(session_id="default", cursor=self._stream_last_cursor)
         except Exception as error:
             self.bridge.set_connection_error(str(error))
             self.bridge.set_status_line(f"Core startup issue: {error}")
@@ -107,6 +116,28 @@ class MainController(QtCore.QObject):
     def _handle_snapshot(self, payload: dict) -> None:
         self._complete_snapshot_request()
         self.bridge.apply_snapshot(payload)
+        self._stream_last_cursor = self._latest_cursor_from_snapshot(payload) or self._stream_last_cursor
+
+    def _handle_stream_event(self, payload: dict) -> None:
+        cursor = payload.get("cursor")
+        if isinstance(cursor, int):
+            self._stream_last_cursor = cursor
+        self.bridge.apply_stream_event(payload)
+        if self._event_requires_snapshot_reconciliation(payload):
+            self._request_snapshot(force=True)
+
+    def _handle_stream_state(self, payload: dict) -> None:
+        cursor = payload.get("cursor")
+        if isinstance(cursor, int):
+            if self._stream_last_cursor is None:
+                self._stream_last_cursor = cursor
+            else:
+                self._stream_last_cursor = max(self._stream_last_cursor, cursor)
+        self.bridge.apply_stream_state(payload)
+
+    def _handle_stream_gap(self, payload: dict) -> None:
+        self.bridge.apply_stream_gap(payload)
+        self._request_snapshot(force=True)
 
     def _apply_actions(self, actions: object) -> None:
         if not isinstance(actions, list):
@@ -177,3 +208,24 @@ class MainController(QtCore.QObject):
             "remote host closed",
         )
         return any(marker in normalized_error for marker in disruption_markers)
+
+    def _latest_cursor_from_snapshot(self, payload: dict) -> int | None:
+        events = payload.get("events")
+        if not isinstance(events, list):
+            return None
+        latest = max(
+            (
+                int(item.get("cursor") or item.get("event_id") or 0)
+                for item in events
+                if isinstance(item, dict) and isinstance(item.get("cursor") or item.get("event_id"), int)
+            ),
+            default=0,
+        )
+        return latest or None
+
+    def _event_requires_snapshot_reconciliation(self, payload: dict) -> bool:
+        visibility = str(payload.get("visibility_scope", "")).strip().lower()
+        if visibility in {"watch_surface", "systems_surface", "deck_context", "ghost_hint", "operator_blocking"}:
+            return True
+        severity = str(payload.get("severity", "")).strip().lower()
+        return severity in {"warning", "error", "critical"}

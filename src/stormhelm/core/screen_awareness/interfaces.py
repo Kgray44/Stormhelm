@@ -6,6 +6,7 @@ from stormhelm.core.screen_awareness.models import CurrentScreenContext
 from stormhelm.core.screen_awareness.models import ActionPlan
 from stormhelm.core.screen_awareness.models import ActionExecutionResult
 from stormhelm.core.screen_awareness.models import AppAdapterResolution
+from stormhelm.core.screen_awareness.models import BrainIntegrationResult
 from stormhelm.core.screen_awareness.models import GroundingOutcome
 from stormhelm.core.screen_awareness.models import GroundingRequest
 from stormhelm.core.screen_awareness.models import NavigationOutcome
@@ -14,6 +15,7 @@ from stormhelm.core.screen_awareness.models import ScreenAnalysisResult
 from stormhelm.core.screen_awareness.models import ScreenInterpretation
 from stormhelm.core.screen_awareness.models import ScreenObservation
 from stormhelm.core.screen_awareness.models import ScreenIntentType
+from stormhelm.core.screen_awareness.models import PowerFeaturesResult
 from stormhelm.core.screen_awareness.models import VerificationOutcome
 from stormhelm.core.screen_awareness.models import WorkflowContinuityResult
 from stormhelm.core.screen_awareness.models import WorkflowLearningResult
@@ -142,6 +144,47 @@ class WorkflowLearningEngine(Protocol):
         action_result: ActionExecutionResult | None,
         active_context: dict[str, Any] | None,
     ) -> WorkflowLearningResult | None: ...
+
+
+class BrainIntegrationEngine(Protocol):
+    def assess(
+        self,
+        *,
+        session_id: str,
+        operator_text: str,
+        intent: ScreenIntentType,
+        observation: ScreenObservation,
+        interpretation: ScreenInterpretation,
+        current_context: CurrentScreenContext,
+        grounding_result: GroundingOutcome | None,
+        verification_result: VerificationOutcome | None,
+        action_result: ActionExecutionResult | None,
+        continuity_result: WorkflowContinuityResult | None,
+        workflow_learning_result: WorkflowLearningResult | None,
+        adapter_resolution: AppAdapterResolution | None,
+        active_context: dict[str, Any] | None,
+        workspace_context: dict[str, Any] | None,
+    ) -> BrainIntegrationResult | None: ...
+
+
+class PowerFeaturesEngine(Protocol):
+    def assess(
+        self,
+        *,
+        operator_text: str,
+        intent: ScreenIntentType,
+        observation: ScreenObservation,
+        interpretation: ScreenInterpretation,
+        current_context: CurrentScreenContext,
+        grounding_result: GroundingOutcome | None,
+        navigation_result: NavigationOutcome | None,
+        verification_result: VerificationOutcome | None,
+        action_result: ActionExecutionResult | None,
+        continuity_result: WorkflowContinuityResult | None,
+        adapter_resolution: AppAdapterResolution | None,
+        active_context: dict[str, Any] | None,
+        workspace_context: dict[str, Any] | None,
+    ) -> PowerFeaturesResult | None: ...
 
 
 class MemoryIntegrator(Protocol):

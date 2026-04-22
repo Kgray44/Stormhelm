@@ -11,7 +11,9 @@ from stormhelm.core.screen_awareness.models import ScreenConfidence
 from stormhelm.core.screen_awareness.models import ScreenInterpretation
 from stormhelm.core.screen_awareness.models import ScreenObservation
 from stormhelm.core.screen_awareness.models import confidence_level_for_score
+from stormhelm.core.screen_awareness.observation import best_live_visible_text
 from stormhelm.core.screen_awareness.observation import best_visible_text
+from stormhelm.core.screen_awareness.observation import has_live_screen_signal
 
 
 _BROWSER_PROCESSES = {"chrome", "msedge", "firefox", "brave", "opera", "vivaldi"}
@@ -172,18 +174,29 @@ class DeterministicScreenInterpreter:
         operator_text: str,
     ) -> ScreenInterpretation:
         del operator_text
+        live_visible_text = best_live_visible_text(observation)
         visible_text = best_visible_text(observation)
         environment = _likely_environment(observation)
         visible_purpose = _visible_purpose(observation, visible_text)
         visible_errors = _extract_visible_errors(visible_text)
 
         environment_score = 0.9 if observation.focus_metadata else 0.6 if observation.workspace_snapshot else 0.0
-        content_score = 0.95 if observation.selected_text else 0.7 if observation.clipboard_text else 0.3 if visible_text else 0.0
+        content_score = (
+            0.95
+            if observation.selected_text
+            else 0.78
+            if live_visible_text
+            else 0.32
+            if observation.clipboard_text
+            else 0.0
+        )
         interpretation_score = 0.9 if visible_errors or _looks_like_math_expression(visible_text) else 0.7 if visible_purpose else 0.4 if environment else 0.0
 
         uncertainty_notes: list[str] = []
         if not observation.selected_text and not observation.clipboard_text:
             uncertainty_notes.append("Only partial native context was available; no direct selected text was present.")
+        if observation.clipboard_text and not has_live_screen_signal(observation):
+            uncertainty_notes.append("Only clipboard text was available, and it may not match the live current screen.")
         if visible_text is None:
             uncertainty_notes.append("The visible content signal was incomplete.")
 
@@ -225,6 +238,7 @@ class DeterministicContextSynthesizer:
         overall = mean(scores) if scores else 0.0
         process_label = str(observation.focus_metadata.get("process_name") or observation.app_identity or "").strip()
         title = _window_title(observation)
+        live_visible_text = best_live_visible_text(observation)
         summary_parts: list[str] = []
         if process_label:
             summary_parts.append(f"{process_label.title()} is focused")
@@ -235,8 +249,10 @@ class DeterministicContextSynthesizer:
                 summary_parts.append(f"The current window appears to be \"{title}\"")
         if observation.selected_text:
             summary_parts.append(f"Selected text reads: {_preview(observation.selected_text)}")
+        elif live_visible_text:
+            summary_parts.append(f"Visible cue: {_preview(live_visible_text)}")
         elif observation.clipboard_text:
-            summary_parts.append(f"Clipboard context reads: {_preview(observation.clipboard_text)}")
+            summary_parts.append(f"Clipboard hint available: {_preview(observation.clipboard_text)}")
         elif interpretation.question_relevant_findings:
             summary_parts.append(f"Visible cue: {interpretation.question_relevant_findings[0]}")
         summary = ". ".join(part.rstrip(".") for part in summary_parts if part).strip()

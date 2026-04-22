@@ -156,6 +156,27 @@ def test_core_container_status_snapshot_includes_calculations_runtime_state(temp
     assert snapshot["calculations"]["runtime_hooks"]["helper_registry_ready"] is True
 
 
+def test_core_container_status_snapshot_includes_event_stream_state(temp_config) -> None:
+    container = build_container(temp_config)
+    container.system_probe = FakeOperationalProbe()  # type: ignore[assignment]
+    container.events.publish(
+        event_family="job",
+        event_type="job.queued",
+        subsystem="job_manager",
+        severity="info",
+        visibility_scope="watch_surface",
+        payload={"job_id": "job-1"},
+        message="Queued job.",
+    )
+
+    snapshot = container.status_snapshot()
+
+    assert snapshot["event_stream"]["capacity"] >= 1
+    assert snapshot["event_stream"]["buffered"] >= 1
+    assert snapshot["event_stream"]["published_total"] >= 1
+    assert snapshot["event_stream"]["family_totals"]["job"] >= 1
+
+
 def test_core_container_status_snapshot_includes_discord_relay_runtime_state(temp_config) -> None:
     container = build_container(temp_config)
     container.system_probe = FakeOperationalProbe()  # type: ignore[assignment]
@@ -367,6 +388,91 @@ def test_core_container_status_snapshot_includes_phase9_workflow_learning_runtim
     assert snapshot["screen_awareness"]["phase"] == "phase9"
     assert snapshot["screen_awareness"]["capabilities"]["workflow_learning_enabled"] is True
     assert snapshot["screen_awareness"]["runtime_hooks"]["workflow_learning_engine_ready"] is True
+
+
+def test_core_container_status_snapshot_includes_phase10_brain_runtime_hooks(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase10"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    temp_config.screen_awareness.grounding_enabled = True
+    temp_config.screen_awareness.guidance_enabled = True
+    temp_config.screen_awareness.verification_enabled = True
+    temp_config.screen_awareness.action_enabled = True
+    temp_config.screen_awareness.memory_enabled = True
+    temp_config.screen_awareness.adapters_enabled = True
+    temp_config.screen_awareness.problem_solving_enabled = True
+    temp_config.screen_awareness.workflow_learning_enabled = True
+    temp_config.screen_awareness.brain_integration_enabled = True
+    temp_config.screen_awareness.action_policy_mode = "confirm_before_act"
+
+    container = build_container(temp_config)
+    container.system_probe = FakeOperationalProbe()  # type: ignore[assignment]
+
+    snapshot = container.status_snapshot()
+
+    assert snapshot["screen_awareness"]["phase"] == "phase10"
+    assert snapshot["screen_awareness"]["capabilities"]["brain_integration_enabled"] is True
+    assert snapshot["screen_awareness"]["runtime_hooks"]["brain_integration_engine_ready"] is True
+
+
+def test_core_container_status_snapshot_includes_phase11_power_runtime_hooks(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase11"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    temp_config.screen_awareness.grounding_enabled = True
+    temp_config.screen_awareness.guidance_enabled = True
+    temp_config.screen_awareness.verification_enabled = True
+    temp_config.screen_awareness.action_enabled = True
+    temp_config.screen_awareness.memory_enabled = True
+    temp_config.screen_awareness.adapters_enabled = True
+    temp_config.screen_awareness.problem_solving_enabled = True
+    temp_config.screen_awareness.workflow_learning_enabled = True
+    temp_config.screen_awareness.brain_integration_enabled = True
+    temp_config.screen_awareness.power_features_enabled = True
+    temp_config.screen_awareness.action_policy_mode = "confirm_before_act"
+
+    container = build_container(temp_config)
+    container.system_probe = FakeOperationalProbe()  # type: ignore[assignment]
+
+    snapshot = container.status_snapshot()
+
+    assert snapshot["screen_awareness"]["phase"] == "phase11"
+    assert snapshot["screen_awareness"]["capabilities"]["power_features_enabled"] is True
+    assert snapshot["screen_awareness"]["runtime_hooks"]["power_features_engine_ready"] is True
+
+
+def test_core_container_status_snapshot_includes_phase12_hardening_runtime_state(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase12"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    temp_config.screen_awareness.grounding_enabled = True
+    temp_config.screen_awareness.guidance_enabled = True
+    temp_config.screen_awareness.verification_enabled = True
+    temp_config.screen_awareness.action_enabled = True
+    temp_config.screen_awareness.memory_enabled = True
+    temp_config.screen_awareness.adapters_enabled = True
+    temp_config.screen_awareness.problem_solving_enabled = True
+    temp_config.screen_awareness.workflow_learning_enabled = True
+    temp_config.screen_awareness.brain_integration_enabled = True
+    temp_config.screen_awareness.power_features_enabled = True
+    temp_config.screen_awareness.action_policy_mode = "confirm_before_act"
+
+    container = build_container(temp_config)
+    container.system_probe = FakeOperationalProbe()  # type: ignore[assignment]
+
+    snapshot = container.status_snapshot()
+
+    assert snapshot["screen_awareness"]["phase"] == "phase12"
+    assert snapshot["screen_awareness"]["capabilities"]["hardening_enabled"] is True
+    assert snapshot["screen_awareness"]["hardening"]["enabled"] is True
+    assert snapshot["screen_awareness"]["hardening"]["truthfulness_audit_enabled"] is True
+    assert snapshot["screen_awareness"]["policy_state"]["action_policy_mode"] == "confirm_before_act"
 
 
 def test_core_container_system_state_cache_uses_completed_snapshot_time(temp_config, monkeypatch) -> None:

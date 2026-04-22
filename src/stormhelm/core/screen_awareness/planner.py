@@ -113,6 +113,59 @@ WORKFLOW_REUSE_PHRASES = {
     "recognize this workflow and help me run it again",
     "apply the same flow here",
 }
+BRAIN_INTEGRATION_PHRASES = {
+    "remember this workflow for next time",
+    "remember this for next time",
+    "remember this workflow",
+    "you should remember that i prefer",
+    "keep this preference in mind",
+    "learn that this environment behaves this way",
+    "this machine always needs that workaround",
+    "bring back the context from last time",
+    "this looks like the same project as before",
+    "proactively help me resume this when it makes sense",
+}
+POWER_MONITOR_PHRASES = {
+    "which display is that on",
+    "which monitor is that on",
+    "what display is this on",
+    "what monitor is this on",
+}
+POWER_TRANSLATION_PHRASES = {
+    "translate this",
+    "translate that",
+    "translate this installer prompt",
+    "translate this prompt",
+}
+POWER_OVERLAY_PHRASES = {
+    "highlight the warning",
+    "highlight this",
+    "highlight that",
+    "show me where the warning is",
+}
+POWER_NOTIFICATION_PHRASES = {
+    "what notification just appeared",
+    "what notification appeared",
+    "which notification just appeared",
+    "what popped up",
+}
+POWER_ACCESSIBILITY_PHRASES = {
+    "what has focus",
+    "where is focus",
+    "what is focused",
+    "how would i reach this with keyboard",
+    "what can i tab to",
+}
+POWER_WORKSPACE_PHRASES = {
+    "what windows are open",
+    "show me the workspace map",
+    "what else is open",
+}
+POWER_ENTITY_PHRASES = {
+    "extract the visible entities",
+    "what version is on screen",
+    "what error code is on screen",
+}
 _CONFIRMATION_FOLLOW_UPS = {"go ahead", "do it", "proceed", "confirm it"}
 VISUAL_REFERENT_HINTS = {
     "screen",
@@ -232,37 +285,44 @@ class ScreenAwarenessPlannerSeam:
 
         if self.config.observation_enabled and self.config.interpretation_enabled and self.config.phase != "phase0":
             disposition = ScreenRouteDisposition.PHASE1_ANALYZE
-            if (
-                intent == ScreenIntentType.LEARN_WORKFLOW_REUSE
-                and self.config.phase == "phase9"
-                and self.config.capability_flags().get("workflow_learning_enabled")
-            ):
-                disposition = ScreenRouteDisposition.PHASE9_WORKFLOW_REUSE
-            if intent == ScreenIntentType.EXECUTE_UI_ACTION and self.config.phase in {"phase5", "phase6", "phase7", "phase8", "phase9"}:
+            if intent == ScreenIntentType.EXECUTE_UI_ACTION and self.config.phase in {"phase5", "phase6", "phase7", "phase8", "phase9", "phase10", "phase11", "phase12"}:
                 disposition = ScreenRouteDisposition.PHASE5_ACT
             elif (
+                intent == ScreenIntentType.BRAIN_INTEGRATION
+                and self.config.phase in {"phase10", "phase11", "phase12"}
+                and self.config.capability_flags().get("brain_integration_enabled")
+            ):
+                disposition = ScreenRouteDisposition.PHASE10_BRAIN_INTEGRATION
+            elif (
+                self.config.phase in {"phase11", "phase12"}
+                and self.config.capability_flags().get("power_features_enabled")
+                and self._is_power_request(normalized_text)
+            ):
+                disposition = ScreenRouteDisposition.PHASE11_POWER
+            elif (
                 intent == ScreenIntentType.LEARN_WORKFLOW_REUSE
-                and self.config.phase == "phase9"
+                and self.config.phase in {"phase9", "phase10", "phase11", "phase12"}
                 and self.config.capability_flags().get("workflow_learning_enabled")
             ):
                 disposition = ScreenRouteDisposition.PHASE9_WORKFLOW_REUSE
             elif (
                 intent == ScreenIntentType.CONTINUE_WORKFLOW
-                and self.config.phase in {"phase6", "phase7", "phase8", "phase9"}
+                and self.config.phase in {"phase6", "phase7", "phase8", "phase9", "phase10", "phase11", "phase12"}
                 and self.config.memory_enabled
             ):
                 disposition = ScreenRouteDisposition.PHASE6_CONTINUE
-            elif intent == ScreenIntentType.GUIDE_NAVIGATION and self.config.phase in {"phase3", "phase4", "phase5", "phase6", "phase7", "phase8", "phase9"} and self.config.guidance_enabled:
+            elif intent == ScreenIntentType.GUIDE_NAVIGATION and self.config.phase in {"phase3", "phase4", "phase5", "phase6", "phase7", "phase8", "phase9", "phase10", "phase11", "phase12"} and self.config.guidance_enabled:
                 disposition = ScreenRouteDisposition.PHASE3_GUIDE
-            elif intent in {ScreenIntentType.VERIFY_SCREEN_STATE, ScreenIntentType.DETECT_VISIBLE_CHANGE} and self.config.phase in {"phase4", "phase5", "phase6", "phase7", "phase8", "phase9"} and self.config.verification_enabled:
+            elif intent in {ScreenIntentType.VERIFY_SCREEN_STATE, ScreenIntentType.DETECT_VISIBLE_CHANGE} and self.config.phase in {"phase4", "phase5", "phase6", "phase7", "phase8", "phase9", "phase10", "phase11", "phase12"} and self.config.verification_enabled:
                 disposition = ScreenRouteDisposition.PHASE4_VERIFY
             elif (
                 intent in {ScreenIntentType.EXPLAIN_VISIBLE_CONTENT, ScreenIntentType.SOLVE_VISIBLE_PROBLEM}
-                and self.config.phase in {"phase8", "phase9"}
+                and self.config.phase in {"phase8", "phase9", "phase10", "phase11", "phase12"}
                 and self.config.capability_flags().get("problem_solving_enabled")
+                and not (self.config.phase in {"phase11", "phase12"} and self.config.capability_flags().get("power_features_enabled") and self._is_power_request(normalized_text))
             ):
                 disposition = ScreenRouteDisposition.PHASE8_PROBLEM_SOLVE
-            elif self.config.phase in {"phase2", "phase3", "phase4", "phase5", "phase6", "phase7", "phase8", "phase9"} and self.config.grounding_enabled:
+            elif self.config.phase in {"phase2", "phase3", "phase4", "phase5", "phase6", "phase7", "phase8", "phase9", "phase10", "phase11", "phase12"} and self.config.grounding_enabled:
                 disposition = ScreenRouteDisposition.PHASE2_GROUND
             return ScreenPlannerEvaluation(
                 candidate=True,
@@ -277,6 +337,12 @@ class ScreenAwarenessPlannerSeam:
                     "bearing_title": (
                         "Action Bearings"
                         if disposition == ScreenRouteDisposition.PHASE5_ACT
+                        else
+                        "Brain Bearings"
+                        if disposition == ScreenRouteDisposition.PHASE10_BRAIN_INTEGRATION
+                        else
+                        "Power Bearings"
+                        if disposition == ScreenRouteDisposition.PHASE11_POWER
                         else
                         "Continuity Bearings"
                         if disposition == ScreenRouteDisposition.PHASE6_CONTINUE
@@ -330,6 +396,10 @@ class ScreenAwarenessPlannerSeam:
         if not lower:
             return None, [], 0.0
 
+        if self.config.phase in {"phase10", "phase11", "phase12"} and any(phrase in lower for phrase in BRAIN_INTEGRATION_PHRASES):
+            return ScreenIntentType.BRAIN_INTEGRATION, ["explicit brain-integration phrase matched"], 0.96
+        if self.config.phase in {"phase11", "phase12"} and self._is_power_request(lower):
+            return self._power_request_intent(lower), ["explicit phase11 power-feature phrase matched"], 0.95
         if any(phrase in lower for phrase in WORKFLOW_REUSE_PHRASES):
             return ScreenIntentType.LEARN_WORKFLOW_REUSE, ["explicit workflow-learning or reuse phrase matched"], 0.96
         if any(phrase in lower for phrase in CONTINUITY_PHRASES):
@@ -398,3 +468,22 @@ class ScreenAwarenessPlannerSeam:
         ):
             return True
         return False
+
+    def _is_power_request(self, normalized_text: str) -> bool:
+        return any(
+            phrase in normalized_text
+            for phrase in (
+                *POWER_MONITOR_PHRASES,
+                *POWER_TRANSLATION_PHRASES,
+                *POWER_OVERLAY_PHRASES,
+                *POWER_NOTIFICATION_PHRASES,
+                *POWER_ACCESSIBILITY_PHRASES,
+                *POWER_WORKSPACE_PHRASES,
+                *POWER_ENTITY_PHRASES,
+            )
+        )
+
+    def _power_request_intent(self, normalized_text: str) -> ScreenIntentType:
+        if any(phrase in normalized_text for phrase in (*POWER_TRANSLATION_PHRASES, *POWER_ENTITY_PHRASES)):
+            return ScreenIntentType.EXPLAIN_VISIBLE_CONTENT
+        return ScreenIntentType.INSPECT_VISIBLE_STATE

@@ -30,6 +30,12 @@ poll_interval_ms = 1500
 hide_to_tray_on_close = true
 ghost_shortcut = "Ctrl+Space"
 
+[event_stream]
+enabled = true
+retention_capacity = 500
+replay_limit = 128
+heartbeat_seconds = 15.0
+
 [location]
 allow_approximate_lookup = true
 lookup_timeout_seconds = 5
@@ -62,7 +68,7 @@ hwinfo_executable_path = ""
 
 [screen_awareness]
 enabled = true
-phase = "phase9"
+phase = "phase12"
 planner_routing_enabled = true
 debug_events_enabled = true
 observation_enabled = true
@@ -76,6 +82,8 @@ memory_enabled = true
 adapters_enabled = true
 problem_solving_enabled = true
 workflow_learning_enabled = true
+brain_integration_enabled = true
+power_features_enabled = true
 
 [calculations]
 enabled = true
@@ -101,6 +109,14 @@ max_recovery_steps = 4
 cloud_fallback_enabled = false
 cloud_fallback_model = "gpt-5.4-nano"
 redaction_enabled = true
+
+[trust]
+enabled = true
+debug_events_enabled = true
+session_grant_ttl_seconds = 14400.0
+once_grant_ttl_seconds = 900.0
+pending_request_ttl_seconds = 3600.0
+audit_recent_limit = 24
 
 [discord_relay]
 enabled = true

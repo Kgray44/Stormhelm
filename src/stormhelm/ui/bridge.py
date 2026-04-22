@@ -73,6 +73,7 @@ class UiBridge(QtCore.QObject):
         self._workspace_state_hint = ""
         self._opened_items: list[dict[str, Any]] = []
         self._active_opened_item_id: str | None = None
+        self._active_task: dict[str, Any] = {}
         self._ghost_messages: list[dict[str, Any]] = []
         self._context_cards: list[dict[str, Any]] = []
         self._ghost_corner_readouts: list[dict[str, Any]] = []
@@ -808,6 +809,13 @@ class UiBridge(QtCore.QObject):
                 self._active_request_state = normalized_request_state
                 collections_changed = True
 
+        active_task = payload.get("active_task")
+        if isinstance(active_task, dict):
+            normalized_active_task = dict(active_task)
+            if normalized_active_task != self._active_task:
+                self._active_task = normalized_active_task
+                collections_changed = True
+
         recent_context_resolutions = payload.get("recent_context_resolutions")
         if isinstance(recent_context_resolutions, list):
             normalized_resolutions = [dict(item) for item in recent_context_resolutions if isinstance(item, dict)]
@@ -832,6 +840,59 @@ class UiBridge(QtCore.QObject):
             self._rebuild_surface_models()
             self.collectionsChanged.emit()
 
+    def apply_stream_event(self, payload: dict[str, Any]) -> None:
+        event = dict(payload)
+        cursor = event.get("cursor") if isinstance(event.get("cursor"), int) else event.get("event_id")
+        if not isinstance(cursor, int):
+            return
+        normalized_events = [dict(item) for item in self._events if isinstance(item, dict)]
+        without_duplicate = [
+            item
+            for item in normalized_events
+            if int(item.get("cursor") or item.get("event_id") or -1) != cursor
+        ]
+        without_duplicate.append(event)
+        without_duplicate.sort(key=lambda item: int(item.get("cursor") or item.get("event_id") or 0))
+        retention_limit = max(32, min(256, int(self._event_stream_state().get("capacity", 64) or 64)))
+        self._events = without_duplicate[-retention_limit:]
+
+        visibility = str(event.get("visibility_scope", "")).strip().lower()
+        severity = str(event.get("severity", event.get("level", ""))).strip().lower()
+        message = str(event.get("message", "")).strip()
+        if visibility in {"ghost_hint", "operator_blocking"} and message:
+            self._status_line = message
+            if severity in {"warning", "error", "critical"} and self._pending_activity is None:
+                self._set_assistant_state("warning")
+            self.statusChanged.emit()
+
+        if visibility != "internal_only" or self._module_requires_live_status_refresh():
+            self._rebuild_surface_models()
+            self.collectionsChanged.emit()
+
+    def apply_stream_state(self, payload: dict[str, Any]) -> None:
+        phase = str(payload.get("phase", "")).strip().lower()
+        source = str(payload.get("source", "")).strip().lower()
+        if source == "client":
+            if phase == "connecting":
+                self._connection_state = "connecting"
+                if self._pending_activity is None:
+                    self._status_line = "Reacquiring operational signal."
+            elif phase == "reconnecting":
+                self._connection_state = "disrupted"
+                if self._pending_activity is None:
+                    self._status_line = "Operational stream reconnecting."
+            elif phase == "stopped" and self._pending_activity is None:
+                self._status_line = "Operational stream paused."
+        elif phase == "connected":
+            self._connection_state = "connected"
+        self.statusChanged.emit()
+
+    def apply_stream_gap(self, payload: dict[str, Any]) -> None:
+        del payload
+        if self._pending_activity is None:
+            self._status_line = "Recent event window expired; refreshing from snapshot."
+            self.statusChanged.emit()
+
     def apply_chat_result(self, payload: dict[str, Any]) -> None:
         user_message = payload.get("user_message")
         assistant_message = payload.get("assistant_message")
@@ -848,6 +909,9 @@ class UiBridge(QtCore.QObject):
         active_request_state = payload.get("active_request_state")
         if isinstance(active_request_state, dict):
             self._active_request_state = dict(active_request_state)
+        active_task = payload.get("active_task")
+        if isinstance(active_task, dict):
+            self._active_task = dict(active_task)
         recent_context_resolutions = payload.get("recent_context_resolutions")
         if isinstance(recent_context_resolutions, list):
             self._recent_context_resolutions = [dict(item) for item in recent_context_resolutions if isinstance(item, dict)]
@@ -1177,6 +1241,19 @@ class UiBridge(QtCore.QObject):
 
     def _build_context_cards(self) -> list[dict[str, Any]]:
         cards: list[dict[str, Any]] = []
+        if self._active_task:
+            ghost_summary = self._active_task.get("ghostSummary") if isinstance(self._active_task.get("ghostSummary"), dict) else {}
+            title = str(ghost_summary.get("title") or self._active_task.get("title") or "").strip()
+            body = str(ghost_summary.get("body") or self._active_task.get("whereLeftOff") or self._active_task.get("latestSummary") or "").strip()
+            subtitle = str(ghost_summary.get("subtitle") or self._active_task.get("state") or "").strip()
+            if title and body:
+                cards.append(
+                    {
+                        "title": title,
+                        "subtitle": subtitle.replace("_", " ").title(),
+                        "body": body,
+                    }
+                )
         latest_message = self._latest_assistant_message()
         if latest_message is not None:
             metadata = latest_message.get("metadata") if isinstance(latest_message.get("metadata"), dict) else {}
@@ -1202,7 +1279,7 @@ class UiBridge(QtCore.QObject):
                 )
                 return cards
         latest_job = self._jobs[0] if self._jobs else None
-        if latest_job is not None:
+        if latest_job is not None and len(cards) < 2:
             summary = ""
             result = latest_job.get("result")
             if isinstance(result, dict):
@@ -1217,12 +1294,12 @@ class UiBridge(QtCore.QObject):
                 }
             )
 
-        latest_event = self._events[0] if self._events else None
+        latest_event = self._latest_surface_event()
         if latest_event is not None and len(cards) < 2:
             cards.append(
                 {
                     "title": "Signals",
-                    "subtitle": str(latest_event.get("level", "INFO")).title(),
+                    "subtitle": str(latest_event.get("severity", latest_event.get("level", "INFO"))).replace("_", " ").title(),
                     "body": str(latest_event.get("message", "No recent signal.")),
                 }
             )
@@ -2139,6 +2216,7 @@ class UiBridge(QtCore.QObject):
         if self._active_module_key != "systems":
             return []
         interpretation = self._systems_interpretation_state()
+        event_stream = self._event_stream_state()
         machine = self._machine_state()
         power = self._power_state()
         resources = self._resource_state()
@@ -2202,6 +2280,46 @@ class UiBridge(QtCore.QObject):
                 ],
             },
         ])
+        if event_stream:
+            buffered = int(event_stream.get("buffered") or 0)
+            capacity = int(event_stream.get("capacity") or 0)
+            replay_requests = int(event_stream.get("replay_requests") or 0)
+            replay_gaps = int(event_stream.get("replay_gap_total") or 0)
+            connections = int(event_stream.get("connections_current") or 0)
+            earliest_cursor = event_stream.get("earliest_cursor")
+            latest_cursor = event_stream.get("latest_cursor")
+            groups.append(
+                {
+                    "title": "Event Spine",
+                    "summary": "Recent operational event retention, replay posture, and live stream health.",
+                    "rows": [
+                        {
+                            "label": "Buffered",
+                            "value": f"{buffered} / {capacity}" if capacity else str(buffered),
+                            "detail": (
+                                f"Cursors {earliest_cursor} to {latest_cursor}"
+                                if earliest_cursor is not None and latest_cursor is not None
+                                else "Awaiting retained event history."
+                            ),
+                        },
+                        {
+                            "label": "Replay",
+                            "value": f"{latest_cursor or 0} latest",
+                            "detail": f"{replay_requests} replays, {replay_gaps} retention gaps",
+                        },
+                        {
+                            "label": "Connections",
+                            "value": f"{connections} live",
+                            "detail": f"{int(event_stream.get('connections_total') or connections)} total stream openings",
+                        },
+                        {
+                            "label": "Visibility",
+                            "value": str(len(event_stream.get("visibility_totals") or {})),
+                            "detail": self._event_stream_visibility_detail(event_stream),
+                        },
+                    ],
+                }
+            )
         return groups
 
     def _network_display_data(self) -> dict[str, Any]:
@@ -2476,6 +2594,13 @@ class UiBridge(QtCore.QObject):
     def _workspace_canvas_task_groups(self) -> list[dict[str, Any]]:
         if self._active_workspace_section_key != "tasks":
             return []
+        active_task_groups = (
+            self._active_task.get("commandDeck", {}).get("groups", [])
+            if isinstance(self._active_task.get("commandDeck"), dict)
+            else []
+        )
+        if isinstance(active_task_groups, list) and active_task_groups:
+            return [dict(group) for group in active_task_groups if isinstance(group, dict)]
         surface_items = self._workspace_surface_items("tasks")
         if surface_items:
             return surface_items
@@ -2622,6 +2747,10 @@ class UiBridge(QtCore.QObject):
     def _systems_interpretation_state(self) -> dict[str, Any]:
         interpretation = self._status.get("systems_interpretation", {})
         return interpretation if isinstance(interpretation, dict) else {}
+
+    def _event_stream_state(self) -> dict[str, Any]:
+        event_stream = self._status.get("event_stream", {})
+        return event_stream if isinstance(event_stream, dict) else {}
 
     def _software_control_state(self) -> dict[str, Any]:
         state = self._status.get("software_control", {})
@@ -3099,6 +3228,86 @@ class UiBridge(QtCore.QObject):
             return "Shell requests stay behind the stub gate and do not enable unrestricted execution."
         return "Shell execution stays unavailable unless the safety policy explicitly enables the stub."
 
+    def _screen_awareness_state(self) -> dict[str, Any]:
+        state = self._status.get("screen_awareness", {})
+        return dict(state) if isinstance(state, dict) else {}
+
+    def _screen_awareness_settings(self) -> dict[str, Any]:
+        settings = self._settings.get("screen_awareness", {})
+        return dict(settings) if isinstance(settings, dict) else {}
+
+    def _screen_awareness_phase_label(self) -> str:
+        state = self._screen_awareness_state()
+        settings = self._screen_awareness_settings()
+        enabled = bool(state.get("enabled", settings.get("enabled", self.config.screen_awareness.enabled)))
+        phase = str(state.get("phase") or settings.get("phase") or self.config.screen_awareness.phase).strip() or "phase?"
+        if not enabled:
+            return "Disabled"
+        if phase.startswith("phase"):
+            return f"Phase {phase.replace('phase', '').strip()} active"
+        return phase
+
+    def _screen_awareness_policy_mode_label(self) -> str:
+        state = self._screen_awareness_state()
+        policy_state = state.get("policy_state")
+        if isinstance(policy_state, dict):
+            raw = str(policy_state.get("action_policy_mode", "")).strip()
+            if raw:
+                return raw.replace("_", " ").title()
+        raw = str(self.config.screen_awareness.action_policy_mode or "observe_only").strip()
+        return raw.replace("_", " ").title()
+
+    def _screen_awareness_policy_detail(self) -> str:
+        state = self._screen_awareness_state()
+        policy_state = state.get("policy_state")
+        if isinstance(policy_state, dict):
+            summary = str(policy_state.get("summary", "")).strip()
+            if summary:
+                return summary
+        return "Screen-awareness policy follows the backend posture rather than a decorative local toggle."
+
+    def _screen_awareness_trace_label(self) -> str:
+        state = self._screen_awareness_state()
+        hardening = state.get("hardening")
+        if isinstance(hardening, dict) and bool(hardening.get("enabled")):
+            count = int(hardening.get("recent_trace_count", 0) or 0)
+            return f"{count} recent trace{'s' if count != 1 else ''}" if count else "Phase 12 ready"
+        return "Telemetry only"
+
+    def _screen_awareness_trace_detail(self) -> str:
+        state = self._screen_awareness_state()
+        hardening = state.get("hardening")
+        if isinstance(hardening, dict):
+            latest = hardening.get("latest_trace")
+            if isinstance(latest, dict):
+                slowest_stage = str(latest.get("slowest_stage", "")).replace("_", " ").strip()
+                total_ms = latest.get("total_duration_ms")
+                audit_passed = bool(latest.get("audit_passed", True))
+                if slowest_stage and total_ms is not None:
+                    return (
+                        f"Latest screen trace took {total_ms} ms; slowest stage was {slowest_stage}. "
+                        f"{'Audit passed.' if audit_passed else 'Audit flagged follow-up.'}"
+                    )
+            if bool(hardening.get("enabled")):
+                return "Truthfulness audits, stage timing, and bounded traces are available when the screen-awareness stack runs."
+        return "Telemetry is available, but Phase 12 hardening traces are not active in the current posture."
+
+    def _screen_awareness_guard_label(self) -> str:
+        state = self._screen_awareness_state()
+        policy_state = state.get("policy_state")
+        if isinstance(policy_state, dict) and bool(policy_state.get("restricted_domain_guarded", True)):
+            return "Restricted domains guarded"
+        return "Guard state unknown"
+
+    def _screen_awareness_guard_detail(self) -> str:
+        state = self._screen_awareness_state()
+        policy_state = state.get("policy_state")
+        if isinstance(policy_state, dict):
+            confirmation_required = bool(policy_state.get("confirmation_required", False))
+            if confirmation_required:
+                return "Direct actions still require confirmation and protected surfaces remain visible in the policy state."
+        return "Restricted-domain gating remains backend-owned so Helm mirrors real behavior instead of promising more than the runtime allows."
+
     def _tools_detail(self, tool_state: dict[str, Any]) -> str:
         if not isinstance(tool_state, dict):
             return "No enabled tools"
@@ -3156,12 +3365,12 @@ class UiBridge(QtCore.QObject):
         entries = [
             {
                 "title": str(event.get("message", "Recent signal")),
-                "eyebrow": str(event.get("source", "core")).title(),
+                "eyebrow": str(event.get("subsystem", event.get("source", "core"))).replace("_", " ").title(),
                 "meta": self._short_time(str(event.get("created_at") or event.get("timestamp", ""))),
                 "detail": self._event_detail(event),
                 "severity": self._event_severity(event),
             }
-            for event in self._events[-8:]
+            for event in self._recent_events(8)
         ]
         for job in self._jobs[:4]:
             status = str(job.get("status", "")).lower()
@@ -3320,6 +3529,16 @@ class UiBridge(QtCore.QObject):
                                 "secondary": self._shell_command_label(),
                                 "detail": self._shell_command_detail(),
                             },
+                            {
+                                "primary": "Screen Bearings",
+                                "secondary": self._screen_awareness_phase_label(),
+                                "detail": self._screen_awareness_policy_detail(),
+                            },
+                            {
+                                "primary": "Action Policy",
+                                "secondary": self._screen_awareness_policy_mode_label(),
+                                "detail": self._screen_awareness_guard_detail(),
+                            },
                         ],
                     ),
                     self._workspace_column(
@@ -3335,6 +3554,11 @@ class UiBridge(QtCore.QObject):
                                 "primary": "Close Behavior",
                                 "secondary": "Fade to tray" if self._hide_to_tray_on_close else "Exit window",
                                 "detail": "Quick controls stay in the tray while Helm carries the fuller posture.",
+                            },
+                            {
+                                "primary": "Traceability",
+                                "secondary": self._screen_awareness_trace_label(),
+                                "detail": self._screen_awareness_trace_detail(),
                             },
                         ],
                     ),
@@ -3353,6 +3577,9 @@ class UiBridge(QtCore.QObject):
                     "Control",
                     "Behavior and quick-setting direction.",
                     [
+                        {"primary": "Screen Bearings", "secondary": self._screen_awareness_phase_label(), "detail": self._screen_awareness_policy_detail()},
+                        {"primary": "Action Policy", "secondary": self._screen_awareness_policy_mode_label(), "detail": self._screen_awareness_guard_detail()},
+                        {"primary": "Traceability", "secondary": self._screen_awareness_trace_label(), "detail": self._screen_awareness_trace_detail()},
                         {"primary": "Ghost Shortcut", "secondary": self.config.ui.ghost_shortcut, "detail": "Summons Ghost capture from anywhere."},
                         {"primary": "Close Behavior", "secondary": "Fade to tray" if self._hide_to_tray_on_close else "Exit window", "detail": "Quick controls stay in the tray."},
                         {"primary": "Safety", "secondary": "Always gated", "detail": "No unrestricted action surfaces are added here."},
@@ -3466,10 +3693,10 @@ class UiBridge(QtCore.QObject):
             event_entries = [
                 {
                     "primary": str(event.get("message", "No recent signal.")),
-                    "secondary": str(event.get("level", "INFO")).title(),
+                    "secondary": str(event.get("severity", event.get("level", "INFO"))).replace("_", " ").title(),
                     "detail": self._short_time(str(event.get("created_at", ""))),
                 }
-                for event in self._events[:4]
+                for event in self._recent_events_newest_first(4)
             ] or [{"primary": "No fresh signal", "secondary": "Standby", "detail": "Watch remains calm until activity resumes."}]
             return [
                 self._workspace_column("Jobs", "Recent operational work.", job_entries),
@@ -3488,10 +3715,10 @@ class UiBridge(QtCore.QObject):
             event_entries = [
                 {
                     "primary": str(event.get("message", "No recent signal.")),
-                    "secondary": str(event.get("level", "INFO")).title(),
+                    "secondary": str(event.get("severity", event.get("level", "INFO"))).replace("_", " ").title(),
                     "detail": str(event.get("created_at", "")),
                 }
-                for event in self._events[:4]
+                for event in self._recent_events_newest_first(4)
             ] or [{"primary": "No recent events", "secondary": "Quiet sea", "detail": "Event telemetry will appear here as needed."}]
             return [
                 self._workspace_column("Live Signal", "Recent conversational and operational signal.", message_entries),
@@ -3555,10 +3782,10 @@ class UiBridge(QtCore.QObject):
         signal_entries = [
             {
                 "primary": str(event.get("message", "No recent signal.")),
-                "secondary": str(event.get("level", "INFO")).title(),
+                "secondary": str(event.get("severity", event.get("level", "INFO"))).replace("_", " ").title(),
                 "detail": self._short_time(str(event.get("created_at", ""))),
             }
-            for event in self._events[:3]
+            for event in self._recent_events_newest_first(3)
         ] or [{"primary": "Signal steady", "secondary": self.connectionLabel, "detail": self._status_line}]
         return [
             self._workspace_column("Active Thread", "The current exchange with Stormhelm.", message_entries),
@@ -3604,6 +3831,9 @@ class UiBridge(QtCore.QObject):
                     f"Read scope is {self._read_scope_label().lower()} and shell command access is {self._shell_command_label().lower()}."
                 ),
                 "entries": [
+                    {"primary": "Screen Bearings", "secondary": self._screen_awareness_phase_label(), "detail": self._screen_awareness_policy_detail()},
+                    {"primary": "Action Policy", "secondary": self._screen_awareness_policy_mode_label(), "detail": self._screen_awareness_guard_detail()},
+                    {"primary": "Traceability", "secondary": self._screen_awareness_trace_label(), "detail": self._screen_awareness_trace_detail()},
                     {"primary": "Ghost Shortcut", "secondary": self.config.ui.ghost_shortcut, "detail": "Summons Ghost text capture from anywhere."},
                     {"primary": "Tray Close", "secondary": "Fade to dormant" if self._hide_to_tray_on_close else "Close window", "detail": "Quick controls belong in the tray, not a full settings dashboard."},
                     {"primary": "Read Scope", "secondary": self._read_scope_label(), "detail": self._read_scope_detail()},
@@ -3679,7 +3909,14 @@ class UiBridge(QtCore.QObject):
 
         bearing_title = "Bearing"
         recent_context = "Standing watch."
-        if latest_message is not None:
+        if self._active_task and latest_message is None:
+            bearing_title = str(self._active_task.get("title", bearing_title))[:48]
+            recent_context = str(
+                self._active_task.get("whereLeftOff")
+                or self._active_task.get("latestSummary")
+                or recent_context
+            )[:96]
+        elif latest_message is not None:
             bearing_title = self._message_bearing_title(latest_message) or bearing_title
             recent_context = self._message_micro(latest_message)
         elif latest_note is not None:
@@ -4214,6 +4451,11 @@ class UiBridge(QtCore.QObject):
         return "steady"
 
     def _event_severity(self, event: dict[str, Any]) -> str:
+        explicit = str(event.get("severity", "")).strip().lower()
+        if explicit in {"warning", "attention", "steady"}:
+            return explicit
+        if explicit in {"error", "critical"}:
+            return "warning"
         payload = event.get("payload", {})
         if isinstance(payload, dict):
             severity = str(payload.get("severity", "")).strip().lower()
@@ -4310,8 +4552,8 @@ class UiBridge(QtCore.QObject):
         return f"{seconds}s"
 
     def _event_detail(self, event: dict[str, Any]) -> str:
-        level = str(event.get("level", "INFO")).strip().upper()
-        source = str(event.get("source", "core")).strip().lower()
+        level = str(event.get("level", event.get("severity", "INFO"))).strip().upper()
+        source = str(event.get("subsystem", event.get("source", "core"))).strip().lower()
         message = str(event.get("message", "")).strip().lower()
         payload = event.get("payload", {})
         if isinstance(payload, dict):
@@ -4337,6 +4579,38 @@ class UiBridge(QtCore.QObject):
         if level == "ERROR":
             return f"{source.title()} reported a failure."
         return f"{source.title()} reported a steady operational update."
+
+    def _recent_events(self, limit: int) -> list[dict[str, Any]]:
+        if limit <= 0:
+            return []
+        return [dict(event) for event in self._events[-limit:] if isinstance(event, dict)]
+
+    def _recent_events_newest_first(self, limit: int) -> list[dict[str, Any]]:
+        return list(reversed(self._recent_events(limit)))
+
+    def _latest_surface_event(self) -> dict[str, Any] | None:
+        for event in reversed(self._events):
+            if not isinstance(event, dict):
+                continue
+            visibility = str(event.get("visibility_scope", "")).strip().lower()
+            severity = str(event.get("severity", event.get("level", ""))).strip().lower()
+            if visibility != "internal_only" or severity in {"warning", "error", "critical"}:
+                return dict(event)
+        return dict(self._events[-1]) if self._events else None
+
+    def _event_stream_visibility_detail(self, event_stream: dict[str, Any]) -> str:
+        totals = event_stream.get("visibility_totals")
+        if not isinstance(totals, dict) or not totals:
+            return "No visibility buckets retained yet."
+        ordered = sorted(
+            (
+                (str(key).replace("_", " ").title(), int(value))
+                for key, value in totals.items()
+            ),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        return ", ".join(f"{label} {count}" for label, count in ordered[:3])
 
     def _parse_time(self, value: str) -> datetime | None:
         if not value:

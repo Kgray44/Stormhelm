@@ -29,9 +29,20 @@ class JobRecord:
     result: dict[str, Any] | None = None
     error: str | None = None
     cancel_requested: bool = False
+    task_id: str | None = None
+    task_step_id: str | None = None
 
     @classmethod
-    def queued(cls, job_id: str, tool_name: str, arguments: dict[str, Any], timeout_seconds: float) -> "JobRecord":
+    def queued(
+        cls,
+        job_id: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        timeout_seconds: float,
+        *,
+        task_id: str | None = None,
+        task_step_id: str | None = None,
+    ) -> "JobRecord":
         return cls(
             job_id=job_id,
             tool_name=tool_name,
@@ -39,6 +50,8 @@ class JobRecord:
             status=JobStatus.QUEUED,
             created_at=utc_now_iso(),
             timeout_seconds=timeout_seconds,
+            task_id=task_id,
+            task_step_id=task_step_id,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -54,5 +67,6 @@ class JobRecord:
             "result": self.result,
             "error": self.error,
             "cancel_requested": self.cancel_requested,
+            "task_id": self.task_id,
+            "task_step_id": self.task_step_id,
         }
-

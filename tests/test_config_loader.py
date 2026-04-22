@@ -97,10 +97,10 @@ def test_load_config_applies_hardware_telemetry_environment_overrides(temp_proje
     assert config.hardware_telemetry.hwinfo_executable_path == "C:/Tools/HWiNFO64.EXE"
 
 
-def test_load_config_defaults_screen_awareness_to_phase9_workflow_learning_flags(temp_project_root: Path) -> None:
+def test_load_config_defaults_screen_awareness_to_phase12_hardening_and_power_flags(temp_project_root: Path) -> None:
     config = load_config(project_root=temp_project_root, env={})
 
-    assert config.screen_awareness.phase == "phase9"
+    assert config.screen_awareness.phase == "phase12"
     assert config.screen_awareness.enabled is True
     assert config.screen_awareness.planner_routing_enabled is True
     assert config.screen_awareness.debug_events_enabled is True
@@ -115,6 +115,9 @@ def test_load_config_defaults_screen_awareness_to_phase9_workflow_learning_flags
     assert config.screen_awareness.adapters_enabled is True
     assert config.screen_awareness.problem_solving_enabled is True
     assert config.screen_awareness.workflow_learning_enabled is True
+    assert config.screen_awareness.brain_integration_enabled is True
+    assert config.screen_awareness.power_features_enabled is True
+    assert config.screen_awareness.capability_flags()["hardening_enabled"] is True
 
 
 def test_load_config_defaults_calculations_to_enabled_local_routing(temp_project_root: Path) -> None:
@@ -192,6 +195,8 @@ def test_load_config_applies_screen_awareness_environment_overrides(temp_project
             "STORMHELM_SCREEN_AWARENESS_MEMORY_ENABLED": "true",
             "STORMHELM_SCREEN_AWARENESS_PROBLEM_SOLVING_ENABLED": "false",
             "STORMHELM_SCREEN_AWARENESS_WORKFLOW_LEARNING_ENABLED": "false",
+            "STORMHELM_SCREEN_AWARENESS_BRAIN_INTEGRATION_ENABLED": "false",
+            "STORMHELM_SCREEN_AWARENESS_POWER_FEATURES_ENABLED": "false",
         },
     )
 
@@ -204,6 +209,8 @@ def test_load_config_applies_screen_awareness_environment_overrides(temp_project
     assert config.screen_awareness.memory_enabled is True
     assert config.screen_awareness.problem_solving_enabled is False
     assert config.screen_awareness.workflow_learning_enabled is False
+    assert config.screen_awareness.brain_integration_enabled is False
+    assert config.screen_awareness.power_features_enabled is False
 
 
 def test_load_config_defaults_discord_relay_to_enabled_baby_alias(temp_project_root: Path) -> None:

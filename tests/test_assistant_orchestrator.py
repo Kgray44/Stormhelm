@@ -1733,6 +1733,195 @@ def test_assistant_orchestrator_handles_phase9_workflow_learning_and_emits_workf
     assert screen_events[-1]["payload"]["telemetry"]["workflow_learning"]["requested"] is True
 
 
+def test_assistant_orchestrator_handles_phase10_brain_integration_and_emits_memory_debug_event(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase10"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    temp_config.screen_awareness.grounding_enabled = True
+    temp_config.screen_awareness.guidance_enabled = True
+    temp_config.screen_awareness.verification_enabled = True
+    temp_config.screen_awareness.action_enabled = True
+    temp_config.screen_awareness.memory_enabled = True
+    temp_config.screen_awareness.adapters_enabled = True
+    temp_config.screen_awareness.problem_solving_enabled = True
+    temp_config.screen_awareness.workflow_learning_enabled = True
+    temp_config.screen_awareness.brain_integration_enabled = True
+    temp_config.screen_awareness.action_policy_mode = "confirm_before_act"
+
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+    payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="you should remember that I prefer step-by-step guidance here",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context={
+            "workspace": {"workspaceId": "ws-phase10-event", "title": "Release Form"},
+            "module": "browser",
+            "section": "form",
+            "active_item": {
+                "itemId": "release-form",
+                "title": "Release Form",
+                "kind": "form",
+                "focused": True,
+            },
+            "opened_items": [
+                {
+                    "itemId": "button-continue",
+                    "title": "Continue",
+                    "kind": "button",
+                    "pane": "footer",
+                    "enabled": True,
+                }
+            ],
+        },
+        input_context={"selection": {}, "clipboard": {}},
+    )
+
+    planner_debug = _planner_debug(payload)
+    planner_obedience = _planner_obedience(payload)
+    screen_events = [event for event in assistant.events.recent(limit=75) if event.get("source") == "screen_awareness"]
+
+    assert payload["jobs"] == []
+    assert payload["actions"] == []
+    assert planner_debug["structured_query"]["query_shape"] == "screen_awareness_request"
+    assert planner_debug["execution_plan"]["plan_type"] == "screen_awareness_brain"
+    assert planner_debug["screen_awareness"]["disposition"] == "phase10_brain_integration"
+    assert planner_debug["screen_awareness"]["analysis_result"]["brain_integration_result"]["status"] == "preference_learned"
+    assert planner_debug["screen_awareness"]["telemetry"]["brain_integration"]["requested"] is True
+    assert planner_obedience["actual_result_mode"] == "summary_result"
+    assert planner_obedience["authority_enforced"] is True
+    assert "preference" in payload["assistant_message"]["content"].lower() or "remember" in payload["assistant_message"]["content"].lower()
+    assert screen_events
+    assert screen_events[-1]["payload"]["disposition"] == "phase10_brain_integration"
+    assert screen_events[-1]["payload"]["telemetry"]["brain_integration"]["requested"] is True
+
+
+def test_assistant_orchestrator_handles_phase11_power_features_and_emits_power_debug_event(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase11"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    temp_config.screen_awareness.grounding_enabled = True
+    temp_config.screen_awareness.guidance_enabled = True
+    temp_config.screen_awareness.verification_enabled = True
+    temp_config.screen_awareness.action_enabled = True
+    temp_config.screen_awareness.memory_enabled = True
+    temp_config.screen_awareness.adapters_enabled = True
+    temp_config.screen_awareness.problem_solving_enabled = True
+    temp_config.screen_awareness.workflow_learning_enabled = True
+    temp_config.screen_awareness.brain_integration_enabled = True
+    temp_config.screen_awareness.power_features_enabled = True
+    temp_config.screen_awareness.action_policy_mode = "confirm_before_act"
+
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+    payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="which display is that on",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context={
+            "workspace": {"workspaceId": "ws-phase11-event", "title": "Release Form"},
+            "module": "browser",
+            "section": "form",
+            "active_item": {
+                "itemId": "release-form",
+                "title": "Release Form",
+                "kind": "form",
+                "focused": True,
+            },
+        },
+        input_context={
+            "selection": {},
+            "clipboard": {},
+            "accessibility": {
+                "focused_label": "Continue",
+                "focused_role": "button",
+                "enabled": True,
+                "focus_path": ["Release Form", "Footer", "Continue"],
+                "keyboard_hint": "Press Tab until Continue, then Enter.",
+            },
+        },
+    )
+
+    planner_debug = _planner_debug(payload)
+    planner_obedience = _planner_obedience(payload)
+    screen_events = [event for event in assistant.events.recent(limit=75) if event.get("source") == "screen_awareness"]
+
+    assert payload["jobs"] == []
+    assert payload["actions"] == []
+    assert planner_debug["structured_query"]["query_shape"] == "screen_awareness_request"
+    assert planner_debug["execution_plan"]["plan_type"] == "screen_awareness_power"
+    assert planner_debug["screen_awareness"]["disposition"] == "phase11_power"
+    assert planner_debug["screen_awareness"]["telemetry"]["power_features"]["requested"] is True
+    assert planner_obedience["actual_result_mode"] == "summary_result"
+    assert planner_obedience["authority_enforced"] is True
+    assert "display" in payload["assistant_message"]["content"].lower() or "monitor" in payload["assistant_message"]["content"].lower()
+    assert screen_events
+    assert screen_events[-1]["payload"]["disposition"] == "phase11_power"
+    assert screen_events[-1]["payload"]["telemetry"]["power_features"]["requested"] is True
+
+
+def test_assistant_orchestrator_phase12_debug_event_exposes_trace_and_truthfulness_audit(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase12"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    temp_config.screen_awareness.grounding_enabled = True
+    temp_config.screen_awareness.guidance_enabled = True
+    temp_config.screen_awareness.verification_enabled = True
+    temp_config.screen_awareness.action_enabled = True
+    temp_config.screen_awareness.memory_enabled = True
+    temp_config.screen_awareness.adapters_enabled = True
+    temp_config.screen_awareness.problem_solving_enabled = True
+    temp_config.screen_awareness.workflow_learning_enabled = True
+    temp_config.screen_awareness.brain_integration_enabled = True
+    temp_config.screen_awareness.power_features_enabled = True
+    temp_config.screen_awareness.action_policy_mode = "confirm_before_act"
+
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+    payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="did anything change?",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context={
+            "workspace": {"workspaceId": "ws-phase12-event", "title": "Deploy Dashboard"},
+            "module": "browser",
+            "section": "dashboard",
+        },
+        input_context={
+            "selection": {
+                "kind": "text",
+                "value": "Deployment failed. Try again.",
+                "preview": "Deployment failed. Try again.",
+            },
+            "clipboard": {},
+        },
+    )
+
+    planner_debug = _planner_debug(payload)
+    screen_events = [event for event in assistant.events.recent(limit=75) if event.get("source") == "screen_awareness"]
+
+    assert planner_debug["screen_awareness"]["analysis_result"]["trace_id"]
+    assert planner_debug["screen_awareness"]["telemetry"]["trace"]["trace_id"]
+    assert planner_debug["screen_awareness"]["telemetry"]["truthfulness_audit"]["passed"] is True
+    assert planner_debug["screen_awareness"]["telemetry"]["policy"]["phase"] == "phase12"
+    assert planner_debug["screen_awareness"]["telemetry"]["recovery"]["status"] == "unresolved"
+    assert screen_events
+    assert screen_events[-1]["payload"]["telemetry"]["trace"]["trace_id"]
+    assert screen_events[-1]["payload"]["telemetry"]["truthfulness_audit"]["passed"] is True
+
+
 def test_assistant_orchestrator_routes_deck_open_url_without_provider(temp_config) -> None:
     assistant, jobs, executor, _ = _build_assistant(temp_config)
     async def runner() -> dict[str, object]:

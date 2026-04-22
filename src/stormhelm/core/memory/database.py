@@ -169,6 +169,117 @@ class SQLiteDatabase:
                     FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id),
                     FOREIGN KEY(note_id) REFERENCES notes(note_id)
                 );
+
+                CREATE TABLE IF NOT EXISTS tasks (
+                    task_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    workspace_id TEXT NOT NULL DEFAULT '',
+                    title TEXT NOT NULL,
+                    summary TEXT NOT NULL DEFAULT '',
+                    goal TEXT NOT NULL DEFAULT '',
+                    origin TEXT NOT NULL DEFAULT '',
+                    state TEXT NOT NULL,
+                    recovery_state TEXT NOT NULL DEFAULT '',
+                    latest_summary TEXT NOT NULL DEFAULT '',
+                    evidence_summary TEXT NOT NULL DEFAULT '',
+                    where_left_off TEXT NOT NULL DEFAULT '',
+                    active_step_id TEXT NOT NULL DEFAULT '',
+                    last_completed_step_id TEXT NOT NULL DEFAULT '',
+                    hooks_json TEXT NOT NULL DEFAULT '{}',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    started_at TEXT NOT NULL DEFAULT '',
+                    finished_at TEXT NOT NULL DEFAULT ''
+                );
+
+                CREATE TABLE IF NOT EXISTS task_steps (
+                    step_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    sequence_index INTEGER NOT NULL DEFAULT 0,
+                    title TEXT NOT NULL,
+                    detail TEXT NOT NULL DEFAULT '',
+                    tool_name TEXT NOT NULL DEFAULT '',
+                    tool_arguments_json TEXT NOT NULL DEFAULT '{}',
+                    state TEXT NOT NULL,
+                    summary TEXT NOT NULL DEFAULT '',
+                    started_at TEXT NOT NULL DEFAULT '',
+                    finished_at TEXT NOT NULL DEFAULT '',
+                    FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS task_dependencies (
+                    dependency_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    step_id TEXT NOT NULL,
+                    depends_on_step_id TEXT NOT NULL,
+                    dependency_kind TEXT NOT NULL DEFAULT 'finish_to_start',
+                    FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS task_blockers (
+                    blocker_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    step_id TEXT NOT NULL DEFAULT '',
+                    kind TEXT NOT NULL DEFAULT 'recovery',
+                    title TEXT NOT NULL,
+                    detail TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'open',
+                    recovery_hint TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    resolved_at TEXT NOT NULL DEFAULT '',
+                    FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS task_checkpoints (
+                    checkpoint_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    step_id TEXT NOT NULL DEFAULT '',
+                    label TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    summary TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    completed_at TEXT NOT NULL DEFAULT '',
+                    FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS task_artifacts (
+                    artifact_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    step_id TEXT NOT NULL DEFAULT '',
+                    kind TEXT NOT NULL DEFAULT 'file',
+                    label TEXT NOT NULL,
+                    locator TEXT NOT NULL,
+                    required_for_resume INTEGER NOT NULL DEFAULT 1,
+                    exists_state TEXT NOT NULL DEFAULT '',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS task_evidence (
+                    evidence_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    step_id TEXT NOT NULL DEFAULT '',
+                    kind TEXT NOT NULL DEFAULT 'summary',
+                    summary TEXT NOT NULL,
+                    source TEXT NOT NULL DEFAULT '',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS task_job_links (
+                    link_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    step_id TEXT NOT NULL,
+                    job_id TEXT NOT NULL UNIQUE,
+                    tool_name TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+                );
                 """
             )
             self._migrate_workspace_tables(connection)

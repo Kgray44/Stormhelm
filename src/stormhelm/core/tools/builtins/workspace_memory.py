@@ -290,6 +290,10 @@ class WorkspaceWhereLeftOffTool(BaseTool):
         return {"session_id": str(arguments.get("session_id", "default")).strip() or "default"}
 
     def execute_sync(self, context: ToolContext, arguments: dict[str, Any]) -> ToolResult:
+        if context.task_service is not None:
+            task_result = context.task_service.where_we_left_off(session_id=arguments["session_id"])
+            if isinstance(task_result, dict):
+                return ToolResult(success=True, summary=task_result["summary"], data=task_result)
         if context.workspace_service is None:
             return ToolResult(success=False, summary="Workspace memory is unavailable.", error="workspace_service_unavailable")
         result = context.workspace_service.where_we_left_off(session_id=arguments["session_id"])
@@ -315,6 +319,10 @@ class WorkspaceNextStepsTool(BaseTool):
         return {"session_id": str(arguments.get("session_id", "default")).strip() or "default"}
 
     def execute_sync(self, context: ToolContext, arguments: dict[str, Any]) -> ToolResult:
+        if context.task_service is not None:
+            task_result = context.task_service.next_steps(session_id=arguments["session_id"])
+            if isinstance(task_result, dict):
+                return ToolResult(success=True, summary=task_result["summary"], data=task_result)
         if context.workspace_service is None:
             return ToolResult(success=False, summary="Workspace memory is unavailable.", error="workspace_service_unavailable")
         result = context.workspace_service.next_steps(session_id=arguments["session_id"])

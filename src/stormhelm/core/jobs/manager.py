@@ -25,12 +25,14 @@ class JobManager:
         context_factory: ToolContextFactory,
         tool_runs: ToolRunRepository,
         events: EventBuffer,
+        observer: object | None = None,
     ) -> None:
         self.config = config
         self.executor = executor
         self.context_factory = context_factory
         self.tool_runs = tool_runs
         self.events = events
+        self.observer = observer
         self._queue: asyncio.Queue[JobRecord] = asyncio.Queue(maxsize=config.concurrency.queue_size)
         self._workers: list[asyncio.Task[None]] = []
         self._completion_futures: dict[str, asyncio.Future[JobRecord]] = {}
@@ -43,9 +45,14 @@ class JobManager:
         for index in range(self.config.concurrency.max_workers):
             self._workers.append(asyncio.create_task(self._worker_loop(index + 1)))
         self.events.publish(
-            level="INFO",
-            source="job_manager",
+            event_family="lifecycle",
+            event_type="lifecycle.job_manager.started",
+            severity="info",
+            subsystem="job_manager",
+            visibility_scope="systems_surface",
+            retention_class="operator_relevant",
             message=f"Started {len(self._workers)} job workers.",
+            payload={"worker_count": len(self._workers)},
         )
 
     async def stop(self) -> None:
@@ -74,16 +81,32 @@ class JobManager:
         arguments: dict[str, object],
         *,
         timeout_seconds: float | None = None,
+        task_id: str | None = None,
+        task_step_id: str | None = None,
     ) -> JobRecord:
         timeout = timeout_seconds or self.config.concurrency.default_job_timeout_seconds
-        job = JobRecord.queued(str(uuid4()), tool_name, dict(arguments), timeout)
+        job = JobRecord.queued(
+            str(uuid4()),
+            tool_name,
+            dict(arguments),
+            timeout,
+            task_id=task_id,
+            task_step_id=task_step_id,
+        )
         self._jobs[job.job_id] = job
         self._persist(job)
+        self._notify_observer("on_job_queued", job)
         self.events.publish(
-            level="INFO",
-            source="job_manager",
+            event_family="job",
+            event_type="job.queued",
+            severity="info",
+            subsystem="job_manager",
+            subject=job.job_id,
+            visibility_scope="watch_surface",
+            retention_class="operator_relevant",
+            provenance={"channel": "job_manager", "kind": "direct_system_fact"},
             message=f"Queued job {job.job_id} for tool '{tool_name}'.",
-            payload={"job_id": job.job_id, "tool_name": tool_name},
+            payload={"job_id": job.job_id, "tool_name": tool_name, "status": job.status.value},
         )
         loop = asyncio.get_running_loop()
         self._completion_futures[job.job_id] = loop.create_future()
@@ -157,11 +180,18 @@ class JobManager:
         job.started_at = utc_now_iso()
         job.status = JobStatus.RUNNING
         self._persist(job)
+        self._notify_observer("on_job_started", job)
         self.events.publish(
-            level="INFO",
-            source="job_manager",
+            event_family="job",
+            event_type="job.started",
+            severity="info",
+            subsystem="job_manager",
+            subject=job.job_id,
+            visibility_scope="watch_surface",
+            retention_class="operator_relevant",
+            provenance={"channel": "job_manager", "kind": "direct_system_fact"},
             message=f"Worker {worker_index} started job {job.job_id}.",
-            payload={"job_id": job.job_id, "tool_name": job.tool_name},
+            payload={"job_id": job.job_id, "tool_name": job.tool_name, "worker_index": worker_index, "status": job.status.value},
         )
         try:
             result = await asyncio.wait_for(
@@ -188,9 +218,16 @@ class JobManager:
 
     def _finalize(self, job: JobRecord) -> None:
         self._persist(job)
+        self._notify_observer("on_job_finished", job)
         self.events.publish(
-            level="INFO" if job.status == JobStatus.COMPLETED else "WARNING",
-            source="job_manager",
+            event_family="job",
+            event_type=f"job.{job.status.value}",
+            severity="info" if job.status in {JobStatus.COMPLETED, JobStatus.CANCELLED} else "warning",
+            subsystem="job_manager",
+            subject=job.job_id,
+            visibility_scope="watch_surface",
+            retention_class="operator_relevant",
+            provenance={"channel": "job_manager", "kind": "direct_system_fact"},
             message=f"Job {job.job_id} finished with status '{job.status.value}'.",
             payload={
                 "job_id": job.job_id,
@@ -211,6 +248,7 @@ class JobManager:
             return
         job.result = dict(payload)
         self._persist(job)
+        self._notify_observer("on_job_progress", job, dict(payload))
 
     def _persist(self, job: JobRecord) -> None:
         self.tool_runs.upsert_run(
@@ -234,7 +272,17 @@ class JobManager:
         ]
         if len(finished_jobs) <= retention_limit:
             return
-
         removable = sorted(finished_jobs, key=lambda item: item.finished_at or item.created_at)
         for job in removable[: len(finished_jobs) - retention_limit]:
             self._jobs.pop(job.job_id, None)
+
+    def _notify_observer(self, method_name: str, *args: object) -> None:
+        if self.observer is None:
+            return
+        callback = getattr(self.observer, method_name, None)
+        if not callable(callback):
+            return
+        try:
+            callback(*args)
+        except Exception:
+            return

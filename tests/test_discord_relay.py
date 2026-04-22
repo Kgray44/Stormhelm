@@ -91,6 +91,20 @@ class FakeClipboardBridge:
 
 
 @dataclass(slots=True)
+class FailingClipboardBridge:
+    failure_reason: str = "clipboard_lock_failed"
+    attempts: list[tuple[str, object]] = field(default_factory=list)
+
+    def set_text(self, value: str) -> None:
+        self.attempts.append(("text", value))
+        raise RuntimeError(self.failure_reason)
+
+    def set_file_paths(self, paths: list[str]) -> None:
+        self.attempts.append(("files", list(paths)))
+        raise RuntimeError(self.failure_reason)
+
+
+@dataclass(slots=True)
 class FakeDriver:
     actions: list[tuple[str, object]] = field(default_factory=list)
 
@@ -306,6 +320,69 @@ def test_discord_relay_uses_screen_disambiguation_only_to_break_payload_tie(temp
     assert response.preview is not None
     assert response.preview.payload.kind == DiscordPayloadKind.PAGE_LINK
     assert response.preview.screen_awareness_used is True
+
+
+def test_discord_relay_rejects_stale_recent_entity_for_generic_this_request(temp_config) -> None:
+    service, _ = _build_service(temp_config)
+
+    response = service.handle_request(
+        session_id="default",
+        operator_text="send this to Baby",
+        surface_mode="ghost",
+        active_module="chartroom",
+        active_context={
+            "selection": {},
+            "clipboard": {},
+            "recent_entities": [
+                {
+                    "title": "Yesterday page",
+                    "url": "https://example.com/yesterday",
+                }
+            ],
+        },
+        workspace_context={"active_item": {}},
+        request_slots={
+            "destination_alias": "Baby",
+            "payload_hint": "contextual",
+            "request_stage": "preview",
+        },
+    )
+
+    assert response.state == DiscordDispatchState.UNRESOLVED
+    assert response.preview is None
+    assert "current" in response.assistant_response.lower()
+    assert "stale" in response.assistant_response.lower()
+
+
+def test_discord_relay_preview_exposes_payload_source_in_preview_and_debug_state(temp_config) -> None:
+    service, _ = _build_service(temp_config)
+
+    response = service.handle_request(
+        session_id="default",
+        operator_text="send this page to Baby",
+        surface_mode="ghost",
+        active_module="chartroom",
+        active_context={"selection": {}, "clipboard": {}},
+        workspace_context={
+            "module": "browser",
+            "active_item": {
+                "title": "Stormhelm Relay Prompt",
+                "url": "https://example.com/relay",
+                "kind": "browser-tab",
+            }
+        },
+        request_slots={
+            "destination_alias": "Baby",
+            "payload_hint": "page_link",
+            "request_stage": "preview",
+        },
+    )
+
+    assert response.preview is not None
+    assert "source:" in response.assistant_response.lower()
+    assert "current page" in response.assistant_response.lower()
+    assert response.debug["payload_source"]["label"] == "current page"
+    assert response.debug["payload_source"]["strength"] == "strong_current"
 
 
 def test_discord_relay_blocks_secret_text_payload(temp_config) -> None:
@@ -860,3 +937,27 @@ def test_local_discord_adapter_returns_verified_when_strong_evidence_probe_confi
     assert attempt.verification_strength == "strong"
     assert any("Verified message bubble" in item for item in attempt.verification_evidence)
     assert ("submit_send", None) in driver.actions
+
+
+def test_local_discord_adapter_classifies_clipboard_lock_as_transport_failure(temp_config) -> None:
+    clipboard = FailingClipboardBridge()
+    driver = FakeDriver()
+    probe = FakeSystemProbe(
+        focused_window={"process_name": "discord", "window_title": "Baby | Discord"},
+    )
+    adapter = LocalDiscordClientAdapter(
+        config=temp_config.discord_relay,
+        system_probe=probe,
+        clipboard=clipboard,
+        driver=driver,
+        open_target=lambda target: None,
+    )
+
+    attempt = adapter.send(destination=_adapter_preview().destination, preview=_adapter_preview())
+
+    assert attempt.state == DiscordDispatchState.FAILED
+    assert attempt.failure_reason == "clipboard_transport_failed"
+    assert attempt.send_summary is not None
+    assert "clipboard access failed" in attempt.send_summary.lower()
+    assert attempt.debug["failure_stage"] == "payload_insertion"
+    assert attempt.debug["transport_failure_kind"] == "clipboard_lock_failed"

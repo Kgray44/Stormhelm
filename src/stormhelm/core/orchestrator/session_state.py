@@ -35,6 +35,16 @@ class ConversationStateStore:
     def set_active_workspace_id(self, session_id: str, workspace_id: str | None) -> None:
         self.preferences.set_preference(self._workspace_key(session_id), workspace_id or "")
 
+    def get_active_task_id(self, session_id: str) -> str | None:
+        state = self.preferences.get_all()
+        value = state.get(self._task_key(session_id))
+        if isinstance(value, str) and value.strip():
+            return value
+        return None
+
+    def set_active_task_id(self, session_id: str, task_id: str | None) -> None:
+        self.preferences.set_preference(self._task_key(session_id), task_id or "")
+
     def get_active_posture(self, session_id: str) -> dict[str, object]:
         state = self.preferences.get_all()
         value = state.get(self._posture_key(session_id))
@@ -235,6 +245,9 @@ class ConversationStateStore:
 
     def _workspace_key(self, session_id: str) -> str:
         return f"assistant.session.{session_id}.active_workspace_id"
+
+    def _task_key(self, session_id: str) -> str:
+        return f"assistant.session.{session_id}.active_task_id"
 
     def _posture_key(self, session_id: str) -> str:
         return f"assistant.session.{session_id}.active_posture"

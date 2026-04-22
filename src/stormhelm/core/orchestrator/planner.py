@@ -606,6 +606,8 @@ class DeterministicPlanner:
             ScreenRouteDisposition.PHASE6_CONTINUE,
             ScreenRouteDisposition.PHASE8_PROBLEM_SOLVE,
             ScreenRouteDisposition.PHASE9_WORKFLOW_REUSE,
+            ScreenRouteDisposition.PHASE10_BRAIN_INTEGRATION,
+            ScreenRouteDisposition.PHASE11_POWER,
         }:
             execution_type = (
                 "screen_awareness_act"
@@ -614,6 +616,10 @@ class DeterministicPlanner:
                 if screen_awareness_evaluation.disposition == ScreenRouteDisposition.PHASE6_CONTINUE
                 else "screen_awareness_workflow"
                 if screen_awareness_evaluation.disposition == ScreenRouteDisposition.PHASE9_WORKFLOW_REUSE
+                else "screen_awareness_brain"
+                if screen_awareness_evaluation.disposition == ScreenRouteDisposition.PHASE10_BRAIN_INTEGRATION
+                else "screen_awareness_power"
+                if screen_awareness_evaluation.disposition == ScreenRouteDisposition.PHASE11_POWER
                 else "screen_awareness_analyze"
             )
             output_mode = (
@@ -1893,7 +1899,7 @@ class DeterministicPlanner:
                 screen_debug = slots.get("screen_awareness") if isinstance(slots.get("screen_awareness"), dict) else {}
                 disposition = str(screen_debug.get("disposition") or "").strip()
                 requested_screen_action = str(structured_query.requested_action or "").strip()
-                if screen_config.phase in {"phase2", "phase3", "phase4", "phase5", "phase6", "phase7", "phase8", "phase9"} and screen_config.grounding_enabled and "screen_grounding" not in required_capabilities:
+                if screen_config.phase in {"phase2", "phase3", "phase4", "phase5", "phase6", "phase7", "phase8", "phase9", "phase10", "phase11", "phase12"} and screen_config.grounding_enabled and "screen_grounding" not in required_capabilities:
                     required_capabilities.append("screen_grounding")
                 if disposition == "phase3_guide" and screen_config.guidance_enabled and "screen_guidance" not in required_capabilities:
                     required_capabilities.append("screen_guidance")
@@ -1918,6 +1924,14 @@ class DeterministicPlanner:
                         required_capabilities.append("screen_verification")
                     if screen_config.action_enabled and "screen_action_execution" not in required_capabilities:
                         required_capabilities.append("screen_action_execution")
+                if disposition == "phase10_brain_integration":
+                    if screen_config.capability_flags().get("workflow_learning_enabled") and "screen_workflow_learning" not in required_capabilities:
+                        required_capabilities.append("screen_workflow_learning")
+                    if screen_config.capability_flags().get("brain_integration_enabled") and "screen_brain_integration" not in required_capabilities:
+                        required_capabilities.append("screen_brain_integration")
+                if disposition == "phase11_power":
+                    if screen_config.capability_flags().get("power_features_enabled") and "screen_power_features" not in required_capabilities:
+                        required_capabilities.append("screen_power_features")
                 if (
                     screen_config.capability_flags().get("problem_solving_enabled")
                     and (
@@ -1945,6 +1959,8 @@ class DeterministicPlanner:
                         "Phase 7 adapters contribute semantic app context only when those semantics are fresh, supported, and stronger than the generic fallback.",
                         "Phase 8 problem solving keeps observed evidence, inferred interpretation, and general knowledge explicitly separated.",
                         "Phase 9 workflow learning stores bounded, inspectable workflow records and reuses them only through the existing grounding, verification, and action gates.",
+                        "Phase 10 brain integration binds recent workflow and session evidence into bounded memory candidates without pretending long-term certainty.",
+                        "Phase 11 power features add multi-monitor, accessibility, overlays, translation, extraction, notifications, and workspace breadth without replacing the earlier layers.",
                     ],
                 )
             missing_capabilities.append("screen_observation")

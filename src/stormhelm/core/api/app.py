@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import StreamingResponse
 
 from stormhelm.config.models import AppConfig
 from stormhelm.core.api.schemas import ChatRequest, EventsResponse, JobsResponse, NoteCreateRequest, NotesResponse
@@ -83,9 +86,129 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         return {"job_id": job_id, "cancelled": True}
 
     @app.get("/events", response_model=EventsResponse)
-    def list_events(request: Request, since_id: int = 0, limit: int = 100) -> dict[str, object]:
+    def list_events(
+        request: Request,
+        since_id: int = 0,
+        cursor: int | None = None,
+        limit: int = 100,
+        session_id: str = "default",
+    ) -> dict[str, object]:
         current = _current_container(request)
-        return {"events": current.events.recent(since_id=since_id, limit=limit)}
+        replay = current.events.replay(
+            cursor=cursor if cursor is not None else since_id,
+            limit=limit,
+            session_id=session_id,
+        )
+        return {
+            "events": [event.to_dict() for event in replay.events],
+            "cursor": replay.next_cursor,
+            "earliest_cursor": replay.earliest_cursor,
+            "latest_cursor": replay.latest_cursor,
+            "gap_detected": replay.gap_detected,
+        }
+
+    def _encode_sse(event_name: str, payload: dict[str, object]) -> str:
+        return f"event: {event_name}\ndata: {json.dumps(payload, separators=(',', ':'), default=str)}\n\n"
+
+    @app.get("/events/stream")
+    async def stream_events(
+        request: Request,
+        session_id: str = "default",
+        cursor: int = 0,
+        replay_limit: int | None = None,
+        heartbeat_seconds: float | None = None,
+    ) -> StreamingResponse:
+        current = _current_container(request)
+        effective_replay_limit = max(1, int(replay_limit or current.config.event_stream.replay_limit))
+        effective_heartbeat_seconds = max(1.0, float(heartbeat_seconds or current.config.event_stream.heartbeat_seconds))
+
+        async def event_stream():
+            current_cursor = max(0, int(cursor))
+            connection = current.events.register_stream()
+            try:
+                replay = current.events.replay(
+                    cursor=current_cursor,
+                    limit=effective_replay_limit,
+                    session_id=session_id,
+                )
+                yield _encode_sse(
+                    "stormhelm.stream_state",
+                    {
+                        "phase": "connected",
+                        "source": "core",
+                        "session_id": session_id,
+                        "requested_cursor": current_cursor,
+                        "earliest_cursor": replay.earliest_cursor,
+                        "latest_cursor": replay.latest_cursor,
+                        "gap_detected": replay.gap_detected,
+                        "returned_count": replay.returned_count,
+                        "connections_current": connection["connections_current"],
+                    },
+                )
+                if replay.gap_detected:
+                    yield _encode_sse(
+                        "stormhelm.replay_gap",
+                        {
+                            "source": "core",
+                            "session_id": session_id,
+                            "requested_cursor": current_cursor,
+                            "earliest_cursor": replay.earliest_cursor,
+                            "latest_cursor": replay.latest_cursor,
+                            "reason": "cursor_outside_retention_window",
+                        },
+                    )
+                for event in replay.events:
+                    current_cursor = event.cursor
+                    yield _encode_sse("stormhelm.event", event.to_dict())
+
+                while True:
+                    if await request.is_disconnected():
+                        break
+                    next_event = await asyncio.to_thread(
+                        current.events.wait_for_next_event,
+                        cursor=current_cursor,
+                        timeout=effective_heartbeat_seconds,
+                        session_id=session_id,
+                    )
+                    if next_event is None:
+                        state = current.events.state_snapshot()
+                        yield _encode_sse(
+                            "stormhelm.stream_state",
+                            {
+                                "phase": "heartbeat",
+                                "source": "core",
+                                "session_id": session_id,
+                                "current_cursor": current_cursor,
+                                "latest_cursor": state["latest_cursor"],
+                                "connections_current": state["connections_current"],
+                            },
+                        )
+                        continue
+
+                    replay = current.events.replay(
+                        cursor=current_cursor,
+                        limit=effective_replay_limit,
+                        session_id=session_id,
+                    )
+                    if replay.gap_detected:
+                        yield _encode_sse(
+                            "stormhelm.replay_gap",
+                            {
+                                "source": "core",
+                                "session_id": session_id,
+                                "requested_cursor": current_cursor,
+                                "earliest_cursor": replay.earliest_cursor,
+                                "latest_cursor": replay.latest_cursor,
+                                "reason": "cursor_outside_retention_window",
+                            },
+                        )
+                    for event in replay.events:
+                        current_cursor = event.cursor
+                        yield _encode_sse("stormhelm.event", event.to_dict())
+            finally:
+                current.events.unregister_stream()
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
 
     @app.get("/notes", response_model=NotesResponse)
     def list_notes(request: Request, limit: int = 50) -> dict[str, object]:
@@ -141,6 +264,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "active_workspace": current.assistant.workspace_service.active_workspace_summary(session_id),
             "active_request_state": current.assistant.session_state.get_active_request_state(session_id),
             "recent_context_resolutions": current.assistant.session_state.get_recent_context_resolutions(session_id),
+            "active_task": current.task_service.active_task_summary(session_id),
         }
 
     return app

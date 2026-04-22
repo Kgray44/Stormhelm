@@ -88,6 +88,21 @@ class NativeContextObservationSource:
             for item in (window_status.get("monitors") or [])
             if isinstance(item, dict)
         ]
+        windows = [
+            dict(item)
+            for item in (window_status.get("windows") or [])
+            if isinstance(item, dict)
+        ]
+        notifications = [
+            dict(item)
+            for item in (window_status.get("notifications") or [])
+            if isinstance(item, dict)
+        ]
+        accessibility_snapshot = (
+            dict(active_context.get("accessibility") or {})
+            if isinstance(active_context.get("accessibility"), dict)
+            else {}
+        )
         monitor_index = int(focused_window.get("monitor_index") or 0)
         monitor_metadata = next((item for item in monitors if int(item.get("index") or 0) == monitor_index), {})
 
@@ -123,6 +138,9 @@ class NativeContextObservationSource:
         if clipboard_text:
             source_types_used.append(ScreenSourceType.CLIPBOARD)
             quality_notes.append("Clipboard text provided supporting context.")
+        if accessibility_snapshot:
+            source_types_used.append(ScreenSourceType.ACCESSIBILITY)
+            quality_notes.append("Accessibility focus metadata provided native control context.")
         if _has_workspace_signal(workspace_snapshot):
             source_types_used.append(ScreenSourceType.WORKSPACE_CONTEXT)
             quality_notes.append("Workspace context added native application context.")
@@ -141,12 +159,20 @@ class NativeContextObservationSource:
             or ""
         ).strip() or None
 
+        focus_metadata = dict(focused_window)
+        if accessibility_snapshot:
+            focus_metadata["accessibility"] = accessibility_snapshot
+
         return ScreenObservation(
             captured_at=datetime.now(timezone.utc).isoformat(),
             scope=ScreenObservationScope.ACTIVE_WINDOW,
             source_types_used=source_types_used,
             window_metadata={
                 "focused_window": focused_window,
+                "windows": windows,
+                "monitors": monitors,
+                "notifications": notifications,
+                "accessibility": accessibility_snapshot,
                 "surface_mode": surface_mode,
                 "active_module": active_module,
             },
@@ -158,8 +184,8 @@ class NativeContextObservationSource:
             quality_notes=quality_notes,
             warnings=warnings,
             selection_metadata=selection_descriptor,
-            focus_metadata=focused_window,
-            cursor_metadata={},
+            focus_metadata=focus_metadata,
+            cursor_metadata={"notifications": notifications[:4]},
             sensitivity=sensitivity,
         )
 
@@ -168,18 +194,35 @@ def has_direct_screen_signal(observation: ScreenObservation) -> bool:
     return bool(
         observation.focus_metadata
         or observation.selected_text
-        or observation.clipboard_text
         or _has_workspace_signal(observation.workspace_snapshot)
     )
 
 
-def best_visible_text(observation: ScreenObservation) -> str | None:
+def has_live_screen_signal(observation: ScreenObservation) -> bool:
+    return has_direct_screen_signal(observation)
+
+
+def has_clipboard_only_signal(observation: ScreenObservation) -> bool:
+    return bool(observation.clipboard_text) and not has_live_screen_signal(observation)
+
+
+def best_live_visible_text(observation: ScreenObservation) -> str | None:
     for candidate in (
         observation.selected_text,
-        observation.clipboard_text,
         str(observation.workspace_snapshot.get("active_item", {}).get("title") or "").strip() or None,
         str(observation.workspace_snapshot.get("active_item", {}).get("url") or "").strip() or None,
         str(observation.focus_metadata.get("window_title") or "").strip() or None,
+    ):
+        cleaned = _clean_text(candidate)
+        if cleaned:
+            return cleaned
+    return None
+
+
+def best_visible_text(observation: ScreenObservation) -> str | None:
+    for candidate in (
+        best_live_visible_text(observation),
+        observation.clipboard_text,
     ):
         cleaned = _clean_text(candidate)
         if cleaned:

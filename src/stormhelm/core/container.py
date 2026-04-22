@@ -37,6 +37,7 @@ from stormhelm.core.safety.policy import SafetyPolicy
 from stormhelm.core.screen_awareness import ScreenAwarenessSubsystem
 from stormhelm.core.screen_awareness import build_screen_awareness_subsystem
 from stormhelm.core.system.probe import SystemProbe
+from stormhelm.core.tasks import DurableTaskService, TaskRepository
 from stormhelm.core.tools.base import ToolContext
 from stormhelm.core.tools.builtins import register_builtin_tools
 from stormhelm.core.tools.executor import ToolExecutor
@@ -67,6 +68,7 @@ class CoreContainer:
     software_recovery: SoftwareRecoverySubsystem
     screen_awareness: ScreenAwarenessSubsystem
     discord_relay: DiscordRelaySubsystem
+    task_service: DurableTaskService
     network_monitor: NetworkMonitor | None = None
     runtime_bootstrap: RuntimeBootstrapResult | None = None
     operational_awareness: OperationalAwarenessService = field(default_factory=OperationalAwarenessService)
@@ -91,8 +93,12 @@ class CoreContainer:
         if self.network_monitor is not None:
             self.network_monitor.start()
         self.events.publish(
-            level="INFO",
-            source="core",
+            event_family="lifecycle",
+            event_type="lifecycle.core.started",
+            severity="info",
+            subsystem="core",
+            visibility_scope="systems_surface",
+            retention_class="bootstrap_assist",
             message="Stormhelm core started.",
             payload={
                 "data_dir": str(self.config.storage.data_dir),
@@ -103,14 +109,26 @@ class CoreContainer:
         )
         if self.runtime_bootstrap.first_run:
             self.events.publish(
-                level="INFO",
-                source="core",
+                event_family="lifecycle",
+                event_type="lifecycle.runtime.initialized",
+                severity="info",
+                subsystem="core",
+                visibility_scope="systems_surface",
+                retention_class="bootstrap_assist",
                 message="Initialized Stormhelm runtime directories for first run.",
                 payload=self.runtime_bootstrap.first_run_record,
             )
 
     async def stop(self) -> None:
-        self.events.publish(level="INFO", source="core", message="Stormhelm core shutting down.")
+        self.events.publish(
+            event_family="lifecycle",
+            event_type="lifecycle.core.stopping",
+            severity="info",
+            subsystem="core",
+            visibility_scope="systems_surface",
+            retention_class="bootstrap_assist",
+            message="Stormhelm core shutting down.",
+        )
         if self.network_monitor is not None:
             self.network_monitor.stop()
         await self.jobs.stop()
@@ -161,6 +179,8 @@ class CoreContainer:
             "provider_state": self._provider_state_snapshot(),
             "tool_state": self._tool_state_snapshot(),
             "watch_state": watch_state,
+            "active_task": self.task_service.active_task_summary("default"),
+            "event_stream": self.events.state_snapshot(),
             "first_run": bool(self.runtime_bootstrap and self.runtime_bootstrap.first_run),
         }
 
@@ -205,18 +225,22 @@ class CoreContainer:
         }
 
     def _watch_state_snapshot(self, jobs: list[dict[str, Any]]) -> dict[str, Any]:
-        return self.operational_awareness.build_watch_snapshot(
+        snapshot = self.operational_awareness.build_watch_snapshot(
             jobs=jobs,
             worker_capacity=self.config.concurrency.max_workers,
             default_timeout_seconds=self.config.concurrency.default_job_timeout_seconds,
         ).to_dict()
+        task_watch = self.task_service.watch_tasks("default")
+        if task_watch:
+            snapshot["tasks"] = task_watch
+        return snapshot
 
 
 def build_container(config: AppConfig | None = None) -> CoreContainer:
     app_config = config or load_config()
     database = SQLiteDatabase(app_config.storage.database_path)
     database.initialize()
-    events = EventBuffer()
+    events = EventBuffer(capacity=max(64, app_config.event_stream.retention_capacity))
     conversations = ConversationRepository(database)
     notes = NotesRepository(database)
     preferences = PreferencesRepository(database)
@@ -269,6 +293,11 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
         discord_relay_config=app_config.discord_relay,
     )
     workspace_repository = WorkspaceRepository(database)
+    task_service = DurableTaskService(
+        repository=TaskRepository(database),
+        session_state=session_state,
+        events=events,
+    )
     workspace_service = WorkspaceService(
         config=app_config,
         repository=workspace_repository,
@@ -292,9 +321,11 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
             safety_policy=safety,
             system_probe=system_probe,
             workspace_service=workspace_service,
+            task_service=task_service,
         ),
         tool_runs=tool_runs,
         events=events,
+        observer=task_service,
     )
     assistant = AssistantOrchestrator(
         config=app_config,
@@ -307,6 +338,7 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
         planner=planner,
         persona=persona,
         workspace_service=workspace_service,
+        task_service=task_service,
         provider=provider,
         calculations=calculations,
         software_control=software_control,
@@ -333,5 +365,6 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
         software_recovery=software_recovery,
         screen_awareness=screen_awareness,
         discord_relay=discord_relay,
+        task_service=task_service,
         network_monitor=network_monitor,
     )

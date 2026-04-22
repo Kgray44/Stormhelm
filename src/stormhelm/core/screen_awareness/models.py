@@ -71,6 +71,8 @@ class ScreenRouteDisposition(StrEnum):
     PHASE6_CONTINUE = "phase6_continue"
     PHASE8_PROBLEM_SOLVE = "phase8_problem_solve"
     PHASE9_WORKFLOW_REUSE = "phase9_workflow_reuse"
+    PHASE10_BRAIN_INTEGRATION = "phase10_brain_integration"
+    PHASE11_POWER = "phase11_power"
     PHASE0_SCAFFOLD = "phase0_scaffold"
 
 
@@ -92,6 +94,7 @@ class ScreenIntentType(StrEnum):
     EXECUTE_UI_ACTION = "execute_ui_action"
     CONTINUE_WORKFLOW = "continue_workflow"
     LEARN_WORKFLOW_REUSE = "learn_workflow_reuse"
+    BRAIN_INTEGRATION = "brain_integration"
 
 
 class GroundingRequestType(StrEnum):
@@ -266,6 +269,60 @@ class WorkflowLearningStatus(StrEnum):
     REUSE_ATTEMPTED_UNVERIFIED = "reuse_attempted_unverified"
 
 
+class BrainIntegrationRequestType(StrEnum):
+    AUTO_INTEGRATE = "auto_integrate"
+    REMEMBER_WORKFLOW = "remember_workflow"
+    LEARN_PREFERENCE = "learn_preference"
+    LEARN_ENVIRONMENT_QUIRK = "learn_environment_quirk"
+    RECALL_CONTEXT = "recall_context"
+    ENABLE_PROACTIVE_CONTINUITY = "enable_proactive_continuity"
+
+
+class BrainIntegrationStatus(StrEnum):
+    SESSION_INTEGRATED = "session_integrated"
+    CANDIDATE_CREATED = "candidate_created"
+    PREFERENCE_LEARNED = "preference_learned"
+    QUIRK_LEARNED = "quirk_learned"
+    CONTEXT_RECALLED = "context_recalled"
+    PROACTIVE_SUGGESTION = "proactive_suggestion"
+    DEFERRED = "deferred"
+    REFUSED = "refused"
+
+
+class MemoryBindingTarget(StrEnum):
+    WORKING_MEMORY = "working_memory"
+    SESSION_MEMORY = "session_memory"
+    LONG_TERM_CANDIDATE = "long_term_candidate"
+    LEARNED_PREFERENCE = "learned_preference"
+    ENVIRONMENT_QUIRK = "environment_quirk"
+    DEFERRED = "deferred"
+    REFUSED = "refused"
+
+
+class PowerFeatureRequestType(StrEnum):
+    AUTO = "auto"
+    MONITOR_QUERY = "monitor_query"
+    ACCESSIBILITY_QUERY = "accessibility_query"
+    OVERLAY_REQUEST = "overlay_request"
+    TRANSLATION_REQUEST = "translation_request"
+    ENTITY_QUERY = "entity_query"
+    NOTIFICATION_QUERY = "notification_query"
+    WORKSPACE_MAP_QUERY = "workspace_map_query"
+
+
+class OverlayAnchorPrecision(StrEnum):
+    GROUNDED = "grounded"
+    CANDIDATE = "candidate"
+    APPROXIMATE = "approximate"
+
+
+class NotificationSeverity(StrEnum):
+    INFO = "info"
+    WARNING = "warning"
+    ERROR = "error"
+    CRITICAL = "critical"
+
+
 class AppAdapterId(StrEnum):
     BROWSER = "browser"
     FILE_EXPLORER = "file_explorer"
@@ -334,6 +391,19 @@ class ProblemAnswerStatus(StrEnum):
     REFUSED = "refused"
 
 
+class ScreenAuditSeverity(StrEnum):
+    INFO = "info"
+    WARNING = "warning"
+    ERROR = "error"
+
+
+class ScreenRecoveryStatus(StrEnum):
+    STEADY = "steady"
+    RECOVERED = "recovered"
+    PARTIALLY_RECOVERED = "partially_recovered"
+    UNRESOLVED = "unresolved"
+
+
 def confidence_level_for_score(score: float) -> ScreenConfidenceLevel:
     if score <= 0.0:
         return ScreenConfidenceLevel.NONE
@@ -388,6 +458,92 @@ class ScreenTruthfulnessContract:
             "unverified_change_behavior": self.unverified_change_behavior,
             "action_boundary": self.action_boundary,
         }
+
+
+@dataclass(slots=True)
+class ScreenStageTiming:
+    stage: str
+    duration_ms: float
+    status: str = "completed"
+    note: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class ScreenLatencyTrace:
+    trace_id: str
+    total_duration_ms: float = 0.0
+    stage_timings: list[ScreenStageTiming] = field(default_factory=list)
+    slowest_stage: str | None = None
+    notes: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class ScreenAuditFinding:
+    code: str
+    severity: ScreenAuditSeverity
+    message: str
+    evidence: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class ScreenTruthfulnessAudit:
+    passed: bool = True
+    findings: list[ScreenAuditFinding] = field(default_factory=list)
+    summary: str = "No truthfulness issues detected."
+
+    @property
+    def error_count(self) -> int:
+        return sum(1 for finding in self.findings if finding.severity == ScreenAuditSeverity.ERROR)
+
+    @property
+    def warning_count(self) -> int:
+        return sum(1 for finding in self.findings if finding.severity == ScreenAuditSeverity.WARNING)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = _serialize(self)
+        payload["error_count"] = self.error_count
+        payload["warning_count"] = self.warning_count
+        return payload
+
+
+@dataclass(slots=True)
+class ScreenPolicyState:
+    phase: str
+    feature_enabled: bool
+    planner_routing_enabled: bool
+    action_policy_mode: ActionPolicyMode = ActionPolicyMode.OBSERVE_ONLY
+    action_execution_enabled: bool = False
+    verification_enabled: bool = False
+    restricted_domain_guarded: bool = True
+    confirmation_required: bool = False
+    debug_events_enabled: bool = False
+    summary: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class ScreenRecoveryState:
+    status: ScreenRecoveryStatus = ScreenRecoveryStatus.STEADY
+    trigger_conditions: list[str] = field(default_factory=list)
+    recovered_via: list[str] = field(default_factory=list)
+    unresolved_conditions: list[str] = field(default_factory=list)
+    retry_behavior: str | None = None
+    handoff_required: bool = False
+    summary: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
 
 
 @dataclass(slots=True)
@@ -450,6 +606,13 @@ class CurrentScreenContext:
     ephemeral_context_id: str | None = None
     adapter_resolution: AppAdapterResolution | None = None
     semantic_targets: list[AppSemanticTarget] = field(default_factory=list)
+    monitor_topology: MonitorTopology | None = None
+    workspace_map: WorkspaceMap | None = None
+    accessibility_summary: AccessibilitySummary | None = None
+    focus_context: FocusContext | None = None
+    visible_translations: list[VisibleTranslation] = field(default_factory=list)
+    extracted_entity_set: ExtractedEntitySet | None = None
+    notification_events: list[NotificationEvent] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return _serialize(self)
@@ -1739,6 +1902,489 @@ class WorkflowLearningResult:
 
 
 @dataclass(slots=True)
+class TaskGraphNode:
+    node_id: str
+    label: str
+    node_type: str
+    status: str
+    last_seen_at: str
+    blocker_summaries: list[str] = field(default_factory=list)
+    verified_outcomes: list[str] = field(default_factory=list)
+    resumable_next_step: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class TaskGraphLink:
+    link_id: str
+    from_node_id: str
+    to_node_id: str
+    relation: str
+    summary: str
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No task-graph link confidence is available.",
+        )
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class TaskGraph:
+    graph_id: str
+    task_label: str
+    session_id: str
+    current_node_id: str | None = None
+    nodes: list[TaskGraphNode] = field(default_factory=list)
+    links: list[TaskGraphLink] = field(default_factory=list)
+    active: bool = True
+    last_updated_at: str = ""
+    freshness_seconds: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class SessionMemoryRecord:
+    record_id: str
+    category: str
+    summary: str
+    task_graph_id: str | None
+    created_at: str
+    provenance_kind: str
+    evidence_count: int = 1
+    freshness_seconds: float | None = None
+    sensitive: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class LongTermMemoryCandidate:
+    candidate_id: str
+    category: str
+    summary: str
+    source_task_graph_id: str | None
+    evidence_count: int
+    usefulness_score: float
+    sensitivity: ScreenSensitivityLevel
+    created_at: str
+    freshness_seconds: float | None = None
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No long-term memory candidate confidence is available.",
+        )
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class LongTermMemoryBindingDecision:
+    target_layer: MemoryBindingTarget
+    reason: str
+    explicit_request: bool = False
+    privacy_blocked: bool = False
+    freshness_blocked: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class LearnedPreference:
+    preference_key: str
+    value: str
+    scope: str
+    evidence_count: int
+    learned_at: str
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No learned-preference confidence is available.",
+        )
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class EnvironmentQuirk:
+    quirk_id: str
+    summary: str
+    scope: str
+    evidence_count: int
+    learned_at: str
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No environment-quirk confidence is available.",
+        )
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class ProactiveContinuitySuggestion:
+    suggestion_id: str
+    summary: str
+    basis_summary: str
+    task_graph_id: str | None
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No proactive-continuity confidence is available.",
+        )
+    )
+    suppressible: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class PlannerBrainIntegrationResult:
+    resolved: bool
+    status: BrainIntegrationStatus
+    task_graph_id: str | None = None
+    binding_target: MemoryBindingTarget | None = None
+    long_term_candidate_id: str | None = None
+    preference_key: str | None = None
+    environment_quirk_id: str | None = None
+    proactive_suggestion_present: bool = False
+    explanation_summary: str = ""
+    provenance_channels: list[GroundingEvidenceChannel] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class BrainIntegrationResult:
+    request_type: BrainIntegrationRequestType
+    status: BrainIntegrationStatus
+    task_graph: TaskGraph | None = None
+    session_memory_entries: list[SessionMemoryRecord] = field(default_factory=list)
+    long_term_candidate: LongTermMemoryCandidate | None = None
+    binding_decision: LongTermMemoryBindingDecision | None = None
+    learned_preference: LearnedPreference | None = None
+    environment_quirk: EnvironmentQuirk | None = None
+    proactive_suggestion: ProactiveContinuitySuggestion | None = None
+    explanation_summary: str = ""
+    planner_result: PlannerBrainIntegrationResult | None = None
+    provenance: GroundingProvenance = field(default_factory=GroundingProvenance)
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No brain-integration result is available.",
+        )
+    )
+    reused_workflow_learning: bool = False
+    reused_continuity: bool = False
+    reused_verification: bool = False
+    reused_action: bool = False
+    reused_adapter: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class MonitorDescriptor:
+    monitor_id: str
+    label: str
+    is_primary: bool = False
+    bounds: dict[str, Any] = field(default_factory=dict)
+    scale: float | None = None
+    relative_position: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class MonitorTopology:
+    monitors: list[MonitorDescriptor] = field(default_factory=list)
+    active_monitor_id: str | None = None
+    active_monitor_label: str | None = None
+    summary: str = ""
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No monitor-topology confidence is available.",
+        )
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class WorkspaceWindow:
+    window_id: str
+    title: str
+    app_identity: str | None = None
+    monitor_id: str | None = None
+    focused: bool = False
+    minimized: bool = False
+    modal_owner_id: str | None = None
+    bounds: dict[str, Any] = field(default_factory=dict)
+    task_relevance: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class WorkspaceMap:
+    windows: list[WorkspaceWindow] = field(default_factory=list)
+    active_window_id: str | None = None
+    summary: str = ""
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No workspace-map confidence is available.",
+        )
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class AccessibilitySummary:
+    focused_label: str | None = None
+    focused_role: str | None = None
+    enabled: bool | None = None
+    keyboard_hint: str | None = None
+    narration_summary: str | None = None
+    simplified_summary: str | None = None
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No accessibility-summary confidence is available.",
+        )
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class FocusContext:
+    focus_path: list[str] = field(default_factory=list)
+    control_label: str | None = None
+    control_role: str | None = None
+    enabled: bool | None = None
+    monitor_id: str | None = None
+    window_id: str | None = None
+    keyboard_traversal: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class OverlayAnchor:
+    monitor_id: str | None = None
+    window_id: str | None = None
+    target_candidate_id: str | None = None
+    bounds: dict[str, Any] = field(default_factory=dict)
+    precision: OverlayAnchorPrecision = OverlayAnchorPrecision.APPROXIMATE
+    provenance_note: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class OverlayInstruction:
+    overlay_id: str
+    kind: str
+    label: str
+    anchor: OverlayAnchor
+    numbered_step: int | None = None
+    expires_after_seconds: float | None = None
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No overlay-instruction confidence is available.",
+        )
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class VisibleTranslation:
+    source_text: str
+    translated_text: str
+    source_language: str
+    target_language: str
+    role_context: str | None = None
+    direct_translation: bool = True
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No translation confidence is available.",
+        )
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class ExtractedEntity:
+    entity_id: str
+    entity_type: str
+    raw_value: str
+    normalized_value: str | None = None
+    source_text: str | None = None
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No extracted-entity confidence is available.",
+        )
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class ExtractedEntitySet:
+    entities: list[ExtractedEntity] = field(default_factory=list)
+    summary: str = ""
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No extracted-entity-set confidence is available.",
+        )
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class NotificationEvent:
+    notification_id: str
+    title: str
+    body: str = ""
+    app_identity: str | None = None
+    severity: NotificationSeverity = NotificationSeverity.INFO
+    blocker: bool = False
+    passive: bool = True
+    monitor_id: str | None = None
+    kind: str | None = None
+    observed_at: str = ""
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No notification-event confidence is available.",
+        )
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class CrossMonitorTargetContext:
+    target_candidate_id: str | None = None
+    active_monitor_id: str | None = None
+    target_monitor_id: str | None = None
+    summary: str = ""
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No cross-monitor target confidence is available.",
+        )
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class PlannerPowerFeaturesResult:
+    resolved: bool
+    request_type: PowerFeatureRequestType
+    monitor_count: int = 0
+    workspace_window_count: int = 0
+    translation_count: int = 0
+    entity_count: int = 0
+    notification_count: int = 0
+    overlay_instruction_count: int = 0
+    explanation_summary: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class PowerFeaturesResult:
+    request_type: PowerFeatureRequestType
+    monitor_topology: MonitorTopology | None = None
+    workspace_map: WorkspaceMap | None = None
+    accessibility_summary: AccessibilitySummary | None = None
+    focus_context: FocusContext | None = None
+    overlay_instructions: list[OverlayInstruction] = field(default_factory=list)
+    translations: list[VisibleTranslation] = field(default_factory=list)
+    extracted_entities: ExtractedEntitySet | None = None
+    notification_events: list[NotificationEvent] = field(default_factory=list)
+    cross_monitor_target_context: CrossMonitorTargetContext | None = None
+    explanation_summary: str = ""
+    planner_result: PlannerPowerFeaturesResult | None = None
+    provenance: GroundingProvenance = field(default_factory=GroundingProvenance)
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No power-features result is available.",
+        )
+    )
+    reused_grounding: bool = False
+    reused_navigation: bool = False
+    reused_verification: bool = False
+    reused_action: bool = False
+    reused_continuity: bool = False
+    reused_adapter: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
 class ScreenAnalysisResult:
     observation: ScreenObservation | None = None
     interpretation: ScreenInterpretation | None = None
@@ -1751,6 +2397,8 @@ class ScreenAnalysisResult:
     continuity_result: WorkflowContinuityResult | None = None
     problem_solving_result: ProblemSolvingResult | None = None
     workflow_learning_result: WorkflowLearningResult | None = None
+    brain_integration_result: BrainIntegrationResult | None = None
+    power_features_result: PowerFeaturesResult | None = None
     calculation_activity: ScreenCalculationActivity | None = None
     limitations: list[ScreenLimitation] = field(default_factory=list)
     fallback_reason: str | None = None
@@ -1761,6 +2409,11 @@ class ScreenAnalysisResult:
             note="No live screen analysis is available.",
         )
     )
+    trace_id: str | None = None
+    latency_trace: ScreenLatencyTrace | None = None
+    truthfulness_audit: ScreenTruthfulnessAudit | None = None
+    policy_state: ScreenPolicyState | None = None
+    recovery_state: ScreenRecoveryState | None = None
     truthfulness_contract: ScreenTruthfulnessContract = field(default_factory=ScreenTruthfulnessContract)
     verification_state: ScreenTruthState = ScreenTruthState.UNVERIFIED
 

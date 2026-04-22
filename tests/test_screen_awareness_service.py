@@ -228,3 +228,83 @@ def test_screen_awareness_subsystem_returns_honest_fallback_when_observation_is_
     assert response.analysis.fallback_reason == "observation_unavailable"
     assert response.telemetry["observation"]["attempted"] is True
     assert "don't have a reliable screen bearing" in response.assistant_response.lower()
+
+
+def test_screen_awareness_clipboard_only_is_downgraded_to_hint_not_screen_truth(temp_config) -> None:
+    subsystem = build_screen_awareness_subsystem(
+        _phase1_screen_config(temp_config),
+        system_probe=FakeObservationProbe(focused_window=None, windows=[]),
+    )
+
+    response = subsystem.handle_request(
+        session_id="default",
+        operator_text="what am I looking at",
+        intent=ScreenIntentType.INSPECT_VISIBLE_STATE,
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context={},
+        active_context={
+            "selection": {},
+            "clipboard": {
+                "kind": "text",
+                "value": "SECRET TOKEN 123",
+                "preview": "SECRET TOKEN 123",
+            },
+        },
+    )
+
+    limitation_codes = {limitation.code for limitation in response.analysis.limitations}
+
+    assert ScreenLimitationCode.OBSERVATION_UNAVAILABLE in limitation_codes
+    assert "clipboard contains" in response.assistant_response.lower()
+    assert "can't confirm" in response.assistant_response.lower()
+    assert response.telemetry["observation"]["clipboard_only"] is True
+    assert response.telemetry["observation"]["live_signal_available"] is False
+
+
+def test_screen_awareness_current_window_outranks_conflicting_clipboard_for_screen_question(temp_config) -> None:
+    subsystem = build_screen_awareness_subsystem(
+        _phase1_screen_config(temp_config),
+        system_probe=FakeObservationProbe(
+            focused_window={
+                "process_name": "chrome",
+                "window_title": "Stormhelm Docs - Google Chrome",
+                "window_handle": 501,
+                "pid": 2001,
+                "monitor_index": 1,
+                "path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+                "is_focused": True,
+                "minimized": False,
+            }
+        ),
+    )
+
+    response = subsystem.handle_request(
+        session_id="default",
+        operator_text="what is on my screen",
+        intent=ScreenIntentType.INSPECT_VISIBLE_STATE,
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context={
+            "workspace": {"workspaceId": "ws-live-1", "title": "Stormhelm Docs"},
+            "active_item": {
+                "itemId": "page-1",
+                "title": "Stormhelm Docs",
+                "url": "https://example.com/stormhelm-docs",
+                "kind": "browser-tab",
+            },
+        },
+        active_context={
+            "selection": {},
+            "clipboard": {
+                "kind": "text",
+                "value": "stale copied text that is not the current page",
+                "preview": "stale copied text that is not the current page",
+            },
+        },
+    )
+
+    assert "stormhelm docs" in response.assistant_response.lower()
+    assert "clipboard context reads" not in response.assistant_response.lower()
+    assert response.telemetry["observation"]["clipboard_only"] is False
+    assert response.telemetry["observation"]["live_signal_available"] is True

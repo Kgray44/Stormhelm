@@ -23,6 +23,10 @@ class NoteCreateRequest(BaseModel):
 
 class EventsResponse(BaseModel):
     events: list[dict[str, Any]]
+    cursor: int | None = None
+    earliest_cursor: int | None = None
+    latest_cursor: int | None = None
+    gap_detected: bool = False
 
 
 class JobsResponse(BaseModel):

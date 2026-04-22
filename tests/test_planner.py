@@ -902,6 +902,122 @@ def test_planner_routes_phase9_workflow_reuse_request_when_enabled(temp_config) 
     assert decision.debug["screen_awareness"]["intent"] == "learn_workflow_reuse"
 
 
+def test_planner_routes_phase10_brain_integration_request_when_enabled(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase10"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    temp_config.screen_awareness.grounding_enabled = True
+    temp_config.screen_awareness.guidance_enabled = True
+    temp_config.screen_awareness.verification_enabled = True
+    temp_config.screen_awareness.action_enabled = True
+    temp_config.screen_awareness.memory_enabled = True
+    temp_config.screen_awareness.adapters_enabled = True
+    temp_config.screen_awareness.problem_solving_enabled = True
+    temp_config.screen_awareness.workflow_learning_enabled = True
+    temp_config.screen_awareness.brain_integration_enabled = True
+    planner = DeterministicPlanner(screen_awareness_config=temp_config.screen_awareness)
+
+    decision = planner.plan(
+        "remember this workflow for next time",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+        active_context={},
+    )
+
+    assert decision.request_type == "screen_awareness_response"
+    assert decision.execution_plan is not None
+    assert decision.execution_plan.plan_type == "screen_awareness_brain"
+    assert decision.response_mode == "summary_result"
+    assert decision.capability_plan is not None
+    assert "screen_brain_integration" in decision.capability_plan.required_capabilities
+    assert decision.debug["screen_awareness"]["disposition"] == "phase10_brain_integration"
+    assert decision.debug["screen_awareness"]["intent"] == "brain_integration"
+
+
+def test_planner_routes_phase11_power_request_when_enabled(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase11"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    temp_config.screen_awareness.grounding_enabled = True
+    temp_config.screen_awareness.guidance_enabled = True
+    temp_config.screen_awareness.verification_enabled = True
+    temp_config.screen_awareness.action_enabled = True
+    temp_config.screen_awareness.memory_enabled = True
+    temp_config.screen_awareness.adapters_enabled = True
+    temp_config.screen_awareness.problem_solving_enabled = True
+    temp_config.screen_awareness.workflow_learning_enabled = True
+    temp_config.screen_awareness.brain_integration_enabled = True
+    temp_config.screen_awareness.power_features_enabled = True
+    planner = DeterministicPlanner(screen_awareness_config=temp_config.screen_awareness)
+
+    decision = planner.plan(
+        "translate this installer prompt",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+        active_context={},
+    )
+
+    assert decision.request_type == "screen_awareness_response"
+    assert decision.execution_plan is not None
+    assert decision.execution_plan.plan_type == "screen_awareness_power"
+    assert decision.response_mode == "summary_result"
+    assert decision.capability_plan is not None
+    assert "screen_power_features" in decision.capability_plan.required_capabilities
+    assert decision.debug["screen_awareness"]["disposition"] == "phase11_power"
+
+
+def test_planner_routes_phase12_power_request_when_enabled(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase12"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    temp_config.screen_awareness.grounding_enabled = True
+    temp_config.screen_awareness.guidance_enabled = True
+    temp_config.screen_awareness.verification_enabled = True
+    temp_config.screen_awareness.action_enabled = True
+    temp_config.screen_awareness.memory_enabled = True
+    temp_config.screen_awareness.adapters_enabled = True
+    temp_config.screen_awareness.problem_solving_enabled = True
+    temp_config.screen_awareness.workflow_learning_enabled = True
+    temp_config.screen_awareness.brain_integration_enabled = True
+    temp_config.screen_awareness.power_features_enabled = True
+    planner = DeterministicPlanner(screen_awareness_config=temp_config.screen_awareness)
+
+    decision = planner.plan(
+        "translate this installer prompt",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+        active_context={},
+    )
+
+    assert decision.request_type == "screen_awareness_response"
+    assert decision.execution_plan is not None
+    assert decision.execution_plan.plan_type == "screen_awareness_power"
+    assert decision.capability_plan is not None
+    assert "screen_power_features" in decision.capability_plan.required_capabilities
+    assert decision.debug["screen_awareness"]["disposition"] == "phase11_power"
+
+
 def test_planner_preserves_phase4_verify_route_when_phase8_problem_solving_is_enabled(temp_config) -> None:
     temp_config.screen_awareness.enabled = True
     temp_config.screen_awareness.phase = "phase8"

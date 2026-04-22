@@ -12,7 +12,10 @@ from stormhelm.core.screen_awareness.models import ScreenAnalysisResult
 from stormhelm.core.screen_awareness.models import ScreenIntentType
 from stormhelm.core.screen_awareness.models import ScreenLimitationCode
 from stormhelm.core.screen_awareness.models import ScreenResponse
+from stormhelm.core.screen_awareness.observation import best_live_visible_text
 from stormhelm.core.screen_awareness.observation import best_visible_text
+from stormhelm.core.screen_awareness.observation import has_clipboard_only_signal
+from stormhelm.core.screen_awareness.observation import has_live_screen_signal
 
 def _preview(text: str | None, *, limit: int = 120) -> str:
     cleaned = " ".join(str(text or "").split()).strip()
@@ -267,6 +270,114 @@ def _workflow_learning_telemetry(analysis: ScreenAnalysisResult) -> dict[str, An
     }
 
 
+def _brain_integration_outcome_reason(analysis: ScreenAnalysisResult) -> str:
+    brain = analysis.brain_integration_result
+    if brain is None:
+        return "brain_integration_not_requested"
+    if brain.explanation_summary:
+        return brain.explanation_summary
+    return brain.status.value
+
+
+def _brain_integration_telemetry(analysis: ScreenAnalysisResult) -> dict[str, Any]:
+    brain = analysis.brain_integration_result
+    if brain is None:
+        return {
+            "requested": False,
+            "outcome": "not_requested",
+            "outcome_reason": "brain_integration_not_requested",
+            "task_graph_id": None,
+            "task_node_count": 0,
+            "task_link_count": 0,
+            "session_memory_count": 0,
+            "binding_target": None,
+            "long_term_candidate_id": None,
+            "preference_key": None,
+            "environment_quirk_id": None,
+            "environment_quirk_evidence_count": 0,
+            "proactive_suggestion_present": False,
+            "reused_workflow_learning": False,
+            "dominant_channel": None,
+            "provenance_channels": [],
+            "planner_result": None,
+        }
+    return {
+        "requested": True,
+        "outcome": brain.status.value,
+        "outcome_reason": _brain_integration_outcome_reason(analysis),
+        "task_graph_id": brain.task_graph.graph_id if brain.task_graph is not None else None,
+        "task_node_count": len(brain.task_graph.nodes) if brain.task_graph is not None else 0,
+        "task_link_count": len(brain.task_graph.links) if brain.task_graph is not None else 0,
+        "session_memory_count": len(brain.session_memory_entries),
+        "binding_target": brain.binding_decision.target_layer.value if brain.binding_decision is not None else None,
+        "long_term_candidate_id": brain.long_term_candidate.candidate_id if brain.long_term_candidate is not None else None,
+        "preference_key": brain.learned_preference.preference_key if brain.learned_preference is not None else None,
+        "environment_quirk_id": brain.environment_quirk.quirk_id if brain.environment_quirk is not None else None,
+        "environment_quirk_evidence_count": brain.environment_quirk.evidence_count if brain.environment_quirk is not None else 0,
+        "proactive_suggestion_present": brain.proactive_suggestion is not None,
+        "reused_workflow_learning": brain.reused_workflow_learning,
+        "dominant_channel": brain.provenance.dominant_channel.value if brain.provenance.dominant_channel is not None else None,
+        "provenance_channels": [channel.value for channel in brain.provenance.channels_used],
+        "planner_result": brain.planner_result.to_dict() if brain.planner_result is not None else None,
+    }
+
+
+def _power_features_outcome_reason(analysis: ScreenAnalysisResult) -> str:
+    power = analysis.power_features_result
+    if power is None:
+        return "power_features_not_requested"
+    return power.explanation_summary or power.request_type.value
+
+
+def _power_features_telemetry(analysis: ScreenAnalysisResult) -> dict[str, Any]:
+    power = analysis.power_features_result
+    if power is None:
+        return {
+            "requested": False,
+            "outcome": "not_requested",
+            "outcome_reason": "power_features_not_requested",
+            "request_type": None,
+            "monitor_count": 0,
+            "workspace_window_count": 0,
+            "translation_count": 0,
+            "entity_count": 0,
+            "notification_count": 0,
+            "blocker_notification_count": 0,
+            "overlay_instruction_count": 0,
+            "active_monitor_id": None,
+            "dominant_channel": None,
+            "provenance_channels": [],
+            "grounding_reused": False,
+            "navigation_reused": False,
+            "verification_reused": False,
+            "action_reused": False,
+            "adapter_reused": False,
+            "planner_result": None,
+        }
+    return {
+        "requested": True,
+        "outcome": "resolved",
+        "outcome_reason": _power_features_outcome_reason(analysis),
+        "request_type": power.request_type.value,
+        "monitor_count": len(power.monitor_topology.monitors) if power.monitor_topology is not None else 0,
+        "workspace_window_count": len(power.workspace_map.windows) if power.workspace_map is not None else 0,
+        "translation_count": len(power.translations),
+        "entity_count": len(power.extracted_entities.entities) if power.extracted_entities is not None else 0,
+        "notification_count": len(power.notification_events),
+        "blocker_notification_count": len([item for item in power.notification_events if item.blocker]),
+        "overlay_instruction_count": len(power.overlay_instructions),
+        "active_monitor_id": power.monitor_topology.active_monitor_id if power.monitor_topology is not None else None,
+        "dominant_channel": power.provenance.dominant_channel.value if power.provenance.dominant_channel is not None else None,
+        "provenance_channels": [channel.value for channel in power.provenance.channels_used],
+        "grounding_reused": power.reused_grounding,
+        "navigation_reused": power.reused_navigation,
+        "verification_reused": power.reused_verification,
+        "action_reused": power.reused_action,
+        "adapter_reused": power.reused_adapter,
+        "planner_result": power.planner_result.to_dict() if power.planner_result is not None else None,
+    }
+
+
 def _action_telemetry(analysis: ScreenAnalysisResult) -> dict[str, Any]:
     action = analysis.action_result
     if action is None:
@@ -418,12 +529,112 @@ class ScreenResponseComposer:
         grounding = analysis.grounding_result
 
         if ScreenLimitationCode.OBSERVATION_UNAVAILABLE in limitation_codes:
-            text = (
-                "I don't have a reliable screen bearing right now. "
-                "Observed: there was no focused window, selected text, or grounded workspace surface I could trust. "
-                "Inference: I can't safely describe the visible state from this signal."
-            )
+            clipboard_text = _preview(observation.clipboard_text) if observation is not None else ""
+            if observation is not None and has_clipboard_only_signal(observation) and clipboard_text:
+                text = (
+                    "I don't have a reliable screen bearing right now. "
+                    f"Observed: the clipboard contains {clipboard_text}, but there was no focused window, selected text, or grounded workspace surface I could trust as live screen evidence. "
+                    "Inference: I can't confirm that the clipboard matches what is on the screen."
+                )
+            else:
+                text = (
+                    "I don't have a reliable screen bearing right now. "
+                    "Observed: there was no focused window, selected text, or grounded workspace surface I could trust. "
+                    "Inference: I can't safely describe the visible state from this signal."
+                )
             return self._response("Screen Bearings", text, analysis)
+
+        brain = analysis.brain_integration_result
+        if intent == ScreenIntentType.BRAIN_INTEGRATION and brain is not None:
+            if brain.status.value == "candidate_created" and brain.long_term_candidate is not None:
+                text = (
+                    f"Observed: I bound the recent workflow bearings into a task graph with {len(brain.task_graph.nodes) if brain.task_graph is not None else 0} current evidence nodes. "
+                    "Inference: this is a bounded long-term memory candidate, not a claimed permanent truth."
+                )
+                return self._response("Brain Bearings", text, analysis)
+            if brain.status.value == "preference_learned" and brain.learned_preference is not None:
+                text = (
+                    f"Observed: I found repeat support for the preference \"{brain.learned_preference.preference_key}\". "
+                    "Inference: I'll carry that preference carefully instead of treating one turn as universal."
+                )
+                return self._response("Brain Bearings", text, analysis)
+            if brain.status.value == "quirk_learned" and brain.environment_quirk is not None:
+                text = (
+                    f"Observed: this environment quirk now has {brain.environment_quirk.evidence_count} supporting bearings. "
+                    "Inference: I can remember it as a bounded machine-specific quirk, not a general rule."
+                )
+                return self._response("Brain Bearings", text, analysis)
+            if brain.status.value == "context_recalled" and brain.proactive_suggestion is not None:
+                text = (
+                    f"Observed: {brain.explanation_summary} "
+                    "Inference: this looks like earlier context, but I am not treating it as certain live state."
+                )
+                return self._response("Brain Bearings", text, analysis)
+            if brain.status.value in {"deferred", "refused"}:
+                text = (
+                    f"Observed: {brain.explanation_summary} "
+                    "Inference: I can't safely promote that into longer-lived memory from the current evidence."
+                )
+                return self._response("Brain Bearings", text, analysis)
+            return self._response("Brain Bearings", brain.explanation_summary or "Brain integration stayed bounded to the current evidence.", analysis)
+
+        power = analysis.power_features_result
+        if power is not None and power.request_type.value != "auto":
+            if power.request_type.value == "monitor_query":
+                if power.monitor_topology is not None:
+                    label = power.monitor_topology.active_monitor_label or power.monitor_topology.active_monitor_id or "the active display"
+                    focus_note = ""
+                    if power.accessibility_summary is not None and power.accessibility_summary.focused_label:
+                        focus_note = f' The focused control is "{power.accessibility_summary.focused_label}".'
+                    text = (
+                        f"Observed: the current window appears on {label}.{focus_note} "
+                        "Inference: that monitor bearing comes from current native window state, not guessed hidden layout."
+                    )
+                else:
+                    text = (
+                        "Observed: I can tell this is a display-location question, but the current native signal did not include monitor topology. "
+                        "Inference: I can't place the window on a specific monitor without that live display context."
+                    )
+                return self._response("Power Bearings", text, analysis)
+            if power.request_type.value == "translation_request" and power.translations:
+                first = power.translations[0]
+                entity_note = ""
+                if power.extracted_entities is not None and power.extracted_entities.entities:
+                    entity_note = f" I also extracted {len(power.extracted_entities.entities)} visible entities from the same text."
+                text = (
+                    f'Observed: the visible phrase "{first.source_text}" translates to "{first.translated_text}".'
+                    f"{entity_note} Inference: that translation is bounded to the visible phrase map and current screen text."
+                )
+                return self._response("Power Bearings", text, analysis)
+            if power.request_type.value == "overlay_request" and power.overlay_instructions:
+                overlay = power.overlay_instructions[0]
+                text = (
+                    f"Observed: I can anchor a highlight for the visible warning on {overlay.anchor.monitor_id or 'the active display'}. "
+                    "Inference: that is a pointing aid only, not a confirmed UI change."
+                )
+                return self._response("Power Bearings", text, analysis)
+            if power.request_type.value == "notification_query" and power.notification_events:
+                primary = power.notification_events[0]
+                blocker_note = " It looks more urgent than the background notifications." if primary.blocker else ""
+                text = (
+                    f'Observed: the most salient visible notification is "{primary.title}".{blocker_note} '
+                    "Inference: I am distinguishing what may need attention from background noise, not claiming broader app state."
+                )
+                return self._response("Power Bearings", text, analysis)
+            if power.request_type.value == "accessibility_query" and power.accessibility_summary is not None:
+                text = (
+                    f"Observed: {power.accessibility_summary.narration_summary or 'Accessibility focus context is available.'} "
+                    "Inference: that guidance is based on current focus cues and keyboard hints."
+                )
+                return self._response("Power Bearings", text, analysis)
+            if power.request_type.value == "workspace_map_query" and power.workspace_map is not None:
+                text = (
+                    f"Observed: {power.workspace_map.summary} "
+                    "Inference: that workspace map is limited to the windows and monitors I can currently observe."
+                )
+                return self._response("Power Bearings", text, analysis)
+            if power.explanation_summary:
+                return self._response("Power Bearings", f"Observed: {power.explanation_summary}", analysis)
 
         workflow = analysis.workflow_learning_result
         if workflow is not None:
@@ -835,6 +1046,21 @@ class ScreenResponseComposer:
                         for source in (analysis.observation.source_types_used if analysis.observation is not None else [])
                     ],
                     "sensitivity": analysis.observation.sensitivity.value if analysis.observation is not None else "unknown",
+                    "live_signal_available": (
+                        has_live_screen_signal(analysis.observation)
+                        if analysis.observation is not None
+                        else False
+                    ),
+                    "clipboard_only": (
+                        has_clipboard_only_signal(analysis.observation)
+                        if analysis.observation is not None
+                        else False
+                    ),
+                    "best_live_visible_text": (
+                        best_live_visible_text(analysis.observation)
+                        if analysis.observation is not None
+                        else None
+                    ),
                 },
                 "interpretation": {
                     "likely_environment": analysis.interpretation.likely_environment if analysis.interpretation is not None else None,
@@ -1046,6 +1272,8 @@ class ScreenResponseComposer:
                 },
                 "problem_solving": _problem_solving_telemetry(analysis),
                 "workflow_learning": _workflow_learning_telemetry(analysis),
+                "brain_integration": _brain_integration_telemetry(analysis),
+                "power_features": _power_features_telemetry(analysis),
                 "limitations": [limitation.to_dict() for limitation in analysis.limitations],
             },
         )
