@@ -82,6 +82,21 @@ def _current_page_label(observation: ScreenObservation) -> str | None:
     return cleaned or title
 
 
+def _adapter_page_label(current_context: CurrentScreenContext) -> str | None:
+    resolution = current_context.adapter_resolution
+    if resolution is None or not resolution.available or resolution.semantic_context is None:
+        return None
+    semantic_context = resolution.semantic_context
+    return semantic_context.page_title or semantic_context.selected_item_label
+
+
+def _adapter_loading_state(current_context: CurrentScreenContext) -> str | None:
+    resolution = current_context.adapter_resolution
+    if resolution is None or not resolution.available or resolution.semantic_context is None:
+        return None
+    return str(resolution.semantic_context.loading_state or "").strip().lower() or None
+
+
 def _workspace_items(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     active_item = snapshot.get("active_item")
@@ -307,11 +322,12 @@ class DeterministicVerificationEngine:
                     calculation_activity=calculation_activity,
                 )
 
-        current_page = _current_page_label(observation)
+        current_page = _adapter_page_label(current_context) or _current_page_label(observation)
         current_errors = list(interpretation.visible_errors)
         current_modal = _current_modal_label(observation)
         success_signal = _success_signal(observation, interpretation)
         disabled_control = _disabled_control(observation)
+        loading_state = _adapter_loading_state(current_context)
         (
             prior_analysis,
             prior_page,
@@ -336,6 +352,7 @@ class DeterministicVerificationEngine:
             navigation_reused=bool(prior_analysis.get("navigation_result")),
             provenance_channels=self._provenance_channels(
                 observation=observation,
+                current_context=current_context,
                 grounding_result=grounding_result,
                 navigation_result=navigation_result,
             ),
@@ -359,6 +376,7 @@ class DeterministicVerificationEngine:
             disabled_control=disabled_control,
             current_page=current_page,
             expected_target=expected_target,
+            loading_state=loading_state,
             comparison=comparison,
         )
         completion_status = self._completion_status(
@@ -369,6 +387,7 @@ class DeterministicVerificationEngine:
             current_errors=current_errors,
             current_page=current_page,
             expected_target=expected_target,
+            loading_state=loading_state,
         )
         evidence = self._evidence(
             comparison=comparison,
@@ -376,6 +395,7 @@ class DeterministicVerificationEngine:
             success_signal=success_signal,
             current_errors=current_errors,
             disabled_control=disabled_control,
+            loading_state=loading_state,
         )
         provenance = GroundingProvenance(
             channels_used=list(context.provenance_channels),
@@ -389,6 +409,7 @@ class DeterministicVerificationEngine:
             current_errors=current_errors,
             expected_target=expected_target,
             current_page=current_page,
+            loading_state=loading_state,
         )
         explanation = self._explanation(
             request=request,
@@ -398,6 +419,7 @@ class DeterministicVerificationEngine:
             current_errors=current_errors,
             current_page=current_page,
             expected_target=expected_target,
+            loading_state=loading_state,
             change_observations=change_observations,
         )
         planner_result = PlannerVerificationResult(
@@ -768,6 +790,7 @@ class DeterministicVerificationEngine:
         disabled_control: str | None,
         current_page: str | None,
         expected_target: str | None,
+        loading_state: str | None,
         comparison: VerificationComparison,
     ) -> list[UnresolvedCondition]:
         conditions: list[UnresolvedCondition] = []
@@ -795,6 +818,14 @@ class DeterministicVerificationEngine:
                     evidence_summary=["The current page label does not match the expected target label."],
                 )
             )
+        if request.request_type == VerificationRequestType.PAGE_CHECK and loading_state and loading_state not in {"complete", "interactive"}:
+            conditions.append(
+                UnresolvedCondition(
+                    condition_type="loading_state",
+                    summary=f'The current page still appears to be {loading_state}.',
+                    evidence_summary=["Adapter-backed page semantics still report an incomplete loading state."],
+                )
+            )
         if comparison.change_classification == ChangeClassification.CHANGED_BUT_NOT_UNDERSTOOD:
             conditions.append(
                 UnresolvedCondition(
@@ -816,12 +847,15 @@ class DeterministicVerificationEngine:
         current_errors: list[str],
         current_page: str | None,
         expected_target: str | None,
+        loading_state: str | None,
     ) -> CompletionStatus:
         if any(item.condition_type == "wrong_page" for item in unresolved_conditions):
             return CompletionStatus.DIVERTED
         if any(item.condition_type == "disabled_control" for item in unresolved_conditions):
             return CompletionStatus.BLOCKED
         if request.request_type == VerificationRequestType.PAGE_CHECK:
+            if loading_state and loading_state not in {"complete", "interactive"}:
+                return CompletionStatus.AMBIGUOUS
             if expected_target and current_page and _normalize_text(current_page) == _normalize_text(expected_target):
                 return CompletionStatus.COMPLETED
             return CompletionStatus.AMBIGUOUS
@@ -859,6 +893,7 @@ class DeterministicVerificationEngine:
         success_signal: str | None,
         current_errors: list[str],
         disabled_control: str | None,
+        loading_state: str | None,
     ) -> list[VerificationEvidence]:
         evidence: list[VerificationEvidence] = []
         if success_signal:
@@ -891,6 +926,16 @@ class DeterministicVerificationEngine:
                     truth_state=ScreenTruthState.OBSERVED,
                 )
             )
+        if loading_state and loading_state not in {"complete", "interactive"}:
+            evidence.append(
+                VerificationEvidence(
+                    signal="adapter_loading_state",
+                    channel=GroundingEvidenceChannel.ADAPTER_SEMANTICS,
+                    score=0.26,
+                    note="Adapter-backed semantics still report an incomplete loading state.",
+                    truth_state=ScreenTruthState.OBSERVED,
+                )
+            )
         if comparison.comparison_ready:
             evidence.append(
                 VerificationEvidence(
@@ -907,6 +952,7 @@ class DeterministicVerificationEngine:
         self,
         *,
         observation: ScreenObservation,
+        current_context: CurrentScreenContext,
         grounding_result: GroundingOutcome | None,
         navigation_result: NavigationOutcome | None,
     ) -> list[GroundingEvidenceChannel]:
@@ -916,6 +962,9 @@ class DeterministicVerificationEngine:
         if observation.workspace_snapshot.get("active_item") or observation.workspace_snapshot.get("opened_items"):
             if GroundingEvidenceChannel.WORKSPACE_CONTEXT not in channels:
                 channels.append(GroundingEvidenceChannel.WORKSPACE_CONTEXT)
+        if current_context.adapter_resolution is not None and current_context.adapter_resolution.available:
+            if GroundingEvidenceChannel.ADAPTER_SEMANTICS not in channels:
+                channels.append(GroundingEvidenceChannel.ADAPTER_SEMANTICS)
         if grounding_result is not None:
             for channel in grounding_result.provenance.channels_used:
                 if channel not in channels:
@@ -937,10 +986,13 @@ class DeterministicVerificationEngine:
         current_errors: list[str],
         expected_target: str | None,
         current_page: str | None,
+        loading_state: str | None,
     ) -> ScreenConfidence:
         score = 0.42
         if comparison.change_classification == ChangeClassification.INSUFFICIENT_EVIDENCE:
             score = 0.18
+        elif loading_state and loading_state not in {"complete", "interactive"}:
+            score = 0.34
         elif completion_status == CompletionStatus.COMPLETED and success_signal:
             score = 0.82 if comparison.comparison_ready else 0.74
         elif completion_status in {CompletionStatus.NOT_COMPLETED, CompletionStatus.BLOCKED} and (current_errors or comparison.comparison_ready):
@@ -961,6 +1013,7 @@ class DeterministicVerificationEngine:
         current_errors: list[str],
         current_page: str | None,
         expected_target: str | None,
+        loading_state: str | None,
         change_observations: list[ChangeObservation],
     ) -> VerificationExplanation:
         evidence_summary = [item.summary for item in change_observations[:2]]
@@ -972,6 +1025,12 @@ class DeterministicVerificationEngine:
             return VerificationExplanation(summary=f'The visible warning "{current_errors[0]}" is still present.', evidence_summary=evidence_summary, unresolved_summary=current_errors[0])
         if completion_status == CompletionStatus.DIVERTED and expected_target and current_page:
             return VerificationExplanation(summary=f'The current page looks like "{current_page}" rather than the expected "{expected_target}".', evidence_summary=evidence_summary, unresolved_summary="The current page does not align with the expected target.")
+        if request.request_type == VerificationRequestType.PAGE_CHECK and loading_state and loading_state not in {"complete", "interactive"}:
+            return VerificationExplanation(
+                summary=f'The current page looks like "{current_page or expected_target}", but it still appears to be {loading_state}.',
+                evidence_summary=evidence_summary,
+                unresolved_summary="The page identity is partially supported, but the loading state keeps completion unverified.",
+            )
         if comparison.change_classification == ChangeClassification.INSUFFICIENT_EVIDENCE:
             return VerificationExplanation(summary="I only have the current bearing, not a prior screen state to compare against.", evidence_summary=evidence_summary)
         if comparison.change_classification == ChangeClassification.CHANGED_BUT_NOT_UNDERSTOOD:

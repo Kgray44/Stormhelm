@@ -25,6 +25,8 @@ INSPECTION_PHRASES = {
 }
 EXPLANATION_PHRASES = {
     "what does this mean",
+    "what does this error mean",
+    "what does that error mean",
     "what does this warning mean",
     "what does that popup mean",
     "what error is this",
@@ -100,6 +102,16 @@ CONTINUITY_PHRASES = {
     "how do i recover from this",
     "help me resume this workflow",
     "how do i get back to the thing i was just doing",
+}
+WORKFLOW_REUSE_PHRASES = {
+    "watch me do this and remember the workflow",
+    "save this process",
+    "save this workflow",
+    "reuse the steps from that prior task",
+    "can you do that same workflow again",
+    "does this match the workflow from before",
+    "recognize this workflow and help me run it again",
+    "apply the same flow here",
 }
 _CONFIRMATION_FOLLOW_UPS = {"go ahead", "do it", "proceed", "confirm it"}
 VISUAL_REFERENT_HINTS = {
@@ -220,19 +232,37 @@ class ScreenAwarenessPlannerSeam:
 
         if self.config.observation_enabled and self.config.interpretation_enabled and self.config.phase != "phase0":
             disposition = ScreenRouteDisposition.PHASE1_ANALYZE
-            if intent == ScreenIntentType.EXECUTE_UI_ACTION and self.config.phase in {"phase5", "phase6"}:
+            if (
+                intent == ScreenIntentType.LEARN_WORKFLOW_REUSE
+                and self.config.phase == "phase9"
+                and self.config.capability_flags().get("workflow_learning_enabled")
+            ):
+                disposition = ScreenRouteDisposition.PHASE9_WORKFLOW_REUSE
+            if intent == ScreenIntentType.EXECUTE_UI_ACTION and self.config.phase in {"phase5", "phase6", "phase7", "phase8", "phase9"}:
                 disposition = ScreenRouteDisposition.PHASE5_ACT
             elif (
+                intent == ScreenIntentType.LEARN_WORKFLOW_REUSE
+                and self.config.phase == "phase9"
+                and self.config.capability_flags().get("workflow_learning_enabled")
+            ):
+                disposition = ScreenRouteDisposition.PHASE9_WORKFLOW_REUSE
+            elif (
                 intent == ScreenIntentType.CONTINUE_WORKFLOW
-                and self.config.phase == "phase6"
+                and self.config.phase in {"phase6", "phase7", "phase8", "phase9"}
                 and self.config.memory_enabled
             ):
                 disposition = ScreenRouteDisposition.PHASE6_CONTINUE
-            elif intent == ScreenIntentType.GUIDE_NAVIGATION and self.config.phase in {"phase3", "phase4", "phase5", "phase6"} and self.config.guidance_enabled:
+            elif intent == ScreenIntentType.GUIDE_NAVIGATION and self.config.phase in {"phase3", "phase4", "phase5", "phase6", "phase7", "phase8", "phase9"} and self.config.guidance_enabled:
                 disposition = ScreenRouteDisposition.PHASE3_GUIDE
-            elif intent in {ScreenIntentType.VERIFY_SCREEN_STATE, ScreenIntentType.DETECT_VISIBLE_CHANGE} and self.config.phase in {"phase4", "phase5", "phase6"} and self.config.verification_enabled:
+            elif intent in {ScreenIntentType.VERIFY_SCREEN_STATE, ScreenIntentType.DETECT_VISIBLE_CHANGE} and self.config.phase in {"phase4", "phase5", "phase6", "phase7", "phase8", "phase9"} and self.config.verification_enabled:
                 disposition = ScreenRouteDisposition.PHASE4_VERIFY
-            elif self.config.phase in {"phase2", "phase3", "phase4", "phase5", "phase6"} and self.config.grounding_enabled:
+            elif (
+                intent in {ScreenIntentType.EXPLAIN_VISIBLE_CONTENT, ScreenIntentType.SOLVE_VISIBLE_PROBLEM}
+                and self.config.phase in {"phase8", "phase9"}
+                and self.config.capability_flags().get("problem_solving_enabled")
+            ):
+                disposition = ScreenRouteDisposition.PHASE8_PROBLEM_SOLVE
+            elif self.config.phase in {"phase2", "phase3", "phase4", "phase5", "phase6", "phase7", "phase8", "phase9"} and self.config.grounding_enabled:
                 disposition = ScreenRouteDisposition.PHASE2_GROUND
             return ScreenPlannerEvaluation(
                 candidate=True,
@@ -250,6 +280,12 @@ class ScreenAwarenessPlannerSeam:
                         else
                         "Continuity Bearings"
                         if disposition == ScreenRouteDisposition.PHASE6_CONTINUE
+                        else
+                        "Workflow Bearings"
+                        if disposition == ScreenRouteDisposition.PHASE9_WORKFLOW_REUSE
+                        else
+                        "Problem Bearings"
+                        if disposition == ScreenRouteDisposition.PHASE8_PROBLEM_SOLVE
                         else
                         "Guided Bearings"
                         if disposition == ScreenRouteDisposition.PHASE3_GUIDE
@@ -294,6 +330,8 @@ class ScreenAwarenessPlannerSeam:
         if not lower:
             return None, [], 0.0
 
+        if any(phrase in lower for phrase in WORKFLOW_REUSE_PHRASES):
+            return ScreenIntentType.LEARN_WORKFLOW_REUSE, ["explicit workflow-learning or reuse phrase matched"], 0.96
         if any(phrase in lower for phrase in CONTINUITY_PHRASES):
             return ScreenIntentType.CONTINUE_WORKFLOW, ["explicit workflow-continuity phrase matched"], 0.96
         if any(phrase in lower for phrase in NAVIGATION_PHRASES):

@@ -68,6 +68,8 @@ class UiBridge(QtCore.QObject):
         self._workspace_sections: list[dict[str, Any]] = []
         self._workspace_canvas: dict[str, Any] = {}
         self._workspace_focus: dict[str, Any] = {}
+        self._active_request_state: dict[str, Any] = {}
+        self._recent_context_resolutions: list[dict[str, Any]] = []
         self._workspace_state_hint = ""
         self._opened_items: list[dict[str, Any]] = []
         self._active_opened_item_id: str | None = None
@@ -799,6 +801,20 @@ class UiBridge(QtCore.QObject):
         if isinstance(active_workspace, dict):
             collections_changed = self._apply_active_workspace_summary(active_workspace) or collections_changed
 
+        active_request_state = payload.get("active_request_state")
+        if isinstance(active_request_state, dict):
+            normalized_request_state = dict(active_request_state)
+            if normalized_request_state != self._active_request_state:
+                self._active_request_state = normalized_request_state
+                collections_changed = True
+
+        recent_context_resolutions = payload.get("recent_context_resolutions")
+        if isinstance(recent_context_resolutions, list):
+            normalized_resolutions = [dict(item) for item in recent_context_resolutions if isinstance(item, dict)]
+            if normalized_resolutions != self._recent_context_resolutions:
+                self._recent_context_resolutions = normalized_resolutions
+                collections_changed = True
+
         if self._pending_activity == "chat":
             pending_response = self._pending_chat_response_message(self._history)
             if pending_response is not None:
@@ -829,6 +845,12 @@ class UiBridge(QtCore.QObject):
 
         if additions:
             self._merge_history_messages(additions)
+        active_request_state = payload.get("active_request_state")
+        if isinstance(active_request_state, dict):
+            self._active_request_state = dict(active_request_state)
+        recent_context_resolutions = payload.get("recent_context_resolutions")
+        if isinstance(recent_context_resolutions, list):
+            self._recent_context_resolutions = [dict(item) for item in recent_context_resolutions if isinstance(item, dict)]
         self._pending_activity = None
         self._pending_chat_echo = None
         self._pending_chat_anchor_message_id = None
@@ -1155,6 +1177,30 @@ class UiBridge(QtCore.QObject):
 
     def _build_context_cards(self) -> list[dict[str, Any]]:
         cards: list[dict[str, Any]] = []
+        latest_message = self._latest_assistant_message()
+        if latest_message is not None:
+            metadata = latest_message.get("metadata") if isinstance(latest_message.get("metadata"), dict) else {}
+            planner_debug = metadata.get("planner_debug") if isinstance(metadata.get("planner_debug"), dict) else {}
+            software_debug = planner_debug.get("software_control") if isinstance(planner_debug.get("software_control"), dict) else {}
+            if software_debug.get("candidate"):
+                result = software_debug.get("result") if isinstance(software_debug.get("result"), dict) else {}
+                trace = software_debug.get("trace") if isinstance(software_debug.get("trace"), dict) else {}
+                status = str(result.get("status") or trace.get("execution_status") or "software").replace("_", " ").strip()
+                subtitle = status.title() if status else "Software"
+                body = str(
+                    latest_message.get("microResponse")
+                    or latest_message.get("fullResponse")
+                    or latest_message.get("content")
+                    or "Software bearings are ready."
+                ).strip()
+                cards.append(
+                    {
+                        "title": self._message_bearing_title(latest_message),
+                        "subtitle": subtitle,
+                        "body": body,
+                    }
+                )
+                return cards
         latest_job = self._jobs[0] if self._jobs else None
         if latest_job is not None:
             summary = ""
@@ -2577,6 +2623,14 @@ class UiBridge(QtCore.QObject):
         interpretation = self._status.get("systems_interpretation", {})
         return interpretation if isinstance(interpretation, dict) else {}
 
+    def _software_control_state(self) -> dict[str, Any]:
+        state = self._status.get("software_control", {})
+        return state if isinstance(state, dict) else {}
+
+    def _software_recovery_state(self) -> dict[str, Any]:
+        state = self._status.get("software_recovery", {})
+        return state if isinstance(state, dict) else {}
+
     def _battery_label(self, power: dict[str, Any]) -> str:
         if not power.get("available"):
             return "Unavailable"
@@ -3311,6 +3365,8 @@ class UiBridge(QtCore.QObject):
             power = self._power_state()
             hardware = self._hardware_state()
             provider = self._provider_state()
+            software_control = self._software_control_state()
+            software_recovery = self._software_recovery_state()
             storage = self._storage_state()
             drives = storage.get("drives", []) if isinstance(storage.get("drives"), list) else []
             primary_drive = drives[0] if drives else {}
@@ -3333,6 +3389,45 @@ class UiBridge(QtCore.QObject):
                         {"primary": "Telemetry", "secondary": self._telemetry_status_label(hardware), "detail": self._telemetry_detail_text(hardware)},
                         {"primary": "Provider", "secondary": "Configured" if provider.get("configured") else "Offline", "detail": self._provider_detail(provider)},
                         {"primary": "Runtime", "secondary": self._runtime_mode_label.title(), "detail": self._environment_label.title()},
+                    ],
+                ),
+                self._workspace_column(
+                    "Software Bearings",
+                    "Native software control and recovery posture.",
+                    [
+                        {
+                            "primary": "Control Lane",
+                            "secondary": "Enabled" if software_control.get("enabled") else "Disabled",
+                            "detail": str(
+                                (
+                                    software_control.get("last_trace", {})
+                                    if isinstance(software_control.get("last_trace"), dict)
+                                    else {}
+                                ).get("execution_status", "Awaiting a software request.")
+                            ).replace("_", " ").title(),
+                        },
+                        {
+                            "primary": "Route Policy",
+                            "secondary": "Package managers"
+                            if software_control.get("package_manager_routes_enabled")
+                            else "Restricted",
+                            "detail": "Browser-guided acquisition is available."
+                            if software_control.get("browser_guided_routes_enabled")
+                            else "Browser-guided acquisition is disabled.",
+                        },
+                        {
+                            "primary": "Recovery",
+                            "secondary": "Cloud advisory off"
+                            if not software_recovery.get("cloud_fallback_enabled")
+                            else "Cloud advisory ready",
+                            "detail": str(
+                                (
+                                    software_recovery.get("last_trace", {})
+                                    if isinstance(software_recovery.get("last_trace"), dict)
+                                    else {}
+                                ).get("status", "No recovery trace yet.")
+                            ).replace("_", " ").title(),
+                        },
                     ],
                 ),
             ]

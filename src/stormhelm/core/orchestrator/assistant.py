@@ -30,6 +30,11 @@ from stormhelm.core.screen_awareness import ScreenAwarenessSubsystem
 from stormhelm.core.screen_awareness import ScreenIntentType
 from stormhelm.core.orchestrator.session_state import ConversationStateStore
 from stormhelm.core.providers.base import AssistantProvider, ProviderToolCall
+from stormhelm.core.software_control import SoftwareExecutionStatus
+from stormhelm.core.software_control import SoftwareOperationRequest
+from stormhelm.core.software_control import SoftwareOperationType
+from stormhelm.core.software_control import SoftwareControlSubsystem
+from stormhelm.core.software_recovery import SoftwareRecoverySubsystem
 from stormhelm.core.tools.registry import ToolRegistry
 from stormhelm.core.workspace.indexer import WorkspaceIndexer
 from stormhelm.core.workspace.repository import WorkspaceRepository
@@ -52,6 +57,8 @@ class AssistantOrchestrator:
         workspace_service: WorkspaceService | None = None,
         provider: AssistantProvider | None = None,
         calculations: CalculationsSubsystem | None = None,
+        software_control: SoftwareControlSubsystem | None = None,
+        software_recovery: SoftwareRecoverySubsystem | None = None,
         screen_awareness: ScreenAwarenessSubsystem | None = None,
         discord_relay: DiscordRelaySubsystem | None = None,
     ) -> None:
@@ -68,6 +75,8 @@ class AssistantOrchestrator:
         self._fallback_workspace_service: WorkspaceService | None = None
         self.provider = provider
         self.calculations = calculations
+        self.software_control = software_control
+        self.software_recovery = software_recovery
         self.screen_awareness = screen_awareness
         self.discord_relay = discord_relay
         self.active_context_service = ActiveContextService(session_state)
@@ -453,8 +462,88 @@ class AssistantOrchestrator:
                 elif (
                     planned.execution_plan is not None
                     and planned.structured_query is not None
+                    and planned.structured_query.query_shape == QueryShape.SOFTWARE_CONTROL_REQUEST
+                    and planned.execution_plan.plan_type == "software_control_execute"
+                    and self.software_control is not None
+                ):
+                    software_slots = (
+                        planned.structured_query.slots if isinstance(planned.structured_query.slots, dict) else {}
+                    )
+                    operation_value = str(software_slots.get("operation_type") or "install").strip().lower()
+                    try:
+                        operation_type = SoftwareOperationType(operation_value)
+                    except ValueError:
+                        operation_type = SoftwareOperationType.INSTALL
+                    software_request = SoftwareOperationRequest(
+                        request_id=f"software-{session_id}",
+                        source_surface=surface_mode,
+                        raw_input=message,
+                        user_visible_text=message,
+                        operation_type=operation_type,
+                        target_name=str(software_slots.get("target_name") or "").strip() or "software",
+                        request_stage=str(software_slots.get("request_stage") or "prepare_plan").strip() or "prepare_plan",
+                        follow_up_reuse=bool(software_slots.get("follow_up_reuse", False)),
+                        selected_source_route=str(software_slots.get("selected_source_route") or "").strip() or None,
+                    )
+                    software_response = self.software_control.execute_software_operation(
+                        session_id=session_id,
+                        active_module=active_module,
+                        request=software_request,
+                    )
+                    assistant_text = self.persona.report(software_response.assistant_response)
+                    self.active_context_service.remember_resolution(
+                        session_id,
+                        {
+                            "kind": "software_control",
+                            "query": message,
+                            "result": software_response.result.to_dict()
+                            if software_response.result is not None
+                            else None,
+                            "verification": software_response.verification.to_dict()
+                            if software_response.verification is not None
+                            else None,
+                            "recovery_plan": software_response.recovery_plan.to_dict()
+                            if software_response.recovery_plan is not None
+                            else None,
+                            "recovery_result": software_response.recovery_result.to_dict()
+                            if software_response.recovery_result is not None
+                            else None,
+                            "trace": software_response.trace.to_dict(),
+                        },
+                    )
+                    planned.structured_query.slots["response_contract"] = dict(software_response.response_contract)
+                    if software_response.active_request_state is not None:
+                        if software_response.active_request_state:
+                            self.session_state.set_active_request_state(session_id, software_response.active_request_state)
+                        else:
+                            self.session_state.clear_active_request_state(session_id)
+                    software_debug = dict(planner_debug.get("software_control") or {})
+                    software_debug["result"] = (
+                        software_response.result.to_dict() if software_response.result is not None else None
+                    )
+                    software_debug["trace"] = software_response.trace.to_dict()
+                    software_debug["verification"] = (
+                        software_response.verification.to_dict() if software_response.verification is not None else None
+                    )
+                    if software_response.recovery_plan is not None:
+                        software_debug["recovery_plan"] = software_response.recovery_plan.to_dict()
+                    if software_response.recovery_result is not None:
+                        software_debug["recovery_result"] = software_response.recovery_result.to_dict()
+                    planner_debug["software_control"] = software_debug
+                    self._publish_software_control_event(
+                        session_id=session_id,
+                        software_debug=software_debug,
+                    )
+                    if software_response.trace.recovery_invoked:
+                        self._publish_software_recovery_event(
+                            session_id=session_id,
+                            recovery_debug=software_debug,
+                        )
+                elif (
+                    planned.execution_plan is not None
+                    and planned.structured_query is not None
                     and planned.structured_query.query_shape == QueryShape.SCREEN_AWARENESS_REQUEST
-                    and planned.execution_plan.plan_type in {"screen_awareness_analyze", "screen_awareness_act", "screen_awareness_continue"}
+                    and planned.execution_plan.plan_type in {"screen_awareness_analyze", "screen_awareness_act", "screen_awareness_continue", "screen_awareness_workflow"}
                     and self.screen_awareness is not None
                 ):
                     screen_debug = planned.structured_query.slots.get("screen_awareness")
@@ -659,6 +748,8 @@ class AssistantOrchestrator:
             "job": jobs[0] if jobs else None,
             "jobs": jobs,
             "actions": actions,
+            "active_request_state": self.session_state.get_active_request_state(session_id),
+            "recent_context_resolutions": self.session_state.get_recent_context_resolutions(session_id),
         }
 
     async def _execute_tool_requests(
@@ -1268,6 +1359,10 @@ class AssistantOrchestrator:
             message = "Screen-awareness request routed to Phase 5 direct UI action execution."
         elif disposition == "phase6_continue":
             message = "Screen-awareness request routed to Phase 6 workflow continuity and recovery."
+        elif disposition == "phase8_problem_solve":
+            message = "Screen-awareness request routed to Phase 8 problem solving and teaching."
+        elif disposition == "phase9_workflow_reuse":
+            message = "Screen-awareness request routed to Phase 9 workflow learning and reuse."
         elif disposition in {"feature_disabled", "routing_disabled"}:
             message = "Screen-awareness request detected but not activated."
         self.events.publish(
@@ -1290,6 +1385,71 @@ class AssistantOrchestrator:
                 "telemetry": dict(screen_awareness_debug.get("telemetry") or {})
                 if isinstance(screen_awareness_debug.get("telemetry"), dict)
                 else {},
+            },
+        )
+
+    def _publish_software_control_event(
+        self,
+        *,
+        session_id: str,
+        software_debug: object,
+    ) -> None:
+        debug_events_enabled = False
+        if self.software_control is not None:
+            debug_events_enabled = self.software_control.config.debug_events_enabled
+        elif hasattr(self.config, "software_control"):
+            debug_events_enabled = bool(self.config.software_control.debug_events_enabled)
+        if not debug_events_enabled:
+            return
+        if not isinstance(software_debug, dict) or not software_debug.get("candidate"):
+            return
+        result = software_debug.get("result") if isinstance(software_debug.get("result"), dict) else {}
+        trace = software_debug.get("trace") if isinstance(software_debug.get("trace"), dict) else {}
+        self.events.publish(
+            level="DEBUG",
+            source="software_control",
+            message="Software-control request handled.",
+            payload={
+                "session_id": session_id,
+                "operation_type": str(software_debug.get("operation_type") or ""),
+                "target_name": str(software_debug.get("target_name") or ""),
+                "status": str((result.get("status") or trace.get("execution_status") or "")).strip(),
+                "route_selected": str(trace.get("route_selected") or ""),
+                "recovery_invoked": bool(trace.get("recovery_invoked", False)),
+                "trace": dict(trace),
+            },
+        )
+
+    def _publish_software_recovery_event(
+        self,
+        *,
+        session_id: str,
+        recovery_debug: object,
+    ) -> None:
+        debug_events_enabled = False
+        if self.software_recovery is not None:
+            debug_events_enabled = self.software_recovery.config.debug_events_enabled
+        elif hasattr(self.config, "software_recovery"):
+            debug_events_enabled = bool(self.config.software_recovery.debug_events_enabled)
+        if not debug_events_enabled:
+            return
+        if not isinstance(recovery_debug, dict):
+            return
+        recovery_plan = recovery_debug.get("recovery_plan") if isinstance(recovery_debug.get("recovery_plan"), dict) else {}
+        recovery_result = recovery_debug.get("recovery_result") if isinstance(recovery_debug.get("recovery_result"), dict) else {}
+        if not recovery_plan and not recovery_result:
+            return
+        self.events.publish(
+            level="DEBUG",
+            source="software_recovery",
+            message="Software recovery route engaged.",
+            payload={
+                "session_id": session_id,
+                "failure_category": str((recovery_plan.get("failure_category") or recovery_debug.get("failure_category") or "")).strip(),
+                "cloud_fallback_disposition": str(recovery_plan.get("cloud_fallback_disposition") or "").strip(),
+                "route_switched_to": str(recovery_result.get("route_switched_to") or "").strip(),
+                "recovery_plan": dict(recovery_plan),
+                "recovery_result": dict(recovery_result),
             },
         )
 

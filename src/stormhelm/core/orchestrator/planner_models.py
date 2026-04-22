@@ -21,6 +21,7 @@ def _serialize(value: Any) -> Any:
 
 class QueryShape(StrEnum):
     CALCULATION_REQUEST = "calculation_request"
+    SOFTWARE_CONTROL_REQUEST = "software_control_request"
     SCREEN_AWARENESS_REQUEST = "screen_awareness_request"
     DISCORD_RELAY_REQUEST = "discord_relay_request"
     CURRENT_METRIC = "current_metric"

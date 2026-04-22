@@ -28,6 +28,10 @@ from stormhelm.core.orchestrator.planner import DeterministicPlanner
 from stormhelm.core.orchestrator.router import IntentRouter
 from stormhelm.core.orchestrator.session_state import ConversationStateStore
 from stormhelm.core.providers.openai_responses import OpenAIResponsesProvider
+from stormhelm.core.software_control import SoftwareControlSubsystem
+from stormhelm.core.software_control import build_software_control_subsystem
+from stormhelm.core.software_recovery import SoftwareRecoverySubsystem
+from stormhelm.core.software_recovery import build_software_recovery_subsystem
 from stormhelm.core.runtime_state import RuntimeBootstrapResult, clear_runtime_state, initialize_runtime_state
 from stormhelm.core.safety.policy import SafetyPolicy
 from stormhelm.core.screen_awareness import ScreenAwarenessSubsystem
@@ -59,6 +63,8 @@ class CoreContainer:
     jobs: JobManager
     assistant: AssistantOrchestrator
     calculations: CalculationsSubsystem
+    software_control: SoftwareControlSubsystem
+    software_recovery: SoftwareRecoverySubsystem
     screen_awareness: ScreenAwarenessSubsystem
     discord_relay: DiscordRelaySubsystem
     network_monitor: NetworkMonitor | None = None
@@ -148,6 +154,8 @@ class CoreContainer:
                 ]
             },
             "calculations": self.calculations.status_snapshot(),
+            "software_control": self.software_control.status_snapshot(),
+            "software_recovery": self.software_recovery.status_snapshot(),
             "screen_awareness": self.screen_awareness.status_snapshot(),
             "discord_relay": self.discord_relay.status_snapshot(),
             "provider_state": self._provider_state_snapshot(),
@@ -207,6 +215,7 @@ class CoreContainer:
 def build_container(config: AppConfig | None = None) -> CoreContainer:
     app_config = config or load_config()
     database = SQLiteDatabase(app_config.storage.database_path)
+    database.initialize()
     events = EventBuffer()
     conversations = ConversationRepository(database)
     notes = NotesRepository(database)
@@ -228,6 +237,16 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
     executor = ToolExecutor(registry, max_sync_workers=app_config.concurrency.max_workers)
     provider = OpenAIResponsesProvider(app_config.openai) if app_config.openai.enabled else None
     calculations = build_calculations_subsystem(app_config.calculations)
+    software_recovery = build_software_recovery_subsystem(
+        app_config.software_recovery,
+        openai_enabled=app_config.openai.enabled,
+    )
+    software_control = build_software_control_subsystem(
+        app_config.software_control,
+        recovery=software_recovery,
+        safety=safety,
+        system_probe=system_probe,
+    )
     screen_awareness = build_screen_awareness_subsystem(
         app_config.screen_awareness,
         system_probe=system_probe,
@@ -243,6 +262,8 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
     planner = DeterministicPlanner(
         calculations_config=app_config.calculations,
         calculations_seam=calculations.planner_seam,
+        software_control_config=app_config.software_control,
+        software_control_seam=software_control.planner_seam,
         screen_awareness_config=app_config.screen_awareness,
         screen_awareness_seam=screen_awareness.planner_seam,
         discord_relay_config=app_config.discord_relay,
@@ -288,6 +309,8 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
         workspace_service=workspace_service,
         provider=provider,
         calculations=calculations,
+        software_control=software_control,
+        software_recovery=software_recovery,
         screen_awareness=screen_awareness,
         discord_relay=discord_relay,
     )
@@ -306,6 +329,8 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
         jobs=jobs,
         assistant=assistant,
         calculations=calculations,
+        software_control=software_control,
+        software_recovery=software_recovery,
         screen_awareness=screen_awareness,
         discord_relay=discord_relay,
         network_monitor=network_monitor,

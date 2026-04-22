@@ -139,6 +139,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             ],
             "tools": current.tool_registry.metadata(),
             "active_workspace": current.assistant.workspace_service.active_workspace_summary(session_id),
+            "active_request_state": current.assistant.session_state.get_active_request_state(session_id),
+            "recent_context_resolutions": current.assistant.session_state.get_recent_context_resolutions(session_id),
         }
 
     return app

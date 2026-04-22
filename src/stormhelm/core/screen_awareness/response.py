@@ -217,6 +217,56 @@ def _continuity_outcome_reason(analysis: ScreenAnalysisResult) -> str:
     return continuity.status.value
 
 
+def _workflow_learning_outcome_reason(analysis: ScreenAnalysisResult) -> str:
+    workflow = analysis.workflow_learning_result
+    if workflow is None:
+        return "workflow_learning_not_requested"
+    if workflow.explanation_summary:
+        return workflow.explanation_summary
+    if workflow.match_result is not None:
+        return workflow.match_result.explanation_summary
+    if workflow.reuse_plan is not None:
+        return workflow.reuse_plan.explanation_summary
+    return workflow.status.value
+
+
+def _workflow_learning_telemetry(analysis: ScreenAnalysisResult) -> dict[str, Any]:
+    workflow = analysis.workflow_learning_result
+    if workflow is None:
+        return {
+            "requested": False,
+            "outcome": "not_requested",
+            "outcome_reason": "workflow_learning_not_requested",
+            "capture_status": None,
+            "stored_workflow_count": 0,
+            "match_status": None,
+            "match_score": None,
+            "reuse_mode": None,
+            "attempted_reuse": False,
+            "verified_reuse": False,
+            "reused_action_path": False,
+            "dominant_channel": None,
+            "provenance_channels": [],
+            "planner_result": None,
+        }
+    return {
+        "requested": True,
+        "outcome": workflow.status.value,
+        "outcome_reason": _workflow_learning_outcome_reason(analysis),
+        "capture_status": workflow.capture_status,
+        "stored_workflow_count": len(workflow.available_workflows) + (1 if workflow.reusable_workflow is not None else 0),
+        "match_status": workflow.match_result.status.value if workflow.match_result is not None else None,
+        "match_score": workflow.match_result.match_score if workflow.match_result is not None else None,
+        "reuse_mode": workflow.reuse_plan.reuse_mode if workflow.reuse_plan is not None else None,
+        "attempted_reuse": workflow.attempted_reuse,
+        "verified_reuse": workflow.verified_reuse,
+        "reused_action_path": bool(workflow.reuse_plan is not None and workflow.reuse_plan.action_reused),
+        "dominant_channel": workflow.provenance.dominant_channel.value if workflow.provenance.dominant_channel is not None else None,
+        "provenance_channels": [channel.value for channel in workflow.provenance.channels_used],
+        "planner_result": workflow.planner_result.to_dict() if workflow.planner_result is not None else None,
+    }
+
+
 def _action_telemetry(analysis: ScreenAnalysisResult) -> dict[str, Any]:
     action = analysis.action_result
     if action is None:
@@ -264,6 +314,95 @@ def _action_telemetry(analysis: ScreenAnalysisResult) -> dict[str, Any]:
     }
 
 
+def _adapter_telemetry(analysis: ScreenAnalysisResult) -> dict[str, Any]:
+    resolution = analysis.adapter_resolution
+    if resolution is None:
+        return {
+            "attempted": False,
+            "active_adapter": None,
+            "available": False,
+            "confidence": None,
+            "fallback_used": False,
+            "fallback_reason": None,
+            "semantic_target_count": 0,
+            "freshness_seconds": None,
+            "used_for_context": False,
+            "used_for_grounding": False,
+            "used_for_navigation": False,
+            "used_for_verification": False,
+            "used_for_action": False,
+            "used_for_continuity": False,
+            "used_for_problem_solving": False,
+        }
+    return {
+        "attempted": True,
+        "active_adapter": resolution.adapter_id.value,
+        "available": resolution.available,
+        "confidence": resolution.confidence.to_dict(),
+        "fallback_used": (resolution.fallback_reason is not None) or (not resolution.available),
+        "fallback_reason": resolution.fallback_reason.value if resolution.fallback_reason is not None else None,
+        "semantic_target_count": len(resolution.semantic_targets),
+        "freshness_seconds": resolution.freshness_seconds,
+        "used_for_context": resolution.used_for_context,
+        "used_for_grounding": resolution.used_for_grounding,
+        "used_for_navigation": resolution.used_for_navigation,
+        "used_for_verification": resolution.used_for_verification,
+        "used_for_action": resolution.used_for_action,
+        "used_for_continuity": resolution.used_for_continuity,
+        "used_for_problem_solving": resolution.used_for_problem_solving,
+    }
+
+
+def _problem_solving_telemetry(analysis: ScreenAnalysisResult) -> dict[str, Any]:
+    problem = analysis.problem_solving_result
+    if problem is None:
+        return {
+            "requested": False,
+            "outcome": "not_requested",
+            "selected_mode": None,
+            "problem_type": None,
+            "artifact_kind": None,
+            "answer_status": None,
+            "ambiguity_state": None,
+            "confidence": None,
+            "refusal_reason": None,
+            "dominant_channel": None,
+            "provenance_channels": [],
+            "adapter_contribution": False,
+            "grounding_reused": False,
+            "navigation_reused": False,
+            "verification_reused": False,
+            "action_reused": False,
+            "continuity_reused": False,
+            "planner_result": None,
+        }
+    outcome = "resolved"
+    if problem.answer_status.value == "refused":
+        outcome = "refused"
+    elif problem.answer_status.value == "partial" or problem.ambiguity_state.value in {"partial", "insufficient_evidence"}:
+        outcome = "partial"
+    return {
+        "requested": True,
+        "outcome": outcome,
+        "selected_mode": problem.explanation_mode.value,
+        "problem_type": problem.problem_type.value,
+        "artifact_kind": problem.artifact_kind.value,
+        "answer_status": problem.answer_status.value,
+        "ambiguity_state": problem.ambiguity_state.value,
+        "confidence": problem.confidence.to_dict(),
+        "refusal_reason": problem.refusal_reason,
+        "dominant_channel": problem.provenance.dominant_channel.value if problem.provenance.dominant_channel is not None else None,
+        "provenance_channels": [channel.value for channel in problem.provenance.channels_used],
+        "adapter_contribution": problem.reused_adapter,
+        "grounding_reused": problem.reused_grounding,
+        "navigation_reused": problem.reused_navigation,
+        "verification_reused": problem.reused_verification,
+        "action_reused": problem.reused_action,
+        "continuity_reused": problem.reused_continuity,
+        "planner_result": problem.planner_result.to_dict() if problem.planner_result is not None else None,
+    }
+
+
 class ScreenResponseComposer:
     def compose(
         self,
@@ -285,6 +424,59 @@ class ScreenResponseComposer:
                 "Inference: I can't safely describe the visible state from this signal."
             )
             return self._response("Screen Bearings", text, analysis)
+
+        workflow = analysis.workflow_learning_result
+        if workflow is not None:
+            if workflow.status.value == "observing" and workflow.observation_session is not None:
+                text = (
+                    "Observed: I started a bounded workflow-observation session on this task. "
+                    "Inference: I'll use the next grounded screen bearings to build a reusable workflow candidate, not hidden background monitoring."
+                )
+                return self._response("Workflow Bearings", text, analysis)
+            if workflow.status.value == "reusable_accepted" and workflow.reusable_workflow is not None:
+                text = (
+                    f'Observed: I captured a reusable workflow for "{workflow.reusable_workflow.label.primary_label}" '
+                    f'from {len(workflow.reusable_workflow.step_sequence.steps)} recent grounded step bearings. '
+                    "Inference: that workflow is now available for bounded matching and reuse."
+                )
+                return self._response("Workflow Bearings", text, analysis)
+            if workflow.status.value == "ambiguous_match":
+                text = (
+                    f"Observed: {workflow.explanation_summary} "
+                    "Inference: I need you to choose which stored workflow you mean before I reuse one."
+                )
+                return self._response("Workflow Bearings", text, analysis)
+            if workflow.status.value in {"downgraded_match", "partial_match", "refused", "weak_basis"}:
+                text = (
+                    f"Observed: {workflow.explanation_summary} "
+                    "Inference: I can't honestly treat the current state as the same workflow yet."
+                )
+                return self._response("Workflow Bearings", text, analysis)
+            if workflow.status.value == "strong_match" and workflow.reuse_plan is not None:
+                next_step = workflow.reuse_plan.next_step_label or "the next stored step"
+                text = (
+                    f"Observed: {workflow.explanation_summary} "
+                    f'Inference: the strongest stored workflow match points to "{next_step}" as the next reusable step.'
+                )
+                return self._response("Workflow Bearings", text, analysis)
+            if workflow.status.value == "reuse_planned" and analysis.action_result is not None:
+                text = (
+                    f"Observed: {workflow.explanation_summary} "
+                    "Inference: I prepared the matched workflow step, but I'm holding execution until you confirm it."
+                )
+                return self._response("Workflow Bearings", text, analysis)
+            if workflow.status.value == "reuse_verified_success" and analysis.action_result is not None:
+                text = (
+                    f"Observed: {workflow.explanation_summary} "
+                    "Inference: I reused the matched workflow step and the follow-up verification bearing supports success."
+                )
+                return self._response("Workflow Bearings", text, analysis)
+            if workflow.status.value in {"reuse_attempted_unverified", "reuse_attempted"} and analysis.action_result is not None:
+                text = (
+                    f"Observed: {workflow.explanation_summary} "
+                    "Inference: I attempted the matched workflow step, but I can't claim a verified reuse success yet."
+                )
+                return self._response("Workflow Bearings", text, analysis)
 
         action = analysis.action_result
         if action is not None:
@@ -380,6 +572,10 @@ class ScreenResponseComposer:
             )
             return self._response("Continuity Bearings", text, analysis)
 
+        problem = analysis.problem_solving_result
+        if problem is not None and problem.answer_summary:
+            return self._response("Problem Bearings", problem.answer_summary, analysis)
+
         verification = analysis.verification_result
         calculation_activity = analysis.calculation_activity
         if verification is not None:
@@ -463,6 +659,34 @@ class ScreenResponseComposer:
                 "Inference: the current verification bearing is still ambiguous."
             )
             return self._response("Verification Bearings", text, analysis)
+
+        adapter_resolution = analysis.adapter_resolution
+        if (
+            adapter_resolution is not None
+            and adapter_resolution.available
+            and adapter_resolution.semantic_context is not None
+            and intent in {ScreenIntentType.INSPECT_VISIBLE_STATE, ScreenIntentType.EXPLAIN_VISIBLE_CONTENT}
+        ):
+            semantic_context = adapter_resolution.semantic_context
+            if adapter_resolution.adapter_id.value == "browser" and semantic_context.page_title:
+                location = f" at {semantic_context.url}" if semantic_context.url else ""
+                loading = (
+                    f" The page still reports {semantic_context.loading_state}."
+                    if semantic_context.loading_state and semantic_context.loading_state not in {"complete", "interactive", "unknown"}
+                    else ""
+                )
+                text = (
+                    f'Observed: Browser semantics identify the current page as "{semantic_context.page_title}"{location}.{loading} '
+                    "Inference: that is the strongest current page bearing I have on this surface."
+                )
+                return self._response("Screen Bearings", text, analysis)
+            if adapter_resolution.adapter_id.value == "file_explorer" and semantic_context.selected_item_label:
+                path_text = f' in "{semantic_context.current_path}"' if semantic_context.current_path else ""
+                text = (
+                    f'Observed: File Explorer shows "{semantic_context.selected_item_label}" selected{path_text}. '
+                    "Inference: that is the current selected item from the adapter-backed bearing."
+                )
+                return self._response("Screen Bearings", text, analysis)
 
         if intent == ScreenIntentType.DETECT_VISIBLE_CHANGE:
             text = (
@@ -617,6 +841,7 @@ class ScreenResponseComposer:
                     "visible_errors": list(analysis.interpretation.visible_errors if analysis.interpretation is not None else []),
                     "likely_task": analysis.interpretation.likely_task if analysis.interpretation is not None else None,
                 },
+                "adapter": _adapter_telemetry(analysis),
                 "grounding": {
                     "requested": analysis.grounding_result is not None,
                     "outcome": analysis.grounding_result.ambiguity_status.value if analysis.grounding_result is not None else "not_requested",
@@ -751,6 +976,11 @@ class ScreenResponseComposer:
                         if analysis.verification_result is not None
                         else False
                     ),
+                    "adapter_used": (
+                        analysis.adapter_resolution.used_for_verification
+                        if analysis.adapter_resolution is not None
+                        else False
+                    ),
                     "planner_result": (
                         analysis.verification_result.planner_result.to_dict()
                         if analysis.verification_result is not None and analysis.verification_result.planner_result is not None
@@ -814,6 +1044,8 @@ class ScreenResponseComposer:
                         else None
                     ),
                 },
+                "problem_solving": _problem_solving_telemetry(analysis),
+                "workflow_learning": _workflow_learning_telemetry(analysis),
                 "limitations": [limitation.to_dict() for limitation in analysis.limitations],
             },
         )

@@ -1558,6 +1558,181 @@ def test_assistant_orchestrator_handles_phase6_continuity_and_emits_continuity_d
     assert screen_events[-1]["payload"]["telemetry"]["continuity"]["resume_candidate_id"] == "button-continue"
 
 
+def test_assistant_orchestrator_handles_phase8_problem_solving_and_emits_problem_debug_event(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase8"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    temp_config.screen_awareness.grounding_enabled = True
+    temp_config.screen_awareness.guidance_enabled = True
+    temp_config.screen_awareness.verification_enabled = True
+    temp_config.screen_awareness.action_enabled = True
+    temp_config.screen_awareness.memory_enabled = True
+    temp_config.screen_awareness.adapters_enabled = True
+    temp_config.screen_awareness.problem_solving_enabled = True
+
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+    payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="explain this like i'm stressed",
+        surface_mode="ghost",
+        active_module="chartroom",
+        input_context={
+            "selection": {
+                "kind": "text",
+                "value": "NameError: name 'foo' is not defined",
+                "preview": "NameError: name 'foo' is not defined",
+            }
+        },
+    )
+
+    planner_debug = _planner_debug(payload)
+    planner_obedience = _planner_obedience(payload)
+    screen_events = [event for event in assistant.events.recent(limit=50) if event.get("source") == "screen_awareness"]
+
+    assert payload["jobs"] == []
+    assert payload["actions"] == []
+    assert planner_debug["structured_query"]["query_shape"] == "screen_awareness_request"
+    assert planner_debug["execution_plan"]["plan_type"] == "screen_awareness_analyze"
+    assert planner_debug["screen_awareness"]["disposition"] == "phase8_problem_solve"
+    assert planner_debug["screen_awareness"]["analysis_result"]["problem_solving_result"]["explanation_mode"] == "stressed_user"
+    assert planner_debug["screen_awareness"]["telemetry"]["problem_solving"]["requested"] is True
+    assert planner_debug["screen_awareness"]["telemetry"]["problem_solving"]["selected_mode"] == "stressed_user"
+    assert planner_obedience["actual_result_mode"] == "summary_result"
+    assert planner_obedience["authority_enforced"] is True
+    assert "important part" in payload["assistant_message"]["content"].lower() or "start with" in payload["assistant_message"]["content"].lower()
+    assert screen_events
+    assert screen_events[-1]["payload"]["disposition"] == "phase8_problem_solve"
+    assert screen_events[-1]["payload"]["telemetry"]["problem_solving"]["requested"] is True
+
+
+def test_assistant_orchestrator_handles_phase9_workflow_learning_and_emits_workflow_debug_event(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase9"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    temp_config.screen_awareness.grounding_enabled = True
+    temp_config.screen_awareness.guidance_enabled = True
+    temp_config.screen_awareness.verification_enabled = True
+    temp_config.screen_awareness.action_enabled = True
+    temp_config.screen_awareness.memory_enabled = True
+    temp_config.screen_awareness.adapters_enabled = True
+    temp_config.screen_awareness.problem_solving_enabled = True
+    temp_config.screen_awareness.workflow_learning_enabled = True
+    temp_config.screen_awareness.action_policy_mode = "confirm_before_act"
+
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+    _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="watch me do this and remember the workflow",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context={
+            "workspace": {"workspaceId": "ws-phase9-event", "title": "Release Form"},
+            "module": "browser",
+            "section": "form",
+            "active_item": {
+                "itemId": "release-form",
+                "title": "Release Form",
+                "kind": "form",
+                "focused": True,
+            },
+            "opened_items": [
+                {
+                    "itemId": "button-continue",
+                    "title": "Continue",
+                    "kind": "button",
+                    "pane": "footer",
+                    "enabled": True,
+                }
+            ],
+        },
+        input_context={"selection": {}, "clipboard": {}},
+    )
+    _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="click the Continue button",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context={
+            "workspace": {"workspaceId": "ws-phase9-event", "title": "Release Form"},
+            "module": "browser",
+            "section": "form",
+            "active_item": {
+                "itemId": "release-form",
+                "title": "Release Form",
+                "kind": "form",
+                "focused": True,
+            },
+            "opened_items": [
+                {
+                    "itemId": "button-continue",
+                    "title": "Continue",
+                    "kind": "button",
+                    "pane": "footer",
+                    "enabled": True,
+                }
+            ],
+        },
+        input_context={"selection": {}, "clipboard": {}},
+    )
+    payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="save this process",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context={
+            "workspace": {"workspaceId": "ws-phase9-event", "title": "Release Form"},
+            "module": "browser",
+            "section": "form",
+            "active_item": {
+                "itemId": "release-form",
+                "title": "Release Form",
+                "kind": "form",
+                "focused": True,
+            },
+            "opened_items": [
+                {
+                    "itemId": "button-continue",
+                    "title": "Continue",
+                    "kind": "button",
+                    "pane": "footer",
+                    "enabled": True,
+                }
+            ],
+        },
+        input_context={"selection": {}, "clipboard": {}},
+    )
+
+    planner_debug = _planner_debug(payload)
+    planner_obedience = _planner_obedience(payload)
+    screen_events = [event for event in assistant.events.recent(limit=75) if event.get("source") == "screen_awareness"]
+
+    assert payload["jobs"] == []
+    assert payload["actions"] == []
+    assert planner_debug["structured_query"]["query_shape"] == "screen_awareness_request"
+    assert planner_debug["execution_plan"]["plan_type"] == "screen_awareness_workflow"
+    assert planner_debug["screen_awareness"]["disposition"] == "phase9_workflow_reuse"
+    assert planner_debug["screen_awareness"]["analysis_result"]["workflow_learning_result"]["status"] == "reusable_accepted"
+    assert planner_debug["screen_awareness"]["telemetry"]["workflow_learning"]["requested"] is True
+    assert planner_obedience["actual_result_mode"] == "summary_result"
+    assert planner_obedience["authority_enforced"] is True
+    assert "workflow" in payload["assistant_message"]["content"].lower()
+    assert screen_events
+    assert screen_events[-1]["payload"]["disposition"] == "phase9_workflow_reuse"
+    assert screen_events[-1]["payload"]["telemetry"]["workflow_learning"]["requested"] is True
+
+
 def test_assistant_orchestrator_routes_deck_open_url_without_provider(temp_config) -> None:
     assistant, jobs, executor, _ = _build_assistant(temp_config)
     async def runner() -> dict[str, object]:

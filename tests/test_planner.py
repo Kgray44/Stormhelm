@@ -59,6 +59,162 @@ def test_planner_routes_direct_arithmetic_to_builtin_calculation_lane() -> None:
     assert decision.debug["calculations"]["extracted_expression"] == "2+2+4+4+4+4+5+10"
 
 
+def test_planner_routes_install_request_to_native_software_control_lane(temp_config) -> None:
+    temp_config.software_control.enabled = True
+    temp_config.software_control.planner_routing_enabled = True
+    planner = DeterministicPlanner(software_control_config=temp_config.software_control)
+
+    decision = planner.plan(
+        "install firefox",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "software_control_response"
+    assert decision.tool_requests == []
+    assert decision.structured_query is not None
+    assert decision.structured_query.query_shape.value == "software_control_request"
+    assert decision.execution_plan is not None
+    assert decision.execution_plan.plan_type == "software_control_execute"
+    assert decision.response_mode == "action_result"
+    assert decision.debug["software_control"]["candidate"] is True
+    assert decision.debug["software_control"]["operation_type"] == "install"
+    assert decision.debug["software_control"]["target_name"] == "firefox"
+
+
+def test_planner_routes_download_and_install_request_to_native_software_control_lane(temp_config) -> None:
+    temp_config.software_control.enabled = True
+    temp_config.software_control.planner_routing_enabled = True
+    planner = DeterministicPlanner(software_control_config=temp_config.software_control)
+
+    decision = planner.plan(
+        "download and install Minecraft",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "software_control_response"
+    assert decision.structured_query is not None
+    assert decision.structured_query.query_shape.value == "software_control_request"
+    assert decision.execution_plan is not None
+    assert decision.execution_plan.plan_type == "software_control_execute"
+    assert decision.debug["software_control"]["candidate"] is True
+    assert decision.debug["software_control"]["operation_type"] == "install"
+    assert decision.debug["software_control"]["target_name"] == "minecraft"
+
+
+def test_planner_routes_open_known_software_to_native_software_control_lane(temp_config) -> None:
+    temp_config.software_control.enabled = True
+    temp_config.software_control.planner_routing_enabled = True
+    planner = DeterministicPlanner(software_control_config=temp_config.software_control)
+
+    decision = planner.plan(
+        "open OBS",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "software_control_response"
+    assert decision.structured_query is not None
+    assert decision.structured_query.query_shape.value == "software_control_request"
+    assert decision.debug["software_control"]["candidate"] is True
+    assert decision.debug["software_control"]["operation_type"] == "launch"
+    assert decision.debug["software_control"]["target_name"] == "obs"
+
+
+def test_planner_routes_check_if_installed_request_without_poisoning_target_name(temp_config) -> None:
+    temp_config.software_control.enabled = True
+    temp_config.software_control.planner_routing_enabled = True
+    planner = DeterministicPlanner(software_control_config=temp_config.software_control)
+
+    decision = planner.plan(
+        "check if Python is installed",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "software_control_response"
+    assert decision.structured_query is not None
+    assert decision.structured_query.query_shape.value == "software_control_request"
+    assert decision.debug["software_control"]["candidate"] is True
+    assert decision.debug["software_control"]["operation_type"] == "verify"
+    assert decision.debug["software_control"]["target_name"] == "python"
+
+
+def test_planner_keeps_generic_open_requests_out_of_software_control_lane(temp_config) -> None:
+    temp_config.software_control.enabled = True
+    temp_config.software_control.planner_routing_enabled = True
+    planner = DeterministicPlanner(software_control_config=temp_config.software_control)
+
+    decision = planner.plan(
+        "open downloads",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type != "software_control_response"
+    assert decision.debug["software_control"]["candidate"] is False
+
+
+def test_planner_routes_confirmation_follow_up_back_into_software_control_lane(temp_config) -> None:
+    temp_config.software_control.enabled = True
+    temp_config.software_control.planner_routing_enabled = True
+    planner = DeterministicPlanner(software_control_config=temp_config.software_control)
+
+    decision = planner.plan(
+        "continue",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={
+            "family": "software_control",
+            "subject": "firefox",
+            "parameters": {
+                "operation_type": "install",
+                "target_name": "firefox",
+                "request_stage": "awaiting_confirmation",
+            },
+        },
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "software_control_response"
+    assert decision.tool_requests == []
+    assert decision.structured_query is not None
+    assert decision.structured_query.query_shape.value == "software_control_request"
+    assert decision.structured_query.slots["request_stage"] == "confirm_execution"
+    assert decision.debug["software_control"]["candidate"] is True
+    assert decision.debug["software_control"]["follow_up_reuse"] is True
+    assert decision.debug["software_control"]["target_name"] == "firefox"
+
+
 def test_planner_routes_explicit_calculation_request_with_malformed_expression_to_calculation_lane() -> None:
     planner = DeterministicPlanner()
 
@@ -601,6 +757,214 @@ def test_planner_routes_phase6_continuity_request_to_screen_awareness_when_enabl
     assert "screen_continuity" in decision.capability_plan.required_capabilities
     assert decision.debug["screen_awareness"]["disposition"] == "phase6_continue"
     assert decision.debug["screen_awareness"]["intent"] == "continue_workflow"
+
+
+def test_planner_preserves_phase4_verify_route_when_phase7_adapters_are_enabled(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase7"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    temp_config.screen_awareness.grounding_enabled = True
+    temp_config.screen_awareness.guidance_enabled = True
+    temp_config.screen_awareness.verification_enabled = True
+    temp_config.screen_awareness.action_enabled = True
+    temp_config.screen_awareness.memory_enabled = True
+    temp_config.screen_awareness.adapters_enabled = True
+    planner = DeterministicPlanner(screen_awareness_config=temp_config.screen_awareness)
+
+    decision = planner.plan(
+        "is this the page I was trying to get to?",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "screen_awareness_response"
+    assert decision.execution_plan is not None
+    assert decision.execution_plan.plan_type == "screen_awareness_analyze"
+    assert decision.response_mode == "summary_result"
+    assert decision.debug["screen_awareness"]["disposition"] == "phase4_verify"
+
+
+def test_planner_preserves_phase5_action_route_when_phase7_adapters_are_enabled(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase7"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    temp_config.screen_awareness.grounding_enabled = True
+    temp_config.screen_awareness.guidance_enabled = True
+    temp_config.screen_awareness.verification_enabled = True
+    temp_config.screen_awareness.action_enabled = True
+    temp_config.screen_awareness.memory_enabled = True
+    temp_config.screen_awareness.adapters_enabled = True
+    planner = DeterministicPlanner(screen_awareness_config=temp_config.screen_awareness)
+
+    decision = planner.plan(
+        "click that button",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "screen_awareness_response"
+    assert decision.execution_plan is not None
+    assert decision.execution_plan.plan_type == "screen_awareness_act"
+    assert decision.response_mode == "action_result"
+    assert decision.debug["screen_awareness"]["disposition"] == "phase5_act"
+
+
+def test_planner_routes_phase8_problem_solving_request_when_enabled(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase8"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    temp_config.screen_awareness.grounding_enabled = True
+    temp_config.screen_awareness.guidance_enabled = True
+    temp_config.screen_awareness.verification_enabled = True
+    temp_config.screen_awareness.action_enabled = True
+    temp_config.screen_awareness.memory_enabled = True
+    temp_config.screen_awareness.adapters_enabled = True
+    temp_config.screen_awareness.problem_solving_enabled = True
+    planner = DeterministicPlanner(screen_awareness_config=temp_config.screen_awareness)
+
+    decision = planner.plan(
+        "what does this error mean?",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+        active_context={
+            "selection": {
+                "kind": "text",
+                "value": "NameError: name 'foo' is not defined",
+                "preview": "NameError: name 'foo' is not defined",
+            }
+        },
+    )
+
+    assert decision.request_type == "screen_awareness_response"
+    assert decision.execution_plan is not None
+    assert decision.execution_plan.plan_type == "screen_awareness_analyze"
+    assert decision.capability_plan is not None
+    assert "screen_problem_solving" in decision.capability_plan.required_capabilities
+    assert decision.debug["screen_awareness"]["disposition"] == "phase8_problem_solve"
+
+
+def test_planner_routes_phase9_workflow_reuse_request_when_enabled(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase9"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    temp_config.screen_awareness.grounding_enabled = True
+    temp_config.screen_awareness.guidance_enabled = True
+    temp_config.screen_awareness.verification_enabled = True
+    temp_config.screen_awareness.action_enabled = True
+    temp_config.screen_awareness.memory_enabled = True
+    temp_config.screen_awareness.adapters_enabled = True
+    temp_config.screen_awareness.problem_solving_enabled = True
+    temp_config.screen_awareness.workflow_learning_enabled = True
+    planner = DeterministicPlanner(screen_awareness_config=temp_config.screen_awareness)
+
+    decision = planner.plan(
+        "watch me do this and remember the workflow",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+        active_context={},
+    )
+
+    assert decision.request_type == "screen_awareness_response"
+    assert decision.execution_plan is not None
+    assert decision.execution_plan.plan_type == "screen_awareness_workflow"
+    assert decision.response_mode == "summary_result"
+    assert decision.capability_plan is not None
+    assert "screen_workflow_learning" in decision.capability_plan.required_capabilities
+    assert decision.debug["screen_awareness"]["disposition"] == "phase9_workflow_reuse"
+    assert decision.debug["screen_awareness"]["intent"] == "learn_workflow_reuse"
+
+
+def test_planner_preserves_phase4_verify_route_when_phase8_problem_solving_is_enabled(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase8"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    temp_config.screen_awareness.grounding_enabled = True
+    temp_config.screen_awareness.guidance_enabled = True
+    temp_config.screen_awareness.verification_enabled = True
+    temp_config.screen_awareness.action_enabled = True
+    temp_config.screen_awareness.memory_enabled = True
+    temp_config.screen_awareness.adapters_enabled = True
+    temp_config.screen_awareness.problem_solving_enabled = True
+    planner = DeterministicPlanner(screen_awareness_config=temp_config.screen_awareness)
+
+    decision = planner.plan(
+        "did that work?",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "screen_awareness_response"
+    assert decision.execution_plan is not None
+    assert decision.execution_plan.plan_type == "screen_awareness_analyze"
+    assert decision.debug["screen_awareness"]["disposition"] == "phase4_verify"
+
+
+def test_planner_preserves_phase5_action_route_when_phase8_problem_solving_is_enabled(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase8"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    temp_config.screen_awareness.grounding_enabled = True
+    temp_config.screen_awareness.guidance_enabled = True
+    temp_config.screen_awareness.verification_enabled = True
+    temp_config.screen_awareness.action_enabled = True
+    temp_config.screen_awareness.memory_enabled = True
+    temp_config.screen_awareness.adapters_enabled = True
+    temp_config.screen_awareness.problem_solving_enabled = True
+    planner = DeterministicPlanner(screen_awareness_config=temp_config.screen_awareness)
+
+    decision = planner.plan(
+        "click that button",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "screen_awareness_response"
+    assert decision.execution_plan is not None
+    assert decision.execution_plan.plan_type == "screen_awareness_act"
+    assert decision.response_mode == "action_result"
+    assert decision.debug["screen_awareness"]["disposition"] == "phase5_act"
 
 
 def test_planner_preserves_phase2_grounding_route_for_explanation_requests_in_phase3(temp_config) -> None:

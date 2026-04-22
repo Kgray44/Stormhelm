@@ -69,6 +69,8 @@ class ScreenRouteDisposition(StrEnum):
     PHASE4_VERIFY = "phase4_verify"
     PHASE5_ACT = "phase5_act"
     PHASE6_CONTINUE = "phase6_continue"
+    PHASE8_PROBLEM_SOLVE = "phase8_problem_solve"
+    PHASE9_WORKFLOW_REUSE = "phase9_workflow_reuse"
     PHASE0_SCAFFOLD = "phase0_scaffold"
 
 
@@ -89,6 +91,7 @@ class ScreenIntentType(StrEnum):
     VERIFY_SCREEN_STATE = "verify_screen_state"
     EXECUTE_UI_ACTION = "execute_ui_action"
     CONTINUE_WORKFLOW = "continue_workflow"
+    LEARN_WORKFLOW_REUSE = "learn_workflow_reuse"
 
 
 class GroundingRequestType(StrEnum):
@@ -118,6 +121,7 @@ class GroundingCandidateRole(StrEnum):
 class GroundingEvidenceChannel(StrEnum):
     NATIVE_OBSERVATION = "native_observation"
     WORKSPACE_CONTEXT = "workspace_context"
+    ADAPTER_SEMANTICS = "adapter_semantics"
     VISUAL_PROVIDER = "visual_provider"
     INTERPRETATION = "interpretation"
 
@@ -228,6 +232,106 @@ class WorkflowContinuityStatus(StrEnum):
     WEAK_BASIS = "weak_basis"
     BLOCKED = "blocked"
     AMBIGUOUS = "ambiguous"
+
+
+class WorkflowLearningRequestType(StrEnum):
+    START_OBSERVATION = "start_observation"
+    SAVE_WORKFLOW = "save_workflow"
+    INSPECT_WORKFLOW = "inspect_workflow"
+    MATCH_WORKFLOW = "match_workflow"
+    REUSE_WORKFLOW = "reuse_workflow"
+
+
+class WorkflowMatchStatus(StrEnum):
+    STRONG_MATCH = "strong_match"
+    PARTIAL_MATCH = "partial_match"
+    DOWNGRADED_MATCH = "downgraded_match"
+    AMBIGUOUS_MATCH = "ambiguous_match"
+    REFUSED = "refused"
+    NO_MATCH = "no_match"
+
+
+class WorkflowLearningStatus(StrEnum):
+    OBSERVING = "observing"
+    WEAK_BASIS = "weak_basis"
+    REUSABLE_ACCEPTED = "reusable_accepted"
+    STRONG_MATCH = "strong_match"
+    PARTIAL_MATCH = "partial_match"
+    DOWNGRADED_MATCH = "downgraded_match"
+    AMBIGUOUS_MATCH = "ambiguous_match"
+    REFUSED = "refused"
+    REUSE_PLANNED = "reuse_planned"
+    REUSE_ATTEMPTED = "reuse_attempted"
+    REUSE_VERIFIED_SUCCESS = "reuse_verified_success"
+    REUSE_ATTEMPTED_UNVERIFIED = "reuse_attempted_unverified"
+
+
+class AppAdapterId(StrEnum):
+    BROWSER = "browser"
+    FILE_EXPLORER = "file_explorer"
+    SYSTEM_SETTINGS = "system_settings"
+    TERMINAL = "terminal"
+    EDITOR = "editor"
+
+
+class AdapterFallbackReason(StrEnum):
+    NO_SEMANTIC_STATE = "no_semantic_state"
+    STALE_SEMANTIC_STATE = "stale_semantic_state"
+    UNSUPPORTED_SURFACE = "unsupported_surface"
+    CONFLICTING_SURFACE = "conflicting_surface"
+    HIDDEN_ONLY_SEMANTIC_TARGETS = "hidden_only_semantic_targets"
+    INSUFFICIENT_SEMANTIC_STATE = "insufficient_semantic_state"
+
+
+class ScreenProblemType(StrEnum):
+    UNKNOWN = "unknown"
+    CODE_ERROR = "code_error"
+    VALIDATION_ERROR = "validation_error"
+    EQUATION_SOLVE = "equation_solve"
+    CHART_INTERPRETATION = "chart_interpretation"
+    TABLE_INTERPRETATION = "table_interpretation"
+    DIAGRAM_INTERPRETATION = "diagram_interpretation"
+    GENERAL_VISIBLE_PROBLEM = "general_visible_problem"
+
+
+class ScreenArtifactKind(StrEnum):
+    UNKNOWN = "unknown"
+    CODE = "code"
+    FORM = "form"
+    EQUATION = "equation"
+    CHART = "chart"
+    TABLE = "table"
+    DIAGRAM = "diagram"
+    TEXT = "text"
+
+
+class ExplanationMode(StrEnum):
+    DIRECT_ANSWER = "direct_answer"
+    CONCISE_EXPLANATION = "concise_explanation"
+    STEP_BY_STEP = "step_by_step"
+    TEACHING = "teaching"
+    STRESSED_USER = "stressed_user"
+
+
+class TeachingMode(StrEnum):
+    NONE = "none"
+    TEACHING = "teaching"
+    STRESSED_USER = "stressed_user"
+
+
+class ProblemAmbiguityState(StrEnum):
+    CLEAR = "clear"
+    PARTIAL = "partial"
+    AMBIGUOUS = "ambiguous"
+    INSUFFICIENT_EVIDENCE = "insufficient_evidence"
+
+
+class ProblemAnswerStatus(StrEnum):
+    DIRECT_ANSWER = "direct_answer"
+    EXPLANATION_ONLY = "explanation_only"
+    APPROXIMATE = "approximate"
+    PARTIAL = "partial"
+    REFUSED = "refused"
 
 
 def confidence_level_for_score(score: float) -> ScreenConfidenceLevel:
@@ -344,6 +448,121 @@ class CurrentScreenContext:
     )
     sensitivity_markers: list[str] = field(default_factory=list)
     ephemeral_context_id: str | None = None
+    adapter_resolution: AppAdapterResolution | None = None
+    semantic_targets: list[AppSemanticTarget] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class BrowserTabIdentity:
+    title: str | None = None
+    index: int | None = None
+    active: bool = True
+    url: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class BrowserFormSemantic:
+    field_id: str
+    label: str
+    role: GroundingCandidateRole = GroundingCandidateRole.FIELD
+    visible: bool = True
+    enabled: bool | None = None
+    kind: str | None = None
+    semantic_type: str | None = None
+    bounds: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class BrowserSemanticContext:
+    page_title: str | None = None
+    url: str | None = None
+    tab_identity: BrowserTabIdentity | None = None
+    loading_state: str | None = None
+    validation_messages: list[str] = field(default_factory=list)
+    form_fields: list[BrowserFormSemantic] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class ExplorerSemanticContext:
+    current_path: str | None = None
+    selected_item_name: str | None = None
+    selected_item_kind: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class AppSemanticTarget:
+    candidate_id: str
+    label: str
+    role: GroundingCandidateRole
+    visible: bool = True
+    enabled: bool | None = None
+    parent_container: str | None = None
+    bounds: dict[str, Any] = field(default_factory=dict)
+    source_type: ScreenSourceType = ScreenSourceType.APP_ADAPTER
+    semantic_metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class AppSemanticContext:
+    adapter_id: AppAdapterId
+    summary: str = ""
+    page_title: str | None = None
+    url: str | None = None
+    current_path: str | None = None
+    selected_item_label: str | None = None
+    selected_item_kind: str | None = None
+    loading_state: str | None = None
+    tab_identity: BrowserTabIdentity | None = None
+    browser: BrowserSemanticContext | None = None
+    explorer: ExplorerSemanticContext | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class AppAdapterResolution:
+    adapter_id: AppAdapterId
+    available: bool
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No adapter semantics are available.",
+        )
+    )
+    semantic_context: AppSemanticContext | None = None
+    semantic_targets: list[AppSemanticTarget] = field(default_factory=list)
+    freshness_seconds: float | None = None
+    fallback_reason: AdapterFallbackReason | None = None
+    provenance_note: str = ""
+    used_for_context: bool = False
+    used_for_grounding: bool = False
+    used_for_navigation: bool = False
+    used_for_verification: bool = False
+    used_for_action: bool = False
+    used_for_continuity: bool = False
+    used_for_problem_solving: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return _serialize(self)
@@ -1212,15 +1431,326 @@ class WorkflowContinuityResult:
 
 
 @dataclass(slots=True)
+class ErrorTriageOutcome:
+    classification: str | None = None
+    severity: str = "unknown"
+    observed_message: str = ""
+    meaning_summary: str = ""
+    bounded_next_step: str | None = None
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No error triage outcome is available.",
+        )
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class ScreenArtifactInterpretation:
+    artifact_kind: ScreenArtifactKind = ScreenArtifactKind.UNKNOWN
+    observed_excerpt: str = ""
+    structured_summary: str = ""
+    visible_values: list[str] = field(default_factory=list)
+    uncertainty_notes: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class ScreenProblemContext:
+    visible_text_preview: str = ""
+    grounding_reused: bool = False
+    navigation_reused: bool = False
+    verification_reused: bool = False
+    action_reused: bool = False
+    continuity_reused: bool = False
+    adapter_reused: bool = False
+    provenance_channels: list[GroundingEvidenceChannel] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class PlannerProblemSolvingResult:
+    resolved: bool
+    problem_type: ScreenProblemType = ScreenProblemType.UNKNOWN
+    artifact_kind: ScreenArtifactKind = ScreenArtifactKind.UNKNOWN
+    explanation_mode: ExplanationMode = ExplanationMode.CONCISE_EXPLANATION
+    answer_status: ProblemAnswerStatus = ProblemAnswerStatus.REFUSED
+    ambiguity_state: ProblemAmbiguityState = ProblemAmbiguityState.INSUFFICIENT_EVIDENCE
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No problem-solving result is available.",
+        )
+    )
+    refusal_reason: str | None = None
+    provenance_channels: list[GroundingEvidenceChannel] = field(default_factory=list)
+    adapter_contribution: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class ProblemSolvingResult:
+    problem_type: ScreenProblemType = ScreenProblemType.UNKNOWN
+    artifact_kind: ScreenArtifactKind = ScreenArtifactKind.UNKNOWN
+    explanation_mode: ExplanationMode = ExplanationMode.CONCISE_EXPLANATION
+    teaching_mode: TeachingMode = TeachingMode.NONE
+    answer_status: ProblemAnswerStatus = ProblemAnswerStatus.REFUSED
+    ambiguity_state: ProblemAmbiguityState = ProblemAmbiguityState.INSUFFICIENT_EVIDENCE
+    context: ScreenProblemContext = field(default_factory=ScreenProblemContext)
+    triage: ErrorTriageOutcome | None = None
+    artifact_interpretation: ScreenArtifactInterpretation | None = None
+    answer_summary: str = ""
+    answer_steps: list[str] = field(default_factory=list)
+    background_note: str | None = None
+    refusal_reason: str | None = None
+    planner_result: PlannerProblemSolvingResult | None = None
+    provenance: GroundingProvenance = field(default_factory=GroundingProvenance)
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No problem-solving result is available.",
+        )
+    )
+    reused_adapter: bool = False
+    reused_grounding: bool = False
+    reused_navigation: bool = False
+    reused_verification: bool = False
+    reused_action: bool = False
+    reused_continuity: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class WorkflowObservationSession:
+    session_id: str
+    started_at: str
+    active: bool = True
+    label_hint: str | None = None
+    observed_resolution_count: int = 0
+    captured_step_count: int = 0
+    last_captured_at: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class WorkflowStepEvent:
+    event_id: str
+    source_intent: str
+    summary: str
+    captured_at: str = ""
+    page_label: str | None = None
+    target_label: str | None = None
+    target_candidate_id: str | None = None
+    action_intent: ActionIntent | None = None
+    completion_status: str | None = None
+    confidence_score: float = 0.0
+    provenance_channels: list[GroundingEvidenceChannel] = field(default_factory=list)
+    sensitive: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class WorkflowStepSequence:
+    steps: list[WorkflowStepEvent] = field(default_factory=list)
+    summary: str = ""
+    stable_signals: list[str] = field(default_factory=list)
+    variable_signals: list[str] = field(default_factory=list)
+    sensitive_signals: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class WorkflowLabel:
+    primary_label: str
+    category: str = "screen_workflow"
+    aliases: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class WorkflowCandidate:
+    candidate_id: str
+    label: WorkflowLabel
+    step_sequence: WorkflowStepSequence
+    summary: str
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No workflow candidate confidence is available.",
+        )
+    )
+    environment_hints: list[str] = field(default_factory=list)
+    known_failure_notes: list[str] = field(default_factory=list)
+    allowed_reuse_modes: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class ReusableWorkflow:
+    workflow_id: str
+    label: WorkflowLabel
+    summary: str
+    step_sequence: WorkflowStepSequence
+    accepted_at: str
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No reusable workflow confidence is available.",
+        )
+    )
+    environment_hints: list[str] = field(default_factory=list)
+    known_failure_notes: list[str] = field(default_factory=list)
+    allowed_reuse_modes: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class WorkflowReuseSafetyState:
+    allowed: bool
+    reason: str
+    blocked: bool = False
+    ambiguous: bool = False
+    sensitive: bool = False
+    verification_ready: bool = False
+    current_target_supported: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class WorkflowMatchResult:
+    workflow_id: str | None
+    workflow_label: str | None
+    status: WorkflowMatchStatus
+    match_score: float
+    explanation_summary: str
+    evidence_summary: list[str] = field(default_factory=list)
+    matched_step_labels: list[str] = field(default_factory=list)
+    provenance_channels: list[GroundingEvidenceChannel] = field(default_factory=list)
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No workflow match confidence is available.",
+        )
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class WorkflowReusePlan:
+    workflow_id: str
+    workflow_label: str
+    reuse_mode: str
+    explanation_summary: str
+    next_step_label: str | None = None
+    current_target_candidate_id: str | None = None
+    action_request_text: str | None = None
+    grounding_reused: bool = False
+    navigation_reused: bool = False
+    verification_reused: bool = False
+    action_reused: bool = False
+    confirmation_required: bool = False
+    safety_state: WorkflowReuseSafetyState = field(
+        default_factory=lambda: WorkflowReuseSafetyState(allowed=False, reason="No workflow reuse safety state is available.")
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class PlannerWorkflowReuseResult:
+    resolved: bool
+    status: WorkflowLearningStatus
+    workflow_id: str | None = None
+    match_score: float = 0.0
+    reuse_mode: str | None = None
+    next_step_label: str | None = None
+    explanation_summary: str = ""
+    confirmation_required: bool = False
+    attempted_reuse: bool = False
+    verified_reuse: bool = False
+    provenance_channels: list[GroundingEvidenceChannel] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class WorkflowLearningResult:
+    request_type: WorkflowLearningRequestType
+    status: WorkflowLearningStatus
+    observation_session: WorkflowObservationSession | None = None
+    candidate: WorkflowCandidate | None = None
+    reusable_workflow: ReusableWorkflow | None = None
+    available_workflows: list[ReusableWorkflow] = field(default_factory=list)
+    match_result: WorkflowMatchResult | None = None
+    reuse_plan: WorkflowReusePlan | None = None
+    capture_status: str | None = None
+    clarification_needed: bool = False
+    clarification_prompt: str | None = None
+    explanation_summary: str = ""
+    planner_result: PlannerWorkflowReuseResult | None = None
+    provenance: GroundingProvenance = field(default_factory=GroundingProvenance)
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No workflow-learning result is available.",
+        )
+    )
+    attempted_reuse: bool = False
+    verified_reuse: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
 class ScreenAnalysisResult:
     observation: ScreenObservation | None = None
     interpretation: ScreenInterpretation | None = None
     current_screen_context: CurrentScreenContext | None = None
+    adapter_resolution: AppAdapterResolution | None = None
     grounding_result: GroundingOutcome | None = None
     navigation_result: NavigationOutcome | None = None
     verification_result: VerificationOutcome | None = None
     action_result: ActionExecutionResult | None = None
     continuity_result: WorkflowContinuityResult | None = None
+    problem_solving_result: ProblemSolvingResult | None = None
+    workflow_learning_result: WorkflowLearningResult | None = None
     calculation_activity: ScreenCalculationActivity | None = None
     limitations: list[ScreenLimitation] = field(default_factory=list)
     fallback_reason: str | None = None

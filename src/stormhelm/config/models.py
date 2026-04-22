@@ -81,7 +81,7 @@ class HardwareTelemetryConfig:
 @dataclass(slots=True)
 class ScreenAwarenessConfig:
     enabled: bool = True
-    phase: str = "phase6"
+    phase: str = "phase9"
     planner_routing_enabled: bool = True
     debug_events_enabled: bool = True
     observation_enabled: bool = True
@@ -92,7 +92,9 @@ class ScreenAwarenessConfig:
     action_policy_mode: str = "confirm_before_act"
     verification_enabled: bool = True
     memory_enabled: bool = True
-    adapters_enabled: bool = False
+    adapters_enabled: bool = True
+    problem_solving_enabled: bool = True
+    workflow_learning_enabled: bool = True
 
     def _phase_at_least(self, minimum_phase: int) -> bool:
         phase_name = str(self.phase or "").strip().lower()
@@ -104,6 +106,9 @@ class ScreenAwarenessConfig:
             "phase4": 4,
             "phase5": 5,
             "phase6": 6,
+            "phase7": 7,
+            "phase8": 8,
+            "phase9": 9,
         }
         return phase_order.get(phase_name, 0) >= minimum_phase
 
@@ -117,7 +122,9 @@ class ScreenAwarenessConfig:
             "verification_enabled": self.verification_enabled and self._phase_at_least(4),
             "memory_enabled": self.memory_enabled,
             "continuity_enabled": self.memory_enabled and self._phase_at_least(6),
-            "adapters_enabled": self.adapters_enabled,
+            "adapters_enabled": self.adapters_enabled and self._phase_at_least(7),
+            "problem_solving_enabled": self.problem_solving_enabled and self._phase_at_least(8),
+            "workflow_learning_enabled": self.workflow_learning_enabled and self._phase_at_least(9),
         }
 
 
@@ -126,6 +133,30 @@ class CalculationsConfig:
     enabled: bool = True
     planner_routing_enabled: bool = True
     debug_events_enabled: bool = True
+
+
+@dataclass(slots=True)
+class SoftwareControlConfig:
+    enabled: bool = True
+    planner_routing_enabled: bool = True
+    debug_events_enabled: bool = True
+    package_manager_routes_enabled: bool = True
+    vendor_installer_routes_enabled: bool = True
+    browser_guided_routes_enabled: bool = True
+    privileged_operations_allowed: bool = False
+    trusted_sources_only: bool = True
+
+
+@dataclass(slots=True)
+class SoftwareRecoveryConfig:
+    enabled: bool = True
+    debug_events_enabled: bool = True
+    local_troubleshooting_enabled: bool = True
+    max_retry_attempts: int = 2
+    max_recovery_steps: int = 4
+    cloud_fallback_enabled: bool = False
+    cloud_fallback_model: str = "gpt-5.4-nano"
+    redaction_enabled: bool = True
 
 
 def default_discord_trusted_aliases() -> dict[str, "DiscordTrustedAliasConfig"]:
@@ -297,6 +328,8 @@ class AppConfig:
     hardware_telemetry: HardwareTelemetryConfig
     screen_awareness: ScreenAwarenessConfig
     calculations: CalculationsConfig
+    software_control: SoftwareControlConfig
+    software_recovery: SoftwareRecoveryConfig
     discord_relay: DiscordRelayConfig
     openai: OpenAIConfig
     safety: SafetyConfig

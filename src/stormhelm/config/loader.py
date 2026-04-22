@@ -18,6 +18,8 @@ from stormhelm.config.models import (
     NetworkConfig,
     OpenAIConfig,
     ScreenAwarenessConfig,
+    SoftwareControlConfig,
+    SoftwareRecoveryConfig,
     WeatherConfig,
     RuntimePathConfig,
     SafetyConfig,
@@ -151,7 +153,7 @@ def _build_app_config(
     screen_awareness_data = data.get("screen_awareness", {})
     screen_awareness_config = ScreenAwarenessConfig(
         enabled=bool(screen_awareness_data.get("enabled", True)),
-        phase=str(screen_awareness_data.get("phase", "phase6")).strip() or "phase6",
+        phase=str(screen_awareness_data.get("phase", "phase9")).strip() or "phase9",
         planner_routing_enabled=bool(screen_awareness_data.get("planner_routing_enabled", True)),
         debug_events_enabled=bool(screen_awareness_data.get("debug_events_enabled", True)),
         observation_enabled=bool(screen_awareness_data.get("observation_enabled", True)),
@@ -163,7 +165,9 @@ def _build_app_config(
         or "confirm_before_act",
         verification_enabled=bool(screen_awareness_data.get("verification_enabled", True)),
         memory_enabled=bool(screen_awareness_data.get("memory_enabled", True)),
-        adapters_enabled=bool(screen_awareness_data.get("adapters_enabled", False)),
+        adapters_enabled=bool(screen_awareness_data.get("adapters_enabled", True)),
+        problem_solving_enabled=bool(screen_awareness_data.get("problem_solving_enabled", True)),
+        workflow_learning_enabled=bool(screen_awareness_data.get("workflow_learning_enabled", True)),
     )
 
     calculations_data = data.get("calculations", {})
@@ -171,6 +175,32 @@ def _build_app_config(
         enabled=bool(calculations_data.get("enabled", True)),
         planner_routing_enabled=bool(calculations_data.get("planner_routing_enabled", True)),
         debug_events_enabled=bool(calculations_data.get("debug_events_enabled", True)),
+    )
+
+    software_control_data = data.get("software_control", {})
+    software_control_config = SoftwareControlConfig(
+        enabled=bool(software_control_data.get("enabled", True)),
+        planner_routing_enabled=bool(software_control_data.get("planner_routing_enabled", True)),
+        debug_events_enabled=bool(software_control_data.get("debug_events_enabled", True)),
+        package_manager_routes_enabled=bool(software_control_data.get("package_manager_routes_enabled", True)),
+        vendor_installer_routes_enabled=bool(software_control_data.get("vendor_installer_routes_enabled", True)),
+        browser_guided_routes_enabled=bool(software_control_data.get("browser_guided_routes_enabled", True)),
+        privileged_operations_allowed=bool(software_control_data.get("privileged_operations_allowed", False)),
+        trusted_sources_only=bool(software_control_data.get("trusted_sources_only", True)),
+    )
+
+    software_recovery_data = data.get("software_recovery", {})
+    software_recovery_config = SoftwareRecoveryConfig(
+        enabled=bool(software_recovery_data.get("enabled", True)),
+        debug_events_enabled=bool(software_recovery_data.get("debug_events_enabled", True)),
+        local_troubleshooting_enabled=bool(software_recovery_data.get("local_troubleshooting_enabled", True)),
+        max_retry_attempts=int(software_recovery_data.get("max_retry_attempts", 2)),
+        max_recovery_steps=int(software_recovery_data.get("max_recovery_steps", 4)),
+        cloud_fallback_enabled=bool(software_recovery_data.get("cloud_fallback_enabled", False)),
+        cloud_fallback_model=(
+            str(software_recovery_data.get("cloud_fallback_model", "gpt-5.4-nano")).strip() or "gpt-5.4-nano"
+        ),
+        redaction_enabled=bool(software_recovery_data.get("redaction_enabled", True)),
     )
 
     discord_relay_data = data.get("discord_relay", {})
@@ -334,6 +364,8 @@ def _build_app_config(
         hardware_telemetry=hardware_telemetry_config,
         screen_awareness=screen_awareness_config,
         calculations=calculations_config,
+        software_control=software_control_config,
+        software_recovery=software_recovery_config,
         discord_relay=discord_relay_config,
         openai=openai_config,
         safety=safety_config,
@@ -429,9 +461,32 @@ def _apply_env_overrides(data: ConfigDict, env: Mapping[str, str]) -> ConfigDict
         "STORMHELM_SCREEN_AWARENESS_VERIFICATION_ENABLED": ("screen_awareness.verification_enabled", _parse_bool),
         "STORMHELM_SCREEN_AWARENESS_MEMORY_ENABLED": ("screen_awareness.memory_enabled", _parse_bool),
         "STORMHELM_SCREEN_AWARENESS_ADAPTERS_ENABLED": ("screen_awareness.adapters_enabled", _parse_bool),
+            "STORMHELM_SCREEN_AWARENESS_PROBLEM_SOLVING_ENABLED": (
+                "screen_awareness.problem_solving_enabled",
+                _parse_bool,
+            ),
+            "STORMHELM_SCREEN_AWARENESS_WORKFLOW_LEARNING_ENABLED": (
+                "screen_awareness.workflow_learning_enabled",
+                _parse_bool,
+            ),
         "STORMHELM_CALCULATIONS_ENABLED": ("calculations.enabled", _parse_bool),
         "STORMHELM_CALCULATIONS_PLANNER_ROUTING_ENABLED": ("calculations.planner_routing_enabled", _parse_bool),
         "STORMHELM_CALCULATIONS_DEBUG_EVENTS_ENABLED": ("calculations.debug_events_enabled", _parse_bool),
+        "STORMHELM_SOFTWARE_CONTROL_ENABLED": ("software_control.enabled", _parse_bool),
+        "STORMHELM_SOFTWARE_CONTROL_PLANNER_ROUTING_ENABLED": ("software_control.planner_routing_enabled", _parse_bool),
+        "STORMHELM_SOFTWARE_CONTROL_DEBUG_EVENTS_ENABLED": ("software_control.debug_events_enabled", _parse_bool),
+        "STORMHELM_SOFTWARE_CONTROL_PACKAGE_MANAGER_ROUTES_ENABLED": ("software_control.package_manager_routes_enabled", _parse_bool),
+        "STORMHELM_SOFTWARE_CONTROL_VENDOR_INSTALLER_ROUTES_ENABLED": ("software_control.vendor_installer_routes_enabled", _parse_bool),
+        "STORMHELM_SOFTWARE_CONTROL_BROWSER_GUIDED_ROUTES_ENABLED": ("software_control.browser_guided_routes_enabled", _parse_bool),
+        "STORMHELM_SOFTWARE_CONTROL_PRIVILEGED_OPERATIONS_ALLOWED": ("software_control.privileged_operations_allowed", _parse_bool),
+        "STORMHELM_SOFTWARE_RECOVERY_ENABLED": ("software_recovery.enabled", _parse_bool),
+        "STORMHELM_SOFTWARE_RECOVERY_DEBUG_EVENTS_ENABLED": ("software_recovery.debug_events_enabled", _parse_bool),
+        "STORMHELM_SOFTWARE_RECOVERY_LOCAL_TROUBLESHOOTING_ENABLED": ("software_recovery.local_troubleshooting_enabled", _parse_bool),
+        "STORMHELM_SOFTWARE_RECOVERY_MAX_RETRY_ATTEMPTS": ("software_recovery.max_retry_attempts", int),
+        "STORMHELM_SOFTWARE_RECOVERY_MAX_RECOVERY_STEPS": ("software_recovery.max_recovery_steps", int),
+        "STORMHELM_SOFTWARE_RECOVERY_CLOUD_FALLBACK_ENABLED": ("software_recovery.cloud_fallback_enabled", _parse_bool),
+        "STORMHELM_SOFTWARE_RECOVERY_CLOUD_FALLBACK_MODEL": ("software_recovery.cloud_fallback_model", str),
+        "STORMHELM_SOFTWARE_RECOVERY_REDACTION_ENABLED": ("software_recovery.redaction_enabled", _parse_bool),
         "STORMHELM_DISCORD_RELAY_ENABLED": ("discord_relay.enabled", _parse_bool),
         "STORMHELM_DISCORD_RELAY_PLANNER_ROUTING_ENABLED": ("discord_relay.planner_routing_enabled", _parse_bool),
         "STORMHELM_DISCORD_RELAY_DEBUG_EVENTS_ENABLED": ("discord_relay.debug_events_enabled", _parse_bool),

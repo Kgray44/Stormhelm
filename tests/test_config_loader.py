@@ -97,10 +97,10 @@ def test_load_config_applies_hardware_telemetry_environment_overrides(temp_proje
     assert config.hardware_telemetry.hwinfo_executable_path == "C:/Tools/HWiNFO64.EXE"
 
 
-def test_load_config_defaults_screen_awareness_to_phase6_continuity_flags(temp_project_root: Path) -> None:
+def test_load_config_defaults_screen_awareness_to_phase9_workflow_learning_flags(temp_project_root: Path) -> None:
     config = load_config(project_root=temp_project_root, env={})
 
-    assert config.screen_awareness.phase == "phase6"
+    assert config.screen_awareness.phase == "phase9"
     assert config.screen_awareness.enabled is True
     assert config.screen_awareness.planner_routing_enabled is True
     assert config.screen_awareness.debug_events_enabled is True
@@ -112,7 +112,9 @@ def test_load_config_defaults_screen_awareness_to_phase6_continuity_flags(temp_p
     assert config.screen_awareness.action_policy_mode == "confirm_before_act"
     assert config.screen_awareness.verification_enabled is True
     assert config.screen_awareness.memory_enabled is True
-    assert config.screen_awareness.adapters_enabled is False
+    assert config.screen_awareness.adapters_enabled is True
+    assert config.screen_awareness.problem_solving_enabled is True
+    assert config.screen_awareness.workflow_learning_enabled is True
 
 
 def test_load_config_defaults_calculations_to_enabled_local_routing(temp_project_root: Path) -> None:
@@ -138,6 +140,45 @@ def test_load_config_applies_calculations_environment_overrides(temp_project_roo
     assert config.calculations.debug_events_enabled is False
 
 
+def test_load_config_defaults_software_control_and_recovery_to_native_local_first(temp_project_root: Path) -> None:
+    config = load_config(project_root=temp_project_root, env={})
+
+    assert config.software_control.enabled is True
+    assert config.software_control.planner_routing_enabled is True
+    assert config.software_control.package_manager_routes_enabled is True
+    assert config.software_control.vendor_installer_routes_enabled is True
+    assert config.software_control.browser_guided_routes_enabled is True
+    assert config.software_control.privileged_operations_allowed is False
+    assert config.software_recovery.enabled is True
+    assert config.software_recovery.local_troubleshooting_enabled is True
+    assert config.software_recovery.cloud_fallback_enabled is False
+    assert config.software_recovery.cloud_fallback_model == "gpt-5.4-nano"
+    assert config.software_recovery.redaction_enabled is True
+
+
+def test_load_config_applies_software_control_and_recovery_environment_overrides(temp_project_root: Path) -> None:
+    config = load_config(
+        project_root=temp_project_root,
+        env={
+            "STORMHELM_SOFTWARE_CONTROL_ENABLED": "false",
+            "STORMHELM_SOFTWARE_CONTROL_PLANNER_ROUTING_ENABLED": "false",
+            "STORMHELM_SOFTWARE_CONTROL_PACKAGE_MANAGER_ROUTES_ENABLED": "false",
+            "STORMHELM_SOFTWARE_CONTROL_BROWSER_GUIDED_ROUTES_ENABLED": "false",
+            "STORMHELM_SOFTWARE_RECOVERY_CLOUD_FALLBACK_ENABLED": "true",
+            "STORMHELM_SOFTWARE_RECOVERY_MAX_RETRY_ATTEMPTS": "3",
+            "STORMHELM_SOFTWARE_RECOVERY_CLOUD_FALLBACK_MODEL": "gpt-5.4-nano",
+        },
+    )
+
+    assert config.software_control.enabled is False
+    assert config.software_control.planner_routing_enabled is False
+    assert config.software_control.package_manager_routes_enabled is False
+    assert config.software_control.browser_guided_routes_enabled is False
+    assert config.software_recovery.cloud_fallback_enabled is True
+    assert config.software_recovery.max_retry_attempts == 3
+    assert config.software_recovery.cloud_fallback_model == "gpt-5.4-nano"
+
+
 def test_load_config_applies_screen_awareness_environment_overrides(temp_project_root: Path) -> None:
     config = load_config(
         project_root=temp_project_root,
@@ -149,6 +190,8 @@ def test_load_config_applies_screen_awareness_environment_overrides(temp_project
             "STORMHELM_SCREEN_AWARENESS_ACTION_POLICY_MODE": "trusted_action",
             "STORMHELM_SCREEN_AWARENESS_VERIFICATION_ENABLED": "false",
             "STORMHELM_SCREEN_AWARENESS_MEMORY_ENABLED": "true",
+            "STORMHELM_SCREEN_AWARENESS_PROBLEM_SOLVING_ENABLED": "false",
+            "STORMHELM_SCREEN_AWARENESS_WORKFLOW_LEARNING_ENABLED": "false",
         },
     )
 
@@ -159,6 +202,8 @@ def test_load_config_applies_screen_awareness_environment_overrides(temp_project
     assert config.screen_awareness.action_policy_mode == "trusted_action"
     assert config.screen_awareness.verification_enabled is False
     assert config.screen_awareness.memory_enabled is True
+    assert config.screen_awareness.problem_solving_enabled is False
+    assert config.screen_awareness.workflow_learning_enabled is False
 
 
 def test_load_config_defaults_discord_relay_to_enabled_baby_alias(temp_project_root: Path) -> None:

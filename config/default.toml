@@ -62,7 +62,7 @@ hwinfo_executable_path = ""
 
 [screen_awareness]
 enabled = true
-phase = "phase6"
+phase = "phase9"
 planner_routing_enabled = true
 debug_events_enabled = true
 observation_enabled = true
@@ -73,12 +73,34 @@ action_enabled = true
 action_policy_mode = "confirm_before_act"
 verification_enabled = true
 memory_enabled = true
-adapters_enabled = false
+adapters_enabled = true
+problem_solving_enabled = true
+workflow_learning_enabled = true
 
 [calculations]
 enabled = true
 planner_routing_enabled = true
 debug_events_enabled = true
+
+[software_control]
+enabled = true
+planner_routing_enabled = true
+debug_events_enabled = true
+package_manager_routes_enabled = true
+vendor_installer_routes_enabled = true
+browser_guided_routes_enabled = true
+privileged_operations_allowed = false
+trusted_sources_only = true
+
+[software_recovery]
+enabled = true
+debug_events_enabled = true
+local_troubleshooting_enabled = true
+max_retry_attempts = 2
+max_recovery_steps = 4
+cloud_fallback_enabled = false
+cloud_fallback_model = "gpt-5.4-nano"
+redaction_enabled = true
 
 [discord_relay]
 enabled = true

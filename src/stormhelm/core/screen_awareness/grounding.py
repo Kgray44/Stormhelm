@@ -285,7 +285,11 @@ class DeterministicGroundingEngine:
             return None
 
         request = self.build_request(operator_text=operator_text, intent=intent, observation=observation)
-        candidates = self._collect_candidates(observation=observation, interpretation=interpretation)
+        candidates = self._collect_candidates(
+            observation=observation,
+            interpretation=interpretation,
+            current_context=current_context,
+        )
         ranked = self._score_candidates(request=request, candidates=candidates, observation=observation)
         ambiguity_status, confidence, winning_candidate = self._resolve_outcome(request=request, ranked_candidates=ranked)
         explanation = self._build_explanation(
@@ -341,14 +345,20 @@ class DeterministicGroundingEngine:
         *,
         observation: ScreenObservation,
         interpretation: ScreenInterpretation,
+        current_context: CurrentScreenContext | None = None,
     ) -> list[GroundingCandidate]:
-        return self._collect_candidates(observation=observation, interpretation=interpretation)
+        return self._collect_candidates(
+            observation=observation,
+            interpretation=interpretation,
+            current_context=current_context,
+        )
 
     def _collect_candidates(
         self,
         *,
         observation: ScreenObservation,
         interpretation: ScreenInterpretation,
+        current_context: CurrentScreenContext | None = None,
     ) -> list[GroundingCandidate]:
         candidates: list[GroundingCandidate] = []
         seen_workspace_ids: set[str] = set()
@@ -419,6 +429,22 @@ class DeterministicGroundingEngine:
                     semantic_metadata={},
                 )
             )
+        if current_context is not None:
+            for semantic_target in current_context.semantic_targets:
+                candidates.append(
+                    GroundingCandidate(
+                        candidate_id=semantic_target.candidate_id,
+                        label=semantic_target.label,
+                        role=semantic_target.role,
+                        source_channel=GroundingEvidenceChannel.ADAPTER_SEMANTICS,
+                        source_type=ScreenSourceType.APP_ADAPTER,
+                        visible_text=semantic_target.label,
+                        enabled=semantic_target.enabled,
+                        parent_container=semantic_target.parent_container,
+                        bounds=dict(semantic_target.bounds),
+                        semantic_metadata=dict(semantic_target.semantic_metadata),
+                    )
+                )
         return candidates
 
     def _workspace_candidate(self, item: dict[str, Any], *, is_active: bool) -> GroundingCandidate | None:
@@ -704,6 +730,8 @@ class DeterministicGroundingEngine:
     def _source_trust_weight(self, candidate: GroundingCandidate) -> float:
         if candidate.source_channel == GroundingEvidenceChannel.NATIVE_OBSERVATION:
             return 0.34
+        if candidate.source_channel == GroundingEvidenceChannel.ADAPTER_SEMANTICS:
+            return 0.31
         if candidate.source_channel == GroundingEvidenceChannel.WORKSPACE_CONTEXT:
             return 0.28
         if candidate.source_channel == GroundingEvidenceChannel.VISUAL_PROVIDER:
@@ -925,6 +953,9 @@ class DeterministicGroundingEngine:
             return "the current focus state"
         if candidate.source_channel == GroundingEvidenceChannel.WORKSPACE_CONTEXT:
             return "workspace context"
+        if candidate.source_channel == GroundingEvidenceChannel.ADAPTER_SEMANTICS:
+            adapter_id = str(candidate.semantic_metadata.get("adapter_id") or "app").replace("_", " ")
+            return f"{adapter_id} adapter semantics"
         if candidate.source_channel == GroundingEvidenceChannel.NATIVE_OBSERVATION:
             return "native observation"
         if candidate.source_channel == GroundingEvidenceChannel.INTERPRETATION:

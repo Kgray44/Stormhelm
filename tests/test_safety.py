@@ -18,3 +18,12 @@ def test_safety_policy_allows_only_allowlisted_files(temp_config, temp_project_r
     assert policy.can_read_path(str(outside_file)).allowed is False
     assert policy.authorize_tool("shell_command", SafetyClassification.ACTION).allowed is False
 
+
+def test_safety_policy_blocks_disabled_software_routes(temp_config) -> None:
+    temp_config.software_control.browser_guided_routes_enabled = False
+    temp_config.software_control.privileged_operations_allowed = False
+    policy = SafetyPolicy(temp_config)
+
+    assert policy.authorize_software_route("browser_guided").allowed is False
+    assert policy.authorize_software_route("winget").allowed is True
+    assert policy.authorize_software_route("vendor_installer", requires_elevation=True).allowed is False

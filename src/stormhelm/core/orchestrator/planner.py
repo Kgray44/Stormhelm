@@ -7,6 +7,7 @@ from typing import Any
 from stormhelm.config.models import CalculationsConfig
 from stormhelm.config.models import DiscordRelayConfig
 from stormhelm.config.models import ScreenAwarenessConfig
+from stormhelm.config.models import SoftwareControlConfig
 from stormhelm.core.calculations import CalculationsPlannerSeam
 from stormhelm.core.calculations import CalculationOutputMode
 from stormhelm.core.calculations import CalculationRouteDisposition
@@ -29,6 +30,8 @@ from stormhelm.core.screen_awareness import ScreenAwarenessPlannerSeam
 from stormhelm.core.screen_awareness import ScreenIntentType
 from stormhelm.core.screen_awareness import ScreenPlannerEvaluation
 from stormhelm.core.screen_awareness import ScreenRouteDisposition
+from stormhelm.core.software_control import SoftwareControlPlannerSeam
+from stormhelm.core.software_control import SoftwareRouteDisposition
 
 NOTE_EXTENSIONS = {".md", ".markdown", ".txt"}
 FILE_LOOKUP_PREFIXES = {"open ", "show ", "bring up ", "pull up "}
@@ -196,6 +199,8 @@ class DeterministicPlanner:
         screen_awareness_seam: ScreenAwarenessPlannerSeam | None = None,
         calculations_config: CalculationsConfig | None = None,
         calculations_seam: CalculationsPlannerSeam | None = None,
+        software_control_config: SoftwareControlConfig | None = None,
+        software_control_seam: SoftwareControlPlannerSeam | None = None,
         discord_relay_config: DiscordRelayConfig | None = None,
     ) -> None:
         self._available_tools = set(available_tools or DEFAULT_AVAILABLE_TOOLS)
@@ -205,6 +210,9 @@ class DeterministicPlanner:
         )
         self._calculations_seam = calculations_seam or CalculationsPlannerSeam(
             calculations_config or CalculationsConfig()
+        )
+        self._software_control_seam = software_control_seam or SoftwareControlPlannerSeam(
+            software_control_config or SoftwareControlConfig()
         )
         self._discord_relay_config = discord_relay_config or DiscordRelayConfig()
 
@@ -301,6 +309,77 @@ class DeterministicPlanner:
                 response_mode=ResponseMode.CALCULATION_RESULT,
                 family="calculations",
                 subject=calculation_evaluation.helper_name or ("verification" if verification_request else "expression"),
+            )
+            debug["structured_query"] = structured_query.to_dict()
+            debug["capability_plan"] = capability_plan.to_dict()
+            debug["execution_plan"] = execution_plan.to_dict()
+            debug["response_mode"] = execution_plan.response_mode.value
+            return PlannerDecision(
+                request_type=execution_plan.request_type,
+                tool_requests=[],
+                assistant_message=None,
+                requires_reasoner=False,
+                active_request_state=self._active_request_state_from_structured_query(structured_query, execution_plan),
+                structured_query=structured_query,
+                capability_plan=capability_plan,
+                execution_plan=execution_plan,
+                response_mode=execution_plan.response_mode.value,
+                debug=debug,
+            )
+
+        software_control_evaluation = self._software_control_seam.evaluate(
+            raw_text=message,
+            normalized_text=normalized.normalized_text,
+            surface_mode=surface_mode,
+            active_module=active_module,
+            active_request_state=active_request_state or {},
+            active_context=active_context or {},
+        )
+        debug["software_control"] = software_control_evaluation.to_dict()
+        if (
+            software_control_evaluation.candidate
+            and software_control_evaluation.disposition
+            in {
+                SoftwareRouteDisposition.DIRECT_REQUEST,
+                SoftwareRouteDisposition.FOLLOW_UP_CONFIRMATION,
+            }
+            and software_control_evaluation.operation_type
+            and software_control_evaluation.target_name
+        ):
+            structured_query = StructuredQuery(
+                domain="software_control",
+                query_shape=QueryShape.SOFTWARE_CONTROL_REQUEST,
+                requested_action=software_control_evaluation.operation_type,
+                output_mode=ResponseMode.ACTION_RESULT.value,
+                execution_type="software_control_execute",
+                capability_requirements=["software_control"],
+                confidence=software_control_evaluation.route_confidence,
+                output_type="action",
+                slots={
+                    "software_control_request": software_control_evaluation.to_dict(),
+                    "operation_type": software_control_evaluation.operation_type,
+                    "target_name": software_control_evaluation.target_name,
+                    "request_stage": software_control_evaluation.request_stage,
+                    "follow_up_reuse": software_control_evaluation.follow_up_reuse,
+                    "family": "software_control",
+                    "subject": software_control_evaluation.target_name,
+                    "request_type_hint": "software_control_response",
+                },
+            )
+            capability_plan = CapabilityPlan(
+                supported=True,
+                required_capabilities=["software_control"],
+                notes=[
+                    "Routes software lifecycle intent into the native software-control subsystem.",
+                    "Execution remains local-first and truthfully staged before any attempt.",
+                ],
+            )
+            execution_plan = ExecutionPlan(
+                plan_type="software_control_execute",
+                request_type="software_control_response",
+                response_mode=ResponseMode.ACTION_RESULT,
+                family="software_control",
+                subject=software_control_evaluation.target_name,
             )
             debug["structured_query"] = structured_query.to_dict()
             debug["capability_plan"] = capability_plan.to_dict()
@@ -525,12 +604,16 @@ class DeterministicPlanner:
             ScreenRouteDisposition.PHASE4_VERIFY,
             ScreenRouteDisposition.PHASE5_ACT,
             ScreenRouteDisposition.PHASE6_CONTINUE,
+            ScreenRouteDisposition.PHASE8_PROBLEM_SOLVE,
+            ScreenRouteDisposition.PHASE9_WORKFLOW_REUSE,
         }:
             execution_type = (
                 "screen_awareness_act"
                 if screen_awareness_evaluation.disposition == ScreenRouteDisposition.PHASE5_ACT
                 else "screen_awareness_continue"
                 if screen_awareness_evaluation.disposition == ScreenRouteDisposition.PHASE6_CONTINUE
+                else "screen_awareness_workflow"
+                if screen_awareness_evaluation.disposition == ScreenRouteDisposition.PHASE9_WORKFLOW_REUSE
                 else "screen_awareness_analyze"
             )
             output_mode = (
@@ -1760,10 +1843,42 @@ class DeterministicPlanner:
             freshness_expectation = "current"
         elif structured_query.query_shape == QueryShape.SCREEN_AWARENESS_REQUEST:
             freshness_expectation = "current"
+        elif structured_query.query_shape == QueryShape.SOFTWARE_CONTROL_REQUEST:
+            freshness_expectation = "current"
         elif structured_query.query_shape == QueryShape.DISCORD_RELAY_REQUEST:
             freshness_expectation = "current"
         elif structured_query.query_shape in {QueryShape.CONTROL_COMMAND, QueryShape.REPAIR_REQUEST}:
             freshness_expectation = "immediate"
+
+        if structured_query.query_shape == QueryShape.SOFTWARE_CONTROL_REQUEST:
+            software_config = self._software_control_seam.config
+            if software_config.enabled and software_config.planner_routing_enabled:
+                return CapabilityPlan(
+                    supported=True,
+                    available_tools=sorted(tool for tool in available_tools if tool in DEFAULT_AVAILABLE_TOOLS),
+                    required_tools=[],
+                    required_capabilities=required_capabilities,
+                    missing_capabilities=[],
+                    freshness_expectation=freshness_expectation,
+                    unsupported_reason=None,
+                    notes=[
+                        "Software control stays native, typed, and local-first.",
+                        "Verification and recovery remain separate checkpoints instead of being folded into a vague success state.",
+                    ],
+                )
+            return CapabilityPlan(
+                supported=False,
+                available_tools=sorted(tool for tool in available_tools if tool in DEFAULT_AVAILABLE_TOOLS),
+                required_tools=[],
+                required_capabilities=required_capabilities,
+                missing_capabilities=["software_control"],
+                freshness_expectation=freshness_expectation,
+                unsupported_reason=UnsupportedReason(
+                    code="software_control_unavailable",
+                    message="Software control isn't available in the current environment.",
+                ),
+                notes=["The planner recognized a software lifecycle request, but the native software-control runtime is disabled."],
+            )
 
         if structured_query.query_shape == QueryShape.SCREEN_AWARENESS_REQUEST:
             screen_config = self._screen_awareness_seam.config
@@ -1777,7 +1892,8 @@ class DeterministicPlanner:
             if ready_for_phase1:
                 screen_debug = slots.get("screen_awareness") if isinstance(slots.get("screen_awareness"), dict) else {}
                 disposition = str(screen_debug.get("disposition") or "").strip()
-                if screen_config.phase in {"phase2", "phase3", "phase4", "phase5", "phase6"} and screen_config.grounding_enabled and "screen_grounding" not in required_capabilities:
+                requested_screen_action = str(structured_query.requested_action or "").strip()
+                if screen_config.phase in {"phase2", "phase3", "phase4", "phase5", "phase6", "phase7", "phase8", "phase9"} and screen_config.grounding_enabled and "screen_grounding" not in required_capabilities:
                     required_capabilities.append("screen_grounding")
                 if disposition == "phase3_guide" and screen_config.guidance_enabled and "screen_guidance" not in required_capabilities:
                     required_capabilities.append("screen_guidance")
@@ -1795,6 +1911,22 @@ class DeterministicPlanner:
                         required_capabilities.append("screen_verification")
                     if screen_config.memory_enabled and "screen_continuity" not in required_capabilities:
                         required_capabilities.append("screen_continuity")
+                if disposition == "phase9_workflow_reuse":
+                    if screen_config.capability_flags().get("workflow_learning_enabled") and "screen_workflow_learning" not in required_capabilities:
+                        required_capabilities.append("screen_workflow_learning")
+                    if screen_config.verification_enabled and "screen_verification" not in required_capabilities:
+                        required_capabilities.append("screen_verification")
+                    if screen_config.action_enabled and "screen_action_execution" not in required_capabilities:
+                        required_capabilities.append("screen_action_execution")
+                if (
+                    screen_config.capability_flags().get("problem_solving_enabled")
+                    and (
+                        disposition == "phase8_problem_solve"
+                        or requested_screen_action in {"explain_visible_content", "solve_visible_problem"}
+                    )
+                ):
+                    if "screen_problem_solving" not in required_capabilities:
+                        required_capabilities.append("screen_problem_solving")
                 return CapabilityPlan(
                     supported=True,
                     available_tools=sorted(tool for tool in available_tools if tool in DEFAULT_AVAILABLE_TOOLS),
@@ -1810,6 +1942,9 @@ class DeterministicPlanner:
                         "Phase 4 verification compares the current bearing to explicit expectations and any available prior screen state.",
                         "Phase 5 action execution reuses grounded targets and Phase 4 verification instead of treating attempts as success.",
                         "Phase 6 workflow continuity reuses recent grounded, guided, verified, and action bearings without pretending long-term memory.",
+                        "Phase 7 adapters contribute semantic app context only when those semantics are fresh, supported, and stronger than the generic fallback.",
+                        "Phase 8 problem solving keeps observed evidence, inferred interpretation, and general knowledge explicitly separated.",
+                        "Phase 9 workflow learning stores bounded, inspectable workflow records and reuses them only through the existing grounding, verification, and action gates.",
                     ],
                 )
             missing_capabilities.append("screen_observation")
@@ -1978,6 +2113,10 @@ class DeterministicPlanner:
                 parameters["follow_up_reuse"] = bool(calculation_request.get("follow_up_reuse", False))
                 if calculation_request.get("helper_name"):
                     parameters["helper_name"] = str(calculation_request.get("helper_name") or "").strip()
+        if structured_query.query_shape == QueryShape.SOFTWARE_CONTROL_REQUEST:
+            for key in ("operation_type", "target_name", "request_stage", "follow_up_reuse", "selected_source_route"):
+                if key in structured_query.slots:
+                    parameters[key] = structured_query.slots.get(key)
         if structured_query.requested_metric:
             parameters["metric"] = structured_query.requested_metric
         if structured_query.requested_action:
@@ -2170,6 +2309,7 @@ class DeterministicPlanner:
             "deterministic_diagnostic_request",
             "follow_up_grounded",
             "direct_action",
+            "software_control_response",
             "browser_search",
             "unsupported_capability",
             "clarification_request",
