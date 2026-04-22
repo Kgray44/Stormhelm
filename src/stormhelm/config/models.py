@@ -81,29 +81,95 @@ class HardwareTelemetryConfig:
 @dataclass(slots=True)
 class ScreenAwarenessConfig:
     enabled: bool = True
-    phase: str = "phase2"
+    phase: str = "phase6"
     planner_routing_enabled: bool = True
     debug_events_enabled: bool = True
     observation_enabled: bool = True
     interpretation_enabled: bool = True
     grounding_enabled: bool = True
-    guidance_enabled: bool = False
-    action_enabled: bool = False
-    verification_enabled: bool = False
-    memory_enabled: bool = False
+    guidance_enabled: bool = True
+    action_enabled: bool = True
+    action_policy_mode: str = "confirm_before_act"
+    verification_enabled: bool = True
+    memory_enabled: bool = True
     adapters_enabled: bool = False
+
+    def _phase_at_least(self, minimum_phase: int) -> bool:
+        phase_name = str(self.phase or "").strip().lower()
+        phase_order = {
+            "phase0": 0,
+            "phase1": 1,
+            "phase2": 2,
+            "phase3": 3,
+            "phase4": 4,
+            "phase5": 5,
+            "phase6": 6,
+        }
+        return phase_order.get(phase_name, 0) >= minimum_phase
 
     def capability_flags(self) -> dict[str, bool]:
         return {
-            "observation_enabled": self.observation_enabled,
-            "interpretation_enabled": self.interpretation_enabled,
-            "grounding_enabled": self.grounding_enabled,
-            "guidance_enabled": self.guidance_enabled,
-            "action_enabled": self.action_enabled,
-            "verification_enabled": self.verification_enabled,
+            "observation_enabled": self.observation_enabled and self._phase_at_least(1),
+            "interpretation_enabled": self.interpretation_enabled and self._phase_at_least(1),
+            "grounding_enabled": self.grounding_enabled and self._phase_at_least(2),
+            "guidance_enabled": self.guidance_enabled and self._phase_at_least(3),
+            "action_enabled": self.action_enabled and self._phase_at_least(5),
+            "verification_enabled": self.verification_enabled and self._phase_at_least(4),
             "memory_enabled": self.memory_enabled,
+            "continuity_enabled": self.memory_enabled and self._phase_at_least(6),
             "adapters_enabled": self.adapters_enabled,
         }
+
+
+@dataclass(slots=True)
+class CalculationsConfig:
+    enabled: bool = True
+    planner_routing_enabled: bool = True
+    debug_events_enabled: bool = True
+
+
+def default_discord_trusted_aliases() -> dict[str, "DiscordTrustedAliasConfig"]:
+    return {
+        "baby": DiscordTrustedAliasConfig(
+            alias="Baby",
+            label="Baby",
+            destination_kind="personal_dm",
+            route_mode="local_client_automation",
+            navigation_mode="quick_switch",
+            search_query="Baby",
+            thread_uri=None,
+            trusted=True,
+            confirmation_policy="preview_required",
+            attachment_policy="allow",
+        )
+    }
+
+
+@dataclass(slots=True)
+class DiscordTrustedAliasConfig:
+    alias: str
+    label: str
+    destination_kind: str = "personal_dm"
+    route_mode: str = "local_client_automation"
+    navigation_mode: str = "quick_switch"
+    search_query: str | None = None
+    thread_uri: str | None = None
+    trusted: bool = True
+    confirmation_policy: str = "preview_required"
+    attachment_policy: str = "allow"
+
+
+@dataclass(slots=True)
+class DiscordRelayConfig:
+    enabled: bool = True
+    planner_routing_enabled: bool = True
+    debug_events_enabled: bool = True
+    screen_disambiguation_enabled: bool = True
+    preview_before_send: bool = True
+    verification_enabled: bool = True
+    local_dm_route_enabled: bool = True
+    bot_webhook_routes_enabled: bool = False
+    trusted_aliases: dict[str, DiscordTrustedAliasConfig] = field(default_factory=default_discord_trusted_aliases)
 
 
 @dataclass(slots=True)
@@ -230,6 +296,8 @@ class AppConfig:
     weather: WeatherConfig
     hardware_telemetry: HardwareTelemetryConfig
     screen_awareness: ScreenAwarenessConfig
+    calculations: CalculationsConfig
+    discord_relay: DiscordRelayConfig
     openai: OpenAIConfig
     safety: SafetyConfig
     tools: ToolConfig

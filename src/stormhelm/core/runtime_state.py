@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from time import sleep
 
 from stormhelm.config.models import AppConfig
 from stormhelm.shared.time import utc_now_iso
+
+_RUNTIME_STATE_UNLINK_RETRIES = 5
+_RUNTIME_STATE_UNLINK_DELAY_SECONDS = 0.05
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -49,8 +55,18 @@ def initialize_runtime_state(config: AppConfig) -> RuntimeBootstrapResult:
 
 
 def clear_runtime_state(config: AppConfig) -> None:
-    if config.runtime.core_state_path.exists():
-        config.runtime.core_state_path.unlink()
+    for attempt in range(_RUNTIME_STATE_UNLINK_RETRIES + 1):
+        try:
+            config.runtime.core_state_path.unlink(missing_ok=True)
+            return
+        except PermissionError:
+            if attempt >= _RUNTIME_STATE_UNLINK_RETRIES:
+                logger.warning(
+                    "Leaving stale runtime state file in place because it remained locked during shutdown: %s",
+                    config.runtime.core_state_path,
+                )
+                return
+            sleep(_RUNTIME_STATE_UNLINK_DELAY_SECONDS * (attempt + 1))
 
 
 def _load_json(path: Path) -> dict[str, object]:

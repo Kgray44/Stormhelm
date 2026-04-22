@@ -3,11 +3,17 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from stormhelm.core.screen_awareness.models import CurrentScreenContext
+from stormhelm.core.screen_awareness.models import ActionPlan
+from stormhelm.core.screen_awareness.models import ActionExecutionResult
 from stormhelm.core.screen_awareness.models import GroundingOutcome
 from stormhelm.core.screen_awareness.models import GroundingRequest
+from stormhelm.core.screen_awareness.models import NavigationOutcome
 from stormhelm.core.screen_awareness.models import ScreenAnalysisResult
 from stormhelm.core.screen_awareness.models import ScreenInterpretation
 from stormhelm.core.screen_awareness.models import ScreenObservation
+from stormhelm.core.screen_awareness.models import ScreenIntentType
+from stormhelm.core.screen_awareness.models import VerificationOutcome
+from stormhelm.core.screen_awareness.models import WorkflowContinuityResult
 
 
 class ObservationSource(Protocol):
@@ -48,15 +54,51 @@ class GroundingResolver(Protocol):
 
 
 class GuidanceEngine(Protocol):
-    def guide(self, context: CurrentScreenContext) -> dict[str, Any]: ...
+    def guide(
+        self,
+        *,
+        operator_text: str,
+        observation: ScreenObservation,
+        interpretation: ScreenInterpretation,
+        current_context: CurrentScreenContext,
+        grounding_result: GroundingOutcome | None,
+    ) -> NavigationOutcome | None: ...
 
 
 class ActionExecutor(Protocol):
-    def execute(self, action: dict[str, Any]) -> dict[str, Any]: ...
+    def execute_plan(self, *, plan: ActionPlan) -> dict[str, Any]: ...
 
 
 class VerificationEngine(Protocol):
-    def verify(self, analysis: ScreenAnalysisResult) -> dict[str, Any]: ...
+    def verify(
+        self,
+        *,
+        operator_text: str,
+        intent: ScreenIntentType,
+        observation: ScreenObservation,
+        interpretation: ScreenInterpretation,
+        current_context: CurrentScreenContext,
+        grounding_result: GroundingOutcome | None,
+        navigation_result: NavigationOutcome | None,
+        active_context: dict[str, Any] | None,
+    ) -> VerificationOutcome | None: ...
+
+
+class WorkflowContinuityEngine(Protocol):
+    def assess(
+        self,
+        *,
+        operator_text: str,
+        intent: ScreenIntentType,
+        observation: ScreenObservation,
+        interpretation: ScreenInterpretation,
+        current_context: CurrentScreenContext,
+        grounding_result: GroundingOutcome | None,
+        navigation_result: NavigationOutcome | None,
+        verification_result: VerificationOutcome | None,
+        action_result: ActionExecutionResult | None,
+        active_context: dict[str, Any] | None,
+    ) -> WorkflowContinuityResult | None: ...
 
 
 class MemoryIntegrator(Protocol):

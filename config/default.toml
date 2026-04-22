@@ -62,17 +62,42 @@ hwinfo_executable_path = ""
 
 [screen_awareness]
 enabled = true
-phase = "phase2"
+phase = "phase6"
 planner_routing_enabled = true
 debug_events_enabled = true
 observation_enabled = true
 interpretation_enabled = true
 grounding_enabled = true
-guidance_enabled = false
-action_enabled = false
-verification_enabled = false
-memory_enabled = false
+guidance_enabled = true
+action_enabled = true
+action_policy_mode = "confirm_before_act"
+verification_enabled = true
+memory_enabled = true
 adapters_enabled = false
+
+[calculations]
+enabled = true
+planner_routing_enabled = true
+debug_events_enabled = true
+
+[discord_relay]
+enabled = true
+planner_routing_enabled = true
+debug_events_enabled = true
+screen_disambiguation_enabled = true
+preview_before_send = true
+verification_enabled = true
+local_dm_route_enabled = true
+bot_webhook_routes_enabled = false
+
+[discord_relay.trusted_aliases.baby]
+alias = "Baby"
+label = "Baby"
+destination_kind = "personal_dm"
+route_mode = "local_client_automation"
+navigation_mode = "quick_switch"
+search_query = "Baby"
+trusted = true
 
 [openai]
 enabled = false

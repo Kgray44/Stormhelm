@@ -92,6 +92,24 @@ _REQUEST_STOP_WORDS = {
     "problem",
     "blocking",
     "me",
+    "click",
+    "press",
+    "type",
+    "enter",
+    "fill",
+    "put",
+    "write",
+    "focus",
+    "select",
+    "scroll",
+    "open",
+    "hover",
+    "go",
+    "ahead",
+    "do",
+    "it",
+    "into",
+    "here",
 }
 _GROUNDING_HINTS = (
     "what is this",
@@ -118,6 +136,19 @@ def _preview(value: str | None, *, limit: int = 120) -> str:
     if len(cleaned) <= limit:
         return cleaned
     return cleaned[: limit - 3].rstrip() + "..."
+
+
+def _bounds_from_mapping(payload: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    if isinstance(payload.get("bounds"), dict):
+        return dict(payload["bounds"])
+    bounds: dict[str, Any] = {}
+    for key in ("left", "top", "width", "height", "x", "y"):
+        value = payload.get(key)
+        if isinstance(value, (int, float)):
+            bounds[key] = int(value)
+    return bounds
 
 
 def _score_confidence(score: float, note: str) -> ScreenConfidence:
@@ -187,6 +218,19 @@ def _looks_like_math_expression(text: str | None) -> bool:
     return bool(candidate and len(candidate) <= 64 and re.fullmatch(r"[0-9\.\+\-\*\/\(\)\s%]+", candidate))
 
 
+def _is_execution_request(request: GroundingRequest) -> bool:
+    return "action_execution" in request.mode_flags
+
+
+def _is_actionable_candidate(candidate: GroundingCandidate) -> bool:
+    return candidate.role in {
+        GroundingCandidateRole.BUTTON,
+        GroundingCandidateRole.CHECKBOX,
+        GroundingCandidateRole.FIELD,
+        GroundingCandidateRole.TAB,
+    }
+
+
 @dataclass(slots=True)
 class DeterministicGroundingEngine:
     provider: Any | None = None
@@ -194,6 +238,12 @@ class DeterministicGroundingEngine:
     def should_ground(self, *, operator_text: str, intent: ScreenIntentType, observation: ScreenObservation) -> bool:
         lowered = _normalize_text(operator_text)
         if any(hint in lowered for hint in _GROUNDING_HINTS):
+            return True
+        if intent == ScreenIntentType.EXECUTE_UI_ACTION and (
+            _extract_label_tokens(lowered)
+            or _extract_roles(lowered)
+            or observation.workspace_snapshot.get("active_item")
+        ):
             return True
         if _extract_roles(lowered) or _extract_spatial(lowered) or _extract_appearance(lowered):
             return True
@@ -205,6 +255,9 @@ class DeterministicGroundingEngine:
 
     def build_request(self, *, operator_text: str, intent: ScreenIntentType, observation: ScreenObservation) -> GroundingRequest:
         lowered = _normalize_text(operator_text)
+        mode_flags = [flag for flag, present in {"deictic": any(token in lowered.split() for token in {"this", "that", "these", "those"})}.items() if present]
+        if intent == ScreenIntentType.EXECUTE_UI_ACTION:
+            mode_flags.append("action_execution")
         return GroundingRequest(
             utterance=operator_text,
             request_type=_infer_request_type(operator_text, intent),
@@ -216,7 +269,7 @@ class DeterministicGroundingEngine:
             has_selected_region=bool(observation.selected_text),
             has_focus_anchor=bool(observation.focus_metadata or observation.workspace_snapshot.get("active_item")),
             has_cursor_anchor=bool(observation.cursor_metadata),
-            mode_flags=[flag for flag, present in {"deictic": any(token in lowered.split() for token in {"this", "that", "these", "those"})}.items() if present],
+            mode_flags=mode_flags,
         )
 
     def resolve(
@@ -282,6 +335,14 @@ class DeterministicGroundingEngine:
         if not capture_reference:
             return {"attempted": False, "used": False, "reason": _VISUAL_PROVIDER_REASON}
         return {"attempted": False, "used": False, "reason": "provider_visual_grounding_deferred"}
+
+    def collect_candidates(
+        self,
+        *,
+        observation: ScreenObservation,
+        interpretation: ScreenInterpretation,
+    ) -> list[GroundingCandidate]:
+        return self._collect_candidates(observation=observation, interpretation=interpretation)
 
     def _collect_candidates(
         self,
@@ -377,6 +438,7 @@ class DeterministicGroundingEngine:
             visible_text=str(item.get("text") or item.get("title") or "").strip() or None,
             enabled=item.get("enabled") if isinstance(item.get("enabled"), bool) else None,
             parent_container=str(item.get("parent") or item.get("pane") or item.get("container") or "").strip() or None,
+            bounds=_bounds_from_mapping(item),
             semantic_metadata=metadata,
         )
 
@@ -635,6 +697,7 @@ class DeterministicGroundingEngine:
             visible_text=candidate.visible_text,
             enabled=candidate.enabled,
             parent_container=candidate.parent_container,
+            bounds=dict(candidate.bounds),
             semantic_metadata=dict(candidate.semantic_metadata),
         )
 
@@ -747,6 +810,10 @@ class DeterministicGroundingEngine:
             role_compatible = not request.role_descriptors or self._role_match(request, candidate) > 0.0
             if visible_text and visible_text == _normalize_text(best_visible_text(observation)) and role_compatible:
                 return 0.08
+        if _is_execution_request(request) and _is_actionable_candidate(candidate) and (
+            request.label_tokens or request.role_descriptors or request.spatial_descriptors
+        ):
+            return 0.08
         return 0.0
 
     def _penalty(self, request: GroundingRequest, candidate: GroundingCandidate) -> float:
@@ -759,6 +826,20 @@ class DeterministicGroundingEngine:
             word in request.spatial_descriptors for word in {"selected", "focused", "current"}
         ):
             penalty += 0.05
+        if (
+            _is_execution_request(request)
+            and (request.label_tokens or request.role_descriptors or request.spatial_descriptors)
+            and not _is_actionable_candidate(candidate)
+            and candidate.role in {
+                GroundingCandidateRole.WINDOW,
+                GroundingCandidateRole.DOCUMENT,
+                GroundingCandidateRole.REGION,
+                GroundingCandidateRole.UNKNOWN,
+            }
+            and self._label_match(request, candidate) == 0.0
+            and self._role_match(request, candidate) == 0.0
+        ):
+            penalty += 0.24
         return penalty
 
     def _reason_join(self, reasons: list[str]) -> str:

@@ -97,21 +97,45 @@ def test_load_config_applies_hardware_telemetry_environment_overrides(temp_proje
     assert config.hardware_telemetry.hwinfo_executable_path == "C:/Tools/HWiNFO64.EXE"
 
 
-def test_load_config_defaults_screen_awareness_to_phase2_grounding_flags(temp_project_root: Path) -> None:
+def test_load_config_defaults_screen_awareness_to_phase6_continuity_flags(temp_project_root: Path) -> None:
     config = load_config(project_root=temp_project_root, env={})
 
-    assert config.screen_awareness.phase == "phase2"
+    assert config.screen_awareness.phase == "phase6"
     assert config.screen_awareness.enabled is True
     assert config.screen_awareness.planner_routing_enabled is True
     assert config.screen_awareness.debug_events_enabled is True
     assert config.screen_awareness.observation_enabled is True
     assert config.screen_awareness.interpretation_enabled is True
     assert config.screen_awareness.grounding_enabled is True
-    assert config.screen_awareness.guidance_enabled is False
-    assert config.screen_awareness.action_enabled is False
-    assert config.screen_awareness.verification_enabled is False
-    assert config.screen_awareness.memory_enabled is False
+    assert config.screen_awareness.guidance_enabled is True
+    assert config.screen_awareness.action_enabled is True
+    assert config.screen_awareness.action_policy_mode == "confirm_before_act"
+    assert config.screen_awareness.verification_enabled is True
+    assert config.screen_awareness.memory_enabled is True
     assert config.screen_awareness.adapters_enabled is False
+
+
+def test_load_config_defaults_calculations_to_enabled_local_routing(temp_project_root: Path) -> None:
+    config = load_config(project_root=temp_project_root, env={})
+
+    assert config.calculations.enabled is True
+    assert config.calculations.planner_routing_enabled is True
+    assert config.calculations.debug_events_enabled is True
+
+
+def test_load_config_applies_calculations_environment_overrides(temp_project_root: Path) -> None:
+    config = load_config(
+        project_root=temp_project_root,
+        env={
+            "STORMHELM_CALCULATIONS_ENABLED": "false",
+            "STORMHELM_CALCULATIONS_PLANNER_ROUTING_ENABLED": "false",
+            "STORMHELM_CALCULATIONS_DEBUG_EVENTS_ENABLED": "false",
+        },
+    )
+
+    assert config.calculations.enabled is False
+    assert config.calculations.planner_routing_enabled is False
+    assert config.calculations.debug_events_enabled is False
 
 
 def test_load_config_applies_screen_awareness_environment_overrides(temp_project_root: Path) -> None:
@@ -119,16 +143,58 @@ def test_load_config_applies_screen_awareness_environment_overrides(temp_project
         project_root=temp_project_root,
         env={
             "STORMHELM_SCREEN_AWARENESS_ENABLED": "true",
-            "STORMHELM_SCREEN_AWARENESS_PHASE": "phase1",
+            "STORMHELM_SCREEN_AWARENESS_PHASE": "phase6",
             "STORMHELM_SCREEN_AWARENESS_PLANNER_ROUTING_ENABLED": "true",
             "STORMHELM_SCREEN_AWARENESS_DEBUG_EVENTS_ENABLED": "false",
+            "STORMHELM_SCREEN_AWARENESS_ACTION_POLICY_MODE": "trusted_action",
+            "STORMHELM_SCREEN_AWARENESS_VERIFICATION_ENABLED": "false",
+            "STORMHELM_SCREEN_AWARENESS_MEMORY_ENABLED": "true",
         },
     )
 
     assert config.screen_awareness.enabled is True
-    assert config.screen_awareness.phase == "phase1"
+    assert config.screen_awareness.phase == "phase6"
     assert config.screen_awareness.planner_routing_enabled is True
     assert config.screen_awareness.debug_events_enabled is False
+    assert config.screen_awareness.action_policy_mode == "trusted_action"
+    assert config.screen_awareness.verification_enabled is False
+    assert config.screen_awareness.memory_enabled is True
+
+
+def test_load_config_defaults_discord_relay_to_enabled_baby_alias(temp_project_root: Path) -> None:
+    config = load_config(project_root=temp_project_root, env={})
+
+    assert config.discord_relay.enabled is True
+    assert config.discord_relay.planner_routing_enabled is True
+    assert config.discord_relay.preview_before_send is True
+    assert "baby" in config.discord_relay.trusted_aliases
+    assert config.discord_relay.trusted_aliases["baby"].label == "Baby"
+    assert config.discord_relay.trusted_aliases["baby"].route_mode == "local_client_automation"
+
+
+def test_load_config_applies_discord_relay_environment_overrides(temp_project_root: Path) -> None:
+    config = load_config(
+        project_root=temp_project_root,
+        env={
+            "STORMHELM_DISCORD_RELAY_ENABLED": "false",
+            "STORMHELM_DISCORD_RELAY_PLANNER_ROUTING_ENABLED": "false",
+            "STORMHELM_DISCORD_RELAY_DEBUG_EVENTS_ENABLED": "false",
+            "STORMHELM_DISCORD_RELAY_SCREEN_DISAMBIGUATION_ENABLED": "false",
+            "STORMHELM_DISCORD_RELAY_PREVIEW_BEFORE_SEND": "false",
+            "STORMHELM_DISCORD_RELAY_VERIFICATION_ENABLED": "false",
+            "STORMHELM_DISCORD_RELAY_LOCAL_DM_ROUTE_ENABLED": "false",
+            "STORMHELM_DISCORD_RELAY_BOT_WEBHOOK_ROUTES_ENABLED": "true",
+        },
+    )
+
+    assert config.discord_relay.enabled is False
+    assert config.discord_relay.planner_routing_enabled is False
+    assert config.discord_relay.debug_events_enabled is False
+    assert config.discord_relay.screen_disambiguation_enabled is False
+    assert config.discord_relay.preview_before_send is False
+    assert config.discord_relay.verification_enabled is False
+    assert config.discord_relay.local_dm_route_enabled is False
+    assert config.discord_relay.bot_webhook_routes_enabled is True
 
 
 def test_load_config_uses_install_root_when_packaged(monkeypatch: pytest.MonkeyPatch, workspace_temp_dir: Path) -> None:

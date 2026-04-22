@@ -18,6 +18,10 @@ from stormhelm.core.memory.repositories import (
 )
 from stormhelm.core.network import CloudflareQualityProvider, NetworkMonitor
 from stormhelm.core.operations.service import OperationalAwarenessService
+from stormhelm.core.calculations import CalculationsSubsystem
+from stormhelm.core.calculations import build_calculations_subsystem
+from stormhelm.core.discord_relay import DiscordRelaySubsystem
+from stormhelm.core.discord_relay import build_discord_relay_subsystem
 from stormhelm.core.orchestrator.assistant import AssistantOrchestrator
 from stormhelm.core.orchestrator.persona import PersonaContract
 from stormhelm.core.orchestrator.planner import DeterministicPlanner
@@ -54,7 +58,9 @@ class CoreContainer:
     tool_executor: ToolExecutor
     jobs: JobManager
     assistant: AssistantOrchestrator
+    calculations: CalculationsSubsystem
     screen_awareness: ScreenAwarenessSubsystem
+    discord_relay: DiscordRelaySubsystem
     network_monitor: NetworkMonitor | None = None
     runtime_bootstrap: RuntimeBootstrapResult | None = None
     operational_awareness: OperationalAwarenessService = field(default_factory=OperationalAwarenessService)
@@ -141,7 +147,9 @@ class CoreContainer:
                     )
                 ]
             },
+            "calculations": self.calculations.status_snapshot(),
             "screen_awareness": self.screen_awareness.status_snapshot(),
+            "discord_relay": self.discord_relay.status_snapshot(),
             "provider_state": self._provider_state_snapshot(),
             "tool_state": self._tool_state_snapshot(),
             "watch_state": watch_state,
@@ -219,14 +227,25 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
     register_builtin_tools(registry)
     executor = ToolExecutor(registry, max_sync_workers=app_config.concurrency.max_workers)
     provider = OpenAIResponsesProvider(app_config.openai) if app_config.openai.enabled else None
+    calculations = build_calculations_subsystem(app_config.calculations)
     screen_awareness = build_screen_awareness_subsystem(
         app_config.screen_awareness,
         system_probe=system_probe,
         provider=provider,
+        calculations=calculations,
+    )
+    discord_relay = build_discord_relay_subsystem(
+        app_config.discord_relay,
+        session_state=session_state,
+        system_probe=system_probe,
+        observation_source=screen_awareness.native_observer,
     )
     planner = DeterministicPlanner(
+        calculations_config=app_config.calculations,
+        calculations_seam=calculations.planner_seam,
         screen_awareness_config=app_config.screen_awareness,
         screen_awareness_seam=screen_awareness.planner_seam,
+        discord_relay_config=app_config.discord_relay,
     )
     workspace_repository = WorkspaceRepository(database)
     workspace_service = WorkspaceService(
@@ -268,7 +287,9 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
         persona=persona,
         workspace_service=workspace_service,
         provider=provider,
+        calculations=calculations,
         screen_awareness=screen_awareness,
+        discord_relay=discord_relay,
     )
     return CoreContainer(
         config=app_config,
@@ -284,6 +305,8 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
         tool_executor=executor,
         jobs=jobs,
         assistant=assistant,
+        calculations=calculations,
         screen_awareness=screen_awareness,
+        discord_relay=discord_relay,
         network_monitor=network_monitor,
     )

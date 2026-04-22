@@ -54,6 +54,9 @@ class ActiveContextService:
             updated_at=datetime.now(timezone.utc).isoformat(),
         )
         payload = context.to_dict()
+        recent_resolutions = self.session_state.get_recent_context_resolutions(session_id)
+        if recent_resolutions:
+            payload["recent_context_resolutions"] = recent_resolutions[:4]
         self.session_state.set_active_context(session_id, payload)
         return payload
 

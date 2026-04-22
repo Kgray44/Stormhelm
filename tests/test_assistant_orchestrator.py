@@ -9,6 +9,11 @@ from stormhelm.core.events import EventBuffer
 from stormhelm.core.jobs.manager import JobManager
 from stormhelm.core.memory.database import SQLiteDatabase
 from stormhelm.core.memory.repositories import ConversationRepository, NotesRepository, PreferencesRepository
+from stormhelm.core.discord_relay import DiscordDispatchAttempt
+from stormhelm.core.discord_relay import DiscordDispatchState
+from stormhelm.core.discord_relay import DiscordRouteMode
+from stormhelm.core.discord_relay import DiscordRelaySubsystem
+from stormhelm.core.discord_relay import build_discord_relay_subsystem
 from stormhelm.core.orchestrator.assistant import AssistantOrchestrator
 from stormhelm.core.orchestrator.persona import PersonaContract
 from stormhelm.core.orchestrator.planner import DeterministicPlanner
@@ -16,6 +21,7 @@ from stormhelm.core.orchestrator.router import IntentRouter
 from stormhelm.core.orchestrator.session_state import ConversationStateStore
 from stormhelm.core.providers.base import AssistantProvider, ProviderToolCall, ProviderTurnResult
 from stormhelm.core.safety.policy import SafetyPolicy
+from stormhelm.core.calculations import build_calculations_subsystem
 from stormhelm.core.screen_awareness import build_screen_awareness_subsystem
 from stormhelm.core.tools.base import ToolContext
 from stormhelm.core.tools.builtins import register_builtin_tools
@@ -140,6 +146,22 @@ class BrowserSearchFallbackProvider(AssistantProvider):
                     },
                 )
             ],
+        )
+
+
+class FakeDiscordRelayAdapter:
+    def __init__(self, *, state: DiscordDispatchState = DiscordDispatchState.STARTED) -> None:
+        self.state = state
+        self.calls: list[dict[str, object]] = []
+
+    def send(self, *, destination, preview) -> DiscordDispatchAttempt:
+        self.calls.append({"destination": destination.to_dict(), "preview": preview.to_dict()})
+        return DiscordDispatchAttempt(
+            state=self.state,
+            route_mode=DiscordRouteMode.LOCAL_CLIENT_AUTOMATION,
+            route_basis="fake_adapter",
+            verification_evidence=["Fake Discord adapter executed the send route."],
+            send_summary="Fake Discord adapter completed the send path.",
         )
 
 
@@ -696,7 +718,12 @@ class BrowserAwareSystemProbe(FakeSystemProbe):
         }
 
 
-def _build_assistant(temp_config, *, system_probe=None) -> tuple[AssistantOrchestrator, JobManager, ToolExecutor, ConversationStateStore]:
+def _build_assistant(
+    temp_config,
+    *,
+    system_probe=None,
+    discord_relay: DiscordRelaySubsystem | None = None,
+) -> tuple[AssistantOrchestrator, JobManager, ToolExecutor, ConversationStateStore]:
     events = EventBuffer()
     notes = FakeNotesRepository()
     preferences = FakePreferencesRepository()
@@ -719,6 +746,18 @@ def _build_assistant(temp_config, *, system_probe=None) -> tuple[AssistantOrches
         tool_runs=FakeToolRunRepository(),
         events=events,
     )
+    calculations = build_calculations_subsystem(temp_config.calculations)
+    screen_awareness = build_screen_awareness_subsystem(
+        temp_config.screen_awareness,
+        system_probe=system_probe,
+        calculations=calculations,
+    )
+    relay = discord_relay or build_discord_relay_subsystem(
+        temp_config.discord_relay,
+        session_state=session_state,
+        system_probe=system_probe,
+        observation_source=screen_awareness.native_observer,
+    )
     assistant = AssistantOrchestrator(
         config=temp_config,
         conversations=FakeConversationRepository(),
@@ -727,14 +766,17 @@ def _build_assistant(temp_config, *, system_probe=None) -> tuple[AssistantOrches
         events=events,
         tool_registry=registry,
         session_state=session_state,
-        planner=DeterministicPlanner(screen_awareness_config=temp_config.screen_awareness),
+        planner=DeterministicPlanner(
+            calculations_config=temp_config.calculations,
+            screen_awareness_config=temp_config.screen_awareness,
+            discord_relay_config=temp_config.discord_relay,
+        ),
         persona=PersonaContract(temp_config),
         workspace_service=None,
         provider=None,
-        screen_awareness=build_screen_awareness_subsystem(
-            temp_config.screen_awareness,
-            system_probe=system_probe,
-        ),
+        calculations=calculations,
+        screen_awareness=screen_awareness,
+        discord_relay=relay,
     )
     return assistant, jobs, executor, session_state
 
@@ -755,6 +797,7 @@ def _build_assistant_with_workspace(
     temp_config,
     *,
     system_probe=None,
+    discord_relay: DiscordRelaySubsystem | None = None,
 ) -> tuple[AssistantOrchestrator, JobManager, ToolExecutor, ConversationStateStore, WorkspaceService]:
     events = EventBuffer()
     database = SQLiteDatabase(temp_config.storage.database_path)
@@ -793,6 +836,18 @@ def _build_assistant_with_workspace(
         tool_runs=FakeToolRunRepository(),
         events=events,
     )
+    calculations = build_calculations_subsystem(temp_config.calculations)
+    screen_awareness = build_screen_awareness_subsystem(
+        temp_config.screen_awareness,
+        system_probe=system_probe,
+        calculations=calculations,
+    )
+    relay = discord_relay or build_discord_relay_subsystem(
+        temp_config.discord_relay,
+        session_state=session_state,
+        system_probe=system_probe,
+        observation_source=screen_awareness.native_observer,
+    )
     assistant = AssistantOrchestrator(
         config=temp_config,
         conversations=conversations,
@@ -801,14 +856,17 @@ def _build_assistant_with_workspace(
         events=events,
         tool_registry=registry,
         session_state=session_state,
-        planner=DeterministicPlanner(screen_awareness_config=temp_config.screen_awareness),
+        planner=DeterministicPlanner(
+            calculations_config=temp_config.calculations,
+            screen_awareness_config=temp_config.screen_awareness,
+            discord_relay_config=temp_config.discord_relay,
+        ),
         persona=PersonaContract(temp_config),
         workspace_service=workspace_service,
         provider=None,
-        screen_awareness=build_screen_awareness_subsystem(
-            temp_config.screen_awareness,
-            system_probe=system_probe,
-        ),
+        calculations=calculations,
+        screen_awareness=screen_awareness,
+        discord_relay=relay,
     )
     return assistant, jobs, executor, session_state, workspace_service
 
@@ -839,6 +897,220 @@ def _run_assistant_once(
             executor.shutdown()
 
     return asyncio.run(runner())
+
+
+def test_assistant_routes_direct_arithmetic_to_local_calculation_lane_without_provider(temp_config) -> None:
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+
+    payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="2+2",
+        surface_mode="ghost",
+        active_module="chartroom",
+    )
+
+    assert payload["jobs"] == []
+    assert payload["assistant_message"]["content"] in {"4", "4."}
+    planner_debug = _planner_debug(payload)
+    assert planner_debug["calculations"]["candidate"] is True
+    assert planner_debug["calculations"]["trace"]["normalized_expression"] == "2+2"
+    assert planner_debug["calculations"]["trace"]["parse_success"] is True
+
+
+def test_assistant_reports_honest_parse_failure_for_malformed_calculation(temp_config) -> None:
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+
+    payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="calculate 2+*",
+        surface_mode="ghost",
+        active_module="chartroom",
+    )
+
+    planner_debug = _planner_debug(payload)
+    assert planner_debug["calculations"]["candidate"] is True
+    assert planner_debug["calculations"]["trace"]["parse_success"] is False
+    assert "parse" in payload["assistant_message"]["content"].lower()
+
+
+def test_assistant_routes_engineering_style_expression_to_local_calculation_lane(temp_config) -> None:
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+
+    payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="3.3k * 2.2mA",
+        surface_mode="ghost",
+        active_module="chartroom",
+    )
+
+    assert payload["jobs"] == []
+    assert payload["assistant_message"]["content"] == "7.26"
+    planner_debug = _planner_debug(payload)
+    assert planner_debug["calculations"]["candidate"] is True
+    assert planner_debug["calculations"]["trace"]["normalized_expression"] == "3300*0.0022"
+    assert planner_debug["calculations"]["trace"]["parse_success"] is True
+
+
+def test_assistant_routes_supported_helper_request_to_local_calculation_lane(temp_config) -> None:
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+
+    payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="power at 12V and 1.5A",
+        surface_mode="ghost",
+        active_module="chartroom",
+    )
+
+    assert payload["jobs"] == []
+    assert payload["assistant_message"]["content"] == "Power = 18 W"
+    planner_debug = _planner_debug(payload)
+    assert planner_debug["calculations"]["candidate"] is True
+    assert planner_debug["calculations"]["helper_name"] == "power_from_voltage_current"
+    assert planner_debug["calculations"]["trace"]["helper_used"] == "power_from_voltage_current"
+
+
+def test_assistant_reports_brief_under_specified_helper_failure_locally(temp_config) -> None:
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+
+    payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="power at 12V",
+        surface_mode="ghost",
+        active_module="chartroom",
+    )
+
+    assert payload["jobs"] == []
+    planner_debug = _planner_debug(payload)
+    assert planner_debug["calculations"]["candidate"] is True
+    assert planner_debug["calculations"]["trace"]["failure_stage"] == "helper_match"
+    assert "current or resistance" in payload["assistant_message"]["content"].lower()
+
+
+def test_assistant_reuses_prior_direct_calculation_for_show_the_steps_follow_up(temp_config) -> None:
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+
+    async def runner() -> tuple[dict[str, object], dict[str, object]]:
+        await jobs.start()
+        try:
+            first = await assistant.handle_message(
+                "3.3k * 2.2mA",
+                session_id="default",
+                surface_mode="ghost",
+                active_module="chartroom",
+            )
+            second = await assistant.handle_message(
+                "show the steps",
+                session_id="default",
+                surface_mode="ghost",
+                active_module="chartroom",
+            )
+            return first, second
+        finally:
+            await jobs.stop()
+            executor.shutdown()
+
+    _, payload = asyncio.run(runner())
+
+    planner_debug = _planner_debug(payload)
+    assert planner_debug["calculations"]["candidate"] is True
+    assert planner_debug["calculations"]["follow_up_reuse"] is True
+    assert planner_debug["calculations"]["trace"]["explanation_follow_up_reuse"] is True
+    assert payload["assistant_message"]["content"] == "3.3k -> 3300\n2.2mA -> 0.0022\n3300 * 0.0022 = 7.26"
+
+
+def test_assistant_reuses_prior_helper_calculation_for_show_the_formula_follow_up(temp_config) -> None:
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+
+    async def runner() -> tuple[dict[str, object], dict[str, object]]:
+        await jobs.start()
+        try:
+            first = await assistant.handle_message(
+                "power at 12V and 1.5A",
+                session_id="default",
+                surface_mode="ghost",
+                active_module="chartroom",
+            )
+            second = await assistant.handle_message(
+                "show the formula",
+                session_id="default",
+                surface_mode="ghost",
+                active_module="chartroom",
+            )
+            return first, second
+        finally:
+            await jobs.stop()
+            executor.shutdown()
+
+    _, payload = asyncio.run(runner())
+
+    planner_debug = _planner_debug(payload)
+    assert planner_debug["calculations"]["candidate"] is True
+    assert planner_debug["calculations"]["follow_up_reuse"] is True
+    assert planner_debug["calculations"]["trace"]["helper_used"] == "power_from_voltage_current"
+    assert planner_debug["calculations"]["trace"]["explanation_follow_up_reuse"] is True
+    assert payload["assistant_message"]["content"] == "P = V * I\nP = 12 * 1.5\nP = 18 W"
+
+
+def test_assistant_reuses_prior_screen_calculation_for_show_the_steps_follow_up(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase4"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    temp_config.screen_awareness.grounding_enabled = True
+    temp_config.screen_awareness.guidance_enabled = True
+    temp_config.screen_awareness.verification_enabled = True
+
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+
+    async def runner() -> tuple[dict[str, object], dict[str, object]]:
+        await jobs.start()
+        try:
+            first = await assistant.handle_message(
+                "can you solve this",
+                session_id="default",
+                surface_mode="ghost",
+                active_module="chartroom",
+                input_context={
+                    "selection": {
+                        "kind": "text",
+                        "value": "(48/3)+7^2",
+                        "preview": "(48/3)+7^2",
+                    }
+                },
+            )
+            second = await assistant.handle_message(
+                "show the steps",
+                session_id="default",
+                surface_mode="ghost",
+                active_module="chartroom",
+            )
+            return first, second
+        finally:
+            await jobs.stop()
+            executor.shutdown()
+
+    first_payload, payload = asyncio.run(runner())
+
+    first_debug = _planner_debug(first_payload)
+    planner_debug = _planner_debug(payload)
+
+    assert first_debug["screen_awareness"]["analysis_result"]["calculation_activity"]["status"] == "resolved"
+    assert first_debug["screen_awareness"]["analysis_result"]["calculation_activity"]["calculation_trace"]["caller_subsystem"] == "screen_awareness"
+    assert planner_debug["calculations"]["candidate"] is True
+    assert planner_debug["calculations"]["follow_up_reuse"] is True
+    assert planner_debug["calculations"]["trace"]["explanation_follow_up_reuse"] is True
+    assert payload["assistant_message"]["content"] == "48 / 3 = 16\n7 ^ 2 = 49\n16 + 49 = 65"
 
 
 def test_assistant_orchestrator_handles_phase1_screen_awareness_analysis_and_debug_event(temp_config) -> None:
@@ -968,6 +1240,322 @@ def test_assistant_orchestrator_handles_phase2_grounding_and_emits_grounding_deb
     assert screen_events
     assert screen_events[-1]["payload"]["disposition"] == "phase2_ground"
     assert screen_events[-1]["payload"]["telemetry"]["grounding"]["winning_candidate_id"]
+
+
+def test_assistant_orchestrator_handles_phase3_guided_navigation_and_emits_navigation_debug_event(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase3"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    temp_config.screen_awareness.grounding_enabled = True
+    temp_config.screen_awareness.guidance_enabled = True
+
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+    payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="what should I click next?",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context={
+            "workspace": {"workspaceId": "ws-nav-1", "title": "Release Form"},
+            "module": "browser",
+            "section": "form",
+            "opened_items": [
+                {
+                    "itemId": "button-continue",
+                    "title": "Continue",
+                    "kind": "button",
+                    "pane": "footer",
+                    "enabled": True,
+                },
+                {
+                    "itemId": "button-cancel",
+                    "title": "Cancel",
+                    "kind": "button",
+                    "pane": "footer",
+                    "enabled": True,
+                },
+            ],
+            "active_item": {
+                "itemId": "field-email",
+                "title": "Release email",
+                "kind": "text-field",
+                "focused": True,
+                "selected": True,
+            },
+        },
+        input_context={"selection": {}, "clipboard": {}},
+    )
+    planner_debug = _planner_debug(payload)
+    planner_obedience = _planner_obedience(payload)
+    screen_events = [event for event in assistant.events.recent(limit=50) if event.get("source") == "screen_awareness"]
+
+    assert payload["jobs"] == []
+    assert payload["actions"] == []
+    assert planner_debug["structured_query"]["query_shape"] == "screen_awareness_request"
+    assert planner_debug["execution_plan"]["plan_type"] == "screen_awareness_analyze"
+    assert planner_debug["screen_awareness"]["disposition"] == "phase3_guide"
+    assert planner_debug["screen_awareness"]["analysis_result"]["navigation_result"]["winning_candidate"]["label"] == "Continue"
+    assert planner_debug["screen_awareness"]["telemetry"]["navigation"]["outcome"] == "ready"
+    assert planner_debug["screen_awareness"]["telemetry"]["navigation"]["candidate_count"] >= 2
+    assert planner_obedience["actual_result_mode"] == "summary_result"
+    assert planner_obedience["authority_enforced"] is True
+    assert "continue" in payload["assistant_message"]["content"].lower()
+    assert "clicked" not in payload["assistant_message"]["content"].lower()
+    assert screen_events
+    assert screen_events[-1]["payload"]["disposition"] == "phase3_guide"
+    assert screen_events[-1]["payload"]["telemetry"]["navigation"]["winning_candidate_id"] == "button-continue"
+
+
+def test_assistant_orchestrator_handles_phase4_verification_and_emits_verification_debug_event(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase4"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    temp_config.screen_awareness.grounding_enabled = True
+    temp_config.screen_awareness.guidance_enabled = True
+    temp_config.screen_awareness.verification_enabled = True
+
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+    first_payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="what should I click next?",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context={
+            "workspace": {"workspaceId": "ws-verify-event", "title": "Deploy Settings"},
+            "module": "browser",
+            "section": "form",
+            "active_item": {
+                "itemId": "field-token",
+                "title": "API token",
+                "kind": "text-field",
+                "focused": True,
+                "selected": True,
+            },
+            "opened_items": [
+                {
+                    "itemId": "button-save",
+                    "title": "Save",
+                    "kind": "button",
+                    "pane": "footer",
+                    "enabled": True,
+                }
+            ],
+        },
+        input_context={"selection": {}, "clipboard": {}},
+    )
+    assert first_payload["assistant_message"]["content"]
+
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+    payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="did that work?",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context={
+            "workspace": {"workspaceId": "ws-verify-event", "title": "Deploy Settings"},
+            "module": "browser",
+            "section": "form",
+            "active_item": {
+                "itemId": "save-success",
+                "title": "Saved successfully",
+                "kind": "status-banner",
+            },
+            "opened_items": [
+                {
+                    "itemId": "button-continue",
+                    "title": "Continue",
+                    "kind": "button",
+                    "pane": "footer",
+                    "enabled": True,
+                }
+            ],
+        },
+        input_context={"selection": {}, "clipboard": {}},
+    )
+    planner_debug = _planner_debug(payload)
+    planner_obedience = _planner_obedience(payload)
+    screen_events = [event for event in assistant.events.recent(limit=50) if event.get("source") == "screen_awareness"]
+
+    assert payload["jobs"] == []
+    assert payload["actions"] == []
+    assert planner_debug["structured_query"]["query_shape"] == "screen_awareness_request"
+    assert planner_debug["execution_plan"]["plan_type"] == "screen_awareness_analyze"
+    assert planner_debug["screen_awareness"]["disposition"] == "phase4_verify"
+    assert planner_debug["screen_awareness"]["analysis_result"]["verification_result"]["completion_status"] == "completed"
+    assert planner_debug["screen_awareness"]["telemetry"]["verification"]["outcome"] == "completed"
+    assert planner_obedience["actual_result_mode"] == "summary_result"
+    assert planner_obedience["authority_enforced"] is True
+    assert "completed" in payload["assistant_message"]["content"].lower()
+    assert screen_events
+    assert screen_events[-1]["payload"]["disposition"] == "phase4_verify"
+    assert screen_events[-1]["payload"]["telemetry"]["verification"]["requested"] is True
+
+
+def test_assistant_orchestrator_handles_phase5_action_preview_and_emits_action_debug_event(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase5"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    temp_config.screen_awareness.grounding_enabled = True
+    temp_config.screen_awareness.guidance_enabled = True
+    temp_config.screen_awareness.verification_enabled = True
+    temp_config.screen_awareness.action_enabled = True
+    temp_config.screen_awareness.action_policy_mode = "confirm_before_act"
+
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+    payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="click the Save button",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context={
+            "workspace": {"workspaceId": "ws-act-preview", "title": "Deploy Settings"},
+            "module": "browser",
+            "section": "form",
+            "active_item": {
+                "itemId": "settings-page",
+                "title": "Deploy Settings",
+                "kind": "settings-page",
+            },
+            "opened_items": [
+                {
+                    "itemId": "button-save",
+                    "title": "Save",
+                    "kind": "button",
+                    "pane": "footer",
+                    "enabled": True,
+                    "bounds": {"left": 120, "top": 220, "width": 90, "height": 32},
+                }
+            ],
+        },
+        input_context={"selection": {}, "clipboard": {}},
+    )
+
+    planner_debug = _planner_debug(payload)
+    planner_obedience = _planner_obedience(payload)
+    screen_events = [event for event in assistant.events.recent(limit=50) if event.get("source") == "screen_awareness"]
+
+    assert payload["jobs"] == []
+    assert payload["actions"] == []
+    assert planner_debug["structured_query"]["query_shape"] == "screen_awareness_request"
+    assert planner_debug["execution_plan"]["plan_type"] == "screen_awareness_act"
+    assert planner_debug["screen_awareness"]["disposition"] == "phase5_act"
+    assert planner_debug["screen_awareness"]["analysis_result"]["action_result"]["status"] == "planned"
+    assert planner_debug["screen_awareness"]["telemetry"]["action"]["outcome"] == "planned"
+    assert planner_obedience["actual_result_mode"] == "action_result"
+    assert planner_obedience["authority_enforced"] is True
+    assert "go ahead" in payload["assistant_message"]["content"].lower() or "confirm" in payload["assistant_message"]["content"].lower()
+    assert screen_events
+    assert screen_events[-1]["payload"]["disposition"] == "phase5_act"
+    assert screen_events[-1]["payload"]["telemetry"]["action"]["confirmation_required"] is True
+
+
+def test_assistant_orchestrator_handles_phase6_continuity_and_emits_continuity_debug_event(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase6"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    temp_config.screen_awareness.grounding_enabled = True
+    temp_config.screen_awareness.guidance_enabled = True
+    temp_config.screen_awareness.verification_enabled = True
+    temp_config.screen_awareness.action_enabled = True
+    temp_config.screen_awareness.memory_enabled = True
+    temp_config.screen_awareness.action_policy_mode = "confirm_before_act"
+
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+    first_payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="what should I click next?",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context={
+            "workspace": {"workspaceId": "ws-cont-event", "title": "Release Form"},
+            "module": "browser",
+            "section": "form",
+            "active_item": {
+                "itemId": "field-email",
+                "title": "Release email",
+                "kind": "text-field",
+                "focused": True,
+                "selected": True,
+            },
+            "opened_items": [
+                {
+                    "itemId": "button-continue",
+                    "title": "Continue",
+                    "kind": "button",
+                    "pane": "footer",
+                    "enabled": True,
+                }
+            ],
+        },
+        input_context={"selection": {}, "clipboard": {}},
+    )
+    assert first_payload["assistant_message"]["content"]
+
+    payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="continue where we left off",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context={
+            "workspace": {"workspaceId": "ws-cont-event", "title": "Release Form"},
+            "module": "browser",
+            "section": "form",
+            "active_item": {
+                "itemId": "field-email",
+                "title": "Release email",
+                "kind": "text-field",
+                "focused": True,
+            },
+            "opened_items": [
+                {
+                    "itemId": "button-continue",
+                    "title": "Continue",
+                    "kind": "button",
+                    "pane": "footer",
+                    "enabled": True,
+                }
+            ],
+        },
+        input_context={"selection": {}, "clipboard": {}},
+    )
+
+    planner_debug = _planner_debug(payload)
+    planner_obedience = _planner_obedience(payload)
+    screen_events = [event for event in assistant.events.recent(limit=50) if event.get("source") == "screen_awareness"]
+
+    assert payload["jobs"] == []
+    assert payload["actions"] == []
+    assert planner_debug["structured_query"]["query_shape"] == "screen_awareness_request"
+    assert planner_debug["execution_plan"]["plan_type"] == "screen_awareness_continue"
+    assert planner_debug["screen_awareness"]["disposition"] == "phase6_continue"
+    assert planner_debug["screen_awareness"]["analysis_result"]["continuity_result"]["status"] == "resume_ready"
+    assert planner_debug["screen_awareness"]["telemetry"]["continuity"]["outcome"] == "resume_ready"
+    assert planner_obedience["actual_result_mode"] == "summary_result"
+    assert planner_obedience["authority_enforced"] is True
+    assert "continue" in payload["assistant_message"]["content"].lower() or "resume" in payload["assistant_message"]["content"].lower()
+    assert screen_events
+    assert screen_events[-1]["payload"]["disposition"] == "phase6_continue"
+    assert screen_events[-1]["payload"]["telemetry"]["continuity"]["resume_candidate_id"] == "button-continue"
 
 
 def test_assistant_orchestrator_routes_deck_open_url_without_provider(temp_config) -> None:
@@ -2157,6 +2745,73 @@ def test_assistant_orchestrator_enforces_comparison_requests_as_clarifications(t
     assert planner_obedience["actual_result_mode"] == "clarification"
     assert planner_obedience["authority_enforced"] is True
     assert payload["assistant_message"]["content"] == "Which two files should I compare?"
+
+
+def test_assistant_orchestrator_handles_discord_relay_preview_then_confirmation(temp_config) -> None:
+    adapter = FakeDiscordRelayAdapter(state=DiscordDispatchState.STARTED)
+    assistant, jobs, executor, session_state = _build_assistant(
+        temp_config,
+        system_probe=FakeSystemProbe(),
+    )
+    assistant.discord_relay = build_discord_relay_subsystem(
+        temp_config.discord_relay,
+        session_state=session_state,
+        local_adapter=adapter,
+    )
+
+    async def runner() -> tuple[dict[str, object], dict[str, object]]:
+        await jobs.start()
+        try:
+            preview_payload = await assistant.handle_message(
+                "send this to Baby",
+                session_id="default",
+                surface_mode="ghost",
+                active_module="chartroom",
+                workspace_context={
+                    "module": "browser",
+                    "active_item": {
+                        "title": "Stormhelm Dispatch Spec",
+                        "url": "https://example.com/dispatch",
+                        "kind": "browser-tab",
+                    },
+                },
+            )
+            dispatch_payload = await assistant.handle_message(
+                "send it",
+                session_id="default",
+                surface_mode="ghost",
+                active_module="chartroom",
+                workspace_context={
+                    "module": "browser",
+                    "active_item": {
+                        "title": "Stormhelm Dispatch Spec",
+                        "url": "https://example.com/dispatch",
+                        "kind": "browser-tab",
+                    },
+                },
+            )
+            return preview_payload, dispatch_payload
+        finally:
+            await jobs.stop()
+            executor.shutdown()
+
+    preview_payload, dispatch_payload = asyncio.run(runner())
+    preview_debug = _planner_debug(preview_payload)
+    dispatch_debug = _planner_debug(dispatch_payload)
+
+    assert preview_payload["jobs"] == []
+    assert preview_payload["assistant_message"]["metadata"]["bearing_title"] == "Discord Preview"
+    assert "haven't sent anything yet" in preview_payload["assistant_message"]["content"]
+    assert preview_debug["structured_query"]["query_shape"] == "discord_relay_request"
+    assert preview_debug["execution_plan"]["plan_type"] == "discord_relay_preview"
+
+    assert dispatch_payload["jobs"] == []
+    assert dispatch_payload["assistant_message"]["metadata"]["bearing_title"] == "Discord Dispatch"
+    assert "Started the Discord dispatch to Baby" in dispatch_payload["assistant_message"]["content"]
+    assert dispatch_debug["structured_query"]["query_shape"] == "discord_relay_request"
+    assert dispatch_debug["execution_plan"]["plan_type"] == "discord_relay_dispatch"
+    assert adapter.calls
+    assert session_state.get_active_request_state("default") == {}
 
 
 def test_assistant_orchestrator_enforces_workspace_restore_contract(temp_config) -> None:

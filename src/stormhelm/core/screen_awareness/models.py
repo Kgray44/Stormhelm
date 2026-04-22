@@ -65,6 +65,10 @@ class ScreenRouteDisposition(StrEnum):
     ROUTING_DISABLED = "routing_disabled"
     PHASE1_ANALYZE = "phase1_analyze"
     PHASE2_GROUND = "phase2_ground"
+    PHASE3_GUIDE = "phase3_guide"
+    PHASE4_VERIFY = "phase4_verify"
+    PHASE5_ACT = "phase5_act"
+    PHASE6_CONTINUE = "phase6_continue"
     PHASE0_SCAFFOLD = "phase0_scaffold"
 
 
@@ -81,6 +85,10 @@ class ScreenIntentType(StrEnum):
     EXPLAIN_VISIBLE_CONTENT = "explain_visible_content"
     SOLVE_VISIBLE_PROBLEM = "solve_visible_problem"
     DETECT_VISIBLE_CHANGE = "detect_visible_change"
+    GUIDE_NAVIGATION = "guide_navigation"
+    VERIFY_SCREEN_STATE = "verify_screen_state"
+    EXECUTE_UI_ACTION = "execute_ui_action"
+    CONTINUE_WORKFLOW = "continue_workflow"
 
 
 class GroundingRequestType(StrEnum):
@@ -120,6 +128,106 @@ class GroundingAmbiguityStatus(StrEnum):
     AMBIGUOUS = "ambiguous"
     UNRESOLVED_INSUFFICIENT_EVIDENCE = "unresolved_insufficient_evidence"
     UNRESOLVED_CONFLICTING_EVIDENCE = "unresolved_conflicting_evidence"
+
+
+class NavigationRequestType(StrEnum):
+    NEXT_STEP = "next_step"
+    TARGET_SELECTION = "target_selection"
+    RIGHT_PAGE_CHECK = "right_page_check"
+    RECOVERY = "recovery"
+    BLOCKER_CHECK = "blocker_check"
+
+
+class NavigationStepStatus(StrEnum):
+    READY = "ready"
+    AMBIGUOUS = "ambiguous"
+    BLOCKED = "blocked"
+    WRONG_PAGE = "wrong_page"
+    REENTRY = "reentry"
+    UNRESOLVED = "unresolved"
+
+
+class VerificationRequestType(StrEnum):
+    RESULT_CHECK = "result_check"
+    CHANGE_CHECK = "change_check"
+    COMPLETION_CHECK = "completion_check"
+    PAGE_CHECK = "page_check"
+    ERROR_CHECK = "error_check"
+    BLOCKER_CHECK = "blocker_check"
+
+
+class CompletionStatus(StrEnum):
+    COMPLETED = "completed"
+    NOT_COMPLETED = "not_completed"
+    AMBIGUOUS = "ambiguous"
+    BLOCKED = "blocked"
+    DIVERTED = "diverted"
+
+
+class ChangeClassification(StrEnum):
+    VERIFIED_CHANGE = "verified_change"
+    LIKELY_CHANGE = "likely_change"
+    NO_VISIBLE_CHANGE = "no_visible_change"
+    INSUFFICIENT_EVIDENCE = "insufficient_evidence"
+    CHANGED_BUT_NOT_UNDERSTOOD = "changed_but_not_understood"
+
+
+class ActionPolicyMode(StrEnum):
+    OBSERVE_ONLY = "observe_only"
+    GUIDE = "guide"
+    CONFIRM_BEFORE_ACT = "confirm_before_act"
+    TRUSTED_ACTION = "trusted_action"
+
+
+class ActionIntent(StrEnum):
+    CLICK = "click"
+    DOUBLE_CLICK = "double_click"
+    RIGHT_CLICK = "right_click"
+    TYPE_TEXT = "type_text"
+    PRESS_KEY = "press_key"
+    HOTKEY = "hotkey"
+    SCROLL = "scroll"
+    FOCUS = "focus"
+    SELECT = "select"
+    HOVER = "hover"
+
+
+class ActionRiskLevel(StrEnum):
+    LOW = "low"
+    MODERATE = "moderate"
+    HIGH = "high"
+    RESTRICTED = "restricted"
+
+
+class ActionExecutionStatus(StrEnum):
+    PLANNED = "planned"
+    GATED = "gated"
+    ATTEMPTED = "attempted"
+    VERIFIED_SUCCESS = "verified_success"
+    ATTEMPTED_UNVERIFIED = "attempted_unverified"
+    BLOCKED = "blocked"
+    AMBIGUOUS = "ambiguous"
+    FAILED = "failed"
+
+
+class WorkflowContinuityRequestType(StrEnum):
+    RESUME = "resume"
+    FLOW_STATUS = "flow_status"
+    DETOUR_RECOVERY = "detour_recovery"
+    BACKTRACK_CHECK = "backtrack_check"
+    RECOVERY = "recovery"
+    UNDO_HINT = "undo_hint"
+
+
+class WorkflowContinuityStatus(StrEnum):
+    ACTIVE_FLOW = "active_flow"
+    INTERRUPTED_FLOW = "interrupted_flow"
+    DETOURED = "detoured"
+    RECOVERY_READY = "recovery_ready"
+    RESUME_READY = "resume_ready"
+    WEAK_BASIS = "weak_basis"
+    BLOCKED = "blocked"
+    AMBIGUOUS = "ambiguous"
 
 
 def confidence_level_for_score(score: float) -> ScreenConfidenceLevel:
@@ -318,6 +426,7 @@ class GroundedTarget:
     visible_text: str | None = None
     enabled: bool | None = None
     parent_container: str | None = None
+    bounds: dict[str, Any] = field(default_factory=dict)
     semantic_metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -406,11 +515,713 @@ class GroundingOutcome:
 
 
 @dataclass(slots=True)
+class NavigationRequest:
+    utterance: str
+    request_type: NavigationRequestType
+    label_tokens: list[str] = field(default_factory=list)
+    role_descriptors: list[GroundingCandidateRole] = field(default_factory=list)
+    wants_next_step_guidance: bool = False
+    wants_page_check: bool = False
+    wants_recovery: bool = False
+    wants_blocker_check: bool = False
+    mode_flags: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class NavigationContext:
+    current_summary: str = ""
+    visible_task_state: str | None = None
+    candidate_next_steps: list[str] = field(default_factory=list)
+    blocker_cues: list[str] = field(default_factory=list)
+    active_item_label: str | None = None
+    active_item_kind: str | None = None
+    grounded_target: GroundedTarget | None = None
+    grounding_status: GroundingAmbiguityStatus = GroundingAmbiguityStatus.NOT_REQUESTED
+    grounding_reused: bool = False
+    provenance_channels: list[GroundingEvidenceChannel] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class NavigationStepState:
+    status: NavigationStepStatus
+    current_step_summary: str
+    expected_target_label: str | None = None
+    on_path: bool | None = None
+    blocked: bool = False
+    wrong_page: bool = False
+    reentry_possible: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class NavigationCandidate:
+    candidate_id: str
+    label: str
+    role: GroundingCandidateRole
+    source_channel: GroundingEvidenceChannel
+    source_type: ScreenSourceType | None = None
+    enabled: bool | None = None
+    parent_container: str | None = None
+    bounds: dict[str, Any] = field(default_factory=dict)
+    score: float = 0.0
+    reasons: list[str] = field(default_factory=list)
+    based_on_grounding: bool = False
+    semantic_metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class NavigationGuidance:
+    instruction: str
+    look_for: str | None = None
+    reasoning_summary: str = ""
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No guidance confidence is available.",
+        )
+    )
+    provenance_note: str = ""
+    target_candidate_id: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class NavigationBlocker:
+    blocker_type: str
+    summary: str
+    evidence_summary: list[str] = field(default_factory=list)
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No blocker confidence is available.",
+        )
+    )
+    candidate_id: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class NavigationRecoveryHint:
+    summary: str
+    reason: str
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No recovery confidence is available.",
+        )
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class NavigationAmbiguityState:
+    ambiguous: bool
+    reason: str
+    candidate_labels: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class NavigationClarificationNeed:
+    needed: bool
+    reason: str
+    prompt: str
+    candidate_labels: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class PlannerNavigationResult:
+    request_type: NavigationRequestType
+    resolved: bool
+    next_candidate_id: str | None = None
+    alternative_candidate_ids: list[str] = field(default_factory=list)
+    step_status: NavigationStepStatus = NavigationStepStatus.UNRESOLVED
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No navigation result is available.",
+        )
+    )
+    explanation_summary: str = ""
+    provenance_channels: list[GroundingEvidenceChannel] = field(default_factory=list)
+    blocker_present: bool = False
+    wrong_page: bool = False
+    clarification_needed: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class NavigationOutcome:
+    request: NavigationRequest
+    context: NavigationContext
+    step_state: NavigationStepState
+    winning_candidate: NavigationCandidate | None = None
+    ranked_candidates: list[NavigationCandidate] = field(default_factory=list)
+    guidance: NavigationGuidance | None = None
+    blocker: NavigationBlocker | None = None
+    recovery_hint: NavigationRecoveryHint | None = None
+    ambiguity_state: NavigationAmbiguityState | None = None
+    clarification_need: NavigationClarificationNeed | None = None
+    planner_result: PlannerNavigationResult | None = None
+    provenance: GroundingProvenance = field(default_factory=GroundingProvenance)
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No navigation outcome is available.",
+        )
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class VerificationRequest:
+    utterance: str
+    request_type: VerificationRequestType
+    referenced_tokens: list[str] = field(default_factory=list)
+    wants_change_summary: bool = False
+    wants_completion_check: bool = False
+    wants_page_check: bool = False
+    wants_error_check: bool = False
+    wants_blocker_check: bool = False
+    mode_flags: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class VerificationEvidence:
+    signal: str
+    channel: GroundingEvidenceChannel
+    score: float
+    note: str
+    truth_state: ScreenTruthState = ScreenTruthState.OBSERVED
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class VerificationContext:
+    current_summary: str = ""
+    prior_summary: str | None = None
+    current_page_label: str | None = None
+    prior_page_label: str | None = None
+    expected_target_label: str | None = None
+    prior_resolution_available: bool = False
+    grounding_reused: bool = False
+    navigation_reused: bool = False
+    provenance_channels: list[GroundingEvidenceChannel] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class VerificationExpectation:
+    summary: str
+    target_label: str | None = None
+    derived_from: str = ""
+    expected_presence: list[str] = field(default_factory=list)
+    expected_absence: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class VerificationComparison:
+    basis: str
+    prior_state_available: bool
+    comparison_ready: bool
+    change_classification: ChangeClassification
+    compared_signals: list[str] = field(default_factory=list)
+    summary: str = ""
+    basis_reason: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class ChangeObservation:
+    change_type: str
+    classification: ChangeClassification
+    summary: str
+    evidence_summary: list[str] = field(default_factory=list)
+    from_value: str | None = None
+    to_value: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class UnresolvedCondition:
+    condition_type: str
+    summary: str
+    evidence_summary: list[str] = field(default_factory=list)
+    still_present: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class VerificationExplanation:
+    summary: str
+    evidence_summary: list[str] = field(default_factory=list)
+    unresolved_summary: str | None = None
+    truthfulness_note: str = "Verification claims stay bounded to the observed current state and any explicit comparison basis."
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class ScreenCalculationActivity:
+    status: str
+    caller_intent: str
+    input_origin: str
+    source_text_preview: str = ""
+    extracted_expression: str | None = None
+    claim_text: str | None = None
+    internal_validation: bool = False
+    result_visibility: str = "user_facing"
+    ambiguous_reason: str | None = None
+    summary: str | None = None
+    calculation_trace: dict[str, Any] = field(default_factory=dict)
+    calculation_result: dict[str, Any] | None = None
+    calculation_failure: dict[str, Any] | None = None
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No calculation activity is available.",
+        )
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class PlannerVerificationResult:
+    request_type: VerificationRequestType
+    resolved: bool
+    completion_status: CompletionStatus
+    change_classification: ChangeClassification
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No verification result is available.",
+        )
+    )
+    explanation_summary: str = ""
+    provenance_channels: list[GroundingEvidenceChannel] = field(default_factory=list)
+    grounding_reused: bool = False
+    navigation_reused: bool = False
+    comparison_ready: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class VerificationOutcome:
+    request: VerificationRequest
+    context: VerificationContext
+    expectation: VerificationExpectation | None = None
+    evidence: list[VerificationEvidence] = field(default_factory=list)
+    comparison: VerificationComparison = field(
+        default_factory=lambda: VerificationComparison(
+            basis="current_state_only",
+            prior_state_available=False,
+            comparison_ready=False,
+            change_classification=ChangeClassification.INSUFFICIENT_EVIDENCE,
+            summary="No prior screen bearing is available for comparison.",
+        )
+    )
+    completion_status: CompletionStatus = CompletionStatus.AMBIGUOUS
+    change_observations: list[ChangeObservation] = field(default_factory=list)
+    unresolved_conditions: list[UnresolvedCondition] = field(default_factory=list)
+    explanation: VerificationExplanation = field(
+        default_factory=lambda: VerificationExplanation(
+            summary="The current verification bearing is unavailable.",
+        )
+    )
+    planner_result: PlannerVerificationResult | None = None
+    provenance: GroundingProvenance = field(default_factory=GroundingProvenance)
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No verification outcome is available.",
+        )
+    )
+    calculation_activity: ScreenCalculationActivity | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class ActionExecutionRequest:
+    utterance: str
+    intent: ActionIntent
+    target_tokens: list[str] = field(default_factory=list)
+    typed_text: str | None = None
+    key_name: str | None = None
+    hotkey_sequence: list[str] = field(default_factory=list)
+    scroll_direction: str | None = None
+    scroll_amount: int | None = None
+    follow_up_confirmation: bool = False
+    mode_flags: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = _serialize(self)
+        if isinstance(payload, dict) and payload.get("typed_text") is not None:
+            payload["typed_text"] = "[redacted]"
+        return payload
+
+
+@dataclass(slots=True)
+class ActionTarget:
+    candidate_id: str | None = None
+    label: str | None = None
+    role: GroundingCandidateRole = GroundingCandidateRole.UNKNOWN
+    source_channel: GroundingEvidenceChannel | None = None
+    source_type: ScreenSourceType | None = None
+    enabled: bool | None = None
+    bounds: dict[str, Any] = field(default_factory=dict)
+    semantic_metadata: dict[str, Any] = field(default_factory=dict)
+    equivalent_execution_basis: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class ActionVerificationLink:
+    verification_ready: bool
+    expectation_summary: str = ""
+    comparison_basis: str = "current_state_only"
+    prior_bearing_injected: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class ActionPlan:
+    request: ActionExecutionRequest
+    action_intent: ActionIntent
+    target: ActionTarget | None = None
+    parameters: dict[str, Any] = field(default_factory=dict)
+    preview_summary: str = ""
+    verification_link: ActionVerificationLink = field(
+        default_factory=lambda: ActionVerificationLink(verification_ready=False)
+    )
+    grounding_reused: bool = False
+    navigation_reused: bool = False
+    verification_reused: bool = True
+    text_payload_redacted: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = _serialize(self)
+        if isinstance(payload, dict):
+            parameters = payload.get("parameters")
+            if isinstance(parameters, dict) and "text" in parameters:
+                parameters["text"] = "[redacted]"
+        return payload
+
+
+@dataclass(slots=True)
+class ActionGateDecision:
+    allowed: bool
+    outcome: str
+    reason: str
+    policy_mode: ActionPolicyMode
+    risk_level: ActionRiskLevel
+    confirmation_required: bool = False
+    ambiguity_present: bool = False
+    blocker_present: bool = False
+    verification_ready: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class ActionExecutionAttempt:
+    action_intent: ActionIntent
+    target_candidate_id: str | None = None
+    success: bool = False
+    executor_name: str = ""
+    details: dict[str, Any] = field(default_factory=dict)
+    typed_text_redacted: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class PlannerActionResult:
+    resolved: bool
+    execution_status: ActionExecutionStatus
+    target_candidate_id: str | None = None
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No action result is available.",
+        )
+    )
+    risk_level: ActionRiskLevel = ActionRiskLevel.LOW
+    explanation_summary: str = ""
+    provenance_channels: list[GroundingEvidenceChannel] = field(default_factory=list)
+    confirmation_required: bool = False
+    grounding_reused: bool = False
+    navigation_reused: bool = False
+    verification_ready: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class ActionExecutionResult:
+    request: ActionExecutionRequest
+    plan: ActionPlan
+    gate: ActionGateDecision
+    attempt: ActionExecutionAttempt | None = None
+    post_action_verification: VerificationOutcome | None = None
+    status: ActionExecutionStatus = ActionExecutionStatus.GATED
+    explanation_summary: str = ""
+    planner_result: PlannerActionResult | None = None
+    provenance: GroundingProvenance = field(default_factory=GroundingProvenance)
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No action outcome is available.",
+        )
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class WorkflowContinuityRequest:
+    utterance: str
+    request_type: WorkflowContinuityRequestType
+    wants_resume: bool = False
+    wants_recovery: bool = False
+    wants_detour_help: bool = False
+    wants_backtrack_check: bool = False
+    wants_undo_hint: bool = False
+    mode_flags: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class WorkflowStepState:
+    summary: str
+    expected_target_label: str | None = None
+    page_label: str | None = None
+    source_intent: str = ""
+    completion_status: str | None = None
+    verified: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class WorkflowDetourState:
+    active: bool
+    detour_type: str
+    summary: str
+    current_label: str | None = None
+    prior_task_summary: str | None = None
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No detour confidence is available.",
+        )
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class WorkflowRecoveryHint:
+    summary: str
+    reason: str
+    target_label: str | None = None
+    bounded_undo_hint: bool = False
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No recovery confidence is available.",
+        )
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class WorkflowResumeCandidate:
+    candidate_id: str | None
+    label: str
+    source_layer: str
+    summary: str
+    score: float
+    evidence_summary: list[str] = field(default_factory=list)
+    from_event_id: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class WorkflowTimelineEvent:
+    event_id: str
+    event_type: str
+    source_intent: str
+    summary: str
+    captured_at: str = ""
+    page_label: str | None = None
+    target_label: str | None = None
+    target_candidate_id: str | None = None
+    completion_status: str | None = None
+    confidence_score: float = 0.0
+    stale: bool = False
+    provenance_channels: list[GroundingEvidenceChannel] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class WorkflowContinuityContext:
+    current_summary: str = ""
+    current_page_label: str | None = None
+    current_modal_label: str | None = None
+    recent_event_count: int = 0
+    recent_screen_available: bool = False
+    grounding_reused: bool = False
+    navigation_reused: bool = False
+    verification_reused: bool = False
+    action_reused: bool = False
+    provenance_channels: list[GroundingEvidenceChannel] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class PlannerContinuityResult:
+    request_type: WorkflowContinuityRequestType
+    resolved: bool
+    status: WorkflowContinuityStatus
+    resume_candidate_id: str | None = None
+    alternative_resume_candidate_ids: list[str] = field(default_factory=list)
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No continuity result is available.",
+        )
+    )
+    explanation_summary: str = ""
+    provenance_channels: list[GroundingEvidenceChannel] = field(default_factory=list)
+    detour_active: bool = False
+    blocked: bool = False
+    clarification_needed: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class WorkflowContinuityResult:
+    request: WorkflowContinuityRequest
+    context: WorkflowContinuityContext
+    status: WorkflowContinuityStatus
+    active_step: WorkflowStepState | None = None
+    detour_state: WorkflowDetourState | None = None
+    recovery_hint: WorkflowRecoveryHint | None = None
+    resume_candidate: WorkflowResumeCandidate | None = None
+    resume_options: list[WorkflowResumeCandidate] = field(default_factory=list)
+    timeline_events: list[WorkflowTimelineEvent] = field(default_factory=list)
+    clarification_needed: bool = False
+    clarification_prompt: str | None = None
+    explanation_summary: str = ""
+    planner_result: PlannerContinuityResult | None = None
+    provenance: GroundingProvenance = field(default_factory=GroundingProvenance)
+    confidence: ScreenConfidence = field(
+        default_factory=lambda: ScreenConfidence(
+            score=0.0,
+            level=ScreenConfidenceLevel.NONE,
+            note="No workflow continuity result is available.",
+        )
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
 class ScreenAnalysisResult:
     observation: ScreenObservation | None = None
     interpretation: ScreenInterpretation | None = None
     current_screen_context: CurrentScreenContext | None = None
     grounding_result: GroundingOutcome | None = None
+    navigation_result: NavigationOutcome | None = None
+    verification_result: VerificationOutcome | None = None
+    action_result: ActionExecutionResult | None = None
+    continuity_result: WorkflowContinuityResult | None = None
+    calculation_activity: ScreenCalculationActivity | None = None
     limitations: list[ScreenLimitation] = field(default_factory=list)
     fallback_reason: str | None = None
     confidence: ScreenConfidence = field(

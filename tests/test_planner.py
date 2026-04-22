@@ -34,6 +34,294 @@ def test_planner_routes_direct_weather_to_structured_tool_without_open() -> None
     assert decision.tool_requests[0].arguments["forecast_target"] == "current"
 
 
+def test_planner_routes_direct_arithmetic_to_builtin_calculation_lane() -> None:
+    planner = DeterministicPlanner()
+
+    decision = planner.plan(
+        "2+2+4+4+4+4+5+10",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "calculation_response"
+    assert decision.tool_requests == []
+    assert decision.structured_query is not None
+    assert decision.structured_query.query_shape.value == "calculation_request"
+    assert decision.execution_plan is not None
+    assert decision.execution_plan.plan_type == "calculation_evaluate"
+    assert decision.response_mode == "calculation_result"
+    assert decision.debug["calculations"]["candidate"] is True
+    assert decision.debug["calculations"]["extracted_expression"] == "2+2+4+4+4+4+5+10"
+
+
+def test_planner_routes_explicit_calculation_request_with_malformed_expression_to_calculation_lane() -> None:
+    planner = DeterministicPlanner()
+
+    decision = planner.plan(
+        "calculate 2+*",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "calculation_response"
+    assert decision.tool_requests == []
+    assert decision.execution_plan is not None
+    assert decision.execution_plan.plan_type == "calculation_evaluate"
+    assert decision.debug["calculations"]["candidate"] is True
+    assert decision.debug["calculations"]["disposition"] == "direct_expression"
+
+
+def test_planner_routes_engineering_style_expression_to_builtin_calculation_lane() -> None:
+    planner = DeterministicPlanner()
+
+    decision = planner.plan(
+        "3.3k * 2.2mA",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "calculation_response"
+    assert decision.tool_requests == []
+    assert decision.execution_plan is not None
+    assert decision.execution_plan.plan_type == "calculation_evaluate"
+    assert decision.debug["calculations"]["candidate"] is True
+    assert decision.debug["calculations"]["extracted_expression"] == "3.3k * 2.2mA"
+
+
+def test_planner_routes_supported_rc_cutoff_helper_request_to_builtin_calculation_lane() -> None:
+    planner = DeterministicPlanner()
+
+    decision = planner.plan(
+        "what is the RC cutoff for 10k and 0.1uF",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "calculation_response"
+    assert decision.debug["calculations"]["candidate"] is True
+    assert decision.debug["calculations"]["helper_name"] == "rc_cutoff"
+    assert decision.debug["calculations"]["disposition"] == "helper_request"
+
+
+def test_planner_routes_supported_helper_request_to_builtin_calculation_lane() -> None:
+    planner = DeterministicPlanner()
+
+    decision = planner.plan(
+        "power at 12V and 1.5A",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "calculation_response"
+    assert decision.tool_requests == []
+    assert decision.execution_plan is not None
+    assert decision.execution_plan.plan_type == "calculation_evaluate"
+    assert decision.debug["calculations"]["candidate"] is True
+    assert decision.debug["calculations"]["helper_name"] == "power_from_voltage_current"
+    assert decision.debug["calculations"]["disposition"] == "helper_request"
+
+
+def test_planner_routes_under_specified_supported_helper_request_without_falling_through() -> None:
+    planner = DeterministicPlanner()
+
+    decision = planner.plan(
+        "power at 12V",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "calculation_response"
+    assert decision.tool_requests == []
+    assert decision.debug["calculations"]["candidate"] is True
+    assert decision.debug["calculations"]["helper_name"] == "power_family"
+    assert decision.debug["calculations"]["missing_arguments"]
+
+
+def test_planner_does_not_hijack_unsupported_helper_like_prose() -> None:
+    planner = DeterministicPlanner()
+
+    decision = planner.plan(
+        "teach me ohm's law",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type != "calculation_response"
+    assert decision.debug["calculations"]["candidate"] is False
+
+
+def test_planner_routes_verification_request_to_builtin_calculation_lane() -> None:
+    planner = DeterministicPlanner()
+
+    decision = planner.plan(
+        "verify 2+2+4+4+4+4+5+10 = 28",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "calculation_response"
+    assert decision.execution_plan is not None
+    assert decision.execution_plan.plan_type == "calculation_evaluate"
+    assert decision.debug["calculations"]["candidate"] is True
+    assert decision.debug["calculations"]["disposition"] == "verification_request"
+    assert decision.debug["calculations"]["verification_claim"] == "28"
+
+
+def test_planner_routes_explanation_follow_up_to_prior_direct_calculation() -> None:
+    planner = DeterministicPlanner()
+
+    decision = planner.plan(
+        "show the steps",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+        active_context={
+            "recent_context_resolutions": [
+                {
+                    "kind": "calculation",
+                    "query": "3.3k * 2.2mA",
+                    "result": {
+                        "expression": "3.3k * 2.2mA",
+                        "normalized_expression": "3300*0.0022",
+                    },
+                    "trace": {
+                        "extracted_expression": "3.3k * 2.2mA",
+                        "normalized_expression": "3300*0.0022",
+                    },
+                }
+            ]
+        },
+    )
+
+    assert decision.request_type == "calculation_response"
+    assert decision.debug["calculations"]["candidate"] is True
+    assert decision.debug["calculations"]["follow_up_reuse"] is True
+    assert decision.debug["calculations"]["extracted_expression"] == "3.3k * 2.2mA"
+    assert decision.debug["calculations"]["requested_mode"] == "step_by_step"
+
+
+def test_planner_routes_formula_follow_up_to_prior_helper_calculation() -> None:
+    planner = DeterministicPlanner()
+
+    decision = planner.plan(
+        "show the formula",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+        active_context={
+            "recent_context_resolutions": [
+                {
+                    "kind": "calculation",
+                    "query": "power at 12V and 1.5A",
+                    "result": {
+                        "helper_used": "power_from_voltage_current",
+                    },
+                    "trace": {
+                        "helper_used": "power_from_voltage_current",
+                        "helper_arguments": {
+                            "voltage": {"value": "12", "normalized_expression": "12"},
+                            "current": {"value": "1.5", "normalized_expression": "1.5"},
+                        },
+                    },
+                }
+            ]
+        },
+    )
+
+    assert decision.request_type == "calculation_response"
+    assert decision.debug["calculations"]["candidate"] is True
+    assert decision.debug["calculations"]["follow_up_reuse"] is True
+    assert decision.debug["calculations"]["helper_name"] == "power_from_voltage_current"
+    assert decision.debug["calculations"]["requested_mode"] == "formula_substitution"
+
+
+def test_planner_routes_explanation_follow_up_to_prior_screen_aware_calculation() -> None:
+    planner = DeterministicPlanner()
+
+    decision = planner.plan(
+        "show the steps",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        active_context={
+            "recent_context_resolutions": [
+                {
+                    "kind": "screen_awareness",
+                    "intent": "solve_visible_problem",
+                    "analysis_result": {
+                        "calculation_activity": {
+                            "status": "resolved",
+                            "calculation_trace": {
+                                "extracted_expression": "(48/3)+7^2",
+                                "helper_used": None,
+                                "result_visibility": "user_facing",
+                            },
+                            "calculation_result": {
+                                "expression": "(48/3)+7^2",
+                                "normalized_expression": "(48/3)+7^2",
+                            },
+                        }
+                    },
+                }
+            ]
+        },
+    )
+
+    assert decision.request_type == "calculation_response"
+    assert decision.debug["calculations"]["candidate"] is True
+    assert decision.debug["calculations"]["follow_up_reuse"] is True
+    assert decision.debug["calculations"]["extracted_expression"] == "(48/3)+7^2"
+    assert decision.debug["calculations"]["requested_mode"] == "step_by_step"
+
+
 def test_planner_records_screen_awareness_candidate_without_hijacking_when_routing_is_disabled(temp_config) -> None:
     temp_config.screen_awareness.enabled = True
     temp_config.screen_awareness.planner_routing_enabled = False
@@ -123,6 +411,226 @@ def test_planner_routes_grounding_disambiguation_request_to_phase2_screen_awaren
     assert decision.debug["screen_awareness"]["disposition"] == "phase2_ground"
 
 
+def test_planner_routes_guided_navigation_request_to_phase3_screen_awareness_when_enabled(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase3"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    temp_config.screen_awareness.grounding_enabled = True
+    temp_config.screen_awareness.guidance_enabled = True
+    planner = DeterministicPlanner(screen_awareness_config=temp_config.screen_awareness)
+
+    decision = planner.plan(
+        "what should I click next?",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "screen_awareness_response"
+    assert decision.tool_requests == []
+    assert decision.structured_query is not None
+    assert decision.structured_query.query_shape.value == "screen_awareness_request"
+    assert decision.execution_plan is not None
+    assert decision.execution_plan.plan_type == "screen_awareness_analyze"
+    assert decision.capability_plan is not None
+    assert "screen_grounding" in decision.capability_plan.required_capabilities
+    assert "screen_guidance" in decision.capability_plan.required_capabilities
+    assert decision.debug["screen_awareness"]["disposition"] == "phase3_guide"
+    assert decision.debug["screen_awareness"]["intent"] == "guide_navigation"
+
+
+def test_planner_routes_phase4_verification_request_to_screen_awareness_when_enabled(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase4"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    temp_config.screen_awareness.grounding_enabled = True
+    temp_config.screen_awareness.guidance_enabled = True
+    temp_config.screen_awareness.verification_enabled = True
+    planner = DeterministicPlanner(screen_awareness_config=temp_config.screen_awareness)
+
+    decision = planner.plan(
+        "did that work?",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "screen_awareness_response"
+    assert decision.tool_requests == []
+    assert decision.structured_query is not None
+    assert decision.structured_query.query_shape.value == "screen_awareness_request"
+    assert decision.execution_plan is not None
+    assert decision.execution_plan.plan_type == "screen_awareness_analyze"
+    assert decision.capability_plan is not None
+    assert "screen_grounding" in decision.capability_plan.required_capabilities
+    assert "screen_verification" in decision.capability_plan.required_capabilities
+    assert decision.debug["screen_awareness"]["disposition"] == "phase4_verify"
+
+
+def test_planner_routes_phase4_numeric_verification_request_to_screen_awareness_when_enabled(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase4"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    temp_config.screen_awareness.grounding_enabled = True
+    temp_config.screen_awareness.guidance_enabled = True
+    temp_config.screen_awareness.verification_enabled = True
+    planner = DeterministicPlanner(screen_awareness_config=temp_config.screen_awareness)
+
+    decision = planner.plan(
+        "do these numbers add up?",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        active_context={
+            "selection": {
+                "kind": "text",
+                "value": "2 + 2 + 4 + 4 + 4 + 4 + 5 + 10 = 28",
+                "preview": "2 + 2 + 4 + 4 + 4 + 4 + 5 + 10 = 28",
+            }
+        },
+    )
+
+    assert decision.request_type == "screen_awareness_response"
+    assert decision.execution_plan is not None
+    assert decision.execution_plan.plan_type == "screen_awareness_analyze"
+    assert decision.debug["screen_awareness"]["disposition"] == "phase4_verify"
+    assert decision.debug["screen_awareness"]["intent"] == "verify_screen_state"
+
+
+def test_planner_routes_phase5_action_request_to_screen_awareness_when_enabled(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase5"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    temp_config.screen_awareness.grounding_enabled = True
+    temp_config.screen_awareness.guidance_enabled = True
+    temp_config.screen_awareness.verification_enabled = True
+    temp_config.screen_awareness.action_enabled = True
+    temp_config.screen_awareness.action_policy_mode = "confirm_before_act"
+    planner = DeterministicPlanner(screen_awareness_config=temp_config.screen_awareness)
+
+    decision = planner.plan(
+        "click the Save button",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "screen_awareness_response"
+    assert decision.tool_requests == []
+    assert decision.structured_query is not None
+    assert decision.structured_query.query_shape.value == "screen_awareness_request"
+    assert decision.execution_plan is not None
+    assert decision.execution_plan.plan_type == "screen_awareness_act"
+    assert decision.response_mode == "action_result"
+    assert decision.capability_plan is not None
+    assert "screen_grounding" in decision.capability_plan.required_capabilities
+    assert "screen_verification" in decision.capability_plan.required_capabilities
+    assert "screen_action_execution" in decision.capability_plan.required_capabilities
+    assert decision.debug["screen_awareness"]["disposition"] == "phase5_act"
+    assert decision.debug["screen_awareness"]["intent"] == "execute_ui_action"
+
+
+def test_planner_routes_phase6_continuity_request_to_screen_awareness_when_enabled(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase6"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    temp_config.screen_awareness.grounding_enabled = True
+    temp_config.screen_awareness.guidance_enabled = True
+    temp_config.screen_awareness.verification_enabled = True
+    temp_config.screen_awareness.action_enabled = True
+    temp_config.screen_awareness.memory_enabled = True
+    planner = DeterministicPlanner(screen_awareness_config=temp_config.screen_awareness)
+
+    decision = planner.plan(
+        "continue where we left off",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+        active_context={
+            "recent_context_resolutions": [
+                {
+                    "kind": "screen_awareness",
+                    "intent": "guide_navigation",
+                    "analysis_result": {
+                        "navigation_result": {
+                            "step_state": {"status": "ready", "expected_target_label": "Continue"},
+                        }
+                    },
+                }
+            ]
+        },
+    )
+
+    assert decision.request_type == "screen_awareness_response"
+    assert decision.tool_requests == []
+    assert decision.structured_query is not None
+    assert decision.structured_query.query_shape.value == "screen_awareness_request"
+    assert decision.execution_plan is not None
+    assert decision.execution_plan.plan_type == "screen_awareness_continue"
+    assert decision.response_mode == "summary_result"
+    assert decision.capability_plan is not None
+    assert "screen_grounding" in decision.capability_plan.required_capabilities
+    assert "screen_guidance" in decision.capability_plan.required_capabilities
+    assert "screen_verification" in decision.capability_plan.required_capabilities
+    assert "screen_continuity" in decision.capability_plan.required_capabilities
+    assert decision.debug["screen_awareness"]["disposition"] == "phase6_continue"
+    assert decision.debug["screen_awareness"]["intent"] == "continue_workflow"
+
+
+def test_planner_preserves_phase2_grounding_route_for_explanation_requests_in_phase3(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase3"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    temp_config.screen_awareness.grounding_enabled = True
+    temp_config.screen_awareness.guidance_enabled = True
+    planner = DeterministicPlanner(screen_awareness_config=temp_config.screen_awareness)
+
+    decision = planner.plan(
+        "what does this warning mean",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+        active_context={"selection": {"value": "Warning: Token expired"}, "clipboard": {}},
+    )
+
+    assert decision.capability_plan is not None
+    assert "screen_grounding" in decision.capability_plan.required_capabilities
+    assert "screen_guidance" not in decision.capability_plan.required_capabilities
+    assert decision.debug["screen_awareness"]["disposition"] == "phase2_ground"
+
+
 def test_planner_does_not_hijack_unrelated_requests_when_screen_awareness_is_on(temp_config) -> None:
     temp_config.screen_awareness.enabled = True
     temp_config.screen_awareness.phase = "phase1"
@@ -147,6 +655,76 @@ def test_planner_does_not_hijack_unrelated_requests_when_screen_awareness_is_on(
     assert decision.tool_requests[0].tool_name == "external_open_url"
     assert decision.debug["screen_awareness"]["candidate"] is False
     assert decision.debug["screen_awareness"]["disposition"] == "not_requested"
+
+
+def test_planner_routes_send_this_to_baby_to_discord_relay_preview(temp_config) -> None:
+    planner = DeterministicPlanner(
+        screen_awareness_config=temp_config.screen_awareness,
+        calculations_config=temp_config.calculations,
+        discord_relay_config=temp_config.discord_relay,
+    )
+
+    decision = planner.plan(
+        "send this to Baby",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "discord_relay_dispatch"
+    assert decision.tool_requests == []
+    assert decision.structured_query is not None
+    assert decision.structured_query.query_shape.value == "discord_relay_request"
+    assert decision.execution_plan is not None
+    assert decision.execution_plan.plan_type == "discord_relay_preview"
+    assert decision.response_mode == "action_result"
+    assert decision.structured_query.slots["destination_alias"] == "Baby"
+    assert decision.structured_query.slots["payload_hint"] == "contextual"
+
+
+def test_planner_routes_discord_relay_confirmation_follow_up_to_dispatch(temp_config) -> None:
+    planner = DeterministicPlanner(
+        screen_awareness_config=temp_config.screen_awareness,
+        calculations_config=temp_config.calculations,
+        discord_relay_config=temp_config.discord_relay,
+    )
+
+    decision = planner.plan(
+        "send it",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={
+            "family": "discord_relay",
+            "parameters": {
+                "destination_alias": "Baby",
+                "payload_hint": "page_link",
+                "note_text": None,
+                "pending_preview": {
+                    "destination": {"alias": "Baby", "label": "Baby", "destination_kind": "personal_dm", "route_mode": "local_client_automation"},
+                    "payload": {"kind": "page_link", "summary": "Current page", "provenance": "workspace_active_item", "confidence": 0.9, "url": "https://example.com"},
+                    "policy": {"outcome": "allowed", "warnings": [], "blocks": [], "requires_confirmation": True},
+                    "route_mode": "local_client_automation",
+                    "state": "ready",
+                },
+            },
+        },
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "discord_relay_dispatch"
+    assert decision.tool_requests == []
+    assert decision.execution_plan is not None
+    assert decision.execution_plan.plan_type == "discord_relay_dispatch"
+    assert decision.structured_query is not None
+    assert decision.structured_query.slots["request_stage"] == "dispatch"
+    assert decision.structured_query.slots["pending_preview"]["route_mode"] == "local_client_automation"
 
 
 def test_planner_routes_create_research_workspace_to_workspace_assembly() -> None:

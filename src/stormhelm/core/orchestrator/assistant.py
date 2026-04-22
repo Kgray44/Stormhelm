@@ -6,7 +6,14 @@ from typing import Any
 from urllib.parse import urlparse
 
 from stormhelm.config.models import AppConfig
+from stormhelm.core.calculations import CalculationCallerContext
+from stormhelm.core.calculations import CalculationInputOrigin
+from stormhelm.core.calculations import CalculationOutputMode
+from stormhelm.core.calculations import CalculationRequest
+from stormhelm.core.calculations import CalculationResultVisibility
+from stormhelm.core.calculations import CalculationsSubsystem
 from stormhelm.core.context.service import ActiveContextService
+from stormhelm.core.discord_relay import DiscordRelaySubsystem
 from stormhelm.core.events import EventBuffer
 from stormhelm.core.judgment.service import JudgmentService
 from stormhelm.core.jobs.manager import JobManager
@@ -44,7 +51,9 @@ class AssistantOrchestrator:
         persona: PersonaContract,
         workspace_service: WorkspaceService | None = None,
         provider: AssistantProvider | None = None,
+        calculations: CalculationsSubsystem | None = None,
         screen_awareness: ScreenAwarenessSubsystem | None = None,
+        discord_relay: DiscordRelaySubsystem | None = None,
     ) -> None:
         self.config = config
         self.conversations = conversations
@@ -58,7 +67,9 @@ class AssistantOrchestrator:
         self.workspace_service = workspace_service
         self._fallback_workspace_service: WorkspaceService | None = None
         self.provider = provider
+        self.calculations = calculations
         self.screen_awareness = screen_awareness
+        self.discord_relay = discord_relay
         self.active_context_service = ActiveContextService(session_state)
         self.judgment = JudgmentService(config=config, session_state=session_state)
 
@@ -276,6 +287,10 @@ class AssistantOrchestrator:
                 )
                 planned_decision = planned
                 planner_debug = dict(planned.debug)
+                self._publish_calculation_event(
+                    session_id=session_id,
+                    calculation_debug=planner_debug.get("calculations"),
+                )
                 self._publish_screen_awareness_event(
                     session_id=session_id,
                     screen_awareness_debug=planner_debug.get("screen_awareness"),
@@ -340,8 +355,106 @@ class AssistantOrchestrator:
                 elif (
                     planned.execution_plan is not None
                     and planned.structured_query is not None
+                    and planned.structured_query.query_shape == QueryShape.CALCULATION_REQUEST
+                    and planned.execution_plan.plan_type == "calculation_evaluate"
+                    and self.calculations is not None
+                ):
+                    calculation_slots = (
+                        planned.structured_query.slots if isinstance(planned.structured_query.slots, dict) else {}
+                    )
+                    calculation_request_payload = (
+                        calculation_slots.get("calculation_request")
+                        if isinstance(calculation_slots.get("calculation_request"), dict)
+                        else {}
+                    )
+                    requested_mode = str(
+                        calculation_request_payload.get("requested_mode")
+                        or calculation_slots.get("requested_mode")
+                        or CalculationOutputMode.ANSWER_ONLY.value
+                    ).strip()
+                    try:
+                        calculation_mode = CalculationOutputMode(requested_mode)
+                    except ValueError:
+                        calculation_mode = CalculationOutputMode.ANSWER_ONLY
+                    calculation_request = CalculationRequest(
+                        request_id=f"calc-{session_id}",
+                        source_surface=surface_mode,
+                        raw_input=message,
+                        user_visible_text=message,
+                        extracted_expression=str(calculation_request_payload.get("extracted_expression") or "").strip() or None,
+                        requested_mode=calculation_mode,
+                        helper_name=str(calculation_request_payload.get("helper_name") or "").strip() or None,
+                        arguments=(
+                            dict(calculation_request_payload.get("arguments") or {})
+                            if isinstance(calculation_request_payload.get("arguments"), dict)
+                            else {}
+                        ),
+                        missing_arguments=(
+                            list(calculation_request_payload.get("missing_arguments") or [])
+                            if isinstance(calculation_request_payload.get("missing_arguments"), list)
+                            else []
+                        ),
+                        follow_up_reuse=bool(calculation_request_payload.get("follow_up_reuse", False)),
+                        verification_claim=str(calculation_request_payload.get("verification_claim") or "").strip() or None,
+                        caller=CalculationCallerContext(
+                            subsystem="assistant",
+                            caller_intent="planner_direct_calculation",
+                            input_origin=(
+                                CalculationInputOrigin.REUSED_CONTEXT
+                                if bool(calculation_request_payload.get("follow_up_reuse", False))
+                                else CalculationInputOrigin.USER_TEXT
+                            ),
+                            visual_extraction_dependency=False,
+                            internal_validation=False,
+                            result_visibility=CalculationResultVisibility.USER_FACING,
+                            reuse_path="assistant_orchestrator.calculation_request",
+                            provenance_stack=[
+                                "assistant_orchestrator",
+                                "recent_context_reuse"
+                                if bool(calculation_request_payload.get("follow_up_reuse", False))
+                                else "direct_user_request",
+                            ],
+                        ),
+                    )
+                    calculation_response = self.calculations.execute(
+                        session_id=session_id,
+                        active_module=active_module,
+                        request=calculation_request,
+                    )
+                    assistant_text = calculation_response.assistant_response
+                    self.active_context_service.remember_resolution(
+                        session_id,
+                        {
+                            "kind": "calculation",
+                            "query": message,
+                            "result": calculation_response.result.to_dict()
+                            if calculation_response.result is not None
+                            else None,
+                            "failure": calculation_response.failure.to_dict()
+                            if calculation_response.failure is not None
+                            else None,
+                            "trace": calculation_response.trace.to_dict(),
+                        },
+                    )
+                    planned.structured_query.slots["response_contract"] = dict(calculation_response.response_contract)
+                    calculation_debug = dict(planner_debug.get("calculations") or {})
+                    calculation_debug["trace"] = calculation_response.trace.to_dict()
+                    calculation_debug["result"] = (
+                        calculation_response.result.to_dict() if calculation_response.result is not None else None
+                    )
+                    calculation_debug["failure"] = (
+                        calculation_response.failure.to_dict() if calculation_response.failure is not None else None
+                    )
+                    planner_debug["calculations"] = calculation_debug
+                    self._publish_calculation_event(
+                        session_id=session_id,
+                        calculation_debug=calculation_debug,
+                    )
+                elif (
+                    planned.execution_plan is not None
+                    and planned.structured_query is not None
                     and planned.structured_query.query_shape == QueryShape.SCREEN_AWARENESS_REQUEST
-                    and planned.execution_plan.plan_type == "screen_awareness_analyze"
+                    and planned.execution_plan.plan_type in {"screen_awareness_analyze", "screen_awareness_act", "screen_awareness_continue"}
                     and self.screen_awareness is not None
                 ):
                     screen_debug = planned.structured_query.slots.get("screen_awareness")
@@ -365,6 +478,16 @@ class AssistantOrchestrator:
                         workspace_context=resolved_workspace_context,
                     )
                     assistant_text = self.persona.report(screen_response.assistant_response)
+                    self.active_context_service.remember_resolution(
+                        session_id,
+                        {
+                            "kind": "screen_awareness",
+                            "intent": screen_intent.value,
+                            "query": message,
+                            "analysis_result": screen_response.analysis.to_dict(),
+                            "telemetry": dict(screen_response.telemetry),
+                        },
+                    )
                     planned.structured_query.slots["response_contract"] = dict(screen_response.response_contract)
                     if planned.active_request_state:
                         self.session_state.set_active_request_state(session_id, planned.active_request_state)
@@ -375,6 +498,52 @@ class AssistantOrchestrator:
                     self._publish_screen_awareness_event(
                         session_id=session_id,
                         screen_awareness_debug=screen_awareness_debug,
+                    )
+                elif (
+                    planned.execution_plan is not None
+                    and planned.structured_query is not None
+                    and planned.structured_query.query_shape == QueryShape.DISCORD_RELAY_REQUEST
+                    and planned.execution_plan.plan_type in {"discord_relay_preview", "discord_relay_dispatch"}
+                    and self.discord_relay is not None
+                ):
+                    relay_response = self.discord_relay.handle_request(
+                        session_id=session_id,
+                        operator_text=message,
+                        surface_mode=surface_mode,
+                        active_module=active_module,
+                        active_context=active_context,
+                        workspace_context=resolved_workspace_context,
+                        request_slots=planned.structured_query.slots,
+                    )
+                    assistant_text = self.persona.report(relay_response.assistant_response)
+                    self.active_context_service.remember_resolution(
+                        session_id,
+                        {
+                            "kind": "discord_relay",
+                            "query": message,
+                            "state": relay_response.state.value,
+                            "preview": relay_response.preview.to_dict() if relay_response.preview is not None else None,
+                            "attempt": relay_response.attempt.to_dict() if relay_response.attempt is not None else None,
+                            "trace": relay_response.trace.to_dict() if relay_response.trace is not None else None,
+                        },
+                    )
+                    planned.structured_query.slots["response_contract"] = dict(relay_response.response_contract)
+                    if relay_response.active_request_state is not None:
+                        if relay_response.active_request_state:
+                            self.session_state.set_active_request_state(session_id, relay_response.active_request_state)
+                        else:
+                            self.session_state.clear_active_request_state(session_id)
+                    relay_debug = dict(relay_response.debug)
+                    if relay_response.trace is not None:
+                        relay_debug["trace"] = relay_response.trace.to_dict()
+                    if relay_response.preview is not None:
+                        relay_debug["preview"] = relay_response.preview.to_dict()
+                    if relay_response.attempt is not None:
+                        relay_debug["attempt"] = relay_response.attempt.to_dict()
+                    planner_debug["discord_relay"] = relay_debug
+                    self._publish_discord_relay_event(
+                        session_id=session_id,
+                        relay_debug=relay_debug,
                     )
                 elif planned.assistant_message:
                     if planned.active_request_state:
@@ -1091,6 +1260,14 @@ class AssistantOrchestrator:
             message = "Screen-awareness request routed to Phase 1 observe-and-describe analysis."
         elif disposition == "phase2_ground":
             message = "Screen-awareness request routed to Phase 2 grounding and disambiguation."
+        elif disposition == "phase3_guide":
+            message = "Screen-awareness request routed to Phase 3 guided navigation."
+        elif disposition == "phase4_verify":
+            message = "Screen-awareness request routed to Phase 4 verification and change intelligence."
+        elif disposition == "phase5_act":
+            message = "Screen-awareness request routed to Phase 5 direct UI action execution."
+        elif disposition == "phase6_continue":
+            message = "Screen-awareness request routed to Phase 6 workflow continuity and recovery."
         elif disposition in {"feature_disabled", "routing_disabled"}:
             message = "Screen-awareness request detected but not activated."
         self.events.publish(
@@ -1112,6 +1289,80 @@ class AssistantOrchestrator:
                 else {},
                 "telemetry": dict(screen_awareness_debug.get("telemetry") or {})
                 if isinstance(screen_awareness_debug.get("telemetry"), dict)
+                else {},
+            },
+        )
+
+    def _publish_discord_relay_event(
+        self,
+        *,
+        session_id: str,
+        relay_debug: object,
+    ) -> None:
+        debug_events_enabled = False
+        if self.discord_relay is not None:
+            debug_events_enabled = self.discord_relay.config.debug_events_enabled
+        elif hasattr(self.config, "discord_relay"):
+            debug_events_enabled = bool(self.config.discord_relay.debug_events_enabled)
+        if not debug_events_enabled:
+            return
+        if not isinstance(relay_debug, dict):
+            return
+        trace = relay_debug.get("trace") if isinstance(relay_debug.get("trace"), dict) else {}
+        preview = relay_debug.get("preview") if isinstance(relay_debug.get("preview"), dict) else {}
+        attempt = relay_debug.get("attempt") if isinstance(relay_debug.get("attempt"), dict) else {}
+        if not trace and not preview and not attempt:
+            return
+        self.events.publish(
+            level="DEBUG",
+            source="discord_relay",
+            message="Discord relay request handled.",
+            payload={
+                "session_id": session_id,
+                "state": str((attempt.get("state") or trace.get("state") or "")).strip(),
+                "route_mode": str((attempt.get("route_mode") or preview.get("route_mode") or trace.get("route_mode") or "")).strip(),
+                "payload_kind": str((preview.get("payload") or {}).get("kind") if isinstance(preview.get("payload"), dict) else trace.get("payload_kind") or "").strip(),
+                "destination_alias": str((preview.get("destination") or {}).get("alias") if isinstance(preview.get("destination"), dict) else trace.get("destination_alias") or "").strip(),
+                "preview": dict(preview),
+                "attempt": dict(attempt),
+            },
+        )
+
+    def _publish_calculation_event(
+        self,
+        *,
+        session_id: str,
+        calculation_debug: object,
+    ) -> None:
+        debug_events_enabled = False
+        if self.calculations is not None:
+            debug_events_enabled = self.calculations.config.debug_events_enabled
+        elif hasattr(self.config, "calculations"):
+            debug_events_enabled = bool(self.config.calculations.debug_events_enabled)
+        if not debug_events_enabled:
+            return
+        if not isinstance(calculation_debug, dict) or not calculation_debug.get("candidate"):
+            return
+        trace = calculation_debug.get("trace") if isinstance(calculation_debug.get("trace"), dict) else {}
+        failure = calculation_debug.get("failure") if isinstance(calculation_debug.get("failure"), dict) else {}
+        message = "Calculation request detected."
+        if trace.get("parse_success") is True and trace.get("result"):
+            message = "Calculation request resolved through the deterministic local lane."
+        elif failure:
+            message = "Calculation request failed honestly in the deterministic local lane."
+        self.events.publish(
+            level="DEBUG",
+            source="calculations",
+            message=message,
+            payload={
+                "session_id": session_id,
+                "disposition": str(calculation_debug.get("disposition") or ""),
+                "route_confidence": float(calculation_debug.get("route_confidence") or 0.0),
+                "extracted_expression": str(calculation_debug.get("extracted_expression") or ""),
+                "trace": dict(trace),
+                "failure": dict(failure),
+                "result": dict(calculation_debug.get("result") or {})
+                if isinstance(calculation_debug.get("result"), dict)
                 else {},
             },
         )
@@ -1175,6 +1426,8 @@ class AssistantOrchestrator:
             final_result_type = "search_result"
         elif expected_response_mode == "action_result":
             final_result_type = "action_result"
+        elif expected_response_mode == "calculation_result":
+            final_result_type = "calculation_result"
         elif expected_response_mode in {"numeric_metric", "status_summary", "identity_summary", "diagnostic_summary", "history_summary", "forecast_summary"}:
             final_result_type = expected_response_mode
 

@@ -4,7 +4,12 @@ from dataclasses import dataclass, field
 import re
 from typing import Any
 
+from stormhelm.config.models import CalculationsConfig
+from stormhelm.config.models import DiscordRelayConfig
 from stormhelm.config.models import ScreenAwarenessConfig
+from stormhelm.core.calculations import CalculationsPlannerSeam
+from stormhelm.core.calculations import CalculationOutputMode
+from stormhelm.core.calculations import CalculationRouteDisposition
 from stormhelm.core.intelligence.language import normalize_phrase
 from stormhelm.core.orchestrator.browser_destinations import BrowserDestinationResolver
 from stormhelm.core.orchestrator.browser_destinations import BrowserIntentType
@@ -109,6 +114,16 @@ DEFAULT_AVAILABLE_TOOLS = {
     "external_open_file",
 }
 
+DISCORD_RELAY_CONFIRM_PHRASES = {
+    "yes",
+    "yes send it",
+    "send it",
+    "go ahead",
+    "do it",
+    "confirm",
+    "send",
+}
+
 
 @dataclass(slots=True)
 class PlannerDecision:
@@ -179,12 +194,19 @@ class DeterministicPlanner:
         available_tools: set[str] | None = None,
         screen_awareness_config: ScreenAwarenessConfig | None = None,
         screen_awareness_seam: ScreenAwarenessPlannerSeam | None = None,
+        calculations_config: CalculationsConfig | None = None,
+        calculations_seam: CalculationsPlannerSeam | None = None,
+        discord_relay_config: DiscordRelayConfig | None = None,
     ) -> None:
         self._available_tools = set(available_tools or DEFAULT_AVAILABLE_TOOLS)
         self._browser_destination_resolver = BrowserDestinationResolver()
         self._screen_awareness_seam = screen_awareness_seam or ScreenAwarenessPlannerSeam(
             screen_awareness_config or ScreenAwarenessConfig()
         )
+        self._calculations_seam = calculations_seam or CalculationsPlannerSeam(
+            calculations_config or CalculationsConfig()
+        )
+        self._discord_relay_config = discord_relay_config or DiscordRelayConfig()
 
     def plan(
         self,
@@ -217,6 +239,83 @@ class DeterministicPlanner:
                 assistant_message=guardrail_message,
                 clarification_reason=clarification,
                 response_mode=ResponseMode.CLARIFICATION.value,
+                debug=debug,
+            )
+
+        calculation_evaluation = self._calculations_seam.evaluate(
+            raw_text=message,
+            normalized_text=normalized.normalized_text,
+            surface_mode=surface_mode,
+            active_module=active_module,
+            active_context=active_context or {},
+        )
+        debug["calculations"] = calculation_evaluation.to_dict()
+        if (
+            calculation_evaluation.candidate
+            and calculation_evaluation.disposition
+            in {
+                CalculationRouteDisposition.DIRECT_EXPRESSION,
+                CalculationRouteDisposition.HELPER_REQUEST,
+                CalculationRouteDisposition.VERIFICATION_REQUEST,
+            }
+        ):
+            helper_request = calculation_evaluation.disposition == CalculationRouteDisposition.HELPER_REQUEST
+            verification_request = calculation_evaluation.disposition == CalculationRouteDisposition.VERIFICATION_REQUEST
+            structured_query = StructuredQuery(
+                domain="calculations",
+                query_shape=QueryShape.CALCULATION_REQUEST,
+                requested_action="verify_expression"
+                if verification_request
+                else "evaluate_helper"
+                if helper_request
+                else "evaluate_expression",
+                output_mode=calculation_evaluation.requested_mode.value,
+                execution_type="deterministic_local_verification"
+                if verification_request
+                else "deterministic_local_helper"
+                if helper_request
+                else "deterministic_local_expression",
+                capability_requirements=["local_calculation"],
+                confidence=calculation_evaluation.route_confidence,
+                output_type="numeric",
+                slots={
+                    "calculation_request": calculation_evaluation.to_dict(),
+                    "requested_mode": calculation_evaluation.requested_mode.value,
+                },
+            )
+            capability_plan = CapabilityPlan(
+                supported=True,
+                required_capabilities=["local_calculation"],
+                notes=[
+                    "Routes deterministic numeric verification to the built-in calculations lane."
+                    if verification_request
+                    else
+                    "Routes supported helper math to the built-in deterministic calculation lane."
+                    if helper_request
+                    else "Routes obvious arithmetic to the built-in deterministic calculation lane."
+                ],
+            )
+            execution_plan = ExecutionPlan(
+                plan_type="calculation_evaluate",
+                request_type="calculation_response",
+                response_mode=ResponseMode.CALCULATION_RESULT,
+                family="calculations",
+                subject=calculation_evaluation.helper_name or ("verification" if verification_request else "expression"),
+            )
+            debug["structured_query"] = structured_query.to_dict()
+            debug["capability_plan"] = capability_plan.to_dict()
+            debug["execution_plan"] = execution_plan.to_dict()
+            debug["response_mode"] = execution_plan.response_mode.value
+            return PlannerDecision(
+                request_type=execution_plan.request_type,
+                tool_requests=[],
+                assistant_message=None,
+                requires_reasoner=False,
+                active_request_state=self._active_request_state_from_structured_query(structured_query, execution_plan),
+                structured_query=structured_query,
+                capability_plan=capability_plan,
+                execution_plan=execution_plan,
+                response_mode=execution_plan.response_mode.value,
                 debug=debug,
             )
 
@@ -422,7 +521,24 @@ class DeterministicPlanner:
         if screen_awareness_evaluation.disposition in {
             ScreenRouteDisposition.PHASE1_ANALYZE,
             ScreenRouteDisposition.PHASE2_GROUND,
+            ScreenRouteDisposition.PHASE3_GUIDE,
+            ScreenRouteDisposition.PHASE4_VERIFY,
+            ScreenRouteDisposition.PHASE5_ACT,
+            ScreenRouteDisposition.PHASE6_CONTINUE,
         }:
+            execution_type = (
+                "screen_awareness_act"
+                if screen_awareness_evaluation.disposition == ScreenRouteDisposition.PHASE5_ACT
+                else "screen_awareness_continue"
+                if screen_awareness_evaluation.disposition == ScreenRouteDisposition.PHASE6_CONTINUE
+                else "screen_awareness_analyze"
+            )
+            output_mode = (
+                ResponseMode.ACTION_RESULT.value
+                if screen_awareness_evaluation.disposition == ScreenRouteDisposition.PHASE5_ACT
+                else ResponseMode.SUMMARY_RESULT.value
+            )
+            output_type = "screen_action" if screen_awareness_evaluation.disposition == ScreenRouteDisposition.PHASE5_ACT else "screen_analysis"
             return self._tool_proposal(
                 query_shape=QueryShape.SCREEN_AWARENESS_REQUEST,
                 domain="screen_awareness",
@@ -435,9 +551,9 @@ class DeterministicPlanner:
                 or None,
                 confidence=screen_awareness_evaluation.route_confidence,
                 evidence=list(screen_awareness_evaluation.reasons),
-                execution_type="screen_awareness_analyze",
-                output_mode=ResponseMode.SUMMARY_RESULT.value,
-                output_type="screen_analysis",
+                execution_type=execution_type,
+                output_mode=output_mode,
+                output_type=output_type,
                 slots={
                     "target_scope": "screen",
                     "screen_awareness": screen_awareness_evaluation.to_dict(),
@@ -478,6 +594,14 @@ class DeterministicPlanner:
                     "response_contract": response_contract,
                 },
             )
+
+        discord_relay = self._discord_relay_request(
+            message,
+            lower,
+            active_request_state=active_request_state,
+        )
+        if discord_relay is not None:
+            return discord_relay
 
         location_source_message = self._location_source_follow_up_message(
             lower,
@@ -1493,6 +1617,10 @@ class DeterministicPlanner:
             output_mode = output_mode or ResponseMode.SUMMARY_RESULT.value
             output_type = output_type or "screen_analysis"
             execution_type = execution_type or "screen_awareness_analyze"
+        elif query_shape == QueryShape.DISCORD_RELAY_REQUEST:
+            output_mode = output_mode or ResponseMode.ACTION_RESULT.value
+            output_type = output_type or "action"
+            execution_type = execution_type or "discord_relay_preview"
         elif query_shape == QueryShape.CONTROL_COMMAND:
             output_mode = output_mode or ResponseMode.ACTION_RESULT.value
             output_type = output_type or "action"
@@ -1547,6 +1675,8 @@ class DeterministicPlanner:
             capability_requirements.append("identity_lookup")
         elif query_shape == QueryShape.SCREEN_AWARENESS_REQUEST:
             capability_requirements.extend(["screen_observation", "screen_interpretation"])
+        elif query_shape == QueryShape.DISCORD_RELAY_REQUEST:
+            capability_requirements.append("discord_relay")
         elif query_shape == QueryShape.DIAGNOSTIC_CAUSAL:
             capability_requirements.append("diagnostic_telemetry")
         elif query_shape == QueryShape.HISTORY_TREND:
@@ -1630,6 +1760,8 @@ class DeterministicPlanner:
             freshness_expectation = "current"
         elif structured_query.query_shape == QueryShape.SCREEN_AWARENESS_REQUEST:
             freshness_expectation = "current"
+        elif structured_query.query_shape == QueryShape.DISCORD_RELAY_REQUEST:
+            freshness_expectation = "current"
         elif structured_query.query_shape in {QueryShape.CONTROL_COMMAND, QueryShape.REPAIR_REQUEST}:
             freshness_expectation = "immediate"
 
@@ -1643,8 +1775,26 @@ class DeterministicPlanner:
                 and screen_config.phase != "phase0"
             )
             if ready_for_phase1:
-                if screen_config.phase == "phase2" and screen_config.grounding_enabled and "screen_grounding" not in required_capabilities:
+                screen_debug = slots.get("screen_awareness") if isinstance(slots.get("screen_awareness"), dict) else {}
+                disposition = str(screen_debug.get("disposition") or "").strip()
+                if screen_config.phase in {"phase2", "phase3", "phase4", "phase5", "phase6"} and screen_config.grounding_enabled and "screen_grounding" not in required_capabilities:
                     required_capabilities.append("screen_grounding")
+                if disposition == "phase3_guide" and screen_config.guidance_enabled and "screen_guidance" not in required_capabilities:
+                    required_capabilities.append("screen_guidance")
+                if disposition == "phase4_verify" and screen_config.verification_enabled and "screen_verification" not in required_capabilities:
+                    required_capabilities.append("screen_verification")
+                if disposition == "phase5_act":
+                    if screen_config.verification_enabled and "screen_verification" not in required_capabilities:
+                        required_capabilities.append("screen_verification")
+                    if screen_config.action_enabled and "screen_action_execution" not in required_capabilities:
+                        required_capabilities.append("screen_action_execution")
+                if disposition == "phase6_continue":
+                    if screen_config.guidance_enabled and "screen_guidance" not in required_capabilities:
+                        required_capabilities.append("screen_guidance")
+                    if screen_config.verification_enabled and "screen_verification" not in required_capabilities:
+                        required_capabilities.append("screen_verification")
+                    if screen_config.memory_enabled and "screen_continuity" not in required_capabilities:
+                        required_capabilities.append("screen_continuity")
                 return CapabilityPlan(
                     supported=True,
                     available_tools=sorted(tool for tool in available_tools if tool in DEFAULT_AVAILABLE_TOOLS),
@@ -1656,6 +1806,10 @@ class DeterministicPlanner:
                     notes=[
                         "Screen awareness uses layered native observation first and augments later only when needed.",
                         "Phase 2 grounds referential requests only when evidence supports a truthful winner.",
+                        "Phase 3 guided navigation builds on the existing grounded state rather than replacing it.",
+                        "Phase 4 verification compares the current bearing to explicit expectations and any available prior screen state.",
+                        "Phase 5 action execution reuses grounded targets and Phase 4 verification instead of treating attempts as success.",
+                        "Phase 6 workflow continuity reuses recent grounded, guided, verified, and action bearings without pretending long-term memory.",
                     ],
                 )
             missing_capabilities.append("screen_observation")
@@ -1677,6 +1831,37 @@ class DeterministicPlanner:
                 notes=[
                     "The screen-awareness planner route exists, but the runtime is not configured for live observation and interpretation.",
                 ],
+            )
+
+        if structured_query.query_shape == QueryShape.DISCORD_RELAY_REQUEST:
+            relay_config = self._discord_relay_config
+            if relay_config.enabled and relay_config.planner_routing_enabled:
+                return CapabilityPlan(
+                    supported=True,
+                    available_tools=sorted(tool for tool in available_tools if tool in DEFAULT_AVAILABLE_TOOLS),
+                    required_tools=[],
+                    required_capabilities=required_capabilities,
+                    missing_capabilities=[],
+                    freshness_expectation=freshness_expectation,
+                    unsupported_reason=None,
+                    notes=[
+                        "Discord relay stays planner-routed, backend-owned, and adapter-backed.",
+                        "Preview remains mandatory before any DM send attempt.",
+                        "Screen awareness is used only to break payload ties when native context is insufficient.",
+                    ],
+                )
+            return CapabilityPlan(
+                supported=False,
+                available_tools=sorted(tool for tool in available_tools if tool in DEFAULT_AVAILABLE_TOOLS),
+                required_tools=[],
+                required_capabilities=required_capabilities,
+                missing_capabilities=["discord_relay"],
+                freshness_expectation=freshness_expectation,
+                unsupported_reason=UnsupportedReason(
+                    code="discord_relay_unavailable",
+                    message="Discord relay isn't available in the current environment.",
+                ),
+                notes=["The planner recognized a Discord relay request, but the relay runtime is disabled."],
             )
 
         if structured_query.query_shape == QueryShape.COMPARISON_REQUEST and not tool_name:
@@ -1785,12 +1970,24 @@ class DeterministicPlanner:
                 "execution_type": structured_query.execution_type,
             }
         )
+        if structured_query.query_shape == QueryShape.CALCULATION_REQUEST:
+            calculation_request = structured_query.slots.get("calculation_request")
+            if isinstance(calculation_request, dict):
+                parameters["calculation_request"] = dict(calculation_request)
+                parameters["requested_mode"] = str(calculation_request.get("requested_mode") or "").strip()
+                parameters["follow_up_reuse"] = bool(calculation_request.get("follow_up_reuse", False))
+                if calculation_request.get("helper_name"):
+                    parameters["helper_name"] = str(calculation_request.get("helper_name") or "").strip()
         if structured_query.requested_metric:
             parameters["metric"] = structured_query.requested_metric
         if structured_query.requested_action:
             parameters["requested_action"] = structured_query.requested_action
         if structured_query.timescale:
             parameters["timescale"] = structured_query.timescale
+        if structured_query.query_shape == QueryShape.DISCORD_RELAY_REQUEST:
+            for key in ("destination_alias", "payload_hint", "note_text", "request_stage", "pending_preview", "ambiguity_choices"):
+                if key in structured_query.slots:
+                    parameters[key] = structured_query.slots.get(key)
         return {
             "family": family,
             "subject": execution_plan.subject or family,
@@ -1991,6 +2188,7 @@ class DeterministicPlanner:
             "workflow_execution",
             "search_and_act",
             "repair_execution",
+            "discord_relay_dispatch",
         }:
             return False
         if any(
@@ -2782,6 +2980,140 @@ class DeterministicPlanner:
             return {"maintenance_kind": "downloads_cleanup", "target_directory": None, "older_than_days": 14, "dry_run": False}
         if "find stale large files" in lower:
             return {"maintenance_kind": "find_stale_large_files", "target_directory": None, "older_than_days": 30, "dry_run": True}
+        return None
+
+    def _discord_relay_request(
+        self,
+        message: str,
+        lower: str,
+        *,
+        active_request_state: dict[str, Any],
+    ) -> SemanticParseProposal | None:
+        family = str(active_request_state.get("family") or "").strip().lower()
+        parameters = active_request_state.get("parameters")
+        if not isinstance(parameters, dict):
+            parameters = {}
+
+        if family == "discord_relay" and self._looks_like_discord_relay_confirmation(lower):
+            pending_preview = parameters.get("pending_preview") if isinstance(parameters.get("pending_preview"), dict) else {}
+            destination_alias = str(parameters.get("destination_alias") or "").strip()
+            if pending_preview and destination_alias:
+                return self._tool_proposal(
+                    query_shape=QueryShape.DISCORD_RELAY_REQUEST,
+                    domain="discord_relay",
+                    request_type_hint="discord_relay_dispatch",
+                    family="discord_relay",
+                    subject=destination_alias,
+                    requested_action="dispatch",
+                    confidence=0.99,
+                    evidence=["follow-up confirmation matched a pending Discord relay preview"],
+                    follow_up=True,
+                    execution_type="discord_relay_dispatch",
+                    output_mode=ResponseMode.ACTION_RESULT.value,
+                    output_type="action",
+                    slots={
+                        "destination_alias": destination_alias,
+                        "payload_hint": str(parameters.get("payload_hint") or "contextual"),
+                        "note_text": str(parameters.get("note_text") or "").strip() or None,
+                        "request_stage": "dispatch",
+                        "pending_preview": pending_preview,
+                    },
+                )
+
+        if family == "discord_relay":
+            ambiguity_choices = parameters.get("ambiguity_choices") if isinstance(parameters.get("ambiguity_choices"), list) else []
+            payload_choice = self._discord_follow_up_payload_hint(lower)
+            if ambiguity_choices and payload_choice in {str(choice) for choice in ambiguity_choices}:
+                destination_alias = str(parameters.get("destination_alias") or "").strip()
+                return self._tool_proposal(
+                    query_shape=QueryShape.DISCORD_RELAY_REQUEST,
+                    domain="discord_relay",
+                    request_type_hint="discord_relay_dispatch",
+                    family="discord_relay",
+                    subject=destination_alias or "discord",
+                    requested_action="preview",
+                    confidence=0.95,
+                    evidence=["follow-up payload clarification resolved a pending Discord relay ambiguity"],
+                    follow_up=True,
+                    execution_type="discord_relay_preview",
+                    output_mode=ResponseMode.ACTION_RESULT.value,
+                    output_type="action",
+                    slots={
+                        "destination_alias": destination_alias,
+                        "payload_hint": {
+                            "page": "page_link",
+                            "file": "file",
+                            "text": "selected_text",
+                            "note": "note_artifact",
+                            "screenshot": "screenshot_candidate",
+                        }.get(payload_choice, "contextual"),
+                        "note_text": str(parameters.get("note_text") or "").strip() or None,
+                        "request_stage": "preview",
+                    },
+                )
+
+        match = re.match(
+            r"^(?:send|share|post)\s+(?P<payload>.+?)\s+to\s+(?P<destination>.+?)(?:\s+with(?:\s+a)?\s+note(?:\s*[:\-]?\s*(?P<note>.+))?)?$",
+            message,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return None
+        payload_phrase = " ".join(str(match.group("payload") or "").split()).strip(" .,:;!?")
+        destination_alias = " ".join(str(match.group("destination") or "").split()).strip(" .,:;!?")
+        if not payload_phrase or not destination_alias:
+            return None
+        note_text = " ".join(str(match.group("note") or "").split()).strip() or None
+        return self._tool_proposal(
+            query_shape=QueryShape.DISCORD_RELAY_REQUEST,
+            domain="discord_relay",
+            request_type_hint="discord_relay_dispatch",
+            family="discord_relay",
+            subject=destination_alias,
+            requested_action="preview",
+            confidence=0.95,
+            evidence=["discord relay phrasing matched a trusted-send request"],
+            execution_type="discord_relay_preview",
+            output_mode=ResponseMode.ACTION_RESULT.value,
+            output_type="action",
+            slots={
+                "destination_alias": destination_alias,
+                "payload_hint": self._discord_payload_hint(payload_phrase),
+                "note_text": note_text,
+                "request_stage": "preview",
+            },
+        )
+
+    def _discord_payload_hint(self, payload_phrase: str) -> str:
+        lower = normalize_phrase(payload_phrase)
+        if any(token in lower for token in {"page", "link", "url", "article", "site"}):
+            return "page_link"
+        if any(token in lower for token in {"file", "document", "doc", "pdf"}):
+            return "file"
+        if any(token in lower for token in {"selection", "selected text", "highlight", "quote", "text"}):
+            return "selected_text"
+        if any(token in lower for token in {"note", "artifact"}):
+            return "note_artifact"
+        if "screenshot" in lower:
+            return "screenshot_candidate"
+        return "contextual"
+
+    def _looks_like_discord_relay_confirmation(self, lower: str) -> bool:
+        cleaned = " ".join(str(lower or "").split()).strip()
+        return cleaned in DISCORD_RELAY_CONFIRM_PHRASES
+
+    def _discord_follow_up_payload_hint(self, lower: str) -> str | None:
+        cleaned = " ".join(str(lower or "").split()).strip()
+        if cleaned in {"page", "link", "url"}:
+            return "page"
+        if cleaned in {"file", "document", "doc"}:
+            return "file"
+        if cleaned in {"text", "selection", "selected text"}:
+            return "text"
+        if cleaned in {"note", "artifact"}:
+            return "note"
+        if cleaned == "screenshot":
+            return "screenshot"
         return None
 
     def _file_operation_request(self, message: str, lower: str) -> dict[str, object] | None:

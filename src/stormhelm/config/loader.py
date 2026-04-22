@@ -7,7 +7,11 @@ from typing import Any, Callable, Mapping
 
 from stormhelm.config.models import (
     AppConfig,
+    CalculationsConfig,
     ConcurrencyConfig,
+    DiscordRelayConfig,
+    DiscordTrustedAliasConfig,
+    default_discord_trusted_aliases,
     HardwareTelemetryConfig,
     LocationConfig,
     LoggingConfig,
@@ -147,17 +151,66 @@ def _build_app_config(
     screen_awareness_data = data.get("screen_awareness", {})
     screen_awareness_config = ScreenAwarenessConfig(
         enabled=bool(screen_awareness_data.get("enabled", True)),
-        phase=str(screen_awareness_data.get("phase", "phase2")).strip() or "phase2",
+        phase=str(screen_awareness_data.get("phase", "phase6")).strip() or "phase6",
         planner_routing_enabled=bool(screen_awareness_data.get("planner_routing_enabled", True)),
         debug_events_enabled=bool(screen_awareness_data.get("debug_events_enabled", True)),
         observation_enabled=bool(screen_awareness_data.get("observation_enabled", True)),
         interpretation_enabled=bool(screen_awareness_data.get("interpretation_enabled", True)),
         grounding_enabled=bool(screen_awareness_data.get("grounding_enabled", True)),
-        guidance_enabled=bool(screen_awareness_data.get("guidance_enabled", False)),
-        action_enabled=bool(screen_awareness_data.get("action_enabled", False)),
-        verification_enabled=bool(screen_awareness_data.get("verification_enabled", False)),
-        memory_enabled=bool(screen_awareness_data.get("memory_enabled", False)),
+        guidance_enabled=bool(screen_awareness_data.get("guidance_enabled", True)),
+        action_enabled=bool(screen_awareness_data.get("action_enabled", True)),
+        action_policy_mode=str(screen_awareness_data.get("action_policy_mode", "confirm_before_act")).strip()
+        or "confirm_before_act",
+        verification_enabled=bool(screen_awareness_data.get("verification_enabled", True)),
+        memory_enabled=bool(screen_awareness_data.get("memory_enabled", True)),
         adapters_enabled=bool(screen_awareness_data.get("adapters_enabled", False)),
+    )
+
+    calculations_data = data.get("calculations", {})
+    calculations_config = CalculationsConfig(
+        enabled=bool(calculations_data.get("enabled", True)),
+        planner_routing_enabled=bool(calculations_data.get("planner_routing_enabled", True)),
+        debug_events_enabled=bool(calculations_data.get("debug_events_enabled", True)),
+    )
+
+    discord_relay_data = data.get("discord_relay", {})
+    trusted_aliases_data = (
+        discord_relay_data.get("trusted_aliases")
+        if isinstance(discord_relay_data.get("trusted_aliases"), dict)
+        else {}
+    )
+    trusted_aliases: dict[str, DiscordTrustedAliasConfig] = default_discord_trusted_aliases()
+    for alias_key, alias_payload in trusted_aliases_data.items():
+        if not isinstance(alias_payload, dict):
+            continue
+        normalized_alias = str(alias_payload.get("alias") or alias_key).strip()
+        if not normalized_alias:
+            continue
+        trusted_aliases[normalized_alias.lower()] = DiscordTrustedAliasConfig(
+            alias=normalized_alias,
+            label=str(alias_payload.get("label") or alias_payload.get("display_name") or normalized_alias).strip()
+            or normalized_alias,
+            destination_kind=str(alias_payload.get("destination_kind", "personal_dm")).strip() or "personal_dm",
+            route_mode=str(alias_payload.get("route_mode", "local_client_automation")).strip()
+            or "local_client_automation",
+            navigation_mode=str(alias_payload.get("navigation_mode", "quick_switch")).strip() or "quick_switch",
+            search_query=str(alias_payload.get("search_query", "")).strip() or None,
+            thread_uri=str(alias_payload.get("thread_uri", "")).strip() or None,
+            trusted=bool(alias_payload.get("trusted", True)),
+            confirmation_policy=str(alias_payload.get("confirmation_policy", "preview_required")).strip()
+            or "preview_required",
+            attachment_policy=str(alias_payload.get("attachment_policy", "allow")).strip() or "allow",
+        )
+    discord_relay_config = DiscordRelayConfig(
+        enabled=bool(discord_relay_data.get("enabled", True)),
+        planner_routing_enabled=bool(discord_relay_data.get("planner_routing_enabled", True)),
+        debug_events_enabled=bool(discord_relay_data.get("debug_events_enabled", True)),
+        screen_disambiguation_enabled=bool(discord_relay_data.get("screen_disambiguation_enabled", True)),
+        preview_before_send=bool(discord_relay_data.get("preview_before_send", True)),
+        verification_enabled=bool(discord_relay_data.get("verification_enabled", True)),
+        local_dm_route_enabled=bool(discord_relay_data.get("local_dm_route_enabled", True)),
+        bot_webhook_routes_enabled=bool(discord_relay_data.get("bot_webhook_routes_enabled", False)),
+        trusted_aliases=trusted_aliases,
     )
 
     openai_data = data.get("openai", {})
@@ -280,6 +333,8 @@ def _build_app_config(
         weather=weather_config,
         hardware_telemetry=hardware_telemetry_config,
         screen_awareness=screen_awareness_config,
+        calculations=calculations_config,
+        discord_relay=discord_relay_config,
         openai=openai_config,
         safety=safety_config,
         tools=tool_config,
@@ -370,9 +425,21 @@ def _apply_env_overrides(data: ConfigDict, env: Mapping[str, str]) -> ConfigDict
         "STORMHELM_SCREEN_AWARENESS_GROUNDING_ENABLED": ("screen_awareness.grounding_enabled", _parse_bool),
         "STORMHELM_SCREEN_AWARENESS_GUIDANCE_ENABLED": ("screen_awareness.guidance_enabled", _parse_bool),
         "STORMHELM_SCREEN_AWARENESS_ACTION_ENABLED": ("screen_awareness.action_enabled", _parse_bool),
+        "STORMHELM_SCREEN_AWARENESS_ACTION_POLICY_MODE": ("screen_awareness.action_policy_mode", str),
         "STORMHELM_SCREEN_AWARENESS_VERIFICATION_ENABLED": ("screen_awareness.verification_enabled", _parse_bool),
         "STORMHELM_SCREEN_AWARENESS_MEMORY_ENABLED": ("screen_awareness.memory_enabled", _parse_bool),
         "STORMHELM_SCREEN_AWARENESS_ADAPTERS_ENABLED": ("screen_awareness.adapters_enabled", _parse_bool),
+        "STORMHELM_CALCULATIONS_ENABLED": ("calculations.enabled", _parse_bool),
+        "STORMHELM_CALCULATIONS_PLANNER_ROUTING_ENABLED": ("calculations.planner_routing_enabled", _parse_bool),
+        "STORMHELM_CALCULATIONS_DEBUG_EVENTS_ENABLED": ("calculations.debug_events_enabled", _parse_bool),
+        "STORMHELM_DISCORD_RELAY_ENABLED": ("discord_relay.enabled", _parse_bool),
+        "STORMHELM_DISCORD_RELAY_PLANNER_ROUTING_ENABLED": ("discord_relay.planner_routing_enabled", _parse_bool),
+        "STORMHELM_DISCORD_RELAY_DEBUG_EVENTS_ENABLED": ("discord_relay.debug_events_enabled", _parse_bool),
+        "STORMHELM_DISCORD_RELAY_SCREEN_DISAMBIGUATION_ENABLED": ("discord_relay.screen_disambiguation_enabled", _parse_bool),
+        "STORMHELM_DISCORD_RELAY_PREVIEW_BEFORE_SEND": ("discord_relay.preview_before_send", _parse_bool),
+        "STORMHELM_DISCORD_RELAY_VERIFICATION_ENABLED": ("discord_relay.verification_enabled", _parse_bool),
+        "STORMHELM_DISCORD_RELAY_LOCAL_DM_ROUTE_ENABLED": ("discord_relay.local_dm_route_enabled", _parse_bool),
+        "STORMHELM_DISCORD_RELAY_BOT_WEBHOOK_ROUTES_ENABLED": ("discord_relay.bot_webhook_routes_enabled", _parse_bool),
     }
 
     for env_key, (path, parser) in overrides.items():
