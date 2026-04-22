@@ -1,6 +1,40 @@
 from __future__ import annotations
 
+from stormhelm.core.adapters import AdapterContract
+from stormhelm.core.adapters import AdapterContractRegistry
+from stormhelm.core.adapters import ApprovalDescriptor
+from stormhelm.core.adapters import ClaimOutcome
+from stormhelm.core.adapters import RollbackDescriptor
+from stormhelm.core.adapters import TrustTier
+from stormhelm.core.adapters import VerificationDescriptor
 from stormhelm.core.orchestrator.planner import DeterministicPlanner
+
+
+def _future_contract(adapter_id: str) -> AdapterContract:
+    return AdapterContract(
+        adapter_id=adapter_id,
+        display_name=adapter_id.replace(".", " ").title(),
+        family="future",
+        description="Scaffold contract for planner hardening tests.",
+        observation_modes=["semantic_context"],
+        action_modes=["external_handoff"],
+        artifact_modes=["metadata"],
+        preview_modes=[],
+        safety_posture=["backend_owned"],
+        failure_posture=["explicit_limits"],
+        trust_tier=TrustTier.BOUNDED_LOCAL,
+        approval=ApprovalDescriptor(required=False),
+        verification=VerificationDescriptor(
+            posture="handoff_only",
+            max_claimable_outcome=ClaimOutcome.INITIATED,
+            evidence=["synthetic planner test evidence"],
+        ),
+        rollback=RollbackDescriptor(supported=False, posture="none"),
+        planner_tags=["future"],
+        local_first=True,
+        external_side_effects=False,
+        offline_behavior="full",
+    )
 
 
 def _active_subject(
@@ -2660,3 +2694,128 @@ def test_planner_reports_browser_open_capability_unavailable_specifically() -> N
     assert decision.unsupported_reason is not None
     assert decision.unsupported_reason.code == "browser_opening_unavailable"
     assert decision.assistant_message == "Browser opening isn't available in the current environment."
+
+
+def test_planner_surfaces_browser_adapter_contract_metadata() -> None:
+    planner = DeterministicPlanner()
+
+    decision = planner.plan(
+        "open YouTube in a browser",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.capability_plan is not None
+    assert decision.capability_plan.selected_adapter is not None
+    assert decision.capability_plan.selected_adapter["adapter_id"] == "browser.external"
+    assert decision.capability_plan.approval_required is True
+    assert decision.capability_plan.preview_available is False
+    assert decision.capability_plan.rollback_available is False
+    assert decision.capability_plan.max_claimable_outcome == "initiated"
+
+
+def test_planner_surfaces_app_adapter_contract_metadata() -> None:
+    planner = DeterministicPlanner()
+
+    decision = planner.plan(
+        "open Chrome",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.capability_plan is not None
+    assert decision.capability_plan.selected_adapter is not None
+    assert decision.capability_plan.selected_adapter["adapter_id"] == "app.desktop_control"
+    assert decision.capability_plan.approval_required is True
+    assert decision.capability_plan.preview_available is False
+    assert decision.capability_plan.rollback_available is False
+    assert decision.capability_plan.max_claimable_outcome == "observed"
+
+
+def test_planner_surfaces_file_operation_contract_metadata() -> None:
+    planner = DeterministicPlanner()
+
+    decision = planner.plan(
+        "rename these screenshots by date",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="files",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.capability_plan is not None
+    assert decision.capability_plan.selected_adapter is not None
+    assert decision.capability_plan.selected_adapter["adapter_id"] == "file.operation"
+    assert decision.capability_plan.approval_required is True
+    assert decision.capability_plan.preview_available is True
+    assert decision.capability_plan.rollback_available is True
+    assert decision.capability_plan.max_claimable_outcome == "completed"
+
+
+def test_planner_surfaces_relay_adapter_candidates_and_preview_requirement() -> None:
+    planner = DeterministicPlanner()
+
+    decision = planner.plan(
+        "send this to Baby",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.capability_plan is not None
+    assert {adapter["adapter_id"] for adapter in decision.capability_plan.candidate_adapters} >= {
+        "relay.discord_local_client",
+        "relay.discord_official_scaffold",
+    }
+    assert decision.capability_plan.approval_required is True
+    assert decision.capability_plan.preview_available is True
+
+
+def test_planner_fails_closed_when_adapter_backed_browser_route_is_not_contract_backed() -> None:
+    contracts = AdapterContractRegistry()
+    contracts.register_contract(_future_contract("future.browser_primary"))
+    contracts.register_contract(_future_contract("future.browser_fallback"))
+    contracts.bind_tool(
+        "external_open_url",
+        ["future.browser_primary", "future.browser_fallback"],
+        resolver=lambda arguments: None,
+    )
+    planner = DeterministicPlanner(adapter_contracts=contracts)
+
+    decision = planner.plan(
+        "open YouTube in a browser",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "unsupported_capability"
+    assert decision.unsupported_reason is not None
+    assert decision.unsupported_reason.code == "adapter_contract_unavailable"
+    assert "contract-backed" in decision.assistant_message.lower()
+    assert decision.capability_plan is not None
+    assert decision.capability_plan.supported is False
+    assert decision.capability_plan.adapter_contract_status == "invalid"
+    assert decision.capability_plan.selected_adapter is None
+    assert decision.capability_plan.adapter_contract_errors

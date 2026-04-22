@@ -191,6 +191,10 @@ class SoftwareOperationRequest:
     request_stage: str = "prepare_plan"
     follow_up_reuse: bool = False
     selected_source_route: str | None = None
+    task_id: str | None = None
+    trust_request_id: str | None = None
+    approval_scope: str | None = None
+    approval_outcome: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -203,6 +207,10 @@ class SoftwareOperationRequest:
             "request_stage": self.request_stage,
             "follow_up_reuse": self.follow_up_reuse,
             "selected_source_route": self.selected_source_route,
+            "task_id": self.task_id,
+            "trust_request_id": self.trust_request_id,
+            "approval_scope": self.approval_scope,
+            "approval_outcome": self.approval_outcome,
         }
 
 
@@ -292,6 +300,9 @@ class SoftwarePlannerEvaluation:
     feature_enabled: bool = False
     planner_routing_enabled: bool = False
     follow_up_reuse: bool = False
+    approval_scope: str | None = None
+    approval_outcome: str | None = None
+    trust_request_id: str | None = None
     route_confidence: float = 0.0
     reasons: list[str] = field(default_factory=list)
 
@@ -305,6 +316,9 @@ class SoftwarePlannerEvaluation:
             "feature_enabled": self.feature_enabled,
             "planner_routing_enabled": self.planner_routing_enabled,
             "follow_up_reuse": self.follow_up_reuse,
+            "approval_scope": self.approval_scope,
+            "approval_outcome": self.approval_outcome,
+            "trust_request_id": self.trust_request_id,
             "route_confidence": self.route_confidence,
             "reasons": list(self.reasons),
         }

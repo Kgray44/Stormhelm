@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from stormhelm.core.adapters import ClaimOutcome
+from stormhelm.core.adapters import attach_contract_metadata
+from stormhelm.core.adapters import build_execution_report
 from stormhelm.core.power.service import LongTailPowerService
 from stormhelm.core.tools.base import BaseTool, ToolContext
-from stormhelm.shared.result import ToolResult
+from stormhelm.shared.result import SafetyClassification, ToolResult
 
 
 class RoutineExecuteTool(BaseTool):
@@ -134,6 +137,7 @@ class FileOperationTool(BaseTool):
     display_name = "File Operation"
     description = "Run bounded deterministic file and folder operations with preview support."
     category = "power"
+    classification = SafetyClassification.ACTION
 
     def parameter_schema(self) -> dict[str, Any]:
         return {
@@ -169,7 +173,34 @@ class FileOperationTool(BaseTool):
         }
 
     def execute_sync(self, context: ToolContext, arguments: dict[str, Any]) -> ToolResult:
-        return LongTailPowerService(context).file_operation(**arguments)
+        result = LongTailPowerService(context).file_operation(**arguments)
+        contract = self.resolve_adapter_contract(arguments)
+        if contract is None:
+            return result
+        execution = build_execution_report(
+            contract,
+            success=result.success,
+            observed_outcome=ClaimOutcome.PREVIEW if bool(arguments.get("dry_run")) else ClaimOutcome.COMPLETED,
+            evidence=[
+                "Generated a dry-run preview for the requested file operation."
+                if bool(arguments.get("dry_run"))
+                else "Completed the requested bounded file operation."
+            ],
+            failure_kind=result.error if not result.success else None,
+        )
+        result.adapter_contract = contract.to_dict()
+        result.adapter_execution = execution.to_dict()
+        if isinstance(result.data, dict):
+            action = result.data.get("action")
+            if isinstance(action, dict):
+                result.data["action"] = attach_contract_metadata(action, contract=contract, execution=execution)
+            action_list = result.data.get("actions")
+            if isinstance(action_list, list):
+                result.data["actions"] = [
+                    attach_contract_metadata(item, contract=contract, execution=execution) if isinstance(item, dict) else item
+                    for item in action_list
+                ]
+        return result
 
 
 class MaintenanceActionTool(BaseTool):

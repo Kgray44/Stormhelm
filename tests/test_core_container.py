@@ -191,6 +191,35 @@ def test_core_container_status_snapshot_includes_discord_relay_runtime_state(tem
     assert snapshot["discord_relay"]["truthfulness_contract"]["preview_required"] is True
 
 
+def test_core_container_status_snapshot_includes_adapter_contract_registry_state(temp_config) -> None:
+    container = build_container(temp_config)
+    container.system_probe = FakeOperationalProbe()  # type: ignore[assignment]
+
+    snapshot = container.status_snapshot()
+
+    assert snapshot["tool_state"]["adapter_contract_count"] >= 6
+    assert snapshot["tool_state"]["healthy_adapter_contract_count"] >= snapshot["tool_state"]["adapter_contract_count"]
+    assert snapshot["tool_state"]["adapter_contract_validation_failures"] == 0
+    assert "browser" in snapshot["tool_state"]["adapter_families"]
+    assert "external_open_url" in snapshot["tool_state"]["contract_bound_tools"]
+    assert set(snapshot["tool_state"]["contract_bound_tools"]["external_open_url"]) == {
+        "browser.external",
+        "settings.system_uri",
+    }
+
+
+def test_core_container_status_snapshot_includes_trust_runtime_state(temp_config) -> None:
+    container = build_container(temp_config)
+    container.system_probe = FakeOperationalProbe()  # type: ignore[assignment]
+
+    snapshot = container.status_snapshot()
+
+    assert snapshot["trust"]["enabled"] is True
+    assert snapshot["trust"]["pending_request_count"] == 0
+    assert snapshot["trust"]["active_grant_count"] == 0
+    assert snapshot["trust"]["deck_groups"][0]["title"] == "Pending Approval"
+
+
 def test_core_container_status_snapshot_includes_software_control_and_recovery_runtime_state(temp_config) -> None:
     container = build_container(temp_config)
     container.system_probe = FakeOperationalProbe()  # type: ignore[assignment]

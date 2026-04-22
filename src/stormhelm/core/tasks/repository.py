@@ -46,6 +46,7 @@ class TaskRepository:
                     last_completed_step_id = excluded.last_completed_step_id,
                     hooks_json = excluded.hooks_json,
                     metadata_json = excluded.metadata_json,
+                    created_at = excluded.created_at,
                     updated_at = excluded.updated_at,
                     started_at = excluded.started_at,
                     finished_at = excluded.finished_at

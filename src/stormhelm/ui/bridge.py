@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 import time
@@ -47,10 +48,12 @@ class UiBridge(QtCore.QObject):
         self._active_module_key = "chartroom"
         self._active_workspace_section_key = "overview"
         self._hide_to_tray_on_close = config.ui.hide_to_tray_on_close
+        self._tray_present = False
         self._connected = False
         self._ui_version_label = config.version_label
         self._core_version_label = "Awaiting signal"
         self._runtime_mode_label = config.runtime.mode
+        self._install_mode_label = "Awaiting posture"
         self._environment_label = config.environment
         self._connection_state = "connecting"
         self._status_line = "Standing watch."
@@ -87,6 +90,7 @@ class UiBridge(QtCore.QObject):
         self._ghost_capture_active = False
         self._ghost_draft_text = ""
         self._ghost_reveal_target = 1.0
+        self._window_exposed = False
         self._ghost_adaptive_style = default_ghost_style()
         self._ghost_placement = default_ghost_placement()
         self._ghost_adaptive_diagnostics = default_ghost_diagnostics()
@@ -247,6 +251,10 @@ class UiBridge(QtCore.QObject):
     @QtCore.Property(str, notify=statusChanged)
     def runtimeModeLabel(self) -> str:
         return self._runtime_mode_label
+
+    @QtCore.Property(str, notify=statusChanged)
+    def installModeLabel(self) -> str:
+        return self._install_mode_label
 
     @QtCore.Property(str, notify=statusChanged)
     def environmentLabel(self) -> str:
@@ -642,10 +650,19 @@ class UiBridge(QtCore.QObject):
         self._hide_to_tray_on_close = enabled
         self.visibilityChanged.emit()
 
+    @QtCore.Slot(bool)
+    def setTrayPresent(self, enabled: bool) -> None:
+        self._tray_present = bool(enabled)
+        self.visibilityChanged.emit()
+
     @QtCore.Slot()
     def showWindow(self) -> None:
         self._ghost_hide_timer.stop()
+        was_exposed = self._window_exposed
+        self._window_exposed = True
         self._set_ghost_reveal_target(1.0)
+        if not was_exposed:
+            self.visibilityChanged.emit()
         if self._window is None:
             self._sync_ghost_adaptive_monitoring()
             return
@@ -657,7 +674,11 @@ class UiBridge(QtCore.QObject):
 
     @QtCore.Slot()
     def hideWindow(self) -> None:
+        was_exposed = self._window_exposed
+        self._window_exposed = False
         self._set_ghost_reveal_target(0.0)
+        if was_exposed:
+            self.visibilityChanged.emit()
         self._sync_ghost_adaptive_monitoring()
         if self._mode == "ghost":
             self._ghost_hide_timer.start()
@@ -668,6 +689,28 @@ class UiBridge(QtCore.QObject):
     def set_local_identity(self, version_label: str) -> None:
         self._ui_version_label = version_label
         self.statusChanged.emit()
+
+    def shell_presence_payload(self) -> dict[str, Any]:
+        window_visible = self._window_exposed and self._ghost_reveal_target > 0.0
+        if self._window is not None:
+            window_visible = self._window.isVisible() and self._ghost_reveal_target > 0.0
+        return {
+            "pid": os.getpid(),
+            "mode": self._mode,
+            "window_visible": window_visible,
+            "tray_present": self._tray_present,
+            "hide_to_tray_on_close": self._hide_to_tray_on_close,
+            "ghost_reveal_target": self._ghost_reveal_target,
+        }
+
+    def tray_tooltip_text(self) -> str:
+        shell_state = "Visible" if self.shell_presence_payload().get("window_visible") else "Hidden"
+        return (
+            "Stormhelm"
+            f" | {self._install_mode_label.title()}"
+            f" | Core {self.connectionLabel}"
+            f" | Shell {shell_state}"
+        )
 
     def set_connection_error(self, error: str) -> None:
         self._connected = False
@@ -732,6 +775,9 @@ class UiBridge(QtCore.QObject):
         runtime_mode = payload.get("runtime_mode")
         if runtime_mode:
             self._runtime_mode_label = str(runtime_mode)
+        install_mode = payload.get("install_mode")
+        if install_mode:
+            self._install_mode_label = str(install_mode)
         if self._connected and self._pending_activity is None and self._assistant_state == "warning":
             self._set_assistant_state("idle")
         self.statusChanged.emit()
@@ -740,6 +786,11 @@ class UiBridge(QtCore.QObject):
         self._status = dict(payload)
         self._core_version_label = str(payload.get("version_label", payload.get("version", self._core_version_label)))
         self._runtime_mode_label = str(payload.get("runtime_mode", self._runtime_mode_label))
+        lifecycle = payload.get("lifecycle")
+        if isinstance(lifecycle, dict):
+            install_state = lifecycle.get("install_state")
+            if isinstance(install_state, dict):
+                self._install_mode_label = str(install_state.get("install_mode", self._install_mode_label))
         self._environment_label = str(payload.get("environment", self._environment_label))
         self.statusChanged.emit()
 
@@ -1241,6 +1292,32 @@ class UiBridge(QtCore.QObject):
 
     def _build_context_cards(self) -> list[dict[str, Any]]:
         cards: list[dict[str, Any]] = []
+        lifecycle = self._lifecycle_state()
+        bootstrap = lifecycle.get("bootstrap") if isinstance(lifecycle.get("bootstrap"), dict) else {}
+        migration = lifecycle.get("migration") if isinstance(lifecycle.get("migration"), dict) else {}
+        lifecycle_hold = str(
+            bootstrap.get("lifecycle_hold_reason") or migration.get("hold_reason") or ""
+        ).strip()
+        if lifecycle_hold:
+            cards.append(
+                {
+                    "title": "Lifecycle Hold",
+                    "subtitle": str(migration.get("status", "hold")).replace("_", " ").title(),
+                    "body": lifecycle_hold,
+                }
+            )
+        trust_state = self._active_request_state.get("trust") if isinstance(self._active_request_state.get("trust"), dict) else {}
+        trust_decision = str(trust_state.get("decision", "")).strip().lower()
+        trust_message = str(trust_state.get("operator_message", "")).strip()
+        trust_scope = str(trust_state.get("suggested_scope", "")).strip()
+        if trust_state and trust_message and trust_decision in {"confirmation_required", "downgraded"}:
+            cards.append(
+                {
+                    "title": "Approval Needed",
+                    "subtitle": (trust_scope or str(trust_state.get("approval_state", "pending"))).replace("_", " ").title(),
+                    "body": trust_message,
+                }
+            )
         if self._active_task:
             ghost_summary = self._active_task.get("ghostSummary") if isinstance(self._active_task.get("ghostSummary"), dict) else {}
             title = str(ghost_summary.get("title") or self._active_task.get("title") or "").strip()
@@ -2080,6 +2157,7 @@ class UiBridge(QtCore.QObject):
         if self._active_module_key == "systems":
             chips = [
                 {"label": "Runtime", "value": self._runtime_mode_label.title()},
+                {"label": "Install", "value": self._install_mode_label.title()},
                 {"label": "Signal", "value": self.connectionLabel},
                 {"label": "Workers", "value": str(self._status.get("max_workers", self.config.concurrency.max_workers))},
             ]
@@ -2758,6 +2836,14 @@ class UiBridge(QtCore.QObject):
 
     def _software_recovery_state(self) -> dict[str, Any]:
         state = self._status.get("software_recovery", {})
+        return state if isinstance(state, dict) else {}
+
+    def _lifecycle_state(self) -> dict[str, Any]:
+        state = self._status.get("lifecycle", {})
+        return state if isinstance(state, dict) else {}
+
+    def _trust_state(self) -> dict[str, Any]:
+        state = self._status.get("trust", {})
         return state if isinstance(state, dict) else {}
 
     def _battery_label(self, power: dict[str, Any]) -> str:
@@ -3594,9 +3680,18 @@ class UiBridge(QtCore.QObject):
             provider = self._provider_state()
             software_control = self._software_control_state()
             software_recovery = self._software_recovery_state()
+            lifecycle = self._lifecycle_state()
+            trust_state = self._trust_state()
             storage = self._storage_state()
             drives = storage.get("drives", []) if isinstance(storage.get("drives"), list) else []
             primary_drive = drives[0] if drives else {}
+            install_state = lifecycle.get("install_state") if isinstance(lifecycle.get("install_state"), dict) else {}
+            startup_policy = lifecycle.get("startup_policy") if isinstance(lifecycle.get("startup_policy"), dict) else {}
+            runtime_state = lifecycle.get("runtime") if isinstance(lifecycle.get("runtime"), dict) else {}
+            uninstall_plan = lifecycle.get("uninstall_plan") if isinstance(lifecycle.get("uninstall_plan"), dict) else {}
+            pending_requests = trust_state.get("pending_requests", []) if isinstance(trust_state.get("pending_requests"), list) else []
+            active_grants = trust_state.get("active_grants", []) if isinstance(trust_state.get("active_grants"), list) else []
+            recent_audit = trust_state.get("recent_audit", []) if isinstance(trust_state.get("recent_audit"), list) else []
             return [
                 self._workspace_column(
                     "Live Telemetry",
@@ -3654,6 +3749,79 @@ class UiBridge(QtCore.QObject):
                                     else {}
                                 ).get("status", "No recovery trace yet.")
                             ).replace("_", " ").title(),
+                        },
+                    ],
+                ),
+                self._workspace_column(
+                    "Lifecycle",
+                    "Install posture, startup truth, and cleanup boundaries.",
+                    [
+                        {
+                            "primary": "Install Mode",
+                            "secondary": str(install_state.get("install_mode", self._install_mode_label)).replace("_", " ").title(),
+                            "detail": "Runtime posture is resolved locally from packaged/source evidence.",
+                        },
+                        {
+                            "primary": "Startup",
+                            "secondary": "Enabled" if startup_policy.get("startup_enabled") else "Disabled",
+                            "detail": str(startup_policy.get("registration_status", "unavailable")).replace("_", " ").title(),
+                        },
+                        {
+                            "primary": "Core / Shell",
+                            "secondary": (
+                                f"{str(runtime_state.get('core_status', 'unknown')).replace('_', ' ').title()} / "
+                                f"{str(runtime_state.get('shell_status', 'unknown')).replace('_', ' ').title()}"
+                            ),
+                            "detail": (
+                                f"Tray {str(runtime_state.get('tray_status', 'unknown')).replace('_', ' ').title()} | "
+                                f"{int(runtime_state.get('connected_clients', 0) or 0)} attached shell"
+                                f"{'' if int(runtime_state.get('connected_clients', 0) or 0) == 1 else 's'}."
+                            ),
+                        },
+                        {
+                            "primary": "Cleanup",
+                            "secondary": "Preserve durable state"
+                            if not uninstall_plan.get("remove_durable_state")
+                            else "Remove durable state",
+                            "detail": str(
+                                uninstall_plan.get(
+                                    "portable_cleanup_notes",
+                                    "Stormhelm will preserve durable state unless the operator explicitly requests deep cleanup.",
+                                )
+                            ),
+                        },
+                    ],
+                ),
+                self._workspace_column(
+                    "Trust Bearings",
+                    "Approval posture, reusable grants, and recent trust audit.",
+                    [
+                        {
+                            "primary": "Pending Approval",
+                            "secondary": str(len(pending_requests)),
+                            "detail": (
+                                str((pending_requests[0] if pending_requests and isinstance(pending_requests[0], dict) else {}).get("operator_message", "No pending approval."))
+                                if pending_requests
+                                else "No pending approval."
+                            ),
+                        },
+                        {
+                            "primary": "Active Grants",
+                            "secondary": str(len(active_grants)),
+                            "detail": (
+                                str((active_grants[0] if active_grants and isinstance(active_grants[0], dict) else {}).get("subject", "No active grants"))
+                                if active_grants
+                                else "No active grants."
+                            ),
+                        },
+                        {
+                            "primary": "Recent Audit",
+                            "secondary": str(len(recent_audit)),
+                            "detail": (
+                                str((recent_audit[0] if recent_audit and isinstance(recent_audit[0], dict) else {}).get("summary", "No recent trust audit."))
+                                if recent_audit
+                                else "No recent trust audit."
+                            ),
                         },
                     ],
                 ),
@@ -3896,6 +4064,7 @@ class UiBridge(QtCore.QObject):
             {"label": "Mode", "value": "Ghost" if self._mode == "ghost" else "Deck"},
             {"label": "State", "value": self._assistant_state.title()},
             {"label": "Signal", "value": self.connectionLabel},
+            {"label": "Install", "value": self._install_mode_label.title()},
             {"label": "Time", "value": self._local_time_label},
             {"label": "Helm", "value": self._active_module_label()},
             {"label": "Version", "value": self._core_version_label},

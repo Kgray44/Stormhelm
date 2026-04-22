@@ -29,6 +29,7 @@ class JobRecord:
     result: dict[str, Any] | None = None
     error: str | None = None
     cancel_requested: bool = False
+    session_id: str = "default"
     task_id: str | None = None
     task_step_id: str | None = None
 
@@ -40,6 +41,7 @@ class JobRecord:
         arguments: dict[str, Any],
         timeout_seconds: float,
         *,
+        session_id: str = "default",
         task_id: str | None = None,
         task_step_id: str | None = None,
     ) -> "JobRecord":
@@ -50,6 +52,7 @@ class JobRecord:
             status=JobStatus.QUEUED,
             created_at=utc_now_iso(),
             timeout_seconds=timeout_seconds,
+            session_id=session_id,
             task_id=task_id,
             task_step_id=task_step_id,
         )
@@ -67,6 +70,7 @@ class JobRecord:
             "result": self.result,
             "error": self.error,
             "cancel_requested": self.cancel_requested,
+            "session_id": self.session_id,
             "task_id": self.task_id,
             "task_step_id": self.task_step_id,
         }

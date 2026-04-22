@@ -22,7 +22,7 @@ class RuntimeBootstrapResult:
     core_state_record: dict[str, object]
 
 
-def initialize_runtime_state(config: AppConfig) -> RuntimeBootstrapResult:
+def initialize_runtime_state(config: AppConfig, *, install_mode: str | None = None) -> RuntimeBootstrapResult:
     first_run = not config.runtime.first_run_marker_path.exists()
     first_run_record = _load_json(config.runtime.first_run_marker_path)
     if first_run:
@@ -31,6 +31,7 @@ def initialize_runtime_state(config: AppConfig) -> RuntimeBootstrapResult:
             "version": config.version,
             "release_channel": config.release_channel,
             "mode": config.runtime.mode,
+            "install_mode": install_mode or "",
         }
         _write_json(config.runtime.first_run_marker_path, first_run_record)
 
@@ -41,6 +42,7 @@ def initialize_runtime_state(config: AppConfig) -> RuntimeBootstrapResult:
         "release_channel": config.release_channel,
         "protocol_version": config.protocol_version,
         "mode": config.runtime.mode,
+        "install_mode": install_mode or "",
         "api_base_url": config.api_base_url,
         "install_root": str(config.runtime.install_root),
         "resource_root": str(config.runtime.resource_root),

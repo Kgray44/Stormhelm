@@ -4,12 +4,80 @@ from datetime import datetime, timezone
 from typing import Any
 
 from stormhelm.core.intelligence.language import fuzzy_ratio, normalize_lookup_phrase, normalize_phrase
+from stormhelm.core.memory import SemanticMemoryRepository, SemanticMemoryService
+from stormhelm.core.memory.models import MemorySourceClass
 from stormhelm.core.memory.repositories import PreferencesRepository
+from stormhelm.shared.time import utc_now_iso
+
+
+class _NullSemanticMemoryService:
+    def list_recent_session_tool_results(
+        self,
+        session_id: str,
+        *,
+        max_age_seconds: float | None = None,
+    ) -> list[dict[str, object]]:
+        return []
+
+    def remember_session_tool_result(
+        self,
+        *,
+        session_id: str,
+        tool_name: str,
+        tool_family: str,
+        arguments: dict[str, object],
+        result: dict[str, object],
+        captured_at: str | None,
+    ) -> None:
+        return None
+
+    def list_recent_context_resolutions(self, session_id: str) -> list[dict[str, object]]:
+        return []
+
+    def remember_context_resolution(self, session_id: str, resolution: dict[str, object]) -> None:
+        return None
+
+    def list_aliases(self, category: str) -> dict[str, dict[str, object]]:
+        return {}
+
+    def remember_alias(self, category: str, alias: str, *, target: dict[str, object]) -> None:
+        return None
+
+    def resolve_alias(self, category: str, phrase: str, *, threshold: float = 0.84) -> dict[str, object] | None:
+        return None
+
+    def get_learned_preferences(self) -> dict[str, dict[str, object]]:
+        return {}
+
+    def remember_preference(
+        self,
+        scope: str,
+        key: str,
+        value: object,
+        *,
+        source_class: str,
+    ) -> None:
+        return None
+
+    def preference_value(self, scope: str, key: str, *, minimum_count: int = 1) -> object | None:
+        return None
 
 
 class ConversationStateStore:
-    def __init__(self, preferences: PreferencesRepository) -> None:
+    def __init__(
+        self,
+        preferences: PreferencesRepository,
+        memory: SemanticMemoryService | None = None,
+    ) -> None:
         self.preferences = preferences
+        if memory is not None:
+            self.memory = memory
+            return
+        database = getattr(preferences, "database", None)
+        if database is not None:
+            self.memory = SemanticMemoryService(SemanticMemoryRepository(database))
+            return
+        self.memory = _NullSemanticMemoryService()
 
     def get_previous_response_id(self, session_id: str, *, role: str = "planner") -> str | None:
         state = self.preferences.get_all()
@@ -45,6 +113,9 @@ class ConversationStateStore:
     def set_active_task_id(self, session_id: str, task_id: str | None) -> None:
         self.preferences.set_preference(self._task_key(session_id), task_id or "")
 
+    def clear_active_task_id(self, session_id: str) -> None:
+        self.preferences.set_preference(self._task_key(session_id), "")
+
     def get_active_posture(self, session_id: str) -> dict[str, object]:
         state = self.preferences.get_all()
         value = state.get(self._posture_key(session_id))
@@ -77,6 +148,12 @@ class ConversationStateStore:
         *,
         max_age_seconds: float | None = None,
     ) -> list[dict[str, object]]:
+        memory_results = self.memory.list_recent_session_tool_results(
+            session_id,
+            max_age_seconds=max_age_seconds,
+        )
+        if memory_results:
+            return memory_results
         state = self.preferences.get_all()
         value = state.get(self._recent_tool_results_key(session_id))
         if not isinstance(value, list):
@@ -107,16 +184,25 @@ class ConversationStateStore:
         result: dict[str, object] | None,
         captured_at: str | None,
     ) -> None:
-        entries = self.get_recent_tool_results(session_id)
+        self.memory.remember_session_tool_result(
+            session_id=session_id,
+            tool_name=tool_name,
+            tool_family=self._tool_family(tool_name),
+            arguments=dict(arguments),
+            result=dict(result) if isinstance(result, dict) else {},
+            captured_at=captured_at,
+        )
         entry = {
             "tool_name": tool_name,
             "family": self._tool_family(tool_name),
             "arguments": dict(arguments),
             "result": dict(result) if isinstance(result, dict) else {},
-            "captured_at": captured_at or datetime.now(timezone.utc).isoformat(),
+            "captured_at": captured_at or utc_now_iso(),
         }
-        entries.insert(0, entry)
-        self.preferences.set_preference(self._recent_tool_results_key(session_id), entries[:12])
+        state = self.preferences.get_all()
+        existing = state.get(self._recent_tool_results_key(session_id))
+        results = [dict(item) for item in existing if isinstance(item, dict)] if isinstance(existing, list) else []
+        self.preferences.set_preference(self._recent_tool_results_key(session_id), [entry, *results][:12])
 
     def get_active_context(self, session_id: str) -> dict[str, object]:
         state = self.preferences.get_all()
@@ -129,6 +215,9 @@ class ConversationStateStore:
         self.preferences.set_preference(self._active_context_key(session_id), context or {})
 
     def get_recent_context_resolutions(self, session_id: str) -> list[dict[str, object]]:
+        memory_results = self.memory.list_recent_context_resolutions(session_id)
+        if memory_results:
+            return memory_results
         state = self.preferences.get_all()
         value = state.get(self._recent_context_resolutions_key(session_id))
         if not isinstance(value, list):
@@ -136,13 +225,13 @@ class ConversationStateStore:
         return [dict(item) for item in value if isinstance(item, dict)]
 
     def remember_context_resolution(self, session_id: str, resolution: dict[str, object]) -> None:
-        entries = self.get_recent_context_resolutions(session_id)
-        enriched = {
-            **dict(resolution),
-            "captured_at": datetime.now(timezone.utc).isoformat(),
-        }
-        entries.insert(0, enriched)
-        self.preferences.set_preference(self._recent_context_resolutions_key(session_id), entries[:8])
+        self.memory.remember_context_resolution(session_id, dict(resolution))
+        entry = dict(resolution)
+        entry.setdefault("captured_at", utc_now_iso())
+        state = self.preferences.get_all()
+        existing = state.get(self._recent_context_resolutions_key(session_id))
+        resolutions = [dict(item) for item in existing if isinstance(item, dict)] if isinstance(existing, list) else []
+        self.preferences.set_preference(self._recent_context_resolutions_key(session_id), [entry, *resolutions][:8])
 
     def get_suggestion_state(self, session_id: str) -> dict[str, object]:
         state = self.preferences.get_all()
@@ -158,6 +247,9 @@ class ConversationStateStore:
         self.preferences.set_preference(self._suggestion_state_key(session_id), {})
 
     def get_aliases(self, category: str) -> dict[str, dict[str, object]]:
+        aliases = self.memory.list_aliases(category)
+        if aliases:
+            return aliases
         state = self.preferences.get_all()
         value = state.get(self._alias_memory_key())
         if not isinstance(value, dict):
@@ -171,19 +263,27 @@ class ConversationStateStore:
         normalized = normalize_lookup_phrase(alias) or normalize_phrase(alias)
         if not self._alias_allowed(normalized):
             return
+        self.memory.remember_alias(category, normalized, target=dict(target))
         aliases = self._all_aliases()
-        category_bucket = aliases.setdefault(category, {})
-        existing = category_bucket.get(normalized, {}) if isinstance(category_bucket.get(normalized), dict) else {}
+        category_bucket = dict(aliases.get(category) or {})
+        existing = category_bucket.get(normalized)
+        existing_payload = dict(existing) if isinstance(existing, dict) else {}
+        count = int(existing_payload.get("count", 0) or 0) + 1
         category_bucket[normalized] = {
-            **existing,
+            **existing_payload,
             **dict(target),
             "alias": normalized,
-            "count": int(existing.get("count", 0)) + 1,
-            "last_used_at": datetime.now(timezone.utc).isoformat(),
+            "count": count,
+            "last_used_at": utc_now_iso(),
+            "source_class": MemorySourceClass.INFERRED.value,
         }
+        aliases[category] = category_bucket
         self.preferences.set_preference(self._alias_memory_key(), aliases)
 
     def resolve_alias(self, category: str, phrase: str, *, threshold: float = 0.84) -> dict[str, object] | None:
+        resolved = self.memory.resolve_alias(category, phrase, threshold=threshold)
+        if resolved is not None:
+            return resolved
         normalized = normalize_lookup_phrase(phrase) or normalize_phrase(phrase)
         if not normalized:
             return None
@@ -205,6 +305,9 @@ class ConversationStateStore:
         return {**best_payload, "matched_alias": best_key, "confidence": best_score}
 
     def get_learned_preferences(self) -> dict[str, dict[str, object]]:
+        learned = self.memory.get_learned_preferences()
+        if learned:
+            return learned
         state = self.preferences.get_all()
         value = state.get(self._preference_memory_key())
         if not isinstance(value, dict):
@@ -216,20 +319,32 @@ class ConversationStateStore:
         }
 
     def remember_preference(self, scope: str, key: str, value: object) -> None:
+        self.memory.remember_preference(
+            scope,
+            key,
+            value,
+            source_class=MemorySourceClass.OPERATOR_PROVIDED.value,
+        )
         preferences = self.get_learned_preferences()
-        scope_bucket = preferences.setdefault(scope, {})
+        scope_bucket = dict(preferences.get(scope) or {})
         existing = scope_bucket.get(key)
-        count = 1
-        if isinstance(existing, dict):
-            count = int(existing.get("count", 0)) + 1
+        existing_entry = dict(existing) if isinstance(existing, dict) else {}
+        count = int(existing_entry.get("count", 0) or 0) + 1 if existing_entry.get("value") == value else 1
         scope_bucket[key] = {
             "value": value,
             "count": count,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": utc_now_iso(),
+            "confidence": round(min(0.55 + (0.1 * count), 0.95), 3),
+            "source_class": MemorySourceClass.OPERATOR_PROVIDED.value,
+            "operator_locked": bool(existing_entry.get("operator_locked", False)),
         }
+        preferences[scope] = scope_bucket
         self.preferences.set_preference(self._preference_memory_key(), preferences)
 
     def preference_value(self, scope: str, key: str, *, minimum_count: int = 1) -> object | None:
+        value = self.memory.preference_value(scope, key, minimum_count=minimum_count)
+        if value is not None:
+            return value
         scope_bucket = self.get_learned_preferences().get(scope, {})
         if not isinstance(scope_bucket, dict):
             return None

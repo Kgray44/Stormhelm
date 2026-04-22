@@ -3330,9 +3330,9 @@ def test_assistant_orchestrator_opens_personal_youtube_history_in_browser_with_c
     assert payload["jobs"][0]["arguments"]["url"] == "https://www.youtube.com/feed/history"
     assert payload["actions"][0]["type"] == "open_external"
     assert payload["actions"][0]["url"] == "https://www.youtube.com/feed/history"
-    assert metadata["bearing_title"] == "YouTube history opened"
-    assert metadata["micro_response"] == "Opened YouTube history in the browser."
-    assert metadata["full_response"] == "Resolved the destination and opened it in the browser."
+    assert metadata["bearing_title"] == "YouTube history requested"
+    assert metadata["micro_response"] == "Requested that YouTube history open externally."
+    assert metadata["full_response"] == "Requested that YouTube history open externally."
 
 
 def test_assistant_orchestrator_reports_unresolved_browser_destination_without_launch_category_error(temp_config) -> None:
@@ -3400,7 +3400,7 @@ def test_assistant_orchestrator_routes_known_browser_destinations_end_to_end(
     assert payload["jobs"][0]["arguments"]["url"] == expected_url
     assert payload["actions"][0]["type"] == "open_external"
     assert payload["actions"][0]["url"] == expected_url
-    assert metadata["bearing_title"] == f"{expected_title} opened"
+    assert metadata["bearing_title"] == f"{expected_title} requested"
     assert planner_obedience["actual_tool_names"] == ["external_open_url"]
     assert planner_obedience["actual_result_mode"] == "action_result"
     assert planner_obedience["authority_enforced"] is True
@@ -3489,9 +3489,9 @@ def test_assistant_orchestrator_uses_nano_browser_search_fallback_for_unresolved
     assert payload["actions"][0]["url"] == "https://www.google.com/search?q=site%3Aorbitz.com+flights"
     assert payload["actions"][0]["browser_target"] == "chrome"
     assert payload["actions"][0]["browser_command"] == "C:/Program Files/Google/Chrome/Application/chrome.exe"
-    assert metadata["bearing_title"] == "Orbitz search opened"
-    assert metadata["micro_response"] == "Opened Orbitz search in the browser."
-    assert metadata["full_response"] == "Resolved the search URL and opened it in the browser."
+    assert metadata["bearing_title"] == "Orbitz search requested"
+    assert metadata["micro_response"] == "Requested that Orbitz search open externally."
+    assert metadata["full_response"] == "Requested that Orbitz search open externally."
     assert planner_obedience["actual_tool_names"] == ["external_open_url"]
     assert planner_obedience["authority_enforced"] is True
     assert provider.calls
@@ -3539,9 +3539,9 @@ def test_assistant_orchestrator_opens_direct_domain_in_explicit_browser(monkeypa
     assert payload["actions"][0]["url"] == "https://docs.python.org/"
     assert payload["actions"][0]["browser_target"] == "firefox"
     assert payload["actions"][0]["browser_command"] == "C:/Program Files/Mozilla Firefox/firefox.exe"
-    assert metadata["bearing_title"] == "docs.python.org opened"
-    assert metadata["micro_response"] == "Opened docs.python.org in the browser."
-    assert metadata["full_response"] == "Resolved the destination and opened it in the browser."
+    assert metadata["bearing_title"] == "docs.python.org requested"
+    assert metadata["micro_response"] == "Requested that docs.python.org open externally."
+    assert metadata["full_response"] == "Requested that docs.python.org open externally."
 
 
 def test_assistant_orchestrator_falls_back_to_default_browser_when_explicit_target_is_unavailable(
@@ -3582,6 +3582,10 @@ def test_assistant_orchestrator_falls_back_to_default_browser_when_explicit_targ
     assert action["browser_fallback_to_default"] is True
     assert action["browser_target_probe"]["available"] is False
     assert action["browser_target_probe"]["reason"] == "browser_not_available"
-    assert metadata["bearing_title"] == "docs.python.org opened"
-    assert metadata["micro_response"] == "Firefox wasn't available, so I opened docs.python.org in the default browser."
-    assert metadata["full_response"] == "Resolved docs.python.org, couldn't use Firefox on this machine, and fell back to the default browser."
+    assert metadata["bearing_title"] == "docs.python.org requested"
+    assert metadata["micro_response"] == (
+        "Requested that docs.python.org open in the default browser because Firefox wasn't available here."
+    )
+    assert metadata["full_response"] == (
+        "Requested that docs.python.org open in the default browser because Firefox wasn't available here."
+    )

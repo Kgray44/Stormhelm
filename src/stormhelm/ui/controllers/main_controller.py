@@ -15,6 +15,8 @@ class MainController(QtCore.QObject):
         self.bridge = bridge
         self.client = client
         self._core_online = False
+        self._core_recovery_attempts = 0
+        self._core_recovery_scheduled = False
         self._snapshot_in_flight = False
         self._snapshot_refresh_queued = False
         self._stream_last_cursor: int | None = None
@@ -22,9 +24,17 @@ class MainController(QtCore.QObject):
         self.refresh_timer = QtCore.QTimer(self)
         self.refresh_timer.setInterval(self.config.ui.poll_interval_ms)
         self.refresh_timer.timeout.connect(self.poll)
+        self.presence_timer = QtCore.QTimer(self)
+        self.presence_timer.setInterval(max(1000, int(self.config.lifecycle.shell_heartbeat_interval_seconds * 1000)))
+        self.presence_timer.timeout.connect(self._report_shell_presence)
+        self.core_recovery_timer = QtCore.QTimer(self)
+        self.core_recovery_timer.setSingleShot(True)
+        self.core_recovery_timer.timeout.connect(self._attempt_core_recovery)
 
         self.bridge.sendMessageRequested.connect(self._send_message)
         self.bridge.saveNoteRequested.connect(self._save_note)
+        self.bridge.modeChanged.connect(self._report_shell_presence)
+        self.bridge.visibilityChanged.connect(self._report_shell_presence)
 
         self.client.error_occurred.connect(self._handle_error)
         self.client.snapshot_received.connect(self._handle_snapshot)
@@ -54,6 +64,11 @@ class MainController(QtCore.QObject):
 
         self.poll()
         self.refresh_timer.start()
+        self.presence_timer.start()
+        self._report_shell_presence()
+        application = QtCore.QCoreApplication.instance()
+        if application is not None:
+            application.aboutToQuit.connect(self._handle_app_about_to_quit, QtCore.Qt.ConnectionType.UniqueConnection)
 
     def poll(self) -> None:
         self._request_snapshot()
@@ -95,12 +110,15 @@ class MainController(QtCore.QObject):
         if self._is_connection_disruption(purpose, error):
             self._core_online = False
             self.bridge.set_connection_error(f"{purpose}: {error}")
+            self._schedule_core_recovery(error)
             return
         self.bridge.set_operation_error(f"{purpose}: {error}")
 
     def _handle_health(self, payload: dict) -> None:
         if payload.get("status") == "ok" and not self._core_online:
             self._core_online = True
+            self._core_recovery_attempts = 0
+            self._core_recovery_scheduled = False
             self.bridge.set_status_line("Standing watch.")
         self.bridge.apply_health(payload)
 
@@ -229,3 +247,42 @@ class MainController(QtCore.QObject):
             return True
         severity = str(payload.get("severity", "")).strip().lower()
         return severity in {"warning", "error", "critical"}
+
+    def _report_shell_presence(self) -> None:
+        if not hasattr(self.client, "report_shell_presence"):
+            return
+        report = self.bridge.shell_presence_payload()
+        self.client.report_shell_presence(report)
+
+    def _handle_app_about_to_quit(self) -> None:
+        if hasattr(self.client, "report_shell_detached"):
+            self.client.report_shell_detached(self.bridge.shell_presence_payload().get("pid"), sync=True)
+        if hasattr(self.client, "stop_event_stream"):
+            self.client.stop_event_stream()
+
+    def _schedule_core_recovery(self, error: str) -> None:
+        if not self.config.lifecycle.auto_restart_core:
+            return
+        if self._core_recovery_scheduled:
+            return
+        if self._core_recovery_attempts >= self.config.lifecycle.max_core_restart_attempts:
+            self.bridge.set_status_line(f"Core restart hold: {error}")
+            return
+        self._core_recovery_scheduled = True
+        self.core_recovery_timer.start(max(0, int(self.config.lifecycle.core_restart_backoff_ms)))
+
+    def _attempt_core_recovery(self) -> None:
+        self._core_recovery_scheduled = False
+        self._core_recovery_attempts += 1
+        try:
+            ensure_core_running(self.config)
+        except Exception as error:
+            self.bridge.set_status_line(f"Core restart issue: {error}")
+            if self._core_recovery_attempts < self.config.lifecycle.max_core_restart_attempts:
+                self._schedule_core_recovery(str(error))
+            return
+        if hasattr(self.client, "fetch_health"):
+            self.client.fetch_health()
+        self._request_snapshot(force=True)
+        if hasattr(self.client, "start_event_stream"):
+            self.client.start_event_stream(session_id="default", cursor=self._stream_last_cursor)

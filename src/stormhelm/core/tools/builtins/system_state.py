@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from typing import Any
 
+from stormhelm.core.adapters import ClaimOutcome
+from stormhelm.core.adapters import attach_contract_metadata
+from stormhelm.core.adapters import build_execution_report
 from stormhelm.core.network.formatter import NetworkResponseFormatter
 from stormhelm.core.orchestrator.persona import PersonaContract
 from stormhelm.core.system.probe import SystemProbe
 from stormhelm.core.tools.base import BaseTool, ToolContext
-from stormhelm.shared.result import ToolResult
+from stormhelm.shared.result import SafetyClassification, ToolResult
 
 
 def _probe(context: ToolContext) -> SystemProbe:
@@ -1494,6 +1497,7 @@ class AppControlTool(BaseTool):
     display_name = "App Control"
     description = "Launch, focus, close, quit, force-quit, or restart a local desktop application."
     category = "system"
+    classification = SafetyClassification.ACTION
 
     def parameter_schema(self) -> dict[str, Any]:
         return {
@@ -1524,27 +1528,54 @@ class AppControlTool(BaseTool):
             app_path=arguments.get("app_path"),
         )
         persona = PersonaContract(context.config)
+        contract = self.resolve_adapter_contract(arguments)
         action = str(data.get("action") or arguments["action"]).replace("_", " ").strip()
         label = str(data.get("window_title") or data.get("process_name") or arguments.get("app_name") or arguments.get("app_path") or "the requested app").strip()
         if data.get("success"):
             if action == "focus":
-                summary = persona.report(f"Focused {label}.")
+                summary = persona.report(f"Windows reported the focus request for {label} succeeded.")
             elif action == "minimize":
-                summary = persona.report(f"Minimized {label}.")
+                summary = persona.report(f"Windows reported the minimize request for {label} succeeded.")
             elif action == "maximize":
-                summary = persona.report(f"Maximized {label}.")
+                summary = persona.report(f"Windows reported the maximize request for {label} succeeded.")
             elif action == "restore":
-                summary = persona.report(f"Restored {label}.")
+                summary = persona.report(f"Windows reported the restore request for {label} succeeded.")
             elif action == "close":
-                summary = persona.report(f"Closed {label}.")
+                summary = persona.report(f"Windows reported the close request for {label} succeeded.")
             elif action == "quit":
-                summary = persona.report(f"Quit {label}.")
+                summary = persona.report(f"Windows reported the quit request for {label} succeeded.")
             elif action == "force quit":
-                summary = persona.report(f"Force-quit {label}.")
+                summary = persona.report(f"Windows reported the force-quit request for {label} succeeded.")
             elif action == "restart":
-                summary = persona.report(f"Restarted {label}.")
+                summary = persona.report(f"Windows reported the restart request for {label} succeeded.")
             else:
-                summary = persona.report(f"Launched {label}.")
+                summary = persona.report(f"Windows reported the launch request for {label} succeeded.")
+            execution = build_execution_report(
+                contract,
+                success=True,
+                observed_outcome=ClaimOutcome.OBSERVED,
+                evidence=["System probe returned a successful desktop-control response."],
+                verification_observed="os_api_acknowledgement",
+            ) if contract is not None else None
+            action_payload = attach_contract_metadata(
+                {
+                    "type": "system_app_control",
+                    "action": action.replace(" ", "_"),
+                    "label": label,
+                    "bearing_title": "Applications",
+                    "micro_response": summary,
+                    "full_response": summary,
+                },
+                contract=contract,
+                execution=execution,
+            )
+            return ToolResult(
+                success=True,
+                summary=summary,
+                data={**data, "action": action_payload},
+                adapter_contract=contract.to_dict() if contract is not None else {},
+                adapter_execution=execution.to_dict() if execution is not None else {},
+            )
         else:
             reason = str(data.get("reason") or "").replace("_", " ").strip()
             if reason in {"app not found", "app not running"}:
@@ -1571,7 +1602,20 @@ class AppControlTool(BaseTool):
                 summary = persona.report(f"Only some matching {label} processes were terminated.")
             else:
                 summary = persona.report(f"Couldn't {action} {label}.")
-        return ToolResult(success=bool(data.get("success")), summary=summary, data=data)
+        execution = build_execution_report(
+            contract,
+            success=False,
+            observed_outcome=ClaimOutcome.NONE,
+            evidence=["System probe returned a failed desktop-control response."],
+            failure_kind=str(data.get("reason") or "").strip() or None,
+        ) if contract is not None else None
+        return ToolResult(
+            success=False,
+            summary=summary,
+            data=data,
+            adapter_contract=contract.to_dict() if contract is not None else {},
+            adapter_execution=execution.to_dict() if execution is not None else {},
+        )
 
 
 class WindowStatusTool(BaseTool):
@@ -1696,6 +1740,7 @@ class SystemControlTool(BaseTool):
     display_name = "System Control"
     description = "Run safe core computer controls like volume, lock, settings pages, and system tools."
     category = "system"
+    classification = SafetyClassification.ACTION
 
     def parameter_schema(self) -> dict[str, Any]:
         return {
@@ -1741,6 +1786,7 @@ class SystemControlTool(BaseTool):
     def execute_sync(self, context: ToolContext, arguments: dict[str, Any]) -> ToolResult:
         data = _probe(context).system_control(**arguments)
         persona = PersonaContract(context.config)
+        contract = self.resolve_adapter_contract(arguments)
         action = str(data.get("action") or arguments["action"]).replace("_", " ").strip()
         if data.get("success"):
             if action == "open task manager":
@@ -1751,7 +1797,7 @@ class SystemControlTool(BaseTool):
                 summary = persona.report("Opened Resource Monitor.")
             elif action == "open settings page":
                 target = str(arguments.get("target") or "settings").strip()
-                summary = persona.report(f"Opened {target} settings.")
+                summary = persona.report(f"Requested the {target} settings page.")
             elif action == "toggle wifi":
                 summary = persona.report(f"Turned Wi-Fi {str(data.get('state') or arguments.get('state') or '').strip() or 'on'}.")
             elif action == "toggle bluetooth":
@@ -1778,6 +1824,32 @@ class SystemControlTool(BaseTool):
                 summary = persona.report("Unmuted the volume.")
             else:
                 summary = persona.report(f"{action.capitalize()}.")
+            if contract is not None:
+                execution = build_execution_report(
+                    contract,
+                    success=True,
+                    observed_outcome=ClaimOutcome.INITIATED,
+                    evidence=["System control returned a successful settings-page response."],
+                    verification_observed="system_acknowledgement",
+                )
+                action_payload = attach_contract_metadata(
+                    {
+                        "type": "system_control",
+                        "action": action.replace(" ", "_"),
+                        "bearing_title": "System Control",
+                        "micro_response": summary,
+                        "full_response": summary,
+                    },
+                    contract=contract,
+                    execution=execution,
+                )
+                return ToolResult(
+                    success=True,
+                    summary=summary,
+                    data={**data, "action": action_payload},
+                    adapter_contract=contract.to_dict(),
+                    adapter_execution=execution.to_dict(),
+                )
         else:
             reason = str(data.get("reason") or "").replace("_", " ").strip()
             if reason == "unsupported":
@@ -1786,7 +1858,20 @@ class SystemControlTool(BaseTool):
                 summary = persona.report("Stormhelm couldn't find the Wi-Fi adapter.")
             else:
                 summary = persona.report(f"Couldn't {action}.")
-        return ToolResult(success=bool(data.get("success")), summary=summary, data=data)
+        execution = build_execution_report(
+            contract,
+            success=False,
+            observed_outcome=ClaimOutcome.NONE,
+            evidence=["System control returned a failed settings-page response."],
+            failure_kind=str(data.get("reason") or "").strip() or None,
+        ) if contract is not None else None
+        return ToolResult(
+            success=bool(data.get("success")),
+            summary=summary,
+            data=data,
+            adapter_contract=contract.to_dict() if contract is not None else {},
+            adapter_execution=execution.to_dict() if execution is not None else {},
+        )
 
 
 class ControlCapabilitiesTool(BaseTool):

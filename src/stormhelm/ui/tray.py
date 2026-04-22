@@ -9,7 +9,8 @@ from stormhelm.ui.bridge import UiBridge
 def create_tray_icon(bridge: UiBridge, config: AppConfig) -> QtWidgets.QSystemTrayIcon:
     tray = QtWidgets.QSystemTrayIcon()
     tray.setIcon(_load_icon(config))
-    tray.setToolTip("Stormhelm")
+    tray.setToolTip(bridge.tray_tooltip_text())
+    bridge.setTrayPresent(True)
 
     menu = QtWidgets.QMenu()
     ghost_action = menu.addAction("Open Ghost Mode")
@@ -28,6 +29,9 @@ def create_tray_icon(bridge: UiBridge, config: AppConfig) -> QtWidgets.QSystemTr
 
     tray.setContextMenu(menu)
     tray.activated.connect(lambda reason: _handle_tray_click(reason, bridge))
+    bridge.statusChanged.connect(lambda: tray.setToolTip(bridge.tray_tooltip_text()))
+    bridge.visibilityChanged.connect(lambda: tray.setToolTip(bridge.tray_tooltip_text()))
+    bridge.modeChanged.connect(lambda: tray.setToolTip(bridge.tray_tooltip_text()))
     tray.show()
     return tray
 

@@ -154,6 +154,22 @@ _GENERIC_APP_MATCH_TOKENS = {
 }
 
 
+def _hidden_console_subprocess_kwargs() -> dict[str, Any]:
+    if os.name != "nt":
+        return {}
+    kwargs: dict[str, Any] = {}
+    creationflags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0) or 0)
+    if creationflags:
+        kwargs["creationflags"] = creationflags
+    startupinfo_cls = getattr(subprocess, "STARTUPINFO", None)
+    if startupinfo_cls is not None:
+        startupinfo = startupinfo_cls()
+        startupinfo.dwFlags |= int(getattr(subprocess, "STARTF_USESHOWWINDOW", 0) or 0)
+        startupinfo.wShowWindow = int(getattr(subprocess, "SW_HIDE", 0) or 0)
+        kwargs["startupinfo"] = startupinfo
+    return kwargs
+
+
 @dataclass(slots=True)
 class SystemProbe:
     config: AppConfig
@@ -677,6 +693,7 @@ class SystemProbe:
                 text=True,
                 timeout=4,
                 check=False,
+                **_hidden_console_subprocess_kwargs(),
             )
         except Exception:
             return {}
@@ -719,6 +736,7 @@ class SystemProbe:
                 text=True,
                 timeout=max(timeout_ms / 1000 + 1.5, 2.0),
                 check=False,
+                **_hidden_console_subprocess_kwargs(),
             )
         except Exception:
             return {"target": target, "reachable": False, "latency_ms": None, "timed_out": True}
@@ -2453,6 +2471,7 @@ class SystemProbe:
                 text=True,
                 timeout=6,
                 check=False,
+                **_hidden_console_subprocess_kwargs(),
             )
         except Exception:
             return None
@@ -2893,6 +2912,7 @@ class SystemProbe:
                 text=True,
                 timeout=20,
                 check=False,
+                **_hidden_console_subprocess_kwargs(),
             )
         except Exception:
             return None

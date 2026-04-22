@@ -1524,6 +1524,70 @@ def test_ui_bridge_builds_spatial_deck_panels_with_context_priority(temp_config)
     assert panels["workspace-main"]["title"] == "Research Workspace"
 
 
+def test_ui_bridge_surfaces_trust_prompt_and_systems_bearings(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+    bridge.apply_snapshot(
+        {
+            "status": {
+                "version": temp_config.version,
+                "version_label": temp_config.version_label,
+                "environment": temp_config.environment,
+                "runtime_mode": "source",
+                "max_workers": temp_config.concurrency.max_workers,
+                "system_state": {},
+                "trust": {
+                    "enabled": True,
+                    "pending_request_count": 1,
+                    "active_grant_count": 1,
+                    "pending_requests": [
+                        {
+                            "approval_request_id": "trust-1",
+                            "subject": "firefox",
+                            "state": "pending_operator_confirmation",
+                        }
+                    ],
+                    "active_grants": [
+                        {
+                            "grant_id": "grant-1",
+                            "subject": "Baby",
+                            "scope": "session",
+                            "state": "approved_for_session",
+                        }
+                    ],
+                    "recent_audit": [
+                        {
+                            "audit_id": "audit-1",
+                            "summary": "Granted discord relay dispatch for this session.",
+                            "approval_state": "approved_for_session",
+                        }
+                    ],
+                },
+            },
+            "active_request_state": {
+                "trust": {
+                    "decision": "confirmation_required",
+                    "approval_state": "pending_operator_confirmation",
+                    "suggested_scope": "task",
+                    "operator_message": "Approval is required before Stormhelm can install Firefox.",
+                }
+            },
+            "settings": {
+                "safety": {"allowed_read_dirs": [str(temp_config.project_root)]},
+            },
+        }
+    )
+
+    assert any(card["title"] == "Approval Needed" for card in bridge.context_cards)
+
+    bridge.activateModule("systems")
+
+    trust_column = next(column for column in bridge.workspaceCanvas["columns"] if column["title"] == "Trust Bearings")
+    assert trust_column["entries"][0]["primary"] == "Pending Approval"
+    assert trust_column["entries"][0]["secondary"] == "1"
+    assert trust_column["entries"][1]["primary"] == "Active Grants"
+    assert trust_column["entries"][1]["secondary"] == "1"
+
+
 def test_ui_bridge_persists_deck_layout_per_workspace(temp_config) -> None:
     restore_action = {
         "type": "workspace_restore",

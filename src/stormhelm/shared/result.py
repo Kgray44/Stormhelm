@@ -21,12 +21,18 @@ class SafetyDecision:
     allowed: bool
     reason: str
     details: dict[str, Any] = field(default_factory=dict)
+    approval_state: str = ""
+    decision: str = ""
+    operator_message: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "allowed": self.allowed,
             "reason": self.reason,
             "details": self.details,
+            "approval_state": self.approval_state,
+            "decision": self.decision,
+            "operator_message": self.operator_message,
         }
 
 
@@ -36,6 +42,8 @@ class ToolResult:
     summary: str
     data: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
+    adapter_contract: dict[str, Any] = field(default_factory=dict)
+    adapter_execution: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -43,4 +51,6 @@ class ToolResult:
             "summary": self.summary,
             "data": self.data,
             "error": self.error,
+            "adapter_contract": self.adapter_contract,
+            "adapter_execution": self.adapter_execution,
         }

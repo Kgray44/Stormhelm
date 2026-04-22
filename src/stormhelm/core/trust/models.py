@@ -161,7 +161,10 @@ class TrustDecision:
         return self.outcome == TrustDecisionOutcome.ALLOWED
 
     def to_dict(self) -> dict[str, Any]:
-        return _serialize(self)
+        payload = _serialize(self)
+        payload["allowed"] = self.allowed
+        payload["decision"] = self.outcome.value
+        return payload
 
 
 @dataclass(slots=True)

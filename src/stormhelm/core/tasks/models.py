@@ -30,9 +30,13 @@ class TaskStepState(str, Enum):
 class TaskResumeStatus(str, Enum):
     RESUMABLE = "resumable"
     BLOCKED = "blocked"
+    WAITING_OPERATOR = "waiting_operator"
+    WAITING_ENVIRONMENT = "waiting_environment"
     STALE = "stale"
     VERIFICATION = "verification"
     COMPLETED = "completed"
+    EXPIRED = "expired"
+    ARCHIVED = "archived"
     MISSING = "missing"
 
 

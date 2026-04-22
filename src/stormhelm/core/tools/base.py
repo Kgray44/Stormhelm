@@ -8,6 +8,7 @@ from typing import Any
 from typing import Callable
 
 from stormhelm.config.models import AppConfig
+from stormhelm.core.adapters import default_adapter_contract_registry
 from stormhelm.core.events import EventBuffer
 from stormhelm.core.memory.repositories import NotesRepository, PreferencesRepository
 from stormhelm.core.safety.policy import SafetyPolicy
@@ -16,6 +17,7 @@ from stormhelm.shared.result import ExecutionMode, SafetyClassification, ToolRes
 if TYPE_CHECKING:
     from stormhelm.core.system.probe import SystemProbe
     from stormhelm.core.tasks.service import DurableTaskService
+    from stormhelm.core.trust.service import TrustService
     from stormhelm.core.workspace.service import WorkspaceService
 
 
@@ -27,9 +29,13 @@ class ToolContext:
     notes: NotesRepository
     preferences: PreferencesRepository
     safety_policy: SafetyPolicy
+    session_id: str = "default"
+    task_id: str = ""
+    task_step_id: str = ""
     system_probe: SystemProbe | None = None
     workspace_service: WorkspaceService | None = None
     task_service: DurableTaskService | None = None
+    trust_service: TrustService | None = None
     progress_callback: Callable[[dict[str, Any]], None] | None = None
     cancellation_requested: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -56,7 +62,17 @@ class BaseTool(ABC):
             "classification": self.classification.value,
             "execution_mode": self.execution_mode.value,
             "timeout_seconds": self.timeout_seconds,
+            "adapter_contracts": [contract.to_dict() for contract in self.adapter_contracts()],
         }
+
+    def adapter_contracts(self) -> list[object]:
+        return default_adapter_contract_registry().contracts_for_tool(self.name)
+
+    def adapter_route_assessment(self, arguments: dict[str, Any]) -> object:
+        return default_adapter_contract_registry().assess_tool_route(self.name, arguments)
+
+    def resolve_adapter_contract(self, arguments: dict[str, Any]) -> object | None:
+        return default_adapter_contract_registry().resolve_tool_contract(self.name, arguments)
 
     def parameter_schema(self) -> dict[str, Any]:
         return {

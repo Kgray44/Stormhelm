@@ -8,6 +8,9 @@ import shutil
 from typing import Any
 from urllib.parse import urlparse
 
+from stormhelm.core.adapters import ClaimOutcome
+from stormhelm.core.adapters import attach_contract_metadata
+from stormhelm.core.adapters import build_execution_report
 from stormhelm.core.tools.base import BaseTool, ToolContext
 from stormhelm.shared.result import SafetyClassification, ToolResult
 
@@ -177,13 +180,15 @@ def _fallback_response_contract_for_default_browser(
     *,
     title: str,
     browser_title: str,
-    base_contract: dict[str, str] | None,
 ) -> dict[str, str]:
-    bearing_title = str((base_contract or {}).get("bearing_title") or f"{title} opened").strip()
     return {
-        "bearing_title": bearing_title,
-        "micro_response": f"{browser_title} wasn't available, so I opened {title} in the default browser.",
-        "full_response": f"Resolved {title}, couldn't use {browser_title} on this machine, and fell back to the default browser.",
+        "bearing_title": f"{title} requested",
+        "micro_response": (
+            f"Requested that {title} open in the default browser because {browser_title} wasn't available here."
+        ),
+        "full_response": (
+            f"Requested that {title} open in the default browser because {browser_title} wasn't available here."
+        ),
     }
 
 
@@ -225,6 +230,26 @@ def _validate_response_contract(raw_contract: object) -> dict[str, str] | None:
         "bearing_title": bearing_title,
         "micro_response": micro_response,
         "full_response": full_response,
+    }
+
+
+def _bearing_title(raw_contract: dict[str, str] | None, fallback: str) -> str:
+    return str((raw_contract or {}).get("bearing_title") or fallback).strip()
+
+
+def _deck_browser_presentation(title: str) -> dict[str, str]:
+    return {
+        "bearing_title": f"{title} queued",
+        "micro_response": f"Queued {title} for the Deck browser.",
+        "full_response": f"Queued {title} for the Deck browser.",
+    }
+
+
+def _external_browser_presentation(title: str) -> dict[str, str]:
+    return {
+        "bearing_title": f"{title} requested",
+        "micro_response": f"Requested that {title} open externally.",
+        "full_response": f"Requested that {title} open externally.",
     }
 
 
@@ -305,10 +330,21 @@ class DeckOpenUrlTool(BaseTool):
         url = arguments["url"]
         parsed = urlparse(url)
         title = str(arguments.get("label") or parsed.netloc or url).strip()
-        response_contract = arguments.get("response_contract") if isinstance(arguments.get("response_contract"), dict) else None
+        contract = self.resolve_adapter_contract(arguments)
+        execution = build_execution_report(
+            contract,
+            success=True,
+            observed_outcome=ClaimOutcome.INITIATED,
+            evidence=["Queued a Deck browser action for the requested URL."],
+        ) if contract is not None else None
+        presentation = attach_contract_metadata(
+            _deck_browser_presentation(title),
+            contract=contract,
+            execution=execution,
+        )
         return ToolResult(
             success=True,
-            summary=str(response_contract.get("full_response") if response_contract else "") or f"Opened {title} in the Deck browser.",
+            summary=str(presentation["full_response"]),
             data={
                 "action": {
                     "type": "workspace_open",
@@ -322,9 +358,11 @@ class DeckOpenUrlTool(BaseTool):
                         "subtitle": url,
                         "url": url,
                     },
-                    **(response_contract or {}),
+                    **presentation,
                 }
             },
+            adapter_contract=contract.to_dict() if contract is not None else {},
+            adapter_execution=execution.to_dict() if execution is not None else {},
         )
 
 
@@ -368,11 +406,11 @@ class ExternalOpenUrlTool(BaseTool):
         url = arguments["url"]
         parsed = urlparse(url)
         title = str(arguments.get("label") or parsed.netloc or parsed.path or url).strip()
-        response_contract = arguments.get("response_contract") if isinstance(arguments.get("response_contract"), dict) else None
         requested_browser_target = str(arguments.get("browser_target") or "").strip().lower()
         browser_target = requested_browser_target or None
         browser_command: str | None = None
         browser_probe: BrowserTargetProbeResult | None = None
+        presentation_contract = _external_browser_presentation(title)
         if requested_browser_target:
             browser_probe = probe_browser_target(requested_browser_target)
             if browser_probe.available:
@@ -380,10 +418,9 @@ class ExternalOpenUrlTool(BaseTool):
                 browser_command = browser_probe.launch_command
             else:
                 browser_target = None
-                response_contract = _fallback_response_contract_for_default_browser(
+                presentation_contract = _fallback_response_contract_for_default_browser(
                     title=title,
                     browser_title=browser_probe.browser_title,
-                    base_contract=response_contract,
                 )
             context.events.publish(
                 level="DEBUG",
@@ -396,9 +433,21 @@ class ExternalOpenUrlTool(BaseTool):
                     "browser_target_probe": browser_probe.to_dict(),
                 },
             )
+        contract = self.resolve_adapter_contract(arguments)
+        execution = build_execution_report(
+            contract,
+            success=True,
+            observed_outcome=ClaimOutcome.INITIATED,
+            evidence=["Issued an external open request for the URL."],
+        ) if contract is not None else None
+        presentation = attach_contract_metadata(
+            presentation_contract,
+            contract=contract,
+            execution=execution,
+        )
         return ToolResult(
             success=True,
-            summary=str(response_contract.get("full_response") if response_contract else "") or f"Opened {title} externally.",
+            summary=str(presentation["full_response"]),
             data={
                 "action": {
                     "type": "open_external",
@@ -410,9 +459,11 @@ class ExternalOpenUrlTool(BaseTool):
                     **({"browser_target_requested": requested_browser_target} if requested_browser_target else {}),
                     **({"browser_target_probe": browser_probe.to_dict()} if browser_probe is not None else {}),
                     **({"browser_fallback_to_default": True} if browser_probe is not None and browser_probe.fallback_to_default else {}),
-                    **(response_contract or {}),
+                    **presentation,
                 }
             },
+            adapter_contract=contract.to_dict() if contract is not None else {},
+            adapter_execution=execution.to_dict() if execution is not None else {},
         )
 
 
@@ -459,9 +510,25 @@ class DeckOpenFileTool(BaseTool):
             )
 
         item = _infer_file_item(path, context.config.tools.max_file_read_bytes)
+        contract = self.resolve_adapter_contract(arguments)
+        execution = build_execution_report(
+            contract,
+            success=True,
+            observed_outcome=ClaimOutcome.INITIATED,
+            evidence=["Validated the file path and queued a Deck file-view action."],
+        ) if contract is not None else None
+        presentation = attach_contract_metadata(
+            {
+                "bearing_title": f"{path.name} queued",
+                "micro_response": f"Queued {path.name} for the Deck file viewer.",
+                "full_response": f"Queued {path.name} for the Deck file viewer.",
+            },
+            contract=contract,
+            execution=execution,
+        )
         return ToolResult(
             success=True,
-            summary=f"Opened {path.name} in the Deck.",
+            summary=str(presentation["full_response"]),
             data={
                 "action": {
                     "type": "workspace_open",
@@ -469,8 +536,11 @@ class DeckOpenFileTool(BaseTool):
                     "module": "files",
                     "section": "opened-items",
                     "item": item,
+                    **presentation,
                 }
             },
+            adapter_contract=contract.to_dict() if contract is not None else {},
+            adapter_execution=execution.to_dict() if execution is not None else {},
         )
 
 
@@ -516,9 +586,25 @@ class ExternalOpenFileTool(BaseTool):
                 error="missing_file",
             )
 
+        contract = self.resolve_adapter_contract(arguments)
+        execution = build_execution_report(
+            contract,
+            success=True,
+            observed_outcome=ClaimOutcome.INITIATED,
+            evidence=["Validated the file path and issued an external open request."],
+        ) if contract is not None else None
+        presentation = attach_contract_metadata(
+            {
+                "bearing_title": f"{path.name} requested",
+                "micro_response": f"Requested that {path.name} open in its external app.",
+                "full_response": f"Requested that {path.name} open in its external app.",
+            },
+            contract=contract,
+            execution=execution,
+        )
         return ToolResult(
             success=True,
-            summary=f"Opened {path.name} externally.",
+            summary=str(presentation["full_response"]),
             data={
                 "action": {
                     "type": "open_external",
@@ -526,6 +612,9 @@ class ExternalOpenFileTool(BaseTool):
                     "path": str(path),
                     "url": path.as_uri(),
                     "title": path.name,
+                    **presentation,
                 }
             },
+            adapter_contract=contract.to_dict() if contract is not None else {},
+            adapter_execution=execution.to_dict() if execution is not None else {},
         )

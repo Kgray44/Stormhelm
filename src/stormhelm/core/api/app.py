@@ -9,8 +9,16 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from stormhelm.config.models import AppConfig
-from stormhelm.core.api.schemas import ChatRequest, EventsResponse, JobsResponse, NoteCreateRequest, NotesResponse
+from stormhelm.core.api.schemas import (
+    ChatRequest,
+    EventsResponse,
+    JobsResponse,
+    NoteCreateRequest,
+    NotesResponse,
+    ShellPresenceRequest,
+)
 from stormhelm.core.container import CoreContainer, build_container
+from stormhelm.core.lifecycle import ShellPresenceUpdate
 from stormhelm.version import __version__
 
 
@@ -42,6 +50,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "protocol_version": current.config.protocol_version,
             "max_workers": current.config.concurrency.max_workers,
             "runtime_mode": current.config.runtime.mode,
+            "install_mode": current.lifecycle.install_state.install_mode.value,
             "pid": os.getpid(),
         }
 
@@ -237,6 +246,16 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     def list_tools(request: Request) -> dict[str, object]:
         current = _current_container(request)
         return {"tools": current.tool_registry.metadata()}
+
+    @app.post("/lifecycle/shell")
+    def report_shell_presence(payload: ShellPresenceRequest, request: Request) -> dict[str, object]:
+        current = _current_container(request)
+        update = ShellPresenceUpdate.from_dict(payload.model_dump())
+        if update.event == "detach":
+            current.lifecycle.record_shell_detached(pid=update.pid)
+        else:
+            current.lifecycle.record_shell_presence(update)
+        return {"runtime": current.lifecycle.status_snapshot().get("runtime", {})}
 
     @app.get("/snapshot")
     def snapshot(

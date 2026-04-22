@@ -304,12 +304,12 @@ def test_main_controller_opens_external_url_in_requested_browser(monkeypatch, te
             "assistant_message": {
                 "message_id": "assistant-browser-1",
                 "role": "assistant",
-                "content": "Opened GitHub search in the browser.",
+                "content": "Requested that GitHub search open externally.",
                 "created_at": "2026-04-21T19:10:00Z",
                 "metadata": {
-                    "bearing_title": "GitHub search opened",
-                    "micro_response": "Opened GitHub search in the browser.",
-                    "full_response": "Resolved the search URL and opened it in the browser.",
+                    "bearing_title": "GitHub search requested",
+                    "micro_response": "Requested that GitHub search open externally.",
+                    "full_response": "Requested that GitHub search open externally.",
                 },
             },
         }

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from stormhelm.config.models import AppConfig
 from stormhelm.core.intelligence.language import fuzzy_ratio, normalize_lookup_phrase, normalize_phrase, token_overlap
 from stormhelm.core.events import EventBuffer
+from stormhelm.core.memory import MemoryQuery, MemoryRetrievalIntent, SemanticMemoryRepository, SemanticMemoryService
 from stormhelm.core.memory.repositories import ConversationRepository, NotesRepository, PreferencesRepository
 from stormhelm.core.orchestrator.persona import PersonaContract
 from stormhelm.core.orchestrator.session_state import ConversationStateStore
@@ -229,6 +231,7 @@ class WorkspaceService:
         indexer: WorkspaceIndexer,
         events: EventBuffer,
         persona: PersonaContract,
+        memory: SemanticMemoryService | None = None,
     ) -> None:
         self.config = config
         self.repository = repository
@@ -239,6 +242,7 @@ class WorkspaceService:
         self.indexer = indexer
         self.events = events
         self.persona = persona
+        self.memory = memory or SemanticMemoryService(SemanticMemoryRepository(repository.database))
         self.templates = _default_workspace_templates()
 
     def capture_workspace_context(
@@ -382,6 +386,13 @@ class WorkspaceService:
             opened_items=opened_items,
             active_item=active_item,
             likely_next=likely_next,
+        )
+        self.memory.sync_workspace_memory(
+            workspace,
+            continuity=continuity,
+            session_posture=session_posture,
+            opened_items=opened_items,
+            source_surface="capture_workspace_context",
         )
         self.session_state.set_active_workspace_id(session_id, workspace.workspace_id)
         self.session_state.set_active_posture(
@@ -719,6 +730,19 @@ class WorkspaceService:
             active_item=active_item,
             opened_items=items,
         ))
+        memory_context = self._workspace_memory_context(
+            workspace,
+            session_id=session_id,
+            query=" ".join(
+                part
+                for part in [
+                    workspace.topic,
+                    workspace.active_goal,
+                    where_left_off,
+                ]
+                if part
+            ),
+        )
         return {
             "workspace": self._workspace_view_payload(
                 workspace,
@@ -742,6 +766,7 @@ class WorkspaceService:
             "findings": self._normalize_item_list(posture.get("findings") or workspace.findings),
             "session_notes": self._normalize_item_list(posture.get("session_notes") or workspace.session_notes),
             "surface_content": surface_content,
+            "memoryContext": memory_context,
             "action": {
                 "type": "workspace_restore",
                 "target": "deck",
@@ -1006,10 +1031,16 @@ class WorkspaceService:
                 pending_next_steps=self._normalize_string_list(posture.get("pending_next_steps") or workspace.pending_next_steps),
                 active_item=posture.get("active_item") if isinstance(posture.get("active_item"), dict) else {},
             )
+        memory_context = self._workspace_memory_context(
+            workspace,
+            session_id=session_id,
+            query=where_left_off,
+        )
         return {
             "summary": self.persona.report(where_left_off),
             "workspace": workspace.to_dict(),
             "next_steps": self._normalize_string_list(posture.get("pending_next_steps") or workspace.pending_next_steps),
+            "memory": memory_context,
         }
 
     def next_steps(self, *, session_id: str) -> dict[str, Any]:
@@ -1024,12 +1055,18 @@ class WorkspaceService:
                 posture.get("active_item") if isinstance(posture.get("active_item"), dict) else {},
                 posture.get("opened_items") if isinstance(posture.get("opened_items"), list) else [],
             )
+        memory_context = self._workspace_memory_context(
+            workspace,
+            session_id=session_id,
+            query=" ".join(next_steps[:3]) or workspace.where_left_off or workspace.summary,
+        )
         return {
             "summary": self.persona.report(
                 f"Next bearings for {workspace.name}: " + "; ".join(next_steps[:3]) if next_steps else f"{workspace.name} is clear of pending next steps."
             ),
             "workspace": workspace.to_dict(),
             "next_steps": next_steps,
+            "memory": memory_context,
         }
 
     def link_note_to_active_workspace(self, *, session_id: str, note_id: str, workspace_id: str = "") -> None:
@@ -1129,6 +1166,27 @@ class WorkspaceService:
                     ],
                 }
         return {"workspace": top_workspace, "basis": self._workspace_basis(top_reasons)}
+
+    def _workspace_memory_context(
+        self,
+        workspace: WorkspaceRecord,
+        *,
+        session_id: str,
+        query: str,
+    ) -> dict[str, Any]:
+        result = self.memory.retrieve(
+            MemoryQuery(
+                query_id=str(uuid4()),
+                retrieval_intent=MemoryRetrievalIntent.WORKSPACE_RESTORE.value,
+                semantic_query_text=query,
+                scope_constraints={
+                    "workspace_id": workspace.workspace_id,
+                    "session_id": session_id,
+                },
+                caller_subsystem="workspace",
+            )
+        )
+        return result.to_dict()
 
     def _workspace_match_score(
         self,
@@ -2263,6 +2321,19 @@ class WorkspaceService:
         workspace_payload["templateTitle"] = plan.template.title
         workspace_payload["templateConfidence"] = round(float(plan.template_confidence), 3)
         workspace_payload["templateReasons"] = list(plan.template_reasons)
+        self.memory.sync_workspace_memory(
+            plan.workspace,
+            continuity=plan.continuity,
+            session_posture=plan.session_posture,
+            opened_items=plan.opened_items,
+            source_surface=f"workspace_{activity_type}",
+        )
+        memory_context = self._workspace_memory_context(
+            plan.workspace,
+            session_id=session_id,
+            query=query,
+        )
+        workspace_payload["memoryContext"] = memory_context
 
         active_item = next(
             (item for item in plan.opened_items if self._item_identity(item) == plan.active_item_id),
@@ -2294,6 +2365,7 @@ class WorkspaceService:
                 "session_posture": plan.session_posture.to_dict(),
                 "capabilities": dict(plan.capabilities),
                 "surface_content": surface_content,
+                "memory_context": memory_context,
                 "resume_context": plan.resume_context.to_dict(),
             },
         )
@@ -2315,6 +2387,7 @@ class WorkspaceService:
             "summary": summary,
             "workspace": workspace_payload,
             "items": [dict(item) for item in plan.opened_items],
+            "memory": memory_context,
             "debug": dict(plan.debug),
             "action": {
                 "type": "workspace_restore",
@@ -2470,6 +2543,13 @@ class WorkspaceService:
                     likely_next=likely_next,
                 ),
             },
+        )
+        self.memory.sync_workspace_memory(
+            refreshed_workspace,
+            continuity=continuity,
+            session_posture=session_posture,
+            opened_items=opened_items,
+            source_surface="workspace_save_snapshot",
         )
         surface_content = self._normalize_surface_content(posture.get("surface_content")) or self._normalize_surface_content(
             snapshot.payload.get("surface_content")

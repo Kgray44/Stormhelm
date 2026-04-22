@@ -2,8 +2,18 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
+import stormhelm.core.tools.base as tool_base_module
+from stormhelm.core.adapters import AdapterContract
+from stormhelm.core.adapters import AdapterContractRegistry
+from stormhelm.core.adapters import ApprovalDescriptor
 from stormhelm.core.events import EventBuffer
 from stormhelm.core.safety.policy import SafetyPolicy
+from stormhelm.core.adapters import ClaimOutcome
+from stormhelm.core.adapters import RollbackDescriptor
+from stormhelm.core.adapters import TrustTier
+from stormhelm.core.adapters import VerificationDescriptor
 from stormhelm.core.tools.base import ToolContext
 from stormhelm.core.tools.builtins import register_builtin_tools
 from stormhelm.core.tools.builtins.system_state import (
@@ -102,6 +112,33 @@ class FakePowerProbe:
         return dict(self._payload)
 
 
+def _future_contract(adapter_id: str) -> AdapterContract:
+    return AdapterContract(
+        adapter_id=adapter_id,
+        display_name=adapter_id.replace(".", " ").title(),
+        family="future",
+        description="Scaffold contract for executor hardening tests.",
+        observation_modes=["semantic_context"],
+        action_modes=["external_handoff"],
+        artifact_modes=["metadata"],
+        preview_modes=[],
+        safety_posture=["backend_owned"],
+        failure_posture=["explicit_limits"],
+        trust_tier=TrustTier.BOUNDED_LOCAL,
+        approval=ApprovalDescriptor(required=False),
+        verification=VerificationDescriptor(
+            posture="handoff_only",
+            max_claimable_outcome=ClaimOutcome.INITIATED,
+            evidence=["synthetic test evidence"],
+        ),
+        rollback=RollbackDescriptor(supported=False, posture="none"),
+        planner_tags=["future"],
+        local_first=True,
+        external_side_effects=False,
+        offline_behavior="full",
+    )
+
+
 def test_tool_registry_executes_echo_tool(temp_config) -> None:
     registry = ToolRegistry()
     register_builtin_tools(registry)
@@ -124,6 +161,102 @@ def test_tool_registry_executes_echo_tool(temp_config) -> None:
     assert any(tool["name"] == "context_action" and tool["category"] == "context" for tool in registry.metadata())
     assert result.success is True
     assert result.data["text"] == "hello"
+
+
+def test_tool_registry_exposes_adapter_contract_metadata() -> None:
+    registry = ToolRegistry()
+    register_builtin_tools(registry)
+
+    metadata_by_name = {item["name"]: item for item in registry.metadata()}
+
+    assert {contract["adapter_id"] for contract in metadata_by_name["external_open_url"]["adapter_contracts"]} == {
+        "browser.external",
+        "settings.system_uri",
+    }
+    assert {contract["adapter_id"] for contract in metadata_by_name["deck_open_url"]["adapter_contracts"]} == {"browser.deck"}
+    assert {contract["adapter_id"] for contract in metadata_by_name["deck_open_file"]["adapter_contracts"]} == {"file.deck"}
+    assert {contract["adapter_id"] for contract in metadata_by_name["external_open_file"]["adapter_contracts"]} == {
+        "file.external"
+    }
+    assert {contract["adapter_id"] for contract in metadata_by_name["app_control"]["adapter_contracts"]} == {
+        "app.desktop_control"
+    }
+    assert {contract["adapter_id"] for contract in metadata_by_name["shell_command"]["adapter_contracts"]} == {
+        "terminal.shell_stub"
+    }
+
+
+def test_tool_executor_attaches_contract_metadata_and_caps_external_open_claim(temp_config) -> None:
+    registry = ToolRegistry()
+    register_builtin_tools(registry)
+    executor = ToolExecutor(registry)
+    context = ToolContext(
+        job_id="test-job",
+        config=temp_config,
+        events=EventBuffer(),
+        notes=DummyNotesRepository(),
+        preferences=DummyPreferencesRepository(),
+        safety_policy=SafetyPolicy(temp_config),
+    )
+
+    result = asyncio.run(
+        executor.execute(
+            "external_open_url",
+            {
+                "url": "https://example.com",
+                "label": "Example",
+                "response_contract": {
+                    "bearing_title": "Example opened",
+                    "micro_response": "Opened Example in the browser.",
+                    "full_response": "Resolved the destination and opened it in the browser.",
+                },
+            },
+            context,
+        )
+    )
+    payload = result.to_dict()
+
+    assert result.success is True
+    assert "opened" not in result.summary.lower()
+    assert "request" in result.summary.lower()
+    assert payload["data"]["action"]["bearing_title"] == "Example requested"
+    assert payload["data"]["action"]["micro_response"] == "Requested that Example open externally."
+    assert payload["data"]["action"]["full_response"] == "Requested that Example open externally."
+    assert payload["adapter_contract"]["adapter_id"] == "browser.external"
+    assert payload["adapter_execution"]["claim_ceiling"] == ClaimOutcome.INITIATED.value
+    assert payload["data"]["action"]["adapter_contract"]["adapter_id"] == "browser.external"
+    assert payload["data"]["action"]["adapter_execution"]["claim_ceiling"] == ClaimOutcome.INITIATED.value
+
+
+def test_tool_executor_fails_closed_when_adapter_route_cannot_resolve_contract(temp_config, monkeypatch: pytest.MonkeyPatch) -> None:
+    registry = ToolRegistry()
+    register_builtin_tools(registry)
+    executor = ToolExecutor(registry)
+    context = ToolContext(
+        job_id="test-job",
+        config=temp_config,
+        events=EventBuffer(),
+        notes=DummyNotesRepository(),
+        preferences=DummyPreferencesRepository(),
+        safety_policy=SafetyPolicy(temp_config),
+    )
+    broken_contracts = AdapterContractRegistry()
+    broken_contracts.register_contract(_future_contract("future.browser_primary"))
+    broken_contracts.register_contract(_future_contract("future.browser_fallback"))
+    broken_contracts.bind_tool(
+        "external_open_url",
+        ["future.browser_primary", "future.browser_fallback"],
+        resolver=lambda arguments: None,
+    )
+    monkeypatch.setattr(tool_base_module, "default_adapter_contract_registry", lambda: broken_contracts)
+
+    result = asyncio.run(executor.execute("external_open_url", {"url": "https://example.com"}, context))
+
+    assert result.success is False
+    assert "contract-backed" in result.summary.lower()
+    assert result.data["adapter_contract_status"]["contract_required"] is True
+    assert result.data["adapter_contract_status"]["healthy"] is False
+    assert result.data["adapter_contract_status"]["selected_adapter"] is None
 
 
 def test_location_and_weather_tools_preserve_none_named_location() -> None:

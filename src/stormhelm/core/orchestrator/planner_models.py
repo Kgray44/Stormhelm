@@ -193,6 +193,14 @@ class CapabilityPlan:
     required_tools: list[str] = field(default_factory=list)
     required_capabilities: list[str] = field(default_factory=list)
     missing_capabilities: list[str] = field(default_factory=list)
+    candidate_adapters: list[dict[str, Any]] = field(default_factory=list)
+    selected_adapter: dict[str, Any] | None = None
+    adapter_contract_status: str | None = None
+    adapter_contract_errors: list[str] = field(default_factory=list)
+    approval_required: bool | None = None
+    preview_available: bool | None = None
+    rollback_available: bool | None = None
+    max_claimable_outcome: str | None = None
     freshness_expectation: str | None = None
     unsupported_reason: UnsupportedReason | None = None
     notes: list[str] = field(default_factory=list)
@@ -204,6 +212,14 @@ class CapabilityPlan:
             "required_tools": list(self.required_tools),
             "required_capabilities": list(self.required_capabilities),
             "missing_capabilities": list(self.missing_capabilities),
+            "candidate_adapters": _serialize(self.candidate_adapters),
+            "selected_adapter": _serialize(self.selected_adapter),
+            "adapter_contract_status": self.adapter_contract_status,
+            "adapter_contract_errors": list(self.adapter_contract_errors),
+            "approval_required": self.approval_required,
+            "preview_available": self.preview_available,
+            "rollback_available": self.rollback_available,
+            "max_claimable_outcome": self.max_claimable_outcome,
             "freshness_expectation": self.freshness_expectation,
             "unsupported_reason": _serialize(self.unsupported_reason),
             "notes": list(self.notes),

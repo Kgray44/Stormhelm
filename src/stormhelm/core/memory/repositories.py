@@ -4,8 +4,17 @@ import json
 from uuid import uuid4
 
 from stormhelm.core.memory.database import SQLiteDatabase
-from stormhelm.core.memory.models import ChatMessageRecord, NoteRecord, SessionRecord
-from stormhelm.shared.json_safety import decode_json_dict, decode_json_value
+from stormhelm.core.memory.models import (
+    ChatMessageRecord,
+    MemoryMatch,
+    MemoryProvenance,
+    MemoryQuery,
+    MemoryRecord,
+    MemoryResult,
+    NoteRecord,
+    SessionRecord,
+)
+from stormhelm.shared.json_safety import decode_json_dict, decode_json_list, decode_json_value
 from stormhelm.shared.time import utc_now_iso
 
 
@@ -231,3 +240,444 @@ class ToolRunRepository:
             }
             for row in rows
         ]
+
+
+class SemanticMemoryRepository:
+    def __init__(self, database: SQLiteDatabase) -> None:
+        self.database = database
+
+    def save_record(self, record: MemoryRecord) -> MemoryRecord:
+        existing = self.get_by_dedupe_key(record.dedupe_key) if record.dedupe_key else None
+        memory_id = existing.memory_id if existing is not None else record.memory_id
+        created_at = existing.created_at if existing is not None else (record.created_at or utc_now_iso())
+        updated_at = record.updated_at or utc_now_iso()
+        payload = MemoryRecord(
+            memory_id=memory_id,
+            dedupe_key=record.dedupe_key,
+            memory_family=record.memory_family,
+            source_class=record.source_class,
+            title=record.title,
+            summary=record.summary,
+            normalized_content=record.normalized_content,
+            structured_fields=dict(record.structured_fields),
+            provenance=record.provenance,
+            confidence=float(record.confidence),
+            freshness_state=record.freshness_state,
+            created_at=created_at,
+            updated_at=updated_at,
+            last_validated_at=record.last_validated_at,
+            retention_policy=record.retention_policy,
+            sensitivity_level=record.sensitivity_level,
+            related_session_id=record.related_session_id,
+            related_task_ids=list(record.related_task_ids),
+            related_workspace_ids=list(record.related_workspace_ids),
+            related_artifact_refs=list(record.related_artifact_refs),
+            tags=list(record.tags),
+            semantic_tokens=list(record.semantic_tokens),
+            last_accessed_at=record.last_accessed_at,
+            access_count=int(record.access_count),
+            archived=bool(record.archived),
+        )
+        with self.database.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO memory_records(
+                    memory_id, dedupe_key, memory_family, source_class, title, summary, normalized_content,
+                    structured_fields_json, provenance_json, confidence, freshness_state, created_at, updated_at,
+                    last_validated_at, retention_policy, sensitivity_level, related_session_id, related_task_ids_json,
+                    related_workspace_ids_json, related_artifact_refs_json, tags_json, semantic_tokens_json,
+                    last_accessed_at, access_count, archived
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(memory_id) DO UPDATE SET
+                    dedupe_key = excluded.dedupe_key,
+                    memory_family = excluded.memory_family,
+                    source_class = excluded.source_class,
+                    title = excluded.title,
+                    summary = excluded.summary,
+                    normalized_content = excluded.normalized_content,
+                    structured_fields_json = excluded.structured_fields_json,
+                    provenance_json = excluded.provenance_json,
+                    confidence = excluded.confidence,
+                    freshness_state = excluded.freshness_state,
+                    updated_at = excluded.updated_at,
+                    last_validated_at = excluded.last_validated_at,
+                    retention_policy = excluded.retention_policy,
+                    sensitivity_level = excluded.sensitivity_level,
+                    related_session_id = excluded.related_session_id,
+                    related_task_ids_json = excluded.related_task_ids_json,
+                    related_workspace_ids_json = excluded.related_workspace_ids_json,
+                    related_artifact_refs_json = excluded.related_artifact_refs_json,
+                    tags_json = excluded.tags_json,
+                    semantic_tokens_json = excluded.semantic_tokens_json,
+                    last_accessed_at = excluded.last_accessed_at,
+                    access_count = excluded.access_count,
+                    archived = excluded.archived
+                """,
+                (
+                    payload.memory_id,
+                    payload.dedupe_key,
+                    payload.memory_family,
+                    payload.source_class,
+                    payload.title,
+                    payload.summary,
+                    payload.normalized_content,
+                    json.dumps(payload.structured_fields),
+                    json.dumps(payload.provenance.to_dict()),
+                    payload.confidence,
+                    payload.freshness_state,
+                    payload.created_at,
+                    payload.updated_at,
+                    payload.last_validated_at,
+                    payload.retention_policy,
+                    payload.sensitivity_level,
+                    payload.related_session_id,
+                    json.dumps(payload.related_task_ids),
+                    json.dumps(payload.related_workspace_ids),
+                    json.dumps(payload.related_artifact_refs),
+                    json.dumps(payload.tags),
+                    json.dumps(payload.semantic_tokens),
+                    payload.last_accessed_at,
+                    payload.access_count,
+                    1 if payload.archived else 0,
+                ),
+            )
+        return self.get_record(payload.memory_id) or payload
+
+    def get_record(self, memory_id: str) -> MemoryRecord | None:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT memory_id, dedupe_key, memory_family, source_class, title, summary, normalized_content,
+                       structured_fields_json, provenance_json, confidence, freshness_state, created_at, updated_at,
+                       last_validated_at, retention_policy, sensitivity_level, related_session_id, related_task_ids_json,
+                       related_workspace_ids_json, related_artifact_refs_json, tags_json, semantic_tokens_json,
+                       last_accessed_at, access_count, archived
+                FROM memory_records
+                WHERE memory_id = ?
+                """,
+                (memory_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_record(row)
+
+    def get_by_dedupe_key(self, dedupe_key: str) -> MemoryRecord | None:
+        if not dedupe_key:
+            return None
+        with self.database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT memory_id, dedupe_key, memory_family, source_class, title, summary, normalized_content,
+                       structured_fields_json, provenance_json, confidence, freshness_state, created_at, updated_at,
+                       last_validated_at, retention_policy, sensitivity_level, related_session_id, related_task_ids_json,
+                       related_workspace_ids_json, related_artifact_refs_json, tags_json, semantic_tokens_json,
+                       last_accessed_at, access_count, archived
+                FROM memory_records
+                WHERE dedupe_key = ?
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (dedupe_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_record(row)
+
+    def list_records(
+        self,
+        *,
+        families: list[str] | None = None,
+        related_session_id: str | None = None,
+        include_archived: bool = False,
+        limit: int = 200,
+    ) -> list[MemoryRecord]:
+        clauses: list[str] = []
+        params: list[object] = []
+        if families:
+            placeholders = ", ".join("?" for _ in families)
+            clauses.append(f"memory_family IN ({placeholders})")
+            params.extend(families)
+        if related_session_id:
+            clauses.append("related_session_id = ?")
+            params.append(related_session_id)
+        if not include_archived:
+            clauses.append("archived = 0")
+        where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT memory_id, dedupe_key, memory_family, source_class, title, summary, normalized_content,
+                       structured_fields_json, provenance_json, confidence, freshness_state, created_at, updated_at,
+                       last_validated_at, retention_policy, sensitivity_level, related_session_id, related_task_ids_json,
+                       related_workspace_ids_json, related_artifact_refs_json, tags_json, semantic_tokens_json,
+                       last_accessed_at, access_count, archived
+                FROM memory_records
+                {where_clause}
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT ?
+                """,
+                (*params, limit),
+            ).fetchall()
+        return [self._row_to_record(row) for row in rows]
+
+    def mark_accessed(self, memory_id: str, *, accessed_at: str | None = None) -> None:
+        timestamp = accessed_at or utc_now_iso()
+        with self.database.connect() as connection:
+            connection.execute(
+                """
+                UPDATE memory_records
+                SET last_accessed_at = ?, access_count = access_count + 1
+                WHERE memory_id = ?
+                """,
+                (timestamp, memory_id),
+            )
+
+    def delete_records_before(self, *, family: str, cutoff: str) -> int:
+        with self.database.connect() as connection:
+            cursor = connection.execute(
+                """
+                DELETE FROM memory_records
+                WHERE memory_family = ? AND updated_at < ?
+                """,
+                (family, cutoff),
+            )
+        return int(cursor.rowcount or 0)
+
+    def trim_records(self, *, family: str, limit: int) -> int:
+        with self.database.connect() as connection:
+            cursor = connection.execute(
+                """
+                DELETE FROM memory_records
+                WHERE memory_id IN (
+                    SELECT memory_id
+                    FROM memory_records
+                    WHERE memory_family = ?
+                    ORDER BY updated_at DESC, created_at DESC
+                    LIMIT -1 OFFSET ?
+                )
+                """,
+                (family, max(int(limit), 0)),
+            )
+        return int(cursor.rowcount or 0)
+
+    def count_by_family(self) -> dict[str, int]:
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT memory_family, COUNT(*) AS count
+                FROM memory_records
+                WHERE archived = 0
+                GROUP BY memory_family
+                ORDER BY memory_family
+                """
+            ).fetchall()
+        return {str(row["memory_family"]): int(row["count"]) for row in rows}
+
+    def log_query(self, query: MemoryQuery, result: MemoryResult) -> None:
+        with self.database.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO memory_query_log(
+                    query_id, retrieval_intent, requested_families_json, caller_subsystem, semantic_query_text,
+                    structured_filters_json, scope_constraints_json, matched_record_ids_json, family_distribution_json,
+                    filtered_out_counts_json, retrieval_trace_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    query.query_id,
+                    query.retrieval_intent,
+                    json.dumps(query.requested_families),
+                    query.caller_subsystem,
+                    query.semantic_query_text,
+                    json.dumps(query.structured_filters),
+                    json.dumps(query.scope_constraints),
+                    json.dumps([match.record.memory_id for match in result.matched_records]),
+                    json.dumps(result.family_distribution),
+                    json.dumps(result.filtered_out_counts),
+                    json.dumps(result.retrieval_trace),
+                    utc_now_iso(),
+                ),
+            )
+
+    def update_query_trace(self, query_id: str, retrieval_trace: dict[str, object]) -> None:
+        with self.database.connect() as connection:
+            connection.execute(
+                """
+                UPDATE memory_query_log
+                SET retrieval_trace_json = ?
+                WHERE query_id = ?
+                """,
+                (json.dumps(retrieval_trace), query_id),
+            )
+
+    def delete_query_logs_before(self, *, cutoff: str) -> int:
+        with self.database.connect() as connection:
+            cursor = connection.execute(
+                """
+                DELETE FROM memory_query_log
+                WHERE created_at < ?
+                """,
+                (cutoff,),
+            )
+        return int(cursor.rowcount or 0)
+
+    def trim_query_log(self, *, limit: int) -> int:
+        with self.database.connect() as connection:
+            cursor = connection.execute(
+                """
+                DELETE FROM memory_query_log
+                WHERE query_id IN (
+                    SELECT query_id
+                    FROM memory_query_log
+                    ORDER BY created_at DESC, query_id DESC
+                    LIMIT -1 OFFSET ?
+                )
+                """,
+                (max(int(limit), 0),),
+            )
+        return int(cursor.rowcount or 0)
+
+    def list_recent_queries(self, *, limit: int = 25) -> list[dict[str, object]]:
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT query_id, retrieval_intent, requested_families_json, caller_subsystem, semantic_query_text,
+                       structured_filters_json, scope_constraints_json, matched_record_ids_json, family_distribution_json,
+                       filtered_out_counts_json, retrieval_trace_json, created_at
+                FROM memory_query_log
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [
+            {
+                "query_id": row["query_id"],
+                "retrieval_intent": row["retrieval_intent"],
+                "requested_families": decode_json_list(
+                    row["requested_families_json"],
+                    context=f"memory_query_log.requested_families_json[{row['query_id']}]",
+                ),
+                "caller_subsystem": row["caller_subsystem"],
+                "semantic_query_text": row["semantic_query_text"],
+                "structured_filters": decode_json_dict(
+                    row["structured_filters_json"],
+                    context=f"memory_query_log.structured_filters_json[{row['query_id']}]",
+                ),
+                "scope_constraints": decode_json_dict(
+                    row["scope_constraints_json"],
+                    context=f"memory_query_log.scope_constraints_json[{row['query_id']}]",
+                ),
+                "matched_record_ids": decode_json_list(
+                    row["matched_record_ids_json"],
+                    context=f"memory_query_log.matched_record_ids_json[{row['query_id']}]",
+                ),
+                "family_distribution": decode_json_dict(
+                    row["family_distribution_json"],
+                    context=f"memory_query_log.family_distribution_json[{row['query_id']}]",
+                ),
+                "filtered_out_counts": decode_json_dict(
+                    row["filtered_out_counts_json"],
+                    context=f"memory_query_log.filtered_out_counts_json[{row['query_id']}]",
+                ),
+                "retrieval_trace": decode_json_dict(
+                    row["retrieval_trace_json"],
+                    context=f"memory_query_log.retrieval_trace_json[{row['query_id']}]",
+                ),
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
+    def _row_to_record(self, row) -> MemoryRecord:
+        provenance = decode_json_dict(row["provenance_json"], context=f"memory_records.provenance_json[{row['memory_id']}]")
+        return MemoryRecord(
+            memory_id=row["memory_id"],
+            dedupe_key=row["dedupe_key"],
+            memory_family=row["memory_family"],
+            source_class=row["source_class"],
+            title=row["title"],
+            summary=row["summary"],
+            normalized_content=row["normalized_content"],
+            structured_fields=decode_json_dict(
+                row["structured_fields_json"],
+                context=f"memory_records.structured_fields_json[{row['memory_id']}]",
+            ),
+            provenance=MemoryProvenance(
+                origin_subsystem=str(provenance.get("originSubsystem") or ""),
+                origin_surface=str(provenance.get("originSurface") or ""),
+                operator_provided=bool(provenance.get("operatorProvided", False)),
+                inferred=bool(provenance.get("inferred", False)),
+                verification_state=str(provenance.get("verificationState") or "unverified"),
+                source_artifact_refs=[
+                    str(value).strip()
+                    for value in provenance.get("sourceArtifactRefs", [])
+                    if str(value).strip()
+                ]
+                if isinstance(provenance.get("sourceArtifactRefs"), list)
+                else [],
+                source_event_refs=[
+                    str(value).strip()
+                    for value in provenance.get("sourceEventRefs", [])
+                    if str(value).strip()
+                ]
+                if isinstance(provenance.get("sourceEventRefs"), list)
+                else [],
+                source_task_ref=str(provenance.get("sourceTaskRef") or ""),
+                source_workspace_ref=str(provenance.get("sourceWorkspaceRef") or ""),
+                source_session_ref=str(provenance.get("sourceSessionRef") or ""),
+            ),
+            confidence=float(row["confidence"] or 0.0),
+            freshness_state=row["freshness_state"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            last_validated_at=row["last_validated_at"],
+            retention_policy=row["retention_policy"],
+            sensitivity_level=row["sensitivity_level"],
+            related_session_id=row["related_session_id"],
+            related_task_ids=[
+                str(value).strip()
+                for value in decode_json_list(
+                    row["related_task_ids_json"],
+                    context=f"memory_records.related_task_ids_json[{row['memory_id']}]",
+                )
+                if str(value).strip()
+            ],
+            related_workspace_ids=[
+                str(value).strip()
+                for value in decode_json_list(
+                    row["related_workspace_ids_json"],
+                    context=f"memory_records.related_workspace_ids_json[{row['memory_id']}]",
+                )
+                if str(value).strip()
+            ],
+            related_artifact_refs=[
+                str(value).strip()
+                for value in decode_json_list(
+                    row["related_artifact_refs_json"],
+                    context=f"memory_records.related_artifact_refs_json[{row['memory_id']}]",
+                )
+                if str(value).strip()
+            ],
+            tags=[
+                str(value).strip()
+                for value in decode_json_list(
+                    row["tags_json"],
+                    context=f"memory_records.tags_json[{row['memory_id']}]",
+                )
+                if str(value).strip()
+            ],
+            semantic_tokens=[
+                str(value).strip()
+                for value in decode_json_list(
+                    row["semantic_tokens_json"],
+                    context=f"memory_records.semantic_tokens_json[{row['memory_id']}]",
+                )
+                if str(value).strip()
+            ],
+            last_accessed_at=row["last_accessed_at"],
+            access_count=int(row["access_count"] or 0),
+            archived=bool(row["archived"]),
+        )

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
 from stormhelm.core.memory.database import SQLiteDatabase
@@ -384,6 +386,42 @@ def test_resource_status_overlays_helper_snapshot(temp_config, monkeypatch: pyte
     assert result["gpu"][0]["temperature_c"] == 67.0
     assert result["gpu"][0]["power_w"] == 155.5
     assert result["thermal"]["sensors"][0]["label"] == "CPU"
+
+
+def test_network_probe_hides_console_window_on_windows(temp_config, monkeypatch: pytest.MonkeyPatch) -> None:
+    probe = SystemProbe(temp_config)
+    captured: dict[str, object] = {}
+
+    class FakeStartupInfo:
+        def __init__(self) -> None:
+            self.dwFlags = 0
+            self.wShowWindow = None
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout="Reply from 1.1.1.1: bytes=32 time=27ms TTL=57",
+            stderr="",
+        )
+
+    monkeypatch.setattr("stormhelm.core.system.probe.os.name", "nt")
+    monkeypatch.setattr("stormhelm.core.system.probe.subprocess.CREATE_NO_WINDOW", 0x08000000, raising=False)
+    monkeypatch.setattr("stormhelm.core.system.probe.subprocess.STARTUPINFO", FakeStartupInfo, raising=False)
+    monkeypatch.setattr("stormhelm.core.system.probe.subprocess.STARTF_USESHOWWINDOW", 1, raising=False)
+    monkeypatch.setattr("stormhelm.core.system.probe.subprocess.SW_HIDE", 0, raising=False)
+    monkeypatch.setattr("stormhelm.core.system.probe.subprocess.run", fake_run)
+
+    result = probe._network_probe("1.1.1.1", timeout_ms=1200)
+
+    assert result["reachable"] is True
+    assert captured["command"] == ["ping", "-n", "1", "-w", "1200", "1.1.1.1"]
+    assert captured["creationflags"] == 0x08000000
+    assert isinstance(captured["startupinfo"], FakeStartupInfo)
+    assert captured["startupinfo"].dwFlags == 1
+    assert captured["startupinfo"].wShowWindow == 0
 
 
 def test_app_control_focuses_matching_visible_app(temp_config, monkeypatch: pytest.MonkeyPatch) -> None:

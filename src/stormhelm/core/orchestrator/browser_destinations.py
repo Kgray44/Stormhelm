@@ -878,11 +878,7 @@ class BrowserDestinationResolver:
 
     def response_contract_for_success(self, resolution: DestinationResolutionResult) -> dict[str, str]:
         title = resolution.display_title or (resolution.destination.title if resolution.destination is not None else "Browser destination")
-        return self._response_contract(
-            title=f"{title} opened",
-            micro=f"Opened {title} in {self._open_surface_label(resolution.request.open_target)}.",
-            full=f"Resolved the destination and opened it in {self._open_surface_label(resolution.request.open_target)}.",
-        )
+        return self._success_response_contract(title, open_target=resolution.request.open_target)
 
     def response_contract_for_failure(self, reason: BrowserOpenFailureReason) -> dict[str, str]:
         if reason == BrowserOpenFailureReason.AMBIGUOUS_DESTINATION:
@@ -920,10 +916,19 @@ class BrowserDestinationResolver:
         return self.response_contract_for_search_title(title, open_target=resolution.request.open_target)
 
     def response_contract_for_search_title(self, title: str, *, open_target: str) -> dict[str, str]:
+        return self._success_response_contract(title, open_target=open_target)
+
+    def _success_response_contract(self, title: str, *, open_target: str) -> dict[str, str]:
+        if open_target == "deck":
+            return self._response_contract(
+                title=f"{title} queued",
+                micro=f"Queued {title} for the Deck browser.",
+                full=f"Queued {title} for the Deck browser.",
+            )
         return self._response_contract(
-            title=f"{title} opened",
-            micro=f"Opened {title} in {self._open_surface_label(open_target)}.",
-            full=f"Resolved the search URL and opened it in {self._open_surface_label(open_target)}.",
+            title=f"{title} requested",
+            micro=f"Requested that {title} open externally.",
+            full=f"Requested that {title} open externally.",
         )
 
     def response_contract_for_search_failure(self, reason: BrowserSearchFailureReason) -> dict[str, str]:

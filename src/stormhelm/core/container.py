@@ -6,9 +6,12 @@ from typing import Any
 
 from stormhelm.config.loader import load_config
 from stormhelm.config.models import AppConfig
+from stormhelm.core.adapters import default_adapter_contract_registry
 from stormhelm.core.events import EventBuffer
 from stormhelm.core.jobs.manager import JobManager
+from stormhelm.core.lifecycle import LifecycleController
 from stormhelm.core.logging import configure_logging
+from stormhelm.core.memory import SemanticMemoryRepository, SemanticMemoryService
 from stormhelm.core.memory.database import SQLiteDatabase
 from stormhelm.core.memory.repositories import (
     ConversationRepository,
@@ -42,6 +45,7 @@ from stormhelm.core.tools.base import ToolContext
 from stormhelm.core.tools.builtins import register_builtin_tools
 from stormhelm.core.tools.executor import ToolExecutor
 from stormhelm.core.tools.registry import ToolRegistry
+from stormhelm.core.trust import TrustRepository, TrustService
 from stormhelm.core.workspace.indexer import WorkspaceIndexer
 from stormhelm.core.workspace.repository import WorkspaceRepository
 from stormhelm.core.workspace.service import WorkspaceService
@@ -58,6 +62,7 @@ class CoreContainer:
     notes: NotesRepository
     preferences: PreferencesRepository
     tool_runs: ToolRunRepository
+    memory: SemanticMemoryService
     safety: SafetyPolicy
     tool_registry: ToolRegistry
     tool_executor: ToolExecutor
@@ -69,6 +74,8 @@ class CoreContainer:
     screen_awareness: ScreenAwarenessSubsystem
     discord_relay: DiscordRelaySubsystem
     task_service: DurableTaskService
+    trust: TrustService
+    lifecycle: LifecycleController
     network_monitor: NetworkMonitor | None = None
     runtime_bootstrap: RuntimeBootstrapResult | None = None
     operational_awareness: OperationalAwarenessService = field(default_factory=OperationalAwarenessService)
@@ -86,7 +93,11 @@ class CoreContainer:
         )
         logger = configure_logging(self.config)
         logger.info("Starting Stormhelm core.")
-        self.runtime_bootstrap = initialize_runtime_state(self.config)
+        lifecycle_bootstrap = self.lifecycle.bootstrap()
+        self.runtime_bootstrap = initialize_runtime_state(
+            self.config,
+            install_mode=self.lifecycle.install_state.install_mode.value,
+        )
         self.database.initialize()
         self.conversations.ensure_session()
         await self.jobs.start()
@@ -118,6 +129,17 @@ class CoreContainer:
                 message="Initialized Stormhelm runtime directories for first run.",
                 payload=self.runtime_bootstrap.first_run_record,
             )
+        if lifecycle_bootstrap.lifecycle_hold_reason:
+            self.events.publish(
+                event_family="lifecycle",
+                event_type="lifecycle.bootstrap.hold",
+                severity="warning",
+                subsystem="lifecycle",
+                visibility_scope="operator_blocking",
+                retention_class="bootstrap_assist",
+                message=lifecycle_bootstrap.lifecycle_hold_reason,
+                payload=lifecycle_bootstrap.to_dict(),
+            )
 
     async def stop(self) -> None:
         self.events.publish(
@@ -133,6 +155,7 @@ class CoreContainer:
             self.network_monitor.stop()
         await self.jobs.stop()
         self.tool_executor.shutdown()
+        self.lifecycle.shutdown()
         clear_runtime_state(self.config)
 
     def status_snapshot(self) -> dict[str, Any]:
@@ -176,12 +199,18 @@ class CoreContainer:
             "software_recovery": self.software_recovery.status_snapshot(),
             "screen_awareness": self.screen_awareness.status_snapshot(),
             "discord_relay": self.discord_relay.status_snapshot(),
+            "trust": self.trust.status_snapshot(
+                session_id="default",
+                active_task_id=str(self.assistant.session_state.get_active_task_id("default") or ""),
+            ),
             "provider_state": self._provider_state_snapshot(),
             "tool_state": self._tool_state_snapshot(),
             "watch_state": watch_state,
             "active_task": self.task_service.active_task_summary("default"),
+            "memory": self.memory.status_snapshot(),
             "event_stream": self.events.state_snapshot(),
             "first_run": bool(self.runtime_bootstrap and self.runtime_bootstrap.first_run),
+            "lifecycle": self.lifecycle.status_snapshot(),
         }
 
     def _system_state_snapshot(self) -> dict[str, Any]:
@@ -214,14 +243,42 @@ class CoreContainer:
         }
 
     def _tool_state_snapshot(self) -> dict[str, Any]:
+        metadata_list = self.tool_registry.metadata()
+        contract_registry_snapshot = default_adapter_contract_registry().snapshot()
         enabled_tools = [
             metadata["name"]
-            for metadata in self.tool_registry.metadata()
+            for metadata in metadata_list
             if self.config.tools.enabled.is_enabled(str(metadata.get("name", "")))
         ]
+        contract_bound_tools: dict[str, list[str]] = {}
+        adapter_families: set[str] = set()
+        adapter_ids: set[str] = set()
+        for metadata in metadata_list:
+            contracts = metadata.get("adapter_contracts")
+            if not isinstance(contracts, list) or not contracts:
+                continue
+            adapter_ids_for_tool: list[str] = []
+            for contract in contracts:
+                if not isinstance(contract, dict):
+                    continue
+                adapter_id = str(contract.get("adapter_id") or "").strip()
+                family = str(contract.get("family") or "").strip()
+                if adapter_id:
+                    adapter_ids_for_tool.append(adapter_id)
+                    adapter_ids.add(adapter_id)
+                if family:
+                    adapter_families.add(family)
+            if adapter_ids_for_tool:
+                contract_bound_tools[str(metadata.get("name") or "")] = adapter_ids_for_tool
         return {
             "enabled_count": len(enabled_tools),
             "enabled_tools": enabled_tools,
+            "adapter_contract_count": len(adapter_ids),
+            "healthy_adapter_contract_count": int(contract_registry_snapshot.get("healthy_contract_count", len(adapter_ids))),
+            "adapter_contract_validation_failures": int(contract_registry_snapshot.get("validation_failure_count", 0)),
+            "adapter_families": sorted(adapter_families),
+            "contract_bound_tools": contract_bound_tools,
+            "adapter_contract_binding_modes": dict(contract_registry_snapshot.get("tool_binding_modes") or {}),
         }
 
     def _watch_state_snapshot(self, jobs: list[dict[str, Any]]) -> dict[str, Any]:
@@ -245,10 +302,10 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
     notes = NotesRepository(database)
     preferences = PreferencesRepository(database)
     tool_runs = ToolRunRepository(database)
-    session_state = ConversationStateStore(preferences)
+    memory = SemanticMemoryService(SemanticMemoryRepository(database))
+    session_state = ConversationStateStore(preferences, memory=memory)
     persona = PersonaContract(app_config)
     system_probe = SystemProbe(app_config, preferences=preferences)
-    safety = SafetyPolicy(app_config)
     network_monitor = NetworkMonitor(
         probe=system_probe,
         events=events,
@@ -259,8 +316,24 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
     registry = ToolRegistry()
     register_builtin_tools(registry)
     executor = ToolExecutor(registry, max_sync_workers=app_config.concurrency.max_workers)
+    lifecycle = LifecycleController(app_config, events=events)
     provider = OpenAIResponsesProvider(app_config.openai) if app_config.openai.enabled else None
     calculations = build_calculations_subsystem(app_config.calculations)
+    workspace_repository = WorkspaceRepository(database)
+    task_service = DurableTaskService(
+        repository=TaskRepository(database),
+        session_state=session_state,
+        events=events,
+        memory=memory,
+    )
+    trust = TrustService(
+        config=app_config.trust,
+        repository=TrustRepository(database),
+        events=events,
+        session_state=session_state,
+        task_service=task_service,
+    )
+    safety = SafetyPolicy(app_config, trust_service=trust)
     software_recovery = build_software_recovery_subsystem(
         app_config.software_recovery,
         openai_enabled=app_config.openai.enabled,
@@ -270,6 +343,7 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
         recovery=software_recovery,
         safety=safety,
         system_probe=system_probe,
+        trust_service=trust,
     )
     screen_awareness = build_screen_awareness_subsystem(
         app_config.screen_awareness,
@@ -282,6 +356,7 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
         session_state=session_state,
         system_probe=system_probe,
         observation_source=screen_awareness.native_observer,
+        trust_service=trust,
     )
     planner = DeterministicPlanner(
         calculations_config=app_config.calculations,
@@ -291,12 +366,6 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
         screen_awareness_config=app_config.screen_awareness,
         screen_awareness_seam=screen_awareness.planner_seam,
         discord_relay_config=app_config.discord_relay,
-    )
-    workspace_repository = WorkspaceRepository(database)
-    task_service = DurableTaskService(
-        repository=TaskRepository(database),
-        session_state=session_state,
-        events=events,
     )
     workspace_service = WorkspaceService(
         config=app_config,
@@ -308,6 +377,7 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
         indexer=WorkspaceIndexer(app_config),
         events=events,
         persona=persona,
+        memory=memory,
     )
     jobs = JobManager(
         config=app_config,
@@ -322,6 +392,7 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
             system_probe=system_probe,
             workspace_service=workspace_service,
             task_service=task_service,
+            trust_service=trust,
         ),
         tool_runs=tool_runs,
         events=events,
@@ -355,6 +426,7 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
         notes=notes,
         preferences=preferences,
         tool_runs=tool_runs,
+        memory=memory,
         safety=safety,
         tool_registry=registry,
         tool_executor=executor,
@@ -366,5 +438,7 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
         screen_awareness=screen_awareness,
         discord_relay=discord_relay,
         task_service=task_service,
+        trust=trust,
+        lifecycle=lifecycle,
         network_monitor=network_monitor,
     )

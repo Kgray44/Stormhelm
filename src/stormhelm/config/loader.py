@@ -14,6 +14,7 @@ from stormhelm.config.models import (
     default_discord_trusted_aliases,
     EventStreamConfig,
     HardwareTelemetryConfig,
+    LifecycleConfig,
     LocationConfig,
     LoggingConfig,
     NetworkConfig,
@@ -92,6 +93,7 @@ def _build_app_config(
     logs_dir = _expand_path(storage_data.get("logs_dir") or "", root, data_dir) or (data_dir / "logs")
     database_path = _expand_path(storage_data.get("database_path") or "", root, data_dir) or (data_dir / "stormhelm.db")
     state_dir = _expand_path(storage_data.get("state_dir") or "", root, data_dir) or (data_dir / "state")
+    cache_dir = _expand_path(storage_data.get("cache_dir") or "", root, data_dir) or (data_dir / "cache")
 
     logging_data = data.get("logging", {})
     logging_config = LoggingConfig(
@@ -114,6 +116,22 @@ def _build_app_config(
         poll_interval_ms=int(ui_data.get("poll_interval_ms", 1500)),
         hide_to_tray_on_close=bool(ui_data.get("hide_to_tray_on_close", True)),
         ghost_shortcut=str(ui_data.get("ghost_shortcut", "Ctrl+Space")),
+    )
+
+    lifecycle_data = data.get("lifecycle", {})
+    lifecycle_config = LifecycleConfig(
+        startup_enabled=bool(lifecycle_data.get("startup_enabled", False)),
+        start_core_with_windows=bool(lifecycle_data.get("start_core_with_windows", False)),
+        start_shell_with_windows=bool(lifecycle_data.get("start_shell_with_windows", False)),
+        tray_only_startup=bool(lifecycle_data.get("tray_only_startup", True)),
+        ghost_ready_on_startup=bool(lifecycle_data.get("ghost_ready_on_startup", True)),
+        background_core_resident=bool(lifecycle_data.get("background_core_resident", True)),
+        auto_restart_core=bool(lifecycle_data.get("auto_restart_core", True)),
+        max_core_restart_attempts=int(lifecycle_data.get("max_core_restart_attempts", 2)),
+        restart_failure_window_seconds=float(lifecycle_data.get("restart_failure_window_seconds", 300.0)),
+        shell_heartbeat_interval_seconds=float(lifecycle_data.get("shell_heartbeat_interval_seconds", 15.0)),
+        shell_stale_after_seconds=float(lifecycle_data.get("shell_stale_after_seconds", 45.0)),
+        core_restart_backoff_ms=int(lifecycle_data.get("core_restart_backoff_ms", 750)),
     )
 
     event_stream_data = data.get("event_stream", {})
@@ -369,6 +387,9 @@ def _build_app_config(
             state_dir=state_dir,
             core_state_path=state_dir / "core-state.json",
             first_run_marker_path=state_dir / "first-run.json",
+            lifecycle_state_path=state_dir / "lifecycle-state.json",
+            core_session_path=state_dir / "core-session.json",
+            shell_session_path=state_dir / "shell-session.json",
             core_executable_path=runtime.install_root / "stormhelm-core.exe",
         ),
         network=NetworkConfig(host=host, port=port),
@@ -377,10 +398,12 @@ def _build_app_config(
             database_path=database_path,
             logs_dir=logs_dir,
             state_dir=state_dir,
+            cache_dir=cache_dir,
         ),
         logging=logging_config,
         concurrency=concurrency_config,
         ui=ui_config,
+        lifecycle=lifecycle_config,
         event_stream=event_stream_config,
         location=location_config,
         weather=weather_config,
@@ -438,6 +461,18 @@ def _apply_env_overrides(data: ConfigDict, env: Mapping[str, str]) -> ConfigDict
         "STORMHELM_DATA_DIR": ("storage.data_dir", str),
         "STORMHELM_MAX_CONCURRENT_JOBS": ("concurrency.max_workers", int),
         "STORMHELM_DEFAULT_JOB_TIMEOUT_SECONDS": ("concurrency.default_job_timeout_seconds", float),
+        "STORMHELM_STARTUP_ENABLED": ("lifecycle.startup_enabled", _parse_bool),
+        "STORMHELM_START_CORE_WITH_WINDOWS": ("lifecycle.start_core_with_windows", _parse_bool),
+        "STORMHELM_START_SHELL_WITH_WINDOWS": ("lifecycle.start_shell_with_windows", _parse_bool),
+        "STORMHELM_TRAY_ONLY_STARTUP": ("lifecycle.tray_only_startup", _parse_bool),
+        "STORMHELM_GHOST_READY_ON_STARTUP": ("lifecycle.ghost_ready_on_startup", _parse_bool),
+        "STORMHELM_BACKGROUND_CORE_RESIDENT": ("lifecycle.background_core_resident", _parse_bool),
+        "STORMHELM_AUTO_RESTART_CORE": ("lifecycle.auto_restart_core", _parse_bool),
+        "STORMHELM_MAX_CORE_RESTART_ATTEMPTS": ("lifecycle.max_core_restart_attempts", int),
+        "STORMHELM_RESTART_FAILURE_WINDOW_SECONDS": ("lifecycle.restart_failure_window_seconds", float),
+        "STORMHELM_SHELL_HEARTBEAT_INTERVAL_SECONDS": ("lifecycle.shell_heartbeat_interval_seconds", float),
+        "STORMHELM_SHELL_STALE_AFTER_SECONDS": ("lifecycle.shell_stale_after_seconds", float),
+        "STORMHELM_CORE_RESTART_BACKOFF_MS": ("lifecycle.core_restart_backoff_ms", int),
         "STORMHELM_OPENAI_ENABLED": ("openai.enabled", _parse_bool),
         "STORMHELM_OPENAI_BASE_URL": ("openai.base_url", str),
         "STORMHELM_OPENAI_MODEL": ("openai.model", str),

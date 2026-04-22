@@ -87,6 +87,24 @@ class CoreApiClient(QtCore.QObject):
     def fetch_settings(self) -> None:
         self._send_json("GET", "/settings", None, self.settings_received.emit)
 
+    def report_shell_presence(self, payload: dict[str, object]) -> None:
+        self._send_json("POST", "/lifecycle/shell", payload, lambda _payload: None)
+
+    def report_shell_detached(self, pid: int | None = None, *, sync: bool = False) -> None:
+        payload = {
+            "pid": int(pid or 0),
+            "mode": "ghost",
+            "window_visible": False,
+            "tray_present": False,
+            "hide_to_tray_on_close": False,
+            "ghost_reveal_target": 0.0,
+            "event": "detach",
+        }
+        if not sync:
+            self.report_shell_presence(payload)
+            return
+        self._send_json_and_wait("POST", "/lifecycle/shell", payload)
+
     def fetch_snapshot(
         self,
         *,
@@ -166,6 +184,22 @@ class CoreApiClient(QtCore.QObject):
             reply = self.manager.post(request, QtCore.QByteArray(data))
 
         reply.finished.connect(lambda reply=reply, cb=callback, purpose=path: self._handle_reply(reply, cb, purpose))
+
+    def _send_json_and_wait(self, method: str, path: str, payload: dict[str, object] | None) -> None:
+        request = QtNetwork.QNetworkRequest(QtCore.QUrl(f"{self.base_url}{path}"))
+        request.setHeader(QtNetwork.QNetworkRequest.ContentTypeHeader, "application/json")
+        data = json.dumps(payload or {}).encode("utf-8")
+        reply = self.manager.post(request, QtCore.QByteArray(data)) if method == "POST" else self.manager.get(request)
+        loop = QtCore.QEventLoop()
+        timer = QtCore.QTimer()
+        timer.setSingleShot(True)
+        timer.timeout.connect(loop.quit)
+        reply.finished.connect(loop.quit)
+        timer.start(250)
+        loop.exec()
+        if reply.isRunning():
+            reply.abort()
+        reply.deleteLater()
 
     def _open_event_stream(self, *, cursor: int | None) -> None:
         query = f"?session_id={self._stream_requested_session_id}"

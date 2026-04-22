@@ -21,6 +21,17 @@ class NoteCreateRequest(BaseModel):
     workspace_id: str = ""
 
 
+class ShellPresenceRequest(BaseModel):
+    pid: int = Field(..., ge=0)
+    mode: str = "ghost"
+    window_visible: bool = False
+    tray_present: bool = False
+    hide_to_tray_on_close: bool = False
+    ghost_reveal_target: float = 0.0
+    event: str = "heartbeat"
+    observed_at: str = ""
+
+
 class EventsResponse(BaseModel):
     events: list[dict[str, Any]]
     cursor: int | None = None

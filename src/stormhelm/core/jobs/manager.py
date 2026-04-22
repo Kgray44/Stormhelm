@@ -80,6 +80,7 @@ class JobManager:
         tool_name: str,
         arguments: dict[str, object],
         *,
+        session_id: str = "default",
         timeout_seconds: float | None = None,
         task_id: str | None = None,
         task_step_id: str | None = None,
@@ -90,6 +91,7 @@ class JobManager:
             tool_name,
             dict(arguments),
             timeout,
+            session_id=session_id,
             task_id=task_id,
             task_step_id=task_step_id,
         )
@@ -125,9 +127,10 @@ class JobManager:
         tool_name: str,
         arguments: dict[str, object],
         *,
+        session_id: str = "default",
         timeout_seconds: float | None = None,
     ) -> JobRecord:
-        job = await self.submit(tool_name, arguments, timeout_seconds=timeout_seconds)
+        job = await self.submit(tool_name, arguments, session_id=session_id, timeout_seconds=timeout_seconds)
         return await self.wait(job.job_id)
 
     async def wait(self, job_id: str) -> JobRecord:
@@ -175,6 +178,9 @@ class JobManager:
 
     async def _execute_job(self, job: JobRecord, worker_index: int) -> None:
         context = self.context_factory(job.job_id)
+        context.session_id = job.session_id
+        context.task_id = str(job.task_id or "")
+        context.task_step_id = str(job.task_step_id or "")
         loop = asyncio.get_running_loop()
         context.progress_callback = lambda payload: loop.call_soon_threadsafe(self._update_progress, job.job_id, payload)
         job.started_at = utc_now_iso()

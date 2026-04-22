@@ -10,6 +10,11 @@ import time
 from typing import Any, Callable
 from urllib.parse import urlparse
 
+from stormhelm.core.adapters import ClaimOutcome
+from stormhelm.core.adapters import attach_contract_metadata
+from stormhelm.core.adapters import build_execution_report
+from stormhelm.core.adapters import claim_outcome_from_verification_strength
+from stormhelm.core.adapters import default_adapter_contract_registry
 from stormhelm.config.models import DiscordRelayConfig
 from stormhelm.core.discord_relay.adapters import LocalDiscordClientAdapter
 from stormhelm.core.discord_relay.adapters import OfficialDiscordScaffoldAdapter
@@ -27,6 +32,9 @@ from stormhelm.core.discord_relay.models import DiscordRelayTrace
 from stormhelm.core.discord_relay.models import DiscordRouteMode
 from stormhelm.core.orchestrator.session_state import ConversationStateStore
 from stormhelm.core.screen_awareness.observation import NativeContextObservationSource
+from stormhelm.core.trust import PermissionScope
+from stormhelm.core.trust import TrustActionKind
+from stormhelm.core.trust import TrustActionRequest
 
 _BROWSER_PROCESSES = {"chrome", "msedge", "firefox", "brave", "opera", "vivaldi", "arc", "safari"}
 _FILE_PROCESSES = {"explorer", "code", "notepad", "notepad++", "devenv", "acrord32", "sumatrapdf"}
@@ -121,6 +129,7 @@ class DiscordRelaySubsystem:
     observation_source: Any | None = None
     local_adapter: Any | None = None
     official_adapter: Any | None = None
+    trust_service: Any | None = None
     clock: Callable[[], float] = time.time
     preview_ttl_seconds: float = _DEFAULT_PREVIEW_TTL_SECONDS
     duplicate_window_seconds: float = _DEFAULT_DUPLICATE_WINDOW_SECONDS
@@ -194,6 +203,9 @@ class DiscordRelaySubsystem:
         stage = str(slots.get("request_stage") or "preview").strip().lower() or "preview"
         destination_alias = _clean_text(slots.get("destination_alias"))
         note_text = _clean_text(slots.get("note_text"))
+        approval_scope = str(slots.get("approval_scope") or "").strip().lower() or None
+        approval_outcome = str(slots.get("approval_outcome") or "approve").strip().lower() or "approve"
+        trust_request_id = str(slots.get("trust_request_id") or "").strip() or None
 
         if not self.config.enabled:
             return self._terminal_response(
@@ -268,9 +280,88 @@ class DiscordRelaySubsystem:
                     preview_fingerprint=str(preview.fingerprint.get("fingerprint_id") or ""),
                     duplicate_suppressed=True,
                 )
+            route_contract_status = self._relay_route_contract_assessment(preview.route_mode)
+            if not route_contract_status["healthy"]:
+                return self._terminal_response(
+                    utterance=operator_text,
+                    stage=stage,
+                    destination_alias=preview.destination.alias,
+                    state=DiscordDispatchState.FAILED,
+                    assistant_response=(
+                        "I can't continue that Discord route because it isn't valid contract-backed adapter work yet."
+                    ),
+                    bearing_title="Discord Route Unavailable",
+                    micro_response="That Discord route isn't contract-backed right now.",
+                    active_request_state={},
+                    debug={
+                        "request_stage": stage,
+                        "destination": preview.destination.to_dict(),
+                        "preview": preview.to_dict(),
+                        "adapter_contract_status": route_contract_status,
+                    },
+                    preview=preview,
+                )
+            trust_decision = None
+            if self.trust_service is not None:
+                trust_request = self._trust_request(session_id=session_id, preview=preview)
+                if trust_request_id:
+                    trust_decision = self.trust_service.respond_to_request(
+                        approval_request_id=trust_request_id,
+                        decision=approval_outcome,
+                        session_id=session_id,
+                        scope=self._trust_scope(approval_scope),
+                        task_id="",
+                    )
+                else:
+                    trust_decision = self.trust_service.evaluate_action(trust_request)
+                if trust_decision.outcome == "blocked":
+                    return self._terminal_response(
+                        utterance=operator_text,
+                        stage=stage,
+                        destination_alias=preview.destination.alias,
+                        state=DiscordDispatchState.FAILED,
+                        assistant_response=trust_decision.operator_message,
+                        bearing_title="Discord Approval Denied",
+                        micro_response=trust_decision.operator_message,
+                        active_request_state={},
+                        debug={
+                            "request_stage": stage,
+                            "destination": preview.destination.to_dict(),
+                            "preview": preview.to_dict(),
+                            "trust": trust_decision.to_dict(),
+                        },
+                    )
+                if not trust_decision.allowed:
+                    return self._terminal_response(
+                        utterance=operator_text,
+                        stage=stage,
+                        destination_alias=preview.destination.alias,
+                        state=DiscordDispatchState.READY,
+                        assistant_response=trust_decision.operator_message,
+                        bearing_title="Discord Approval Needed",
+                        micro_response=trust_decision.operator_message,
+                        active_request_state=self.trust_service.attach_request_state(
+                            self._pending_preview_request_state(preview),
+                            decision=trust_decision,
+                        ),
+                        debug={
+                            "request_stage": stage,
+                            "destination": preview.destination.to_dict(),
+                            "preview": preview.to_dict(),
+                            "trust": trust_decision.to_dict(),
+                        },
+                        preview=preview,
+                    )
             attempt = self._dispatch_preview(preview)
             if attempt.state != DiscordDispatchState.FAILED:
                 self._remember_dispatch(preview)
+                if self.trust_service is not None and trust_decision is not None:
+                    self.trust_service.mark_action_executed(
+                        action_request=self._trust_request(session_id=session_id, preview=preview),
+                        grant=trust_decision.grant,
+                        summary=f"Dispatched Discord relay to {preview.destination.alias}.",
+                        details={"verification_strength": attempt.verification_strength},
+                    )
             self.session_state.remember_alias(
                 "discord_destination",
                 preview.destination.alias,
@@ -304,6 +395,9 @@ class DiscordRelaySubsystem:
                     "preview": preview.to_dict(),
                     "attempt": attempt.to_dict(),
                     "payload_source": _payload_source_details(preview.payload),
+                    "adapter_contract": dict(contract.get("adapter_contract") or {}) if isinstance(contract, dict) else {},
+                    "adapter_execution": dict(contract.get("adapter_execution") or {}) if isinstance(contract, dict) else {},
+                    "trust": trust_decision.to_dict() if trust_decision is not None else {},
                 },
                 active_request_state=self._pending_preview_request_state(preview)
                 if bool(attempt.debug.get("wrong_thread_refusal"))
@@ -322,6 +416,25 @@ class DiscordRelaySubsystem:
                 bearing_title="Discord Relay",
                 micro_response="I need a trusted Discord destination alias.",
                 active_request_state={},
+            )
+        route_contract_status = self._relay_route_contract_assessment(destination.route_mode)
+        if not route_contract_status["healthy"]:
+            return self._terminal_response(
+                utterance=operator_text,
+                stage=stage,
+                destination_alias=destination.alias,
+                state=DiscordDispatchState.FAILED,
+                assistant_response=(
+                    f"I can't use {destination.label}'s Discord route because it isn't valid contract-backed adapter work yet."
+                ),
+                bearing_title="Discord Route Unavailable",
+                micro_response="That Discord route isn't contract-backed right now.",
+                active_request_state={},
+                debug={
+                    "request_stage": stage,
+                    "destination": destination.to_dict(),
+                    "adapter_contract_status": route_contract_status,
+                },
             )
 
         payload_hint = str(slots.get("payload_hint") or "contextual").strip().lower() or "contextual"
@@ -426,8 +539,16 @@ class DiscordRelaySubsystem:
             target=destination.to_alias_target(),
         )
         assistant_response, contract = self._preview_contract(preview)
+        active_request_state = self._pending_preview_request_state(preview)
+        trust_decision = None
+        if self.trust_service is not None:
+            trust_decision = self.trust_service.evaluate_action(self._trust_request(session_id=session_id, preview=preview))
+            active_request_state = self.trust_service.attach_request_state(active_request_state, decision=trust_decision)
         return DiscordRelayResponse(
-            assistant_response=assistant_response,
+            assistant_response=self._merge_trust_prompt(
+                assistant_response,
+                trust_decision.operator_message if trust_decision is not None else "",
+            ),
             response_contract=contract,
             state=DiscordDispatchState.READY,
             preview=preview,
@@ -439,8 +560,11 @@ class DiscordRelaySubsystem:
                 "screen_awareness_used": preview.screen_awareness_used,
                 "payload_candidates": list(resolution.get("candidate_summaries") or []),
                 "payload_source": _payload_source_details(preview.payload),
+                "adapter_contract": dict(contract.get("adapter_contract") or {}) if isinstance(contract, dict) else {},
+                "adapter_execution": dict(contract.get("adapter_execution") or {}) if isinstance(contract, dict) else {},
+                "trust": trust_decision.to_dict() if trust_decision is not None else {},
             },
-            active_request_state=self._pending_preview_request_state(preview),
+            active_request_state=active_request_state,
         )
 
     def _terminal_response(
@@ -1179,11 +1303,22 @@ class DiscordRelaySubsystem:
             f"Route: {preview.route_mode.value}. "
             f"I haven't sent anything yet. Reply \"send it\" to continue.{warning_text}"
         )
-        return assistant_response, {
-            "bearing_title": "Discord Preview",
-            "micro_response": f"Ready to send to {preview.destination.label}.",
-            "full_response": assistant_response,
-        }
+        contract = self._adapter_contract_for_route(preview.route_mode)
+        execution = build_execution_report(
+            contract,
+            success=True,
+            observed_outcome=ClaimOutcome.PREVIEW,
+            evidence=["Built a relay preview without sending anything."],
+        )
+        return assistant_response, attach_contract_metadata(
+            {
+                "bearing_title": "Discord Preview",
+                "micro_response": f"Ready to send to {preview.destination.label}.",
+                "full_response": assistant_response,
+            },
+            contract=contract,
+            execution=execution,
+        )
 
     def _dispatch_contract(
         self,
@@ -1245,10 +1380,70 @@ class DiscordRelaySubsystem:
                 )
                 title = "Discord Failed"
                 micro = f"Failed to send to {preview.destination.label}."
-        return assistant_response, {
-            "bearing_title": title,
-            "micro_response": micro,
-            "full_response": assistant_response,
+        contract = self._adapter_contract_for_route(attempt.route_mode)
+        observed_outcome = ClaimOutcome.NONE
+        if attempt.state == DiscordDispatchState.VERIFIED:
+            observed_outcome = claim_outcome_from_verification_strength(attempt.verification_strength)
+        elif attempt.state == DiscordDispatchState.STARTED:
+            observed_outcome = ClaimOutcome.INITIATED
+        elif attempt.state == DiscordDispatchState.UNCERTAIN:
+            observed_outcome = claim_outcome_from_verification_strength(attempt.verification_strength)
+        execution = build_execution_report(
+            contract,
+            success=attempt.state in {
+                DiscordDispatchState.VERIFIED,
+                DiscordDispatchState.STARTED,
+                DiscordDispatchState.UNCERTAIN,
+            },
+            observed_outcome=observed_outcome,
+            evidence=list(attempt.verification_evidence[:3]),
+            verification_observed=attempt.verification_strength,
+            failure_kind=transport_failure_kind or attempt.failure_reason,
+        )
+        return assistant_response, attach_contract_metadata(
+            {
+                "bearing_title": title,
+                "micro_response": micro,
+                "full_response": assistant_response,
+            },
+            contract=contract,
+            execution=execution,
+        )
+
+    def _adapter_contract_for_route(self, route_mode: DiscordRouteMode) -> Any:
+        assessment = self._relay_route_contract_assessment(route_mode)
+        contract = assessment.get("contract")
+        if assessment.get("healthy") and contract is not None:
+            return contract
+        route_name = route_mode.value if isinstance(route_mode, DiscordRouteMode) else str(route_mode or "unknown")
+        raise ValueError(
+            f"Discord route '{route_name}' is unavailable because it is not backed by a valid adapter contract."
+        )
+
+    def _relay_route_contract_assessment(self, route_mode: DiscordRouteMode) -> dict[str, Any]:
+        registry = default_adapter_contract_registry()
+        adapter_id = "relay.discord_local_client"
+        if route_mode != DiscordRouteMode.LOCAL_CLIENT_AUTOMATION:
+            adapter_id = "relay.discord_official_scaffold"
+        try:
+            contract = registry.get_contract(adapter_id)
+        except KeyError:
+            return {
+                "contract_required": True,
+                "healthy": False,
+                "route_mode": route_mode.value,
+                "adapter_id": adapter_id,
+                "errors": [
+                    f"Discord route '{route_mode.value}' selected undeclared adapter contract '{adapter_id}'."
+                ],
+            }
+        return {
+            "contract_required": True,
+            "healthy": True,
+            "route_mode": route_mode.value,
+            "adapter_id": adapter_id,
+            "errors": [],
+            "contract": contract,
         }
 
     def _dispatch_preview(self, preview: DiscordDispatchPreview) -> DiscordDispatchAttempt:
@@ -1286,6 +1481,48 @@ class DiscordRelaySubsystem:
                 "pending_preview": preview.to_dict(),
             },
         }
+
+    def _trust_request(self, *, session_id: str, preview: DiscordDispatchPreview) -> TrustActionRequest:
+        return TrustActionRequest(
+            request_id=f"discord-{preview.destination.alias}-{preview.fingerprint.get('fingerprint_id') or 'preview'}",
+            family="discord_relay",
+            action_key="discord_relay.dispatch",
+            subject=preview.destination.alias,
+            session_id=session_id,
+            action_kind=TrustActionKind.DISCORD_RELAY,
+            approval_required=True,
+            preview_allowed=True,
+            suggested_scope=PermissionScope.ONCE,
+            available_scopes=[PermissionScope.ONCE, PermissionScope.SESSION],
+            operator_justification=(
+                f"Dispatching to {preview.destination.alias} may send material outside Stormhelm's local workspace."
+            ),
+            operator_message=(
+                f"Approval is required before Stormhelm sends this to {preview.destination.alias}. Choose once or session."
+            ),
+            verification_label="Relay delivery claims remain explicit and bounded by verification strength.",
+            details={
+                "destination_alias": preview.destination.alias,
+                "payload_kind": preview.payload.kind.value,
+                "route_mode": preview.route_mode.value,
+                "preview_fingerprint": str(preview.fingerprint.get("fingerprint_id") or ""),
+            },
+        )
+
+    def _trust_scope(self, value: str | None) -> PermissionScope | None:
+        normalized = str(value or "").strip().lower()
+        if normalized == PermissionScope.SESSION.value:
+            return PermissionScope.SESSION
+        if normalized == PermissionScope.ONCE.value:
+            return PermissionScope.ONCE
+        return None
+
+    def _merge_trust_prompt(self, message: str, trust_prompt: str) -> str:
+        text = str(message or "").strip()
+        prompt = str(trust_prompt or "").strip()
+        if not prompt or prompt in text:
+            return text
+        return f"{text} {prompt}".strip()
 
     def _clarification_request_state(
         self,
@@ -1422,6 +1659,7 @@ def build_discord_relay_subsystem(
     observation_source: Any | None = None,
     local_adapter: Any | None = None,
     official_adapter: Any | None = None,
+    trust_service: Any | None = None,
     clock: Callable[[], float] | None = None,
 ) -> DiscordRelaySubsystem:
     return DiscordRelaySubsystem(
@@ -1431,5 +1669,6 @@ def build_discord_relay_subsystem(
         observation_source=observation_source,
         local_adapter=local_adapter,
         official_adapter=official_adapter,
+        trust_service=trust_service,
         clock=clock or time.time,
     )

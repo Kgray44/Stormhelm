@@ -17,6 +17,7 @@ class StorageConfig:
     database_path: Path
     logs_dir: Path
     state_dir: Path
+    cache_dir: Path
 
 
 @dataclass(slots=True)
@@ -40,6 +41,22 @@ class UIConfig:
     poll_interval_ms: int
     hide_to_tray_on_close: bool
     ghost_shortcut: str
+
+
+@dataclass(slots=True)
+class LifecycleConfig:
+    startup_enabled: bool = False
+    start_core_with_windows: bool = False
+    start_shell_with_windows: bool = False
+    tray_only_startup: bool = True
+    ghost_ready_on_startup: bool = True
+    background_core_resident: bool = True
+    auto_restart_core: bool = True
+    max_core_restart_attempts: int = 2
+    restart_failure_window_seconds: float = 300.0
+    shell_heartbeat_interval_seconds: float = 15.0
+    shell_stale_after_seconds: float = 45.0
+    core_restart_backoff_ms: int = 750
 
 
 @dataclass(slots=True)
@@ -331,6 +348,9 @@ class RuntimePathConfig:
     state_dir: Path
     core_state_path: Path
     first_run_marker_path: Path
+    lifecycle_state_path: Path
+    core_session_path: Path
+    shell_session_path: Path
     core_executable_path: Path
 
 
@@ -349,6 +369,7 @@ class AppConfig:
     logging: LoggingConfig
     concurrency: ConcurrencyConfig
     ui: UIConfig
+    lifecycle: LifecycleConfig
     event_stream: EventStreamConfig
     location: LocationConfig
     weather: WeatherConfig

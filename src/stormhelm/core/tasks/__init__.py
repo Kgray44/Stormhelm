@@ -1,3 +1,5 @@
+from typing import TYPE_CHECKING
+
 from stormhelm.core.tasks.models import (
     TaskExecutionPlan,
     TaskRecord,
@@ -8,7 +10,9 @@ from stormhelm.core.tasks.models import (
     TaskStepState,
 )
 from stormhelm.core.tasks.repository import TaskRepository
-from stormhelm.core.tasks.service import DurableTaskService
+
+if TYPE_CHECKING:
+    from stormhelm.core.tasks.service import DurableTaskService
 
 __all__ = [
     "DurableTaskService",
@@ -21,3 +25,11 @@ __all__ = [
     "TaskStepRecord",
     "TaskStepState",
 ]
+
+
+def __getattr__(name: str) -> object:
+    if name == "DurableTaskService":
+        from stormhelm.core.tasks.service import DurableTaskService
+
+        return DurableTaskService
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

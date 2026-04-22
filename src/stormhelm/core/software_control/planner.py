@@ -19,6 +19,16 @@ _CONFIRMATION_PHRASES = {
     "proceed",
 }
 
+_DENIAL_PHRASES = {
+    "deny",
+    "no",
+    "stop",
+    "cancel",
+    "don't",
+    "do not",
+    "never mind",
+}
+
 _DIRECT_REQUEST_PATTERNS: tuple[tuple[re.Pattern[str], str, bool], ...] = (
     (re.compile(r"^(?:downloads? and install|install)\s+(?P<target>.+)$"), "install", False),
     (re.compile(r"^get\s+(?P<target>.+?)\s+installed$"), "install", False),
@@ -118,11 +128,17 @@ class SoftwareControlPlannerSeam:
         params = dict(parameters) if isinstance(parameters, dict) else {}
         if family != "software_control":
             return None
-        if not (
+        trust = active_request_state.get("trust") if isinstance(active_request_state.get("trust"), dict) else {}
+        approval_outcome = "approve"
+        if lower in _DENIAL_PHRASES or any(lower.startswith(f"{phrase} ") for phrase in _DENIAL_PHRASES):
+            approval_outcome = "deny"
+        elif not (
             lower in _CONFIRMATION_PHRASES
             or lower.startswith("continue ")
             or lower.startswith("confirm ")
             or lower.startswith("go ahead")
+            or lower.startswith("allow ")
+            or lower.startswith("approve ")
         ):
             return None
         operation_type = str(params.get("operation_type") or "").strip().lower()
@@ -135,6 +151,11 @@ class SoftwareControlPlannerSeam:
             disposition = SoftwareRouteDisposition.ROUTING_DISABLED
         else:
             disposition = SoftwareRouteDisposition.FOLLOW_UP_CONFIRMATION
+        approval_scope = "once"
+        if "session" in lower:
+            approval_scope = "session"
+        elif "task" in lower:
+            approval_scope = "task"
         return SoftwarePlannerEvaluation(
             candidate=True,
             disposition=disposition,
@@ -144,6 +165,9 @@ class SoftwareControlPlannerSeam:
             feature_enabled=self.config.enabled,
             planner_routing_enabled=self.config.planner_routing_enabled,
             follow_up_reuse=True,
+            approval_scope=approval_scope,
+            approval_outcome=approval_outcome,
+            trust_request_id=str(trust.get("request_id") or "").strip() or None,
             route_confidence=0.99,
             reasons=["follow-up confirmation matched a pending software-control request"],
         )

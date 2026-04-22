@@ -8,6 +8,10 @@ from stormhelm.config.models import CalculationsConfig
 from stormhelm.config.models import DiscordRelayConfig
 from stormhelm.config.models import ScreenAwarenessConfig
 from stormhelm.config.models import SoftwareControlConfig
+from stormhelm.core.adapters import AdapterContract
+from stormhelm.core.adapters import AdapterContractRegistry
+from stormhelm.core.adapters import AdapterRouteAssessment
+from stormhelm.core.adapters import default_adapter_contract_registry
 from stormhelm.core.calculations import CalculationsPlannerSeam
 from stormhelm.core.calculations import CalculationOutputMode
 from stormhelm.core.calculations import CalculationRouteDisposition
@@ -202,6 +206,7 @@ class DeterministicPlanner:
         software_control_config: SoftwareControlConfig | None = None,
         software_control_seam: SoftwareControlPlannerSeam | None = None,
         discord_relay_config: DiscordRelayConfig | None = None,
+        adapter_contracts: AdapterContractRegistry | None = None,
     ) -> None:
         self._available_tools = set(available_tools or DEFAULT_AVAILABLE_TOOLS)
         self._browser_destination_resolver = BrowserDestinationResolver()
@@ -215,6 +220,7 @@ class DeterministicPlanner:
             software_control_config or SoftwareControlConfig()
         )
         self._discord_relay_config = discord_relay_config or DiscordRelayConfig()
+        self._adapter_contracts = adapter_contracts or default_adapter_contract_registry()
 
     def plan(
         self,
@@ -361,6 +367,9 @@ class DeterministicPlanner:
                     "target_name": software_control_evaluation.target_name,
                     "request_stage": software_control_evaluation.request_stage,
                     "follow_up_reuse": software_control_evaluation.follow_up_reuse,
+                    "approval_scope": software_control_evaluation.approval_scope,
+                    "approval_outcome": software_control_evaluation.approval_outcome,
+                    "trust_request_id": software_control_evaluation.trust_request_id,
                     "family": "software_control",
                     "subject": software_control_evaluation.target_name,
                     "request_type_hint": "software_control_response",
@@ -1841,6 +1850,7 @@ class DeterministicPlanner:
         missing_capabilities: list[str] = []
         notes: list[str] = []
         freshness_expectation = None
+        adapter_fields = self._adapter_capability_fields(structured_query)
         if structured_query.query_shape == QueryShape.CURRENT_METRIC:
             freshness_expectation = "live"
         elif structured_query.query_shape == QueryShape.HISTORY_TREND:
@@ -1865,6 +1875,7 @@ class DeterministicPlanner:
                     required_tools=[],
                     required_capabilities=required_capabilities,
                     missing_capabilities=[],
+                    **adapter_fields,
                     freshness_expectation=freshness_expectation,
                     unsupported_reason=None,
                     notes=[
@@ -1878,6 +1889,7 @@ class DeterministicPlanner:
                 required_tools=[],
                 required_capabilities=required_capabilities,
                 missing_capabilities=["software_control"],
+                **adapter_fields,
                 freshness_expectation=freshness_expectation,
                 unsupported_reason=UnsupportedReason(
                     code="software_control_unavailable",
@@ -1947,6 +1959,7 @@ class DeterministicPlanner:
                     required_tools=[],
                     required_capabilities=required_capabilities,
                     missing_capabilities=[],
+                    **adapter_fields,
                     freshness_expectation=freshness_expectation,
                     unsupported_reason=None,
                     notes=[
@@ -1974,6 +1987,7 @@ class DeterministicPlanner:
                 required_tools=[],
                 required_capabilities=required_capabilities,
                 missing_capabilities=missing_capabilities,
+                **adapter_fields,
                 freshness_expectation=freshness_expectation,
                 unsupported_reason=UnsupportedReason(
                     code=str(slots.get("unsupported_reason_code") or "screen_awareness_observation_unavailable"),
@@ -1993,6 +2007,7 @@ class DeterministicPlanner:
                     required_tools=[],
                     required_capabilities=required_capabilities,
                     missing_capabilities=[],
+                    **adapter_fields,
                     freshness_expectation=freshness_expectation,
                     unsupported_reason=None,
                     notes=[
@@ -2007,6 +2022,7 @@ class DeterministicPlanner:
                 required_tools=[],
                 required_capabilities=required_capabilities,
                 missing_capabilities=["discord_relay"],
+                **adapter_fields,
                 freshness_expectation=freshness_expectation,
                 unsupported_reason=UnsupportedReason(
                     code="discord_relay_unavailable",
@@ -2023,6 +2039,7 @@ class DeterministicPlanner:
                 required_tools=[],
                 required_capabilities=required_capabilities,
                 missing_capabilities=missing_capabilities,
+                **adapter_fields,
                 freshness_expectation=freshness_expectation,
                 unsupported_reason=UnsupportedReason(
                     code="comparison_capability_unavailable",
@@ -2044,12 +2061,31 @@ class DeterministicPlanner:
                 required_tools=required_tools,
                 required_capabilities=required_capabilities,
                 missing_capabilities=missing_capabilities,
+                **adapter_fields,
                 freshness_expectation=freshness_expectation,
                 unsupported_reason=UnsupportedReason(
                     code=unsupported_code,
                     message=unsupported_message,
                 ),
                 notes=["The planner selected a deterministic route whose tool is disabled or unavailable."],
+            )
+
+        if adapter_fields.get("adapter_contract_status") == "invalid":
+            missing_capabilities.append("adapter_contract")
+            return CapabilityPlan(
+                supported=False,
+                available_tools=sorted(tool for tool in available_tools if tool in DEFAULT_AVAILABLE_TOOLS),
+                required_tools=required_tools,
+                required_capabilities=required_capabilities,
+                missing_capabilities=missing_capabilities,
+                **adapter_fields,
+                freshness_expectation=freshness_expectation,
+                unsupported_reason=UnsupportedReason(
+                    code="adapter_contract_unavailable",
+                    message="This route isn't available because it is not valid contract-backed adapter work.",
+                ),
+                notes=list(adapter_fields.get("adapter_contract_errors") or [])
+                or ["The planner refused a route that could not prove valid adapter contract backing."],
             )
 
         if tool_name is None and not slots.get("assistant_message"):
@@ -2060,10 +2096,91 @@ class DeterministicPlanner:
             required_tools=required_tools,
             required_capabilities=required_capabilities,
             missing_capabilities=[],
+            **adapter_fields,
             freshness_expectation=freshness_expectation,
             unsupported_reason=None,
             notes=notes,
         )
+
+    def _adapter_capability_fields(self, structured_query: StructuredQuery) -> dict[str, Any]:
+        assessment = self._adapter_contract_assessment(structured_query)
+        candidate_contracts = list(assessment.candidate_contracts)
+        selected_contract = assessment.selected_contract
+        approval_required: bool | None = None
+        preview_available: bool | None = None
+        rollback_available: bool | None = None
+        max_claimable_outcome: str | None = None
+        if selected_contract is not None:
+            approval_required = selected_contract.approval.required
+            preview_available = selected_contract.preview_available()
+            rollback_available = selected_contract.rollback.supported
+            max_claimable_outcome = selected_contract.verification.max_claimable_outcome.value
+        elif candidate_contracts:
+            approval_required = any(contract.approval.required for contract in candidate_contracts)
+            preview_available = any(contract.preview_available() for contract in candidate_contracts)
+            rollback_available = any(contract.rollback.supported for contract in candidate_contracts)
+        adapter_contract_status = "unbound"
+        if assessment.contract_required:
+            adapter_contract_status = "healthy" if assessment.healthy else "invalid"
+        elif candidate_contracts:
+            adapter_contract_status = "candidate_set"
+        return {
+            "candidate_adapters": [contract.planner_view() for contract in candidate_contracts],
+            "selected_adapter": selected_contract.planner_view() if selected_contract is not None else None,
+            "adapter_contract_status": adapter_contract_status,
+            "adapter_contract_errors": list(assessment.errors),
+            "approval_required": approval_required,
+            "preview_available": preview_available,
+            "rollback_available": rollback_available,
+            "max_claimable_outcome": max_claimable_outcome,
+        }
+
+    def _adapter_contract_assessment(self, structured_query: StructuredQuery) -> AdapterRouteAssessment:
+        slots = structured_query.slots if isinstance(structured_query.slots, dict) else {}
+        tool_name = str(slots.get("tool_name") or "").strip()
+        if tool_name:
+            tool_arguments = dict(slots.get("tool_arguments") or {})
+            return self._adapter_contracts.assess_tool_route(tool_name, tool_arguments)
+        if structured_query.query_shape == QueryShape.DISCORD_RELAY_REQUEST:
+            candidate_contracts: list[AdapterContract] = []
+            errors: list[str] = []
+            for adapter_id in ("relay.discord_local_client", "relay.discord_official_scaffold"):
+                try:
+                    candidate_contracts.append(self._adapter_contracts.get_contract(adapter_id))
+                except KeyError:
+                    errors.append(
+                        f"Discord relay route '{adapter_id}' is unavailable because its adapter contract is missing."
+                    )
+            pending_preview = slots.get("pending_preview") if isinstance(slots.get("pending_preview"), dict) else {}
+            route_mode = str(slots.get("route_mode") or pending_preview.get("route_mode") or "").strip().lower()
+            selected_contract: AdapterContract | None = None
+            if route_mode == "local_client_automation":
+                selected_contract = next(
+                    (contract for contract in candidate_contracts if contract.adapter_id == "relay.discord_local_client"),
+                    None,
+                )
+                if selected_contract is None:
+                    errors.append(
+                        "Discord relay selected the local client route without a declared adapter contract."
+                    )
+            elif route_mode == "official_bot_webhook":
+                selected_contract = next(
+                    (contract for contract in candidate_contracts if contract.adapter_id == "relay.discord_official_scaffold"),
+                    None,
+                )
+                if selected_contract is None:
+                    errors.append(
+                        "Discord relay selected the official scaffold route without a declared adapter contract."
+                    )
+            return AdapterRouteAssessment(
+                tool_name="discord_relay",
+                contract_required=bool(route_mode),
+                candidate_contracts=candidate_contracts,
+                selected_contract=selected_contract,
+                errors=errors,
+                binding_mode="conditional",
+            )
+        return AdapterRouteAssessment(tool_name=tool_name or "planner", contract_required=False)
 
     def _build_execution_plan(
         self,
@@ -2130,7 +2247,16 @@ class DeterministicPlanner:
                 if calculation_request.get("helper_name"):
                     parameters["helper_name"] = str(calculation_request.get("helper_name") or "").strip()
         if structured_query.query_shape == QueryShape.SOFTWARE_CONTROL_REQUEST:
-            for key in ("operation_type", "target_name", "request_stage", "follow_up_reuse", "selected_source_route"):
+            for key in (
+                "operation_type",
+                "target_name",
+                "request_stage",
+                "follow_up_reuse",
+                "selected_source_route",
+                "approval_scope",
+                "approval_outcome",
+                "trust_request_id",
+            ):
                 if key in structured_query.slots:
                     parameters[key] = structured_query.slots.get(key)
         if structured_query.requested_metric:
@@ -2140,7 +2266,17 @@ class DeterministicPlanner:
         if structured_query.timescale:
             parameters["timescale"] = structured_query.timescale
         if structured_query.query_shape == QueryShape.DISCORD_RELAY_REQUEST:
-            for key in ("destination_alias", "payload_hint", "note_text", "request_stage", "pending_preview", "ambiguity_choices"):
+            for key in (
+                "destination_alias",
+                "payload_hint",
+                "note_text",
+                "request_stage",
+                "pending_preview",
+                "ambiguity_choices",
+                "approval_scope",
+                "approval_outcome",
+                "trust_request_id",
+            ):
                 if key in structured_query.slots:
                     parameters[key] = structured_query.slots.get(key)
         return {
@@ -3153,6 +3289,9 @@ class DeterministicPlanner:
         if family == "discord_relay" and self._looks_like_discord_relay_confirmation(lower):
             pending_preview = parameters.get("pending_preview") if isinstance(parameters.get("pending_preview"), dict) else {}
             destination_alias = str(parameters.get("destination_alias") or "").strip()
+            trust = active_request_state.get("trust") if isinstance(active_request_state.get("trust"), dict) else {}
+            approval_outcome = "deny" if lower in {"no", "deny", "cancel", "stop"} else "approve"
+            approval_scope = "session" if "session" in lower else "once"
             if pending_preview and destination_alias:
                 return self._tool_proposal(
                     query_shape=QueryShape.DISCORD_RELAY_REQUEST,
@@ -3173,6 +3312,9 @@ class DeterministicPlanner:
                         "note_text": str(parameters.get("note_text") or "").strip() or None,
                         "request_stage": "dispatch",
                         "pending_preview": pending_preview,
+                        "approval_scope": approval_scope,
+                        "approval_outcome": approval_outcome,
+                        "trust_request_id": str(trust.get("request_id") or "").strip() or None,
                     },
                 )
 
@@ -3256,7 +3398,7 @@ class DeterministicPlanner:
 
     def _looks_like_discord_relay_confirmation(self, lower: str) -> bool:
         cleaned = " ".join(str(lower or "").split()).strip()
-        return cleaned in DISCORD_RELAY_CONFIRM_PHRASES
+        return cleaned in DISCORD_RELAY_CONFIRM_PHRASES or cleaned in {"no", "deny", "cancel", "stop"}
 
     def _discord_follow_up_payload_hint(self, lower: str) -> str | None:
         cleaned = " ".join(str(lower or "").split()).strip()

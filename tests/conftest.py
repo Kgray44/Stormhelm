@@ -6,6 +6,12 @@ from uuid import uuid4
 import pytest
 
 from stormhelm.config.loader import load_config
+from stormhelm.core.events import EventBuffer
+from stormhelm.core.memory.database import SQLiteDatabase
+from stormhelm.core.memory.repositories import PreferencesRepository
+from stormhelm.core.orchestrator.session_state import ConversationStateStore
+from stormhelm.core.tasks import DurableTaskService, TaskRepository
+from stormhelm.core.trust import TrustRepository, TrustService
 
 
 @pytest.fixture()
@@ -69,3 +75,31 @@ shell_command = false
 @pytest.fixture()
 def temp_config(temp_project_root: Path):
     return load_config(project_root=temp_project_root, env={})
+
+
+@pytest.fixture()
+def trust_harness(temp_config):
+    database = SQLiteDatabase(temp_config.storage.database_path)
+    database.initialize()
+    preferences = PreferencesRepository(database)
+    session_state = ConversationStateStore(preferences)
+    events = EventBuffer(capacity=128)
+    task_service = DurableTaskService(
+        repository=TaskRepository(database),
+        session_state=session_state,
+        events=events,
+    )
+    trust_service = TrustService(
+        config=temp_config.trust,
+        repository=TrustRepository(database),
+        events=events,
+        session_state=session_state,
+        task_service=task_service,
+    )
+    return {
+        "database": database,
+        "events": events,
+        "session_state": session_state,
+        "task_service": task_service,
+        "trust_service": trust_service,
+    }

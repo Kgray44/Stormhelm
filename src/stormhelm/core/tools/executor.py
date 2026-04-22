@@ -4,6 +4,8 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 
+from stormhelm.core.adapters import ClaimOutcome
+from stormhelm.core.adapters import build_execution_report
 from stormhelm.core.tools.base import ToolContext
 from stormhelm.core.tools.registry import ToolRegistry
 from stormhelm.shared.result import ExecutionMode
@@ -21,16 +23,31 @@ class ToolExecutor:
     async def execute(self, tool_name: str, arguments: dict[str, object], context: ToolContext) -> ToolResult:
         try:
             tool = self.registry.get(tool_name)
-            decision = context.safety_policy.authorize_tool(tool.name, tool.classification)
+            validated_arguments = tool.validate(dict(arguments))
+            contract_assessment = tool.adapter_route_assessment(validated_arguments)
+            if contract_assessment.contract_required and not contract_assessment.healthy:
+                return ToolResult(
+                    success=False,
+                    summary=f"{tool.display_name} is unavailable because this route is not valid contract-backed adapter work.",
+                    error="Adapter contract enforcement blocked this route.",
+                    data={"adapter_contract_status": contract_assessment.to_dict()},
+                )
+            contract = contract_assessment.selected_contract
+            decision = context.safety_policy.authorize_tool(
+                tool.name,
+                tool.classification,
+                context=context,
+                arguments=validated_arguments,
+                adapter_contract=contract,
+            )
             if not decision.allowed:
                 return ToolResult(
                     success=False,
                     summary=f"{tool.display_name} blocked by safety policy.",
                     data={"decision": decision.to_dict()},
-                    error=decision.reason,
+                    error=decision.operator_message or decision.reason,
                 )
 
-            validated_arguments = tool.validate(dict(arguments))
             context.events.publish(
                 event_family="tool",
                 event_type="tool.execution_started",
@@ -45,17 +62,30 @@ class ToolExecutor:
                     "job_id": context.job_id,
                     "tool_name": tool.name,
                     "execution_mode": tool.execution_mode.value,
+                    "adapter_id": getattr(contract, "adapter_id", None),
                 },
             )
 
             if tool.execution_mode == ExecutionMode.ASYNC:
-                return await tool.execute_async(context, validated_arguments)
+                result = await tool.execute_async(context, validated_arguments)
+            else:
+                loop = asyncio.get_running_loop()
+                result = await loop.run_in_executor(
+                    self._sync_executor,
+                    partial(tool.execute_sync, context, validated_arguments),
+                )
 
-            loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(
-                self._sync_executor,
-                partial(tool.execute_sync, context, validated_arguments),
-            )
+            if contract is not None and not result.adapter_contract:
+                result.adapter_contract = contract.to_dict()
+            if contract is not None and not result.adapter_execution:
+                fallback_execution = build_execution_report(
+                    contract,
+                    success=result.success,
+                    observed_outcome=ClaimOutcome.NONE if not result.success else ClaimOutcome.INITIATED,
+                    failure_kind=result.error if not result.success else None,
+                )
+                result.adapter_execution = fallback_execution.to_dict()
+            return result
         except Exception as error:
             return ToolResult(
                 success=False,

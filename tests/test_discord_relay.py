@@ -4,6 +4,14 @@ from dataclasses import dataclass, field
 
 import pytest
 
+import stormhelm.core.discord_relay.service as relay_service_module
+from stormhelm.core.adapters import AdapterContract
+from stormhelm.core.adapters import AdapterContractRegistry
+from stormhelm.core.adapters import ApprovalDescriptor
+from stormhelm.core.adapters import ClaimOutcome
+from stormhelm.core.adapters import RollbackDescriptor
+from stormhelm.core.adapters import TrustTier
+from stormhelm.core.adapters import VerificationDescriptor
 from stormhelm.core.discord_relay import DiscordDestination
 from stormhelm.core.discord_relay import DiscordDestinationKind
 from stormhelm.core.discord_relay import DiscordDispatchAttempt
@@ -18,6 +26,33 @@ from stormhelm.core.discord_relay import LocalDiscordClientAdapter
 from stormhelm.core.discord_relay import OfficialDiscordScaffoldAdapter
 from stormhelm.core.discord_relay import build_discord_relay_subsystem
 from stormhelm.core.orchestrator.session_state import ConversationStateStore
+
+
+def _future_contract(adapter_id: str) -> AdapterContract:
+    return AdapterContract(
+        adapter_id=adapter_id,
+        display_name=adapter_id.replace(".", " ").title(),
+        family="future",
+        description="Scaffold contract for relay hardening tests.",
+        observation_modes=["semantic_context"],
+        action_modes=["send_via_local_client"],
+        artifact_modes=["dispatch_trace"],
+        preview_modes=["mandatory_preview"],
+        safety_posture=["backend_owned"],
+        failure_posture=["explicit_limits"],
+        trust_tier=TrustTier.EXTERNAL_DISPATCH,
+        approval=ApprovalDescriptor(required=True, preview_allowed=True, preview_required=True, available_scopes=["once"]),
+        verification=VerificationDescriptor(
+            posture="bounded",
+            max_claimable_outcome=ClaimOutcome.INITIATED,
+            evidence=["synthetic relay test evidence"],
+        ),
+        rollback=RollbackDescriptor(supported=False, posture="none"),
+        planner_tags=["future"],
+        local_first=False,
+        external_side_effects=True,
+        offline_behavior="partial",
+    )
 
 
 class FakePreferencesRepository:
@@ -146,6 +181,7 @@ def _build_service(
     observation_payload: dict[str, object] | None = None,
     local_adapter=None,
     clock=None,
+    trust_service=None,
 ):
     session_state = ConversationStateStore(FakePreferencesRepository())
     return (
@@ -155,6 +191,7 @@ def _build_service(
             observation_source=FakeObservationSource(observation_payload or {}),
             local_adapter=local_adapter,
             clock=clock,
+            trust_service=trust_service,
         ),
         session_state,
     )
@@ -859,6 +896,92 @@ def test_discord_relay_uses_likely_completed_wording_when_verification_is_weak(t
     assert "cannot verify delivery" in response.assistant_response.lower()
 
 
+def test_discord_relay_records_contract_backed_claim_ceiling_for_uncertain_send(temp_config) -> None:
+    adapter = FakeDispatchAdapter(
+        state=DiscordDispatchState.UNCERTAIN,
+        verification_strength="moderate",
+        verification_evidence=["Discord stayed focused on Baby after the send key."],
+    )
+    service, _ = _build_service(temp_config, local_adapter=adapter)
+
+    preview = service.handle_request(
+        session_id="default",
+        operator_text="send this to Baby",
+        surface_mode="ghost",
+        active_module="chartroom",
+        active_context={"selection": {}, "clipboard": {}},
+        workspace_context={
+            "active_item": {
+                "title": "Stormhelm Relay Prompt",
+                "url": "https://example.com/relay",
+                "kind": "browser-tab",
+            }
+        },
+        request_slots={
+            "destination_alias": "Baby",
+            "payload_hint": "contextual",
+            "request_stage": "preview",
+        },
+    )
+
+    response = service.handle_request(
+        session_id="default",
+        operator_text="send it",
+        surface_mode="ghost",
+        active_module="chartroom",
+        active_context={"selection": {}, "clipboard": {}},
+        workspace_context={
+            "active_item": {
+                "title": "Stormhelm Relay Prompt",
+                "url": "https://example.com/relay",
+                "kind": "browser-tab",
+            }
+        },
+        request_slots={
+            **dict(preview.active_request_state["parameters"]),  # type: ignore[index]
+            "request_stage": "dispatch",
+        },
+    )
+
+    assert response.debug["adapter_contract"]["adapter_id"] == "relay.discord_local_client"
+    assert response.debug["adapter_execution"]["claim_ceiling"] == "observed"
+    assert "verified that the message appears" not in response.assistant_response.lower()
+
+
+def test_discord_relay_fails_closed_when_route_is_not_contract_backed(
+    temp_config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, _ = _build_service(temp_config)
+    broken_contracts = AdapterContractRegistry()
+    broken_contracts.register_contract(_future_contract("future.other_route"))
+    monkeypatch.setattr(relay_service_module, "default_adapter_contract_registry", lambda: broken_contracts)
+
+    response = service.handle_request(
+        session_id="default",
+        operator_text="send this to Baby",
+        surface_mode="ghost",
+        active_module="chartroom",
+        active_context={
+            "active_page": {
+                "url": "https://example.com/article",
+                "title": "Relay page",
+            }
+        },
+        workspace_context={"active_item": {}},
+        request_slots={
+            "destination_alias": "Baby",
+            "request_stage": "preview",
+        },
+    )
+
+    assert response.state == DiscordDispatchState.FAILED
+    assert response.preview is None
+    assert "contract-backed" in response.assistant_response.lower()
+    assert response.debug["adapter_contract_status"]["contract_required"] is True
+    assert response.debug["adapter_contract_status"]["healthy"] is False
+
+
 def test_local_discord_adapter_refuses_when_wrong_thread_is_focused(temp_config) -> None:
     clipboard = FakeClipboardBridge()
     driver = FakeDriver()
@@ -961,3 +1084,110 @@ def test_local_discord_adapter_classifies_clipboard_lock_as_transport_failure(te
     assert "clipboard access failed" in attempt.send_summary.lower()
     assert attempt.debug["failure_stage"] == "payload_insertion"
     assert attempt.debug["transport_failure_kind"] == "clipboard_lock_failed"
+
+
+def test_discord_relay_preview_attaches_trust_state_when_enabled(temp_config, trust_harness) -> None:
+    service, _ = _build_service(temp_config, trust_service=trust_harness["trust_service"])
+
+    response = service.handle_request(
+        session_id="default",
+        operator_text="send this to Baby",
+        surface_mode="ghost",
+        active_module="chartroom",
+        active_context={"selection": {}, "clipboard": {}},
+        workspace_context={
+            "active_item": {
+                "title": "Stormhelm Relay Prompt",
+                "url": "https://example.com/relay",
+                "kind": "browser-tab",
+            }
+        },
+        request_slots={
+            "destination_alias": "Baby",
+            "payload_hint": "contextual",
+            "request_stage": "preview",
+        },
+    )
+
+    assert response.state == DiscordDispatchState.READY
+    assert response.active_request_state is not None
+    assert response.active_request_state["trust"]["decision"] == "downgraded"
+    assert response.active_request_state["trust"]["request_id"] != ""
+    assert "approval is required" in response.assistant_response.lower()
+
+
+def test_discord_relay_session_grant_reuses_without_second_prompt(temp_config, trust_harness) -> None:
+    adapter = FakeDispatchAdapter(state=DiscordDispatchState.STARTED)
+    service, _ = _build_service(
+        temp_config,
+        local_adapter=adapter,
+        trust_service=trust_harness["trust_service"],
+    )
+
+    preview = service.handle_request(
+        session_id="default",
+        operator_text="send this to Baby",
+        surface_mode="ghost",
+        active_module="chartroom",
+        active_context={"selection": {}, "clipboard": {}},
+        workspace_context={
+            "active_item": {
+                "title": "Stormhelm Relay Prompt",
+                "url": "https://example.com/relay",
+                "kind": "browser-tab",
+            }
+        },
+        request_slots={
+            "destination_alias": "Baby",
+            "payload_hint": "contextual",
+            "request_stage": "preview",
+        },
+    )
+
+    request_id = str(preview.active_request_state["trust"]["request_id"])  # type: ignore[index]
+    dispatched = service.handle_request(
+        session_id="default",
+        operator_text="send it for this session",
+        surface_mode="ghost",
+        active_module="chartroom",
+        active_context={"selection": {}, "clipboard": {}},
+        workspace_context={
+            "active_item": {
+                "title": "Stormhelm Relay Prompt",
+                "url": "https://example.com/relay",
+                "kind": "browser-tab",
+            }
+        },
+        request_slots={
+            **dict(preview.active_request_state["parameters"]),  # type: ignore[index]
+            "request_stage": "dispatch",
+            "trust_request_id": request_id,
+            "approval_scope": "session",
+            "approval_outcome": "approve",
+        },
+    )
+    second_preview = service.handle_request(
+        session_id="default",
+        operator_text="send this to Baby",
+        surface_mode="ghost",
+        active_module="chartroom",
+        active_context={"selection": {}, "clipboard": {}},
+        workspace_context={
+            "active_item": {
+                "title": "Stormhelm Relay Prompt",
+                "url": "https://example.com/relay",
+                "kind": "browser-tab",
+            }
+        },
+        request_slots={
+            "destination_alias": "Baby",
+            "payload_hint": "contextual",
+            "request_stage": "preview",
+        },
+    )
+
+    assert dispatched.state == DiscordDispatchState.STARTED
+    assert adapter.calls
+    assert second_preview.active_request_state is not None
+    assert second_preview.active_request_state["trust"]["decision"] == "allowed"
+    assert "existing this session grant" in second_preview.assistant_response.lower()

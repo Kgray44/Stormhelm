@@ -27,13 +27,20 @@ from stormhelm.core.software_control.models import SoftwareVerificationStatus
 from stormhelm.core.software_control.planner import SoftwareControlPlannerSeam
 from stormhelm.core.software_recovery import FailureEvent
 from stormhelm.core.software_recovery import SoftwareRecoverySubsystem
+from stormhelm.core.trust import PermissionGrant
+from stormhelm.core.trust import PermissionScope
+from stormhelm.core.trust import TrustActionKind
+from stormhelm.core.trust import TrustActionRequest
+from stormhelm.core.trust import TrustDecision
+from stormhelm.core.trust import TrustDecisionOutcome
+from stormhelm.shared.result import SafetyDecision
 
 
 @dataclass(slots=True)
 class _NullSafetyPolicy:
     def authorize_software_route(self, route_kind: str, *, requires_elevation: bool = False):  # type: ignore[no-untyped-def]
         payload = {"route_kind": route_kind, "requires_elevation": requires_elevation}
-        return type("Decision", (), {"allowed": True, "reason": "No safety policy attached.", "context": payload})()
+        return SafetyDecision(True, "No safety policy attached.", details=payload)
 
 
 @dataclass(slots=True)
@@ -42,6 +49,7 @@ class SoftwareControlSubsystem:
     recovery: SoftwareRecoverySubsystem
     safety: SafetyPolicy | _NullSafetyPolicy = field(default_factory=_NullSafetyPolicy)
     system_probe: Any | None = None
+    trust_service: Any | None = None
     planner_seam: SoftwareControlPlannerSeam = field(init=False)
     _recent_traces: deque[SoftwareControlTrace] = field(default_factory=lambda: deque(maxlen=24), init=False)
 
@@ -216,7 +224,7 @@ class SoftwareControlSubsystem:
         active_module: str,
         request: SoftwareOperationRequest,
     ) -> SoftwareControlResponse:
-        del session_id, active_module
+        del active_module
         target = resolve_catalog_target(request.target_name)
         if target is None:
             return self._blocked_response(
@@ -236,7 +244,41 @@ class SoftwareControlSubsystem:
         if request.operation_type == SoftwareOperationType.LAUNCH and request.request_stage != "confirm_execution":
             return self._execute_launch(request=request, target=target, sources=sources, plan=plan)
 
-        if request.request_stage != "confirm_execution":
+        trust_grant: PermissionGrant | None = None
+        trust_decision = None
+        trust_required = self._requires_confirmation(request.operation_type) and self.trust_service is not None
+        if trust_required:
+            trust_request = self._trust_request(
+                session_id=session_id,
+                request=request,
+                target=target,
+                plan=plan,
+            )
+            if request.request_stage == "confirm_execution" and request.trust_request_id:
+                trust_decision = self.trust_service.respond_to_request(
+                    approval_request_id=request.trust_request_id,
+                    decision=str(request.approval_outcome or "approve"),
+                    session_id=session_id,
+                    scope=self._trust_scope(request.approval_scope),
+                    task_id=str((trust_request.task_id or "")),
+                )
+            else:
+                trust_decision = self.trust_service.evaluate_action(trust_request)
+            trust_grant = trust_decision.grant
+            if (
+                request.request_stage == "confirm_execution"
+                and trust_decision is not None
+                and not trust_decision.allowed
+                and trust_decision.outcome != TrustDecisionOutcome.BLOCKED
+            ):
+                trust_decision = self.trust_service.evaluate_action(trust_request)
+                trust_grant = trust_decision.grant
+            if request.request_stage == "confirm_execution" and trust_decision.outcome == "blocked":
+                return self._denied_response(request=request, target=target, decision=trust_decision)
+
+        if (request.request_stage != "confirm_execution" or (trust_decision is not None and not trust_decision.allowed)) and (
+            trust_decision is None or not trust_decision.allowed
+        ):
             trace = SoftwareControlTrace(
                 operation_type=request.operation_type.value,
                 target_name=target.canonical_name,
@@ -265,17 +307,23 @@ class SoftwareControlSubsystem:
                 result=result,
             )
             self._remember_trace(trace)
+            active_request_state = (
+                self._awaiting_confirmation_state(request=request, target=target, plan=plan)
+                if self._requires_confirmation(request.operation_type)
+                else {}
+            )
+            if trust_decision is not None and self.trust_service is not None:
+                active_request_state = self.trust_service.attach_request_state(active_request_state, decision=trust_decision)
             return SoftwareControlResponse(
-                assistant_response=plan.response_contract["full_response"],
+                assistant_response=self._merge_trust_prompt(
+                    plan.response_contract["full_response"],
+                    trust_decision.operator_message if trust_decision is not None else "",
+                ),
                 response_contract=dict(plan.response_contract),
                 trace=trace,
                 result=result,
                 verification=verification,
-                active_request_state=(
-                    self._awaiting_confirmation_state(request=request, target=target, plan=plan)
-                    if self._requires_confirmation(request.operation_type)
-                    else {}
-                ),
+                active_request_state=active_request_state,
                 debug={
                     "operation_type": request.operation_type.value,
                     "target_name": target.canonical_name,
@@ -283,6 +331,7 @@ class SoftwareControlSubsystem:
                     "result": result.to_dict(),
                     "trace": trace.to_dict(),
                     "verification": verification.to_dict(),
+                    "trust": trust_decision.to_dict() if trust_decision is not None else {},
                 },
             )
 
@@ -315,10 +364,11 @@ class SoftwareControlSubsystem:
                 {
                     "allowed": bool(route_policy.allowed),
                     "reason": str(route_policy.reason),
-                    "context": dict(route_policy.context or {}),
+                    "context": dict(route_policy.details or {}),
                 }
             ],
             uncertain_points=["execution_adapter_unavailable"],
+            trust_decision=trust_decision,
         )
 
     def verify_software_operation(
@@ -565,6 +615,7 @@ class SoftwareControlSubsystem:
         local_signals: dict[str, Any],
         policy_decisions: list[dict[str, Any]] | None = None,
         uncertain_points: list[str] | None = None,
+        trust_decision: TrustDecision | None = None,
     ) -> SoftwareControlResponse:
         failure = FailureEvent(
             failure_id=request.request_id,
@@ -631,6 +682,24 @@ class SoftwareControlSubsystem:
                 f"{recovery_result.route_switched_to.replace('_', ' ') if recovery_result.route_switched_to else 'the next safe route'}."
             ),
         }
+        active_request_state = {
+            "family": "software_control",
+            "subject": target.canonical_name,
+            "task_id": str(request.task_id or ""),
+            "request_type": "software_control_response",
+            "parameters": {
+                "operation_type": request.operation_type.value,
+                "target_name": target.canonical_name,
+                "request_stage": "recovery_ready",
+                "route_switched_to": recovery_result.route_switched_to,
+                "task_id": str(request.task_id or ""),
+            },
+        }
+        if trust_decision is not None and self.trust_service is not None:
+            active_request_state = self.trust_service.attach_request_state(
+                active_request_state,
+                decision=trust_decision,
+            )
         return SoftwareControlResponse(
             assistant_response=response_contract["full_response"],
             response_contract=response_contract,
@@ -638,17 +707,7 @@ class SoftwareControlSubsystem:
             result=result,
             recovery_plan=recovery_plan,
             recovery_result=recovery_result,
-            active_request_state={
-                "family": "software_control",
-                "subject": target.canonical_name,
-                "request_type": "software_control_response",
-                "parameters": {
-                    "operation_type": request.operation_type.value,
-                    "target_name": target.canonical_name,
-                    "request_stage": "recovery_ready",
-                    "route_switched_to": recovery_result.route_switched_to,
-                },
-            },
+            active_request_state=active_request_state,
             debug={
                 "operation_type": request.operation_type.value,
                 "target_name": target.canonical_name,
@@ -656,6 +715,7 @@ class SoftwareControlSubsystem:
                 "trace": trace.to_dict(),
                 "recovery_plan": recovery_plan.to_dict(),
                 "recovery_result": recovery_result.to_dict(),
+                "trust": trust_decision.to_dict() if trust_decision is not None else {},
             },
         )
 
@@ -669,6 +729,7 @@ class SoftwareControlSubsystem:
         return {
             "family": "software_control",
             "subject": target.canonical_name,
+            "task_id": str(request.task_id or ""),
             "request_type": "software_control_response",
             "query_shape": "software_control_request",
             "route": {
@@ -681,8 +742,115 @@ class SoftwareControlSubsystem:
                 "request_stage": "awaiting_confirmation",
                 "selected_source_route": plan.selected_source.route if plan.selected_source is not None else "",
                 "presentation_depth": plan.presentation_depth,
+                "task_id": str(request.task_id or ""),
+                "trust_request_id": request.trust_request_id,
             },
         }
+
+    def _trust_request(
+        self,
+        *,
+        session_id: str,
+        request: SoftwareOperationRequest,
+        target: SoftwareTarget,
+        plan: SoftwareOperationPlan,
+    ) -> TrustActionRequest:
+        task_scope = PermissionScope.TASK if str(request.task_id or "").strip() else PermissionScope.ONCE
+        task_id = str(request.task_id or "")
+        return TrustActionRequest(
+            request_id=request.request_id,
+            family="software_control",
+            action_key=f"software_control.{request.operation_type.value}",
+            subject=target.canonical_name,
+            session_id=session_id,
+            task_id=task_id,
+            action_kind=TrustActionKind.SOFTWARE_CONTROL,
+            approval_required=self._requires_confirmation(request.operation_type),
+            preview_allowed=True,
+            suggested_scope=task_scope,
+            available_scopes=[
+                PermissionScope.ONCE,
+                PermissionScope.TASK,
+                PermissionScope.SESSION,
+            ],
+            operator_justification=(
+                f"{request.operation_type.value.title()} may change local software state for {target.display_name} "
+                f"through the {plan.selected_source.route if plan.selected_source is not None else 'selected'} route."
+            ),
+            operator_message=(
+                f"Approval is required before Stormhelm can {request.operation_type.value} {target.display_name}. "
+                "Choose once, task, or session."
+            ),
+            verification_label="Software verification remains explicit after any attempt.",
+            recovery_label="Recovery will re-check trust before carrying a route switch forward.",
+            task_binding_label="Software grants stay bound to the active request context.",
+            details={
+                "operation_type": request.operation_type.value,
+                "target_name": target.canonical_name,
+                "selected_source_route": plan.selected_source.route if plan.selected_source is not None else "",
+                "presentation_depth": plan.presentation_depth,
+            },
+        )
+
+    def _trust_scope(self, value: str | None) -> PermissionScope | None:
+        normalized = str(value or "").strip().lower()
+        if not normalized:
+            return None
+        if normalized == PermissionScope.SESSION.value:
+            return PermissionScope.SESSION
+        if normalized == PermissionScope.TASK.value:
+            return PermissionScope.TASK
+        if normalized == PermissionScope.ONCE.value:
+            return PermissionScope.ONCE
+        return None
+
+    def _merge_trust_prompt(self, message: str, trust_prompt: str) -> str:
+        text = str(message or "").strip()
+        prompt = str(trust_prompt or "").strip()
+        if not prompt or prompt in text:
+            return text
+        return f"{text} {prompt}".strip()
+
+    def _denied_response(
+        self,
+        *,
+        request: SoftwareOperationRequest,
+        target: SoftwareTarget,
+        decision,
+    ) -> SoftwareControlResponse:
+        trace = SoftwareControlTrace(
+            operation_type=request.operation_type.value,
+            target_name=target.canonical_name,
+            execution_status=SoftwareExecutionStatus.BLOCKED.value,
+            failure_category="approval_denied",
+            checkpoints=["blocked"],
+        )
+        result = SoftwareOperationResult(
+            status=SoftwareExecutionStatus.BLOCKED,
+            operation_type=request.operation_type,
+            target_name=target.canonical_name,
+            checkpoints=["blocked"],
+            detail=decision.operator_message,
+        )
+        self._remember_trace(trace)
+        return SoftwareControlResponse(
+            assistant_response=decision.operator_message,
+            response_contract={
+                "bearing_title": "Software Approval Denied",
+                "micro_response": decision.operator_message,
+                "full_response": decision.operator_message,
+            },
+            trace=trace,
+            result=result,
+            active_request_state={},
+            debug={
+                "operation_type": request.operation_type.value,
+                "target_name": target.canonical_name,
+                "trace": trace.to_dict(),
+                "result": result.to_dict(),
+                "trust": decision.to_dict(),
+            },
+        )
 
     def _blocked_response(
         self,
@@ -745,10 +913,12 @@ def build_software_control_subsystem(
     recovery: SoftwareRecoverySubsystem,
     safety: SafetyPolicy | None = None,
     system_probe: Any | None = None,
+    trust_service: Any | None = None,
 ) -> SoftwareControlSubsystem:
     return SoftwareControlSubsystem(
         config=config,
         recovery=recovery,
         safety=safety or _NullSafetyPolicy(),
         system_probe=system_probe,
+        trust_service=trust_service,
     )

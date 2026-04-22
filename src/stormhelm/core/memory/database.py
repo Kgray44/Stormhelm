@@ -280,6 +280,118 @@ class SQLiteDatabase:
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
                 );
+
+                CREATE TABLE IF NOT EXISTS trust_approval_requests (
+                    approval_request_id TEXT PRIMARY KEY,
+                    action_request_id TEXT NOT NULL,
+                    family TEXT NOT NULL,
+                    action_key TEXT NOT NULL,
+                    subject TEXT NOT NULL DEFAULT '',
+                    session_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL DEFAULT '',
+                    action_kind TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    suggested_scope TEXT NOT NULL,
+                    available_scopes_json TEXT NOT NULL DEFAULT '[]',
+                    operator_justification TEXT NOT NULL DEFAULT '',
+                    operator_message TEXT NOT NULL DEFAULT '',
+                    details_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL DEFAULT '',
+                    resolved_at TEXT NOT NULL DEFAULT ''
+                );
+
+                CREATE TABLE IF NOT EXISTS trust_permission_grants (
+                    grant_id TEXT PRIMARY KEY,
+                    approval_request_id TEXT NOT NULL DEFAULT '',
+                    family TEXT NOT NULL,
+                    action_key TEXT NOT NULL,
+                    subject TEXT NOT NULL DEFAULT '',
+                    session_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL DEFAULT '',
+                    scope TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    operator_justification TEXT NOT NULL DEFAULT '',
+                    details_json TEXT NOT NULL DEFAULT '{}',
+                    granted_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL DEFAULT '',
+                    revoked_at TEXT NOT NULL DEFAULT '',
+                    revoked_reason TEXT NOT NULL DEFAULT '',
+                    last_used_at TEXT NOT NULL DEFAULT '',
+                    use_count INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS trust_audit_records (
+                    audit_id TEXT PRIMARY KEY,
+                    event_kind TEXT NOT NULL,
+                    family TEXT NOT NULL,
+                    action_key TEXT NOT NULL,
+                    subject TEXT NOT NULL DEFAULT '',
+                    session_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL DEFAULT '',
+                    approval_request_id TEXT NOT NULL DEFAULT '',
+                    grant_id TEXT NOT NULL DEFAULT '',
+                    approval_state TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    details_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS memory_records (
+                    memory_id TEXT PRIMARY KEY,
+                    dedupe_key TEXT NOT NULL DEFAULT '',
+                    memory_family TEXT NOT NULL,
+                    source_class TEXT NOT NULL,
+                    title TEXT NOT NULL DEFAULT '',
+                    summary TEXT NOT NULL DEFAULT '',
+                    normalized_content TEXT NOT NULL DEFAULT '',
+                    structured_fields_json TEXT NOT NULL DEFAULT '{}',
+                    provenance_json TEXT NOT NULL DEFAULT '{}',
+                    confidence REAL NOT NULL DEFAULT 0,
+                    freshness_state TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    last_validated_at TEXT NOT NULL DEFAULT '',
+                    retention_policy TEXT NOT NULL DEFAULT '',
+                    sensitivity_level TEXT NOT NULL DEFAULT 'normal',
+                    related_session_id TEXT NOT NULL DEFAULT '',
+                    related_task_ids_json TEXT NOT NULL DEFAULT '[]',
+                    related_workspace_ids_json TEXT NOT NULL DEFAULT '[]',
+                    related_artifact_refs_json TEXT NOT NULL DEFAULT '[]',
+                    tags_json TEXT NOT NULL DEFAULT '[]',
+                    semantic_tokens_json TEXT NOT NULL DEFAULT '[]',
+                    last_accessed_at TEXT NOT NULL DEFAULT '',
+                    access_count INTEGER NOT NULL DEFAULT 0,
+                    archived INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_memory_records_family_updated
+                    ON memory_records(memory_family, updated_at DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_memory_records_session_updated
+                    ON memory_records(related_session_id, updated_at DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_memory_records_dedupe_key
+                    ON memory_records(dedupe_key);
+
+                CREATE TABLE IF NOT EXISTS memory_query_log (
+                    query_id TEXT PRIMARY KEY,
+                    retrieval_intent TEXT NOT NULL,
+                    requested_families_json TEXT NOT NULL DEFAULT '[]',
+                    caller_subsystem TEXT NOT NULL DEFAULT '',
+                    semantic_query_text TEXT NOT NULL DEFAULT '',
+                    structured_filters_json TEXT NOT NULL DEFAULT '{}',
+                    scope_constraints_json TEXT NOT NULL DEFAULT '{}',
+                    matched_record_ids_json TEXT NOT NULL DEFAULT '[]',
+                    family_distribution_json TEXT NOT NULL DEFAULT '{}',
+                    filtered_out_counts_json TEXT NOT NULL DEFAULT '{}',
+                    retrieval_trace_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_memory_query_log_created_at
+                    ON memory_query_log(created_at DESC);
                 """
             )
             self._migrate_workspace_tables(connection)

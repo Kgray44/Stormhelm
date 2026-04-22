@@ -15,6 +15,7 @@ class EventFamily(str, Enum):
     JOB = "job"
     TASK = "task"
     TOOL = "tool"
+    APPROVAL = "approval"
     VERIFICATION = "verification"
     WORKSPACE = "workspace"
     SYSTEM_SIGNAL = "system_signal"
@@ -477,7 +478,12 @@ class EventBuffer:
         )
 
     def _default_provenance_kind(self, event_family: str, subsystem: str) -> str:
-        if event_family in {EventFamily.LIFECYCLE.value, EventFamily.JOB.value, EventFamily.TOOL.value}:
+        if event_family in {
+            EventFamily.LIFECYCLE.value,
+            EventFamily.JOB.value,
+            EventFamily.TOOL.value,
+            EventFamily.APPROVAL.value,
+        }:
             return "direct_system_fact"
         if subsystem in {"assistant", "planner"}:
             return "operator_summary"
@@ -505,6 +511,8 @@ class EventBuffer:
             EventFamily.LIFECYCLE.value,
         }:
             return EventVisibilityScope.SYSTEMS_SURFACE.value
+        if event_family == EventFamily.APPROVAL.value:
+            return EventVisibilityScope.DECK_CONTEXT.value
         if event_type.endswith(".failed") or event_type.endswith(".warning"):
             return EventVisibilityScope.GHOST_HINT.value
         if event_family in {
@@ -553,6 +561,7 @@ class EventBuffer:
             "job_manager": EventFamily.JOB,
             "tasks": EventFamily.TASK,
             "tool_executor": EventFamily.TOOL,
+            "trust": EventFamily.APPROVAL,
             "assistant": EventFamily.RUNTIME,
             "planner": EventFamily.RUNTIME,
             "judgment": EventFamily.RUNTIME,
@@ -609,6 +618,12 @@ class EventBuffer:
 
         if event_family == EventFamily.TOOL.value:
             return "tool.execution_started" if "executing" in lowered_message else "tool.updated"
+
+        if event_family == EventFamily.APPROVAL.value:
+            state = str(payload.get("state") or payload.get("approval_state") or "").strip().lower()
+            if state:
+                return f"approval.{state}"
+            return "approval.updated"
 
         if event_family == EventFamily.NETWORK.value:
             kind = str(payload.get("kind") or "").strip().lower()

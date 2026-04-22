@@ -507,6 +507,13 @@ class AssistantOrchestrator:
                         operation_type = SoftwareOperationType(operation_value)
                     except ValueError:
                         operation_type = SoftwareOperationType.INSTALL
+                    sensitive_task_id = ""
+                    if self.task_service is not None:
+                        resolver = getattr(self.task_service, "current_sensitive_task_id", None)
+                        if callable(resolver):
+                            sensitive_task_id = str(resolver(session_id=session_id) or "").strip()
+                    if not sensitive_task_id:
+                        sensitive_task_id = str(self.session_state.get_active_task_id(session_id) or "").strip()
                     software_request = SoftwareOperationRequest(
                         request_id=f"software-{session_id}",
                         source_surface=surface_mode,
@@ -517,6 +524,10 @@ class AssistantOrchestrator:
                         request_stage=str(software_slots.get("request_stage") or "prepare_plan").strip() or "prepare_plan",
                         follow_up_reuse=bool(software_slots.get("follow_up_reuse", False)),
                         selected_source_route=str(software_slots.get("selected_source_route") or "").strip() or None,
+                        task_id=sensitive_task_id or None,
+                        trust_request_id=str(software_slots.get("trust_request_id") or "").strip() or None,
+                        approval_scope=str(software_slots.get("approval_scope") or "").strip() or None,
+                        approval_outcome=str(software_slots.get("approval_outcome") or "").strip() or None,
                     )
                     software_response = self.software_control.execute_software_operation(
                         session_id=session_id,
@@ -855,6 +866,7 @@ class AssistantOrchestrator:
                 self.jobs.submit(
                     request.tool_name if isinstance(request, ToolRequest) else request.name,
                     request.arguments,
+                    session_id=session_id,
                     task_id=task_plan.task_id if task_plan is not None else None,
                     task_step_id=task_plan.step_ids[index] if task_plan is not None and index < len(task_plan.step_ids) else None,
                 )
@@ -1027,11 +1039,18 @@ class AssistantOrchestrator:
         if resolver is not None and hasattr(resolver, "response_contract_for_search_title"):
             response_contract = resolver.response_contract_for_search_title(title, open_target=open_target)
         else:
-            response_contract = {
-                "bearing_title": f"{title} opened",
-                "micro_response": f"Opened {title} in the browser.",
-                "full_response": "Resolved the search URL and opened it in the browser.",
-            }
+            if open_target == "deck":
+                response_contract = {
+                    "bearing_title": f"{title} queued",
+                    "micro_response": f"Queued {title} for the Deck browser.",
+                    "full_response": f"Queued {title} for the Deck browser.",
+                }
+            else:
+                response_contract = {
+                    "bearing_title": f"{title} requested",
+                    "micro_response": f"Requested that {title} open externally.",
+                    "full_response": f"Requested that {title} open externally.",
+                }
         tool_name = "deck_open_url" if open_target == "deck" else "external_open_url"
         tool_arguments: dict[str, Any] = {
             "url": resolved_url,
@@ -1397,6 +1416,59 @@ class AssistantOrchestrator:
             "micro_response": str(action_contract.get("micro_response") or self._micro_response(full_response)).strip(),
             "full_response": full_response,
         }
+        action_adapter_contract = action_contract.get("adapter_contract")
+        action_adapter_execution = action_contract.get("adapter_execution")
+        job_adapter_contract = next(
+            (
+                (job.get("result") or {}).get("adapter_contract")
+                for job in jobs
+                if isinstance(job, dict)
+                and isinstance(job.get("result"), dict)
+                and isinstance((job.get("result") or {}).get("adapter_contract"), dict)
+            ),
+            {},
+        )
+        job_adapter_execution = next(
+            (
+                (job.get("result") or {}).get("adapter_execution")
+                for job in jobs
+                if isinstance(job, dict)
+                and isinstance(job.get("result"), dict)
+                and isinstance((job.get("result") or {}).get("adapter_execution"), dict)
+            ),
+            {},
+        )
+        if isinstance(action_adapter_contract, dict):
+            metadata["adapter_contract"] = dict(action_adapter_contract)
+        elif isinstance(job_adapter_contract, dict) and job_adapter_contract:
+            metadata["adapter_contract"] = dict(job_adapter_contract)
+        elif (
+            planned_decision is not None
+            and planned_decision.capability_plan is not None
+            and isinstance(planned_decision.capability_plan.selected_adapter, dict)
+        ):
+            metadata["adapter_contract"] = dict(planned_decision.capability_plan.selected_adapter)
+        if isinstance(action_adapter_execution, dict):
+            metadata["adapter_execution"] = dict(action_adapter_execution)
+        elif isinstance(job_adapter_execution, dict) and job_adapter_execution:
+            metadata["adapter_execution"] = dict(job_adapter_execution)
+        elif (
+            planned_decision is not None
+            and planned_decision.capability_plan is not None
+            and planned_decision.capability_plan.max_claimable_outcome
+        ):
+            metadata["adapter_execution"] = {
+                "claim_ceiling": planned_decision.capability_plan.max_claimable_outcome,
+                "approval_required": planned_decision.capability_plan.approval_required,
+                "preview_required": False,
+                "rollback_available": planned_decision.capability_plan.rollback_available,
+            }
+        if (
+            planned_decision is not None
+            and planned_decision.capability_plan is not None
+            and planned_decision.capability_plan.candidate_adapters
+        ):
+            metadata["candidate_adapters"] = list(planned_decision.capability_plan.candidate_adapters)
         judgment = judgment or {}
         next_suggestion = judgment.get("next_suggestion")
         if isinstance(next_suggestion, dict):
