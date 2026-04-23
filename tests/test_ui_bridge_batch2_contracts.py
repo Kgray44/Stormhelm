@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from stormhelm.config.loader import load_config
 from stormhelm.ui.bridge import UiBridge
 
 
@@ -141,3 +142,36 @@ def test_ui_bridge_helm_safety_section_reflects_backend_policy_settings(temp_con
     assert any(entry["primary"] == "Read Scope" and entry["secondary"] == "2 allowlisted roots" for entry in entries)
     assert any(entry["primary"] == "Shell Command" and entry["secondary"] == "Disabled" for entry in entries)
     assert any(chip["label"] == "Read Scope" and chip["value"] == "2 allowlisted roots" for chip in bridge.workspaceCanvas["chips"])
+
+
+def test_ui_bridge_helm_safety_section_surfaces_unsafe_test_mode_labels(temp_project_root) -> None:
+    unsafe_config = load_config(
+        project_root=temp_project_root,
+        env={"STORMHELM_UNSAFE_TEST_MODE": "true"},
+    )
+    bridge = UiBridge(unsafe_config)
+    bridge.apply_snapshot(
+        {
+            "settings": {
+                "safety": {
+                    "unsafe_test_mode": True,
+                    "allowed_read_dirs": [str(unsafe_config.safety.allowed_read_dirs[0])],
+                    "allow_shell_stub": True,
+                }
+            }
+        }
+    )
+
+    bridge.activateModule("helm")
+    bridge.activateWorkspaceSection("safety")
+
+    entries = [
+        entry
+        for column in bridge.workspaceCanvas["columns"]
+        for entry in column.get("entries", [])
+    ]
+    assert any(
+        entry["primary"] == "Read Scope" and entry["secondary"] == "Unrestricted (unsafe test mode)"
+        for entry in entries
+    )
+    assert any(entry["primary"] == "Shell Command" and entry["secondary"] == "Live execution" for entry in entries)

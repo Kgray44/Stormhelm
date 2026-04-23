@@ -33,7 +33,12 @@ def _apply_window_behavior(window: QtGui.QWindow, bridge: UiBridge) -> None:
     apply_stormhelm_material(window, ghost_mode=ghost_mode)
 
 
-def run_ui(config: AppConfig | None = None) -> int:
+def run_ui(
+    config: AppConfig | None = None,
+    *,
+    start_hidden: bool = False,
+    startup_mode: str | None = None,
+) -> int:
     app_config = config or load_config()
     logger = configure_application_logging(app_config, "ui")
     install_exception_logging(logger, "ui")
@@ -75,9 +80,18 @@ def run_ui(config: AppConfig | None = None) -> int:
         _apply_window_behavior(root, bridge)
         bridge.modeChanged.connect(lambda: _apply_window_behavior(root, bridge))
 
-    tray_icon = create_tray_icon(bridge, app_config)
+    tray_icon = create_tray_icon(
+        bridge,
+        app_config,
+        request_backend_shutdown=controller.request_backend_shutdown,
+    )
     controller.start()
-    bridge.showWindow()
+    if startup_mode in {"ghost", "deck"}:
+        bridge.setMode(startup_mode)
+    if start_hidden:
+        bridge.hideWindow()
+    else:
+        bridge.showWindow()
     exit_code = app.exec()
     if hotkey_window is not None:
         hotkey_window.close()

@@ -1,15 +1,18 @@
 from __future__ import annotations
 
-from PySide6 import QtCore, QtTest
+import os
+
+from PySide6 import QtCore, QtTest, QtWidgets
 
 from stormhelm.ui.bridge import UiBridge
 from stormhelm.ui.controllers.main_controller import MainController
 
 
-def _ensure_app() -> QtCore.QCoreApplication:
-    app = QtCore.QCoreApplication.instance()
+def _ensure_app() -> QtWidgets.QApplication:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    app = QtWidgets.QApplication.instance()
     if app is None:
-        app = QtCore.QCoreApplication([])
+        app = QtWidgets.QApplication([])
     return app
 
 
@@ -29,6 +32,7 @@ class LifecycleDummyClient(QtCore.QObject):
         self.snapshot_calls = 0
         self.presence_reports: list[dict[str, object]] = []
         self.detach_calls: list[int | None] = []
+        self.shutdown_backend_calls = 0
 
     def fetch_health(self) -> None:
         self.health_calls += 1
@@ -47,6 +51,9 @@ class LifecycleDummyClient(QtCore.QObject):
 
     def report_shell_detached(self, pid: int | None = None, *, sync: bool = False) -> None:
         self.detach_calls.append(pid)
+
+    def shutdown_backend(self) -> None:
+        self.shutdown_backend_calls += 1
 
     def send_message(
         self,
@@ -161,3 +168,29 @@ def test_main_controller_skips_core_restart_when_backend_hold_is_active(monkeypa
     assert restart_attempts == []
     assert client.health_calls == 0
     assert "hold" in bridge.statusLine.lower()
+
+
+def test_main_controller_manual_backend_shutdown_does_not_schedule_recovery(monkeypatch, temp_config) -> None:
+    app = _ensure_app()
+    temp_config.lifecycle.auto_restart_core = True
+    temp_config.lifecycle.max_core_restart_attempts = 2
+    temp_config.lifecycle.core_restart_backoff_ms = 0
+
+    bridge = UiBridge(temp_config)
+    client = LifecycleDummyClient()
+    controller = MainController(config=temp_config, bridge=bridge, client=client)
+
+    restart_attempts: list[str] = []
+    monkeypatch.setattr(
+        "stormhelm.ui.controllers.main_controller.ensure_core_running",
+        lambda config: restart_attempts.append("restart") or True,
+    )
+
+    controller.request_backend_shutdown()
+    controller._handle_error("/health", "connection refused")
+    QtTest.QTest.qWait(5)
+    app.processEvents()
+
+    assert client.shutdown_backend_calls == 1
+    assert restart_attempts == []
+    assert "backend" in bridge.statusLine.lower()

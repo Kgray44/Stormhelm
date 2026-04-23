@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
+from stormhelm.config.loader import load_config
 import stormhelm.core.tools.base as tool_base_module
 from stormhelm.core.adapters import AdapterContract
 from stormhelm.core.adapters import AdapterContractRegistry
@@ -226,6 +228,30 @@ def test_tool_executor_attaches_contract_metadata_and_caps_external_open_claim(t
     assert payload["adapter_execution"]["claim_ceiling"] == ClaimOutcome.INITIATED.value
     assert payload["data"]["action"]["adapter_contract"]["adapter_id"] == "browser.external"
     assert payload["data"]["action"]["adapter_execution"]["claim_ceiling"] == ClaimOutcome.INITIATED.value
+
+
+def test_tool_registry_executes_shell_command_in_unsafe_test_mode(temp_project_root: Path) -> None:
+    unsafe_config = load_config(
+        project_root=temp_project_root,
+        env={"STORMHELM_UNSAFE_TEST_MODE": "true"},
+    )
+    registry = ToolRegistry()
+    register_builtin_tools(registry)
+    executor = ToolExecutor(registry)
+    context = ToolContext(
+        job_id="shell-unsafe",
+        config=unsafe_config,
+        events=EventBuffer(),
+        notes=DummyNotesRepository(),
+        preferences=DummyPreferencesRepository(),
+        safety_policy=SafetyPolicy(unsafe_config),
+    )
+
+    result = asyncio.run(executor.execute("shell_command", {"command": "cmd /c echo unsafe-ok"}, context))
+
+    assert result.success is True
+    assert result.data["exit_code"] == 0
+    assert "unsafe-ok" in result.data["stdout"]
 
 
 def test_tool_executor_fails_closed_when_adapter_route_cannot_resolve_contract(temp_config, monkeypatch: pytest.MonkeyPatch) -> None:

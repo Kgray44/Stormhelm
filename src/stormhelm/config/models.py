@@ -178,6 +178,7 @@ class SoftwareControlConfig:
     browser_guided_routes_enabled: bool = True
     privileged_operations_allowed: bool = False
     trusted_sources_only: bool = True
+    unsafe_test_mode: bool = False
 
 
 @dataclass(slots=True)
@@ -266,6 +267,7 @@ class OpenAIConfig:
 class SafetyConfig:
     allowed_read_dirs: list[Path]
     allow_shell_stub: bool
+    unsafe_test_mode: bool = False
 
 
 @dataclass(slots=True)

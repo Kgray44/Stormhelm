@@ -167,6 +167,7 @@ allowed_read_dirs = [
   "~/Documents",
 ]
 allow_shell_stub = false
+unsafe_test_mode = false
 
 [tools]
 max_file_read_bytes = 32768

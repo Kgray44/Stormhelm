@@ -105,6 +105,24 @@ class CoreApiClient(QtCore.QObject):
             return
         self._send_json_and_wait("POST", "/lifecycle/shell", payload)
 
+    def update_startup_registration(self, payload: dict[str, object]) -> None:
+        self._send_json("POST", "/lifecycle/startup", payload, lambda _payload: None)
+
+    def fetch_resolution_plan(self) -> None:
+        self._send_json("POST", "/lifecycle/resolution/plan", {}, lambda _payload: None)
+
+    def resolve_lifecycle_hold(self, payload: dict[str, object]) -> None:
+        self._send_json("POST", "/lifecycle/resolution", payload, lambda _payload: None)
+
+    def prepare_cleanup_plan(self, payload: dict[str, object]) -> None:
+        self._send_json("POST", "/lifecycle/cleanup/plan", payload, lambda _payload: None)
+
+    def execute_cleanup(self, payload: dict[str, object]) -> None:
+        self._send_json("POST", "/lifecycle/cleanup", payload, lambda _payload: None)
+
+    def shutdown_backend(self) -> None:
+        self._send_json("POST", "/lifecycle/core/shutdown", None, lambda _payload: None)
+
     def fetch_snapshot(
         self,
         *,

@@ -7,6 +7,7 @@ from typing import Any
 from stormhelm.config.loader import load_config
 from stormhelm.config.models import AppConfig
 from stormhelm.core.adapters import default_adapter_contract_registry
+from stormhelm.core.bridge_authority import build_bridge_authority_snapshot
 from stormhelm.core.events import EventBuffer
 from stormhelm.core.jobs.manager import JobManager
 from stormhelm.core.lifecycle import LifecycleController
@@ -163,6 +164,52 @@ class CoreContainer:
         system_state = self._system_state_snapshot()
         recent_events = self.events.recent(limit=32)
         watch_state = self._watch_state_snapshot(jobs)
+        systems_interpretation = self.operational_awareness.build_systems_interpretation(system_state).to_dict()
+        signal_state = {
+            "signals": [
+                signal.to_dict()
+                for signal in self.operational_awareness.build_signals(
+                    events=recent_events,
+                    jobs=jobs,
+                    system_state=system_state,
+                )
+            ]
+        }
+        calculations_state = self.calculations.status_snapshot()
+        software_control_state = self.software_control.status_snapshot()
+        software_recovery_state = self.software_recovery.status_snapshot()
+        screen_awareness_state = self.screen_awareness.status_snapshot()
+        discord_relay_state = self.discord_relay.status_snapshot()
+        trust_state = self.trust.status_snapshot(
+            session_id="default",
+            active_task_id=str(self.assistant.session_state.get_active_task_id("default") or ""),
+        )
+        provider_state = self._provider_state_snapshot()
+        tool_state = self._tool_state_snapshot()
+        active_task = self.task_service.active_task_summary("default")
+        memory_state = self.memory.status_snapshot()
+        event_stream_state = self.events.state_snapshot()
+        lifecycle_state = self.lifecycle.status_snapshot()
+        active_workspace = self.assistant.workspace_service.active_workspace_summary("default")
+        bridge_authority = build_bridge_authority_snapshot(
+            calculations=calculations_state,
+            software_control=software_control_state,
+            software_recovery=software_recovery_state,
+            screen_awareness=screen_awareness_state,
+            discord_relay=discord_relay_state,
+            trust=trust_state,
+            provider_state=provider_state,
+            tool_state=tool_state,
+            watch_state=watch_state,
+            active_task=active_task,
+            memory=memory_state,
+            event_stream=event_stream_state,
+            lifecycle=lifecycle_state,
+            system_state=system_state,
+            systems_interpretation=systems_interpretation,
+            jobs=jobs,
+            active_workspace=active_workspace,
+        )
         return {
             "app_name": self.config.app_name,
             "version": self.config.version,
@@ -183,34 +230,23 @@ class CoreContainer:
             "tool_count": len(self.tool_registry.metadata()),
             "recent_jobs": len(jobs[:25]),
             "system_state": system_state,
-            "systems_interpretation": self.operational_awareness.build_systems_interpretation(system_state).to_dict(),
-            "signal_state": {
-                "signals": [
-                    signal.to_dict()
-                    for signal in self.operational_awareness.build_signals(
-                        events=recent_events,
-                        jobs=jobs,
-                        system_state=system_state,
-                    )
-                ]
-            },
-            "calculations": self.calculations.status_snapshot(),
-            "software_control": self.software_control.status_snapshot(),
-            "software_recovery": self.software_recovery.status_snapshot(),
-            "screen_awareness": self.screen_awareness.status_snapshot(),
-            "discord_relay": self.discord_relay.status_snapshot(),
-            "trust": self.trust.status_snapshot(
-                session_id="default",
-                active_task_id=str(self.assistant.session_state.get_active_task_id("default") or ""),
-            ),
-            "provider_state": self._provider_state_snapshot(),
-            "tool_state": self._tool_state_snapshot(),
+            "systems_interpretation": systems_interpretation,
+            "signal_state": signal_state,
+            "calculations": calculations_state,
+            "software_control": software_control_state,
+            "software_recovery": software_recovery_state,
+            "screen_awareness": screen_awareness_state,
+            "discord_relay": discord_relay_state,
+            "trust": trust_state,
+            "provider_state": provider_state,
+            "tool_state": tool_state,
             "watch_state": watch_state,
-            "active_task": self.task_service.active_task_summary("default"),
-            "memory": self.memory.status_snapshot(),
-            "event_stream": self.events.state_snapshot(),
+            "active_task": active_task,
+            "memory": memory_state,
+            "event_stream": event_stream_state,
+            "bridge_authority": bridge_authority,
             "first_run": bool(self.runtime_bootstrap and self.runtime_bootstrap.first_run),
-            "lifecycle": self.lifecycle.status_snapshot(),
+            "lifecycle": lifecycle_state,
         }
 
     def _system_state_snapshot(self) -> dict[str, Any]:

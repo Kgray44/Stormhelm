@@ -20,6 +20,7 @@ class MainController(QtCore.QObject):
         self._snapshot_in_flight = False
         self._snapshot_refresh_queued = False
         self._stream_last_cursor: int | None = None
+        self._manual_backend_shutdown_requested = False
 
         self.refresh_timer = QtCore.QTimer(self)
         self.refresh_timer.setInterval(self.config.ui.poll_interval_ms)
@@ -109,12 +110,17 @@ class MainController(QtCore.QObject):
             self._complete_snapshot_request()
         if self._is_connection_disruption(purpose, error):
             self._core_online = False
+            if self._manual_backend_shutdown_requested:
+                self.bridge.set_connection_error("Backend stopped from tray for local testing.")
+                return
             self.bridge.set_connection_error(f"{purpose}: {error}")
             self._schedule_core_recovery(error)
             return
         self.bridge.set_operation_error(f"{purpose}: {error}")
 
     def _handle_health(self, payload: dict) -> None:
+        if payload.get("status") == "ok" and self._manual_backend_shutdown_requested:
+            self._manual_backend_shutdown_requested = False
         if payload.get("status") == "ok" and not self._core_online:
             self._core_online = True
             self._core_recovery_attempts = 0
@@ -133,6 +139,12 @@ class MainController(QtCore.QObject):
 
     def _handle_snapshot(self, payload: dict) -> None:
         self._complete_snapshot_request()
+        if self._manual_backend_shutdown_requested:
+            self._manual_backend_shutdown_requested = False
+            self._core_online = True
+            self._core_recovery_attempts = 0
+            self._core_recovery_scheduled = False
+            self.bridge.set_status_line("Standing watch.")
         self.bridge.apply_snapshot(payload)
         self._stream_last_cursor = self._latest_cursor_from_snapshot(payload) or self._stream_last_cursor
 
@@ -254,6 +266,17 @@ class MainController(QtCore.QObject):
         report = self.bridge.shell_presence_payload()
         self.client.report_shell_presence(report)
 
+    def request_backend_shutdown(self) -> None:
+        if not hasattr(self.client, "shutdown_backend"):
+            self.bridge.set_operation_error("Backend shutdown is unavailable in this shell build.")
+            return
+        self._manual_backend_shutdown_requested = True
+        self._core_online = False
+        self._core_recovery_scheduled = False
+        self.core_recovery_timer.stop()
+        self.bridge.set_status_line("Backend shutdown requested from the tray.")
+        self.client.shutdown_backend()
+
     def _handle_app_about_to_quit(self) -> None:
         if hasattr(self.client, "report_shell_detached"):
             self.client.report_shell_detached(self.bridge.shell_presence_payload().get("pid"), sync=True)
@@ -262,6 +285,12 @@ class MainController(QtCore.QObject):
 
     def _schedule_core_recovery(self, error: str) -> None:
         if not self.config.lifecycle.auto_restart_core:
+            return
+        hold_summary = ""
+        if hasattr(self.bridge, "lifecycle_restart_hold_summary"):
+            hold_summary = str(self.bridge.lifecycle_restart_hold_summary() or "").strip()
+        if hold_summary:
+            self.bridge.set_status_line(f"Core restart hold: {hold_summary}")
             return
         if self._core_recovery_scheduled:
             return

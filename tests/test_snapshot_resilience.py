@@ -107,11 +107,27 @@ def test_snapshot_and_status_routes_use_sync_handlers_for_threadpool_isolation()
         "/notes",
         "/settings",
         "/tools",
+        "/lifecycle/core/shutdown",
         "/snapshot",
     ):
         assert inspect.iscoroutinefunction(endpoints[path]) is False
 
     assert inspect.iscoroutinefunction(endpoints["/chat/send"]) is True
+
+
+def test_core_shutdown_route_schedules_process_exit_without_blocking_response(temp_config, monkeypatch) -> None:
+    scheduled: list[str] = []
+    monkeypatch.setattr(
+        "stormhelm.core.api.app._schedule_process_shutdown",
+        lambda: scheduled.append("shutdown"),
+    )
+
+    with TestClient(create_app(temp_config)) as client:
+        response = client.post("/lifecycle/core/shutdown")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "shutting_down"
+    assert scheduled == ["shutdown"]
 
 
 def test_snapshot_tolerates_malformed_preference_rows(temp_config) -> None:

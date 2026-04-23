@@ -704,11 +704,29 @@ class UiBridge(QtCore.QObject):
         }
 
     def tray_tooltip_text(self) -> str:
-        shell_state = "Visible" if self.shell_presence_payload().get("window_visible") else "Hidden"
+        lifecycle = self._lifecycle_state()
+        runtime_state = lifecycle.get("runtime") if isinstance(lifecycle.get("runtime"), dict) else {}
+        restart_policy = lifecycle.get("restart_policy") if isinstance(lifecycle.get("restart_policy"), dict) else {}
+        bootstrap = lifecycle.get("bootstrap") if isinstance(lifecycle.get("bootstrap"), dict) else {}
+        hold_summary = str(
+            restart_policy.get("hold_reason")
+            or bootstrap.get("lifecycle_hold_reason")
+            or ""
+        ).strip()
+        shell_status = str(runtime_state.get("shell_status", "")).strip().lower()
+        if shell_status in {"visible", "hidden", "detached", "stale"}:
+            shell_state = shell_status.title()
+        else:
+            shell_state = "Visible" if self.shell_presence_payload().get("window_visible") else "Hidden"
+        core_status = str(runtime_state.get("core_status", "")).strip().lower()
+        if hold_summary or core_status == "held":
+            core_label = "Hold"
+        else:
+            core_label = self.connectionLabel
         return (
             "Stormhelm"
             f" | {self._install_mode_label.title()}"
-            f" | Core {self.connectionLabel}"
+            f" | Core {core_label}"
             f" | Shell {shell_state}"
         )
 
@@ -1272,7 +1290,7 @@ class UiBridge(QtCore.QObject):
         }
 
     def _module_requires_live_status_refresh(self) -> bool:
-        return self._active_module_key in {"systems", "watch", "signals"}
+        return bool(self._bridge_authority_state()) or self._active_module_key in {"systems", "watch", "signals"}
 
     def _rebuild_surface_models(self) -> None:
         display_history = self._display_history()
@@ -1292,9 +1310,18 @@ class UiBridge(QtCore.QObject):
 
     def _build_context_cards(self) -> list[dict[str, Any]]:
         cards: list[dict[str, Any]] = []
+        cards.extend(self._bridge_authority_context_cards())
         lifecycle = self._lifecycle_state()
         bootstrap = lifecycle.get("bootstrap") if isinstance(lifecycle.get("bootstrap"), dict) else {}
         migration = lifecycle.get("migration") if isinstance(lifecycle.get("migration"), dict) else {}
+        resolution_plan = bootstrap.get("resolution_plan") if isinstance(bootstrap.get("resolution_plan"), dict) else {}
+        resolution_state = bootstrap.get("resolution_state") if isinstance(bootstrap.get("resolution_state"), dict) else {}
+        uninstall_plan = lifecycle.get("uninstall_plan") if isinstance(lifecycle.get("uninstall_plan"), dict) else {}
+        destructive_cleanup_plan = (
+            uninstall_plan.get("destructive_cleanup_plan")
+            if isinstance(uninstall_plan.get("destructive_cleanup_plan"), dict)
+            else {}
+        )
         lifecycle_hold = str(
             bootstrap.get("lifecycle_hold_reason") or migration.get("hold_reason") or ""
         ).strip()
@@ -1304,6 +1331,36 @@ class UiBridge(QtCore.QObject):
                     "title": "Lifecycle Hold",
                     "subtitle": str(migration.get("status", "hold")).replace("_", " ").title(),
                     "body": lifecycle_hold,
+                }
+            )
+        if resolution_plan:
+            resolution_body = str(
+                resolution_state.get("last_resolution_summary")
+                or resolution_plan.get("summary")
+                or resolution_plan.get("operator_action_notes")
+                or ""
+            ).strip()
+            if resolution_body:
+                cards.append(
+                    {
+                        "title": "Resolution Option",
+                        "subtitle": str(
+                            resolution_plan.get("resolution_kind")
+                            or ("manual_only" if resolution_plan else "")
+                        ).replace("_", " ").title(),
+                        "body": resolution_body,
+                    }
+                )
+        cleanup_body = str(
+            destructive_cleanup_plan.get("operator_summary")
+            or ""
+        ).strip()
+        if cleanup_body:
+            cards.append(
+                {
+                    "title": "Cleanup Confirmation",
+                    "subtitle": "Destructive",
+                    "body": cleanup_body,
                 }
             )
         trust_state = self._active_request_state.get("trust") if isinstance(self._active_request_state.get("trust"), dict) else {}
@@ -1331,6 +1388,25 @@ class UiBridge(QtCore.QObject):
                         "body": body,
                     }
                 )
+        for authority_card in self._bridge_authority_ghost_cards():
+            if len(cards) >= 2:
+                break
+            title = str(authority_card.get("title") or "").strip()
+            body = str(authority_card.get("body") or "").strip()
+            if not title or not body:
+                continue
+            if any(card.get("title") == title and card.get("body") == body for card in cards):
+                continue
+            cards.append(
+                {
+                    "title": title,
+                    "subtitle": str(authority_card.get("subtitle") or authority_card.get("resultState") or "").replace("_", " ").title(),
+                    "body": body,
+                    "familyId": str(authority_card.get("familyId") or ""),
+                    "routeFamily": str(authority_card.get("routeFamily") or ""),
+                    "actions": list(authority_card.get("actions") or []),
+                }
+            )
         latest_message = self._latest_assistant_message()
         if latest_message is not None:
             metadata = latest_message.get("metadata") if isinstance(latest_message.get("metadata"), dict) else {}
@@ -2358,6 +2434,9 @@ class UiBridge(QtCore.QObject):
                 ],
             },
         ])
+        authority_group = self._bridge_authority_fact_group()
+        if authority_group is not None:
+            groups.append(authority_group)
         if event_stream:
             buffered = int(event_stream.get("buffered") or 0)
             capacity = int(event_stream.get("capacity") or 0)
@@ -2830,6 +2909,17 @@ class UiBridge(QtCore.QObject):
         event_stream = self._status.get("event_stream", {})
         return event_stream if isinstance(event_stream, dict) else {}
 
+    def _bridge_authority_state(self) -> dict[str, Any]:
+        authority = self._status.get("bridge_authority", {})
+        return authority if isinstance(authority, dict) else {}
+
+    def _bridge_authority_ghost_cards(self) -> list[dict[str, Any]]:
+        authority = self._bridge_authority_state()
+        cards = authority.get("ghostCards", [])
+        if not isinstance(cards, list):
+            return []
+        return [dict(card) for card in cards if isinstance(card, dict)]
+
     def _software_control_state(self) -> dict[str, Any]:
         state = self._status.get("software_control", {})
         return state if isinstance(state, dict) else {}
@@ -2838,9 +2928,109 @@ class UiBridge(QtCore.QObject):
         state = self._status.get("software_recovery", {})
         return state if isinstance(state, dict) else {}
 
+    def _bridge_authority_families(self) -> list[dict[str, Any]]:
+        families = self._bridge_authority_state().get("families", [])
+        return [family for family in families if isinstance(family, dict)] if isinstance(families, list) else []
+
+    def _bridge_authority_context_cards(self) -> list[dict[str, Any]]:
+        cards = self._bridge_authority_state().get("ghostCards", [])
+        if not isinstance(cards, list):
+            return []
+        normalized: list[dict[str, Any]] = []
+        for card in cards:
+            if not isinstance(card, dict):
+                continue
+            title = str(card.get("title", "")).strip()
+            body = str(card.get("body", "")).strip()
+            if not title or not body:
+                continue
+            normalized.append(
+                {
+                    "title": title,
+                    "subtitle": str(card.get("subtitle") or card.get("resultState") or "").replace("_", " ").title(),
+                    "body": body[:160],
+                }
+            )
+        return normalized
+
+    def _bridge_authority_fact_group(self) -> dict[str, Any] | None:
+        authority = self._bridge_authority_state()
+        summary = authority.get("summary") if isinstance(authority.get("summary"), dict) else {}
+        if not summary:
+            return None
+        gaps = authority.get("gapRegister", []) if isinstance(authority.get("gapRegister"), list) else []
+        gap_count = len([gap for gap in gaps if isinstance(gap, dict)])
+        gap_detail = "No backend authority gaps are currently reported."
+        for gap in gaps:
+            if isinstance(gap, dict):
+                gap_detail = str(gap.get("summary") or gap.get("detail") or gap_detail)
+                break
+        return {
+            "title": "Bridge Authority",
+            "summary": str(summary.get("bridgeReadiness", "unknown")).replace("_", " ").title(),
+            "rows": [
+                {
+                    "label": "Mapped Families",
+                    "value": str(summary.get("mappedFamilyCount", 0)),
+                    "detail": "Backend-owned command, preview, and inspection families mapped to UI surfaces.",
+                },
+                {
+                    "label": "Commandable",
+                    "value": str(summary.get("commandableFamilyCount", 0)),
+                    "detail": "Families with backend-backed command authority.",
+                },
+                {
+                    "label": "Previewable",
+                    "value": str(summary.get("previewableFamilyCount", 0)),
+                    "detail": "Families that can show a backend preview before action.",
+                },
+                {
+                    "label": "Gaps",
+                    "value": str(gap_count),
+                    "detail": gap_detail,
+                },
+            ],
+        }
+
+    def _bridge_authority_columns(self) -> list[dict[str, Any]]:
+        families = self._bridge_authority_families()
+        if not families:
+            return []
+        entries = [
+            {
+                "primary": str(family.get("label") or family.get("familyId") or "Authority"),
+                "secondary": str(family.get("commandAuthority", "unknown")).replace("_", " ").title(),
+                "detail": str(family.get("summary") or family.get("degradedReason") or ""),
+            }
+            for family in families[:8]
+        ]
+        return [
+            self._workspace_column(
+                "Authority Map",
+                "Backend authority each UI bridge family is allowed to claim.",
+                entries,
+            )
+        ]
+
     def _lifecycle_state(self) -> dict[str, Any]:
         state = self._status.get("lifecycle", {})
         return state if isinstance(state, dict) else {}
+
+    def lifecycle_state_snapshot(self) -> dict[str, Any]:
+        return dict(self._lifecycle_state())
+
+    def lifecycle_restart_hold_summary(self) -> str:
+        lifecycle = self._lifecycle_state()
+        restart_policy = lifecycle.get("restart_policy") if isinstance(lifecycle.get("restart_policy"), dict) else {}
+        runtime_state = lifecycle.get("runtime") if isinstance(lifecycle.get("runtime"), dict) else {}
+        bootstrap = lifecycle.get("bootstrap") if isinstance(lifecycle.get("bootstrap"), dict) else {}
+        if restart_policy.get("hold_active") or str(runtime_state.get("core_status", "")).strip().lower() == "held":
+            return str(
+                restart_policy.get("hold_reason")
+                or bootstrap.get("lifecycle_hold_reason")
+                or "Stormhelm is holding core restart until the operator reviews recent failures."
+            ).strip()
+        return ""
 
     def _trust_state(self) -> dict[str, Any]:
         state = self._status.get("trust", {})
@@ -3285,7 +3475,15 @@ class UiBridge(QtCore.QObject):
                 return paths
         return [str(path) for path in self.config.safety.allowed_read_dirs if str(path).strip()]
 
+    def _unsafe_test_mode_enabled(self) -> bool:
+        safety = self._safety_settings()
+        if "unsafe_test_mode" in safety:
+            return bool(safety.get("unsafe_test_mode"))
+        return bool(getattr(self.config.safety, "unsafe_test_mode", False))
+
     def _read_scope_label(self) -> str:
+        if self._unsafe_test_mode_enabled():
+            return "Unrestricted (unsafe test mode)"
         allowed = self._allowed_read_dirs()
         count = len(allowed)
         if count <= 0:
@@ -3293,6 +3491,8 @@ class UiBridge(QtCore.QObject):
         return f"{count} allowlisted root{'s' if count != 1 else ''}"
 
     def _read_scope_detail(self) -> str:
+        if self._unsafe_test_mode_enabled():
+            return "Unsafe test mode allows reads across the local filesystem for unrestricted testing."
         allowed = self._allowed_read_dirs()
         if not allowed:
             return "Stormhelm does not currently hold any configured read roots."
@@ -3302,6 +3502,8 @@ class UiBridge(QtCore.QObject):
         return f"Stormhelm can read inside {shown}."
 
     def _shell_command_label(self) -> str:
+        if self._unsafe_test_mode_enabled():
+            return "Live execution"
         safety = self._safety_settings()
         if "allow_shell_stub" in safety:
             enabled = bool(safety.get("allow_shell_stub"))
@@ -3310,6 +3512,8 @@ class UiBridge(QtCore.QObject):
         return "Stub only" if enabled else "Disabled"
 
     def _shell_command_detail(self) -> str:
+        if self._unsafe_test_mode_enabled():
+            return "Unsafe test mode runs shell commands directly on the local machine."
         if self._shell_command_label() == "Stub only":
             return "Shell requests stay behind the stub gate and do not enable unrestricted execution."
         return "Shell execution stays unavailable unless the safety policy explicitly enables the stub."
@@ -3687,8 +3891,18 @@ class UiBridge(QtCore.QObject):
             primary_drive = drives[0] if drives else {}
             install_state = lifecycle.get("install_state") if isinstance(lifecycle.get("install_state"), dict) else {}
             startup_policy = lifecycle.get("startup_policy") if isinstance(lifecycle.get("startup_policy"), dict) else {}
+            startup_registration = startup_policy.get("registration") if isinstance(startup_policy.get("registration"), dict) else {}
             runtime_state = lifecycle.get("runtime") if isinstance(lifecycle.get("runtime"), dict) else {}
+            bootstrap = lifecycle.get("bootstrap") if isinstance(lifecycle.get("bootstrap"), dict) else {}
+            resolution_plan = bootstrap.get("resolution_plan") if isinstance(bootstrap.get("resolution_plan"), dict) else {}
+            resolution_state = bootstrap.get("resolution_state") if isinstance(bootstrap.get("resolution_state"), dict) else {}
             uninstall_plan = lifecycle.get("uninstall_plan") if isinstance(lifecycle.get("uninstall_plan"), dict) else {}
+            cleanup_execution = uninstall_plan.get("cleanup_execution") if isinstance(uninstall_plan.get("cleanup_execution"), dict) else {}
+            destructive_cleanup_plan = (
+                uninstall_plan.get("destructive_cleanup_plan")
+                if isinstance(uninstall_plan.get("destructive_cleanup_plan"), dict)
+                else {}
+            )
             pending_requests = trust_state.get("pending_requests", []) if isinstance(trust_state.get("pending_requests"), list) else []
             active_grants = trust_state.get("active_grants", []) if isinstance(trust_state.get("active_grants"), list) else []
             recent_audit = trust_state.get("recent_audit", []) if isinstance(trust_state.get("recent_audit"), list) else []
@@ -3764,7 +3978,13 @@ class UiBridge(QtCore.QObject):
                         {
                             "primary": "Startup",
                             "secondary": "Enabled" if startup_policy.get("startup_enabled") else "Disabled",
-                            "detail": str(startup_policy.get("registration_status", "unavailable")).replace("_", " ").title(),
+                            "detail": str(
+                                startup_registration.get(
+                                    "operator_summary",
+                                    str(startup_policy.get("registration_status", "unavailable")).replace("_", " ").title(),
+                                )
+                                or str(startup_policy.get("registration_status", "unavailable")).replace("_", " ").title()
+                            ),
                         },
                         {
                             "primary": "Core / Shell",
@@ -3779,14 +3999,36 @@ class UiBridge(QtCore.QObject):
                             ),
                         },
                         {
+                            "primary": "Resolution",
+                            "secondary": (
+                                "Ready"
+                                if resolution_plan.get("resolvable")
+                                else "Manual"
+                                if resolution_plan
+                                else "Clear"
+                            ),
+                            "detail": str(
+                                resolution_state.get("last_resolution_summary")
+                                or resolution_plan.get("summary")
+                                or resolution_plan.get("operator_action_notes")
+                                or "Stormhelm is not holding an active lifecycle resolution step."
+                            ),
+                        },
+                        {
                             "primary": "Cleanup",
                             "secondary": "Preserve durable state"
                             if not uninstall_plan.get("remove_durable_state")
                             else "Remove durable state",
                             "detail": str(
-                                uninstall_plan.get(
-                                    "portable_cleanup_notes",
-                                    "Stormhelm will preserve durable state unless the operator explicitly requests deep cleanup.",
+                                cleanup_execution.get(
+                                    "operator_summary",
+                                    destructive_cleanup_plan.get(
+                                        "operator_summary",
+                                        uninstall_plan.get(
+                                            "portable_cleanup_notes",
+                                            "Stormhelm will preserve durable state unless the operator explicitly requests deep cleanup.",
+                                        ),
+                                    ),
                                 )
                             ),
                         },
@@ -3825,6 +4067,7 @@ class UiBridge(QtCore.QObject):
                         },
                     ],
                 ),
+                *self._bridge_authority_columns(),
             ]
 
         if self._active_module_key == "logbook":
@@ -4103,7 +4346,7 @@ class UiBridge(QtCore.QObject):
         elif self._mode == "deck":
             job_secondary = "Command field deepened"
 
-        return [
+        readouts = [
             {
                 "corner": "top_left",
                 "label": "Stormhelm",
@@ -4129,6 +4372,16 @@ class UiBridge(QtCore.QObject):
                 "secondary": self.config.ui.ghost_shortcut if not self._ghost_capture_active else job_secondary,
             },
         ]
+        authority_cards = self._bridge_authority_context_cards()
+        if authority_cards:
+            authority_card = authority_cards[0]
+            readouts[2] = {
+                "corner": "bottom_left",
+                "label": "Authority",
+                "primary": str(authority_card.get("title", "Authority"))[:48],
+                "secondary": str(authority_card.get("body", ""))[:96],
+            }
+        return readouts
 
     def _companion_module_keys(self, active_key: str) -> list[str]:
         if active_key == "chartroom":

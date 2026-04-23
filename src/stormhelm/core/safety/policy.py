@@ -49,6 +49,13 @@ class SafetyPolicy:
         if not self.config.tools.enabled.is_enabled(tool_name):
             return SafetyDecision(False, f"Tool '{tool_name}' is disabled in configuration.")
 
+        if classification == SafetyClassification.ACTION and self.config.safety.unsafe_test_mode:
+            return SafetyDecision(
+                True,
+                "Unsafe test mode bypassed action safety gates.",
+                details={"tool_name": tool_name, "unsafe_test_mode": True},
+            )
+
         if classification == SafetyClassification.ACTION and tool_name == "shell_command":
             if not self.config.safety.allow_shell_stub:
                 return SafetyDecision(False, "Shell command tool is disabled by safety policy.")
@@ -106,6 +113,12 @@ class SafetyPolicy:
 
     def can_read_path(self, raw_path: str) -> SafetyDecision:
         candidate = Path(raw_path).expanduser().resolve()
+        if self.config.safety.unsafe_test_mode:
+            return SafetyDecision(
+                True,
+                "Unsafe test mode allows unrestricted reads.",
+                {"path": str(candidate), "unsafe_test_mode": True},
+            )
         allowed = any(candidate.is_relative_to(base.resolve()) for base in self.config.safety.allowed_read_dirs)
         if allowed:
             return SafetyDecision(True, "Path is within an allowlisted directory.", {"path": str(candidate)})
@@ -118,6 +131,12 @@ class SafetyPolicy:
     def authorize_software_route(self, route_kind: str, *, requires_elevation: bool = False) -> SafetyDecision:
         software = self.config.software_control
         normalized = str(route_kind or "").strip().lower()
+        if self.config.safety.unsafe_test_mode:
+            return SafetyDecision(
+                True,
+                "Unsafe test mode bypassed software route restrictions.",
+                {"route_kind": normalized, "requires_elevation": requires_elevation, "unsafe_test_mode": True},
+            )
         if requires_elevation and not software.privileged_operations_allowed:
             return SafetyDecision(
                 False,

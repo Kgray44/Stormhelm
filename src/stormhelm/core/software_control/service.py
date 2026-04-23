@@ -419,12 +419,17 @@ class SoftwareControlSubsystem:
         return source.trust_level != SoftwareTrustLevel.UNVERIFIED
 
     def _requires_confirmation(self, operation_type: SoftwareOperationType) -> bool:
+        if self._unsafe_test_mode_enabled():
+            return False
         return operation_type in {
             SoftwareOperationType.INSTALL,
             SoftwareOperationType.UPDATE,
             SoftwareOperationType.UNINSTALL,
             SoftwareOperationType.REPAIR,
         }
+
+    def _unsafe_test_mode_enabled(self) -> bool:
+        return bool(getattr(self.config, "unsafe_test_mode", False))
 
     def _execute_verification(
         self,

@@ -220,6 +220,49 @@ def test_core_container_status_snapshot_includes_trust_runtime_state(temp_config
     assert snapshot["trust"]["deck_groups"][0]["title"] == "Pending Approval"
 
 
+def test_core_container_status_snapshot_includes_bridge_authority_map(temp_config) -> None:
+    container = build_container(temp_config)
+    container.system_probe = FakeOperationalProbe()  # type: ignore[assignment]
+
+    snapshot = container.status_snapshot()
+    authority = snapshot["bridge_authority"]
+    families = {
+        str(family["familyId"]): family
+        for family in authority["families"]
+    }
+
+    for family_id in {
+        "trust",
+        "tasks",
+        "lifecycle",
+        "relay",
+        "software",
+        "adapters",
+        "memory",
+        "systems",
+    }:
+        assert family_id in families
+
+    assert authority["resultStates"] == [
+        "requested",
+        "planned",
+        "pending_approval",
+        "executing",
+        "completed",
+        "verified",
+        "failed",
+        "blocked",
+        "stale",
+        "unknown",
+    ]
+    assert families["software"]["ownerFamily"] == "software"
+    assert families["software"]["routeFamily"] == "native_orchestration"
+    assert families["relay"]["routeFamily"] == "preview_and_confirm"
+    assert families["adapters"]["inspectAuthority"] == "available"
+    assert families["systems"]["commandAuthority"] == "unavailable"
+    assert authority["summary"]["mappedFamilyCount"] >= 8
+
+
 def test_core_container_status_snapshot_includes_software_control_and_recovery_runtime_state(temp_config) -> None:
     container = build_container(temp_config)
     container.system_probe = FakeOperationalProbe()  # type: ignore[assignment]

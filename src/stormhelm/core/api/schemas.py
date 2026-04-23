@@ -32,6 +32,39 @@ class ShellPresenceRequest(BaseModel):
     observed_at: str = ""
 
 
+class StartupPolicyMutationRequest(BaseModel):
+    startup_enabled: bool = False
+    start_core_with_windows: bool = False
+    start_shell_with_windows: bool = False
+    tray_only_startup: bool = True
+    ghost_ready_on_startup: bool = True
+
+
+class LifecycleResolutionRequest(BaseModel):
+    plan_id: str = ""
+    resolution_kind: str = ""
+    confirmation_kind: str = ""
+    confirmed_summary: str = ""
+
+
+class DestructiveCleanupConfirmationRequest(BaseModel):
+    plan_id: str = ""
+    operation: str = ""
+    confirmation_kind: str = ""
+    confirmed_summary: str = ""
+    confirmed_at: str = ""
+    destructive_intent: bool = False
+
+
+class CleanupExecutionRequest(BaseModel):
+    remove_startup_registration: bool = False
+    remove_logs: bool = False
+    remove_caches: bool = False
+    remove_durable_state: bool = False
+    destructive_confirmation_received: bool = False
+    destructive_confirmation: DestructiveCleanupConfirmationRequest | None = None
+
+
 class EventsResponse(BaseModel):
     events: list[dict[str, Any]]
     cursor: int | None = None

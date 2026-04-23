@@ -70,7 +70,10 @@ def load_config(
         config_data = _deep_merge(config_data, _read_toml(user_config_path))
         config_data = _apply_env_overrides(config_data, env_values)
 
-    return _build_app_config(config_data, root, runtime, env_values)
+    app_config = _build_app_config(config_data, root, runtime, env_values)
+    if app_config.safety.unsafe_test_mode:
+        _apply_unsafe_test_mode_overrides(app_config, root=root)
+    return app_config
 
 
 def _build_app_config(
@@ -217,6 +220,7 @@ def _build_app_config(
         browser_guided_routes_enabled=bool(software_control_data.get("browser_guided_routes_enabled", True)),
         privileged_operations_allowed=bool(software_control_data.get("privileged_operations_allowed", False)),
         trusted_sources_only=bool(software_control_data.get("trusted_sources_only", True)),
+        unsafe_test_mode=bool(software_control_data.get("unsafe_test_mode", False)),
     )
 
     software_recovery_data = data.get("software_recovery", {})
@@ -315,6 +319,7 @@ def _build_app_config(
     safety_config = SafetyConfig(
         allowed_read_dirs=allowed_dirs,
         allow_shell_stub=bool(safety_data.get("allow_shell_stub", False)),
+        unsafe_test_mode=bool(safety_data.get("unsafe_test_mode", False)),
     )
 
     tool_data = data.get("tools", {})
@@ -546,6 +551,7 @@ def _apply_env_overrides(data: ConfigDict, env: Mapping[str, str]) -> ConfigDict
         "STORMHELM_SOFTWARE_CONTROL_VENDOR_INSTALLER_ROUTES_ENABLED": ("software_control.vendor_installer_routes_enabled", _parse_bool),
         "STORMHELM_SOFTWARE_CONTROL_BROWSER_GUIDED_ROUTES_ENABLED": ("software_control.browser_guided_routes_enabled", _parse_bool),
         "STORMHELM_SOFTWARE_CONTROL_PRIVILEGED_OPERATIONS_ALLOWED": ("software_control.privileged_operations_allowed", _parse_bool),
+        "STORMHELM_SOFTWARE_CONTROL_TRUSTED_SOURCES_ONLY": ("software_control.trusted_sources_only", _parse_bool),
         "STORMHELM_SOFTWARE_RECOVERY_ENABLED": ("software_recovery.enabled", _parse_bool),
         "STORMHELM_SOFTWARE_RECOVERY_DEBUG_EVENTS_ENABLED": ("software_recovery.debug_events_enabled", _parse_bool),
         "STORMHELM_SOFTWARE_RECOVERY_LOCAL_TROUBLESHOOTING_ENABLED": ("software_recovery.local_troubleshooting_enabled", _parse_bool),
@@ -562,6 +568,7 @@ def _apply_env_overrides(data: ConfigDict, env: Mapping[str, str]) -> ConfigDict
         "STORMHELM_DISCORD_RELAY_VERIFICATION_ENABLED": ("discord_relay.verification_enabled", _parse_bool),
         "STORMHELM_DISCORD_RELAY_LOCAL_DM_ROUTE_ENABLED": ("discord_relay.local_dm_route_enabled", _parse_bool),
         "STORMHELM_DISCORD_RELAY_BOT_WEBHOOK_ROUTES_ENABLED": ("discord_relay.bot_webhook_routes_enabled", _parse_bool),
+        "STORMHELM_UNSAFE_TEST_MODE": ("safety.unsafe_test_mode", _parse_bool),
     }
 
     for env_key, (path, parser) in overrides.items():
@@ -643,3 +650,21 @@ def _initial_override_candidates(
 def _resolve_data_dir(data: ConfigDict, root: Path, app_name: str) -> Path:
     storage_data = data.get("storage", {})
     return _expand_path(storage_data.get("data_dir") or "", root, None) or default_data_dir(app_name)
+
+
+def _apply_unsafe_test_mode_overrides(config: AppConfig, *, root: Path) -> None:
+    filesystem_root = _filesystem_root(root)
+    config.safety.allow_shell_stub = True
+    config.safety.allowed_read_dirs = [filesystem_root]
+    config.tools.enabled.shell_command = True
+    config.software_control.package_manager_routes_enabled = True
+    config.software_control.vendor_installer_routes_enabled = True
+    config.software_control.browser_guided_routes_enabled = True
+    config.software_control.privileged_operations_allowed = True
+    config.software_control.trusted_sources_only = False
+    config.software_control.unsafe_test_mode = True
+    config.screen_awareness.action_policy_mode = "trusted_action"
+
+
+def _filesystem_root(root: Path) -> Path:
+    return Path(root.anchor or root.root or "/").resolve()

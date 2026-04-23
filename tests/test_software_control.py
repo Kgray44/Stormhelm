@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import shutil
+from pathlib import Path
 from uuid import uuid4
 
+from stormhelm.config.loader import load_config
 from stormhelm.core.tasks.models import TaskCheckpointRecord
 from stormhelm.core.tasks.models import TaskRecord
 from stormhelm.core.tasks.models import TaskState
@@ -192,6 +194,36 @@ def test_software_control_does_not_offer_unverified_browser_route_when_trusted_s
     assert target is not None
     assert target.canonical_name == "some made up tool"
     assert sources == []
+
+
+def test_software_control_unsafe_mode_allows_unverified_sources_and_skips_confirmation(temp_project_root: Path) -> None:
+    unsafe_config = load_config(
+        project_root=temp_project_root,
+        env={"STORMHELM_UNSAFE_TEST_MODE": "true"},
+    )
+    recovery = build_software_recovery_subsystem(
+        unsafe_config.software_recovery,
+        openai_enabled=unsafe_config.openai.enabled,
+    )
+    software = build_software_control_subsystem(
+        unsafe_config.software_control,
+        recovery=recovery,
+    )
+
+    target = software.resolve_software_target("install some made up tool")
+    assert target is not None
+    sources = software.discover_software_sources(target)
+    plan = software.plan_software_operation(
+        operation_type=SoftwareOperationType.INSTALL,
+        target=target,
+        sources=sources,
+    )
+
+    assert sources
+    assert sources[0].route == "browser_guided"
+    assert plan.selected_source is not None
+    assert plan.selected_source.route == "browser_guided"
+    assert all(step.status.value != "waiting_confirmation" for step in plan.steps)
 
 
 def test_software_control_verifies_local_install_state_without_confirmation(temp_config, monkeypatch) -> None:

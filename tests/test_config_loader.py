@@ -213,6 +213,23 @@ def test_load_config_applies_screen_awareness_environment_overrides(temp_project
     assert config.screen_awareness.power_features_enabled is False
 
 
+def test_load_config_enables_unsafe_test_mode_overrides(temp_project_root: Path) -> None:
+    config = load_config(
+        project_root=temp_project_root,
+        env={"STORMHELM_UNSAFE_TEST_MODE": "true"},
+    )
+
+    filesystem_root = Path(temp_project_root.anchor or temp_project_root.root or "/").resolve()
+
+    assert config.safety.unsafe_test_mode is True
+    assert config.safety.allow_shell_stub is True
+    assert config.safety.allowed_read_dirs == [filesystem_root]
+    assert config.tools.enabled.shell_command is True
+    assert config.software_control.privileged_operations_allowed is True
+    assert config.software_control.trusted_sources_only is False
+    assert config.screen_awareness.action_policy_mode == "trusted_action"
+
+
 def test_load_config_defaults_discord_relay_to_enabled_baby_alias(temp_project_root: Path) -> None:
     config = load_config(project_root=temp_project_root, env={})
 

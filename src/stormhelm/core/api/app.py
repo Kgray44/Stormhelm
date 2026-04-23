@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
+import threading
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
@@ -11,15 +13,31 @@ from fastapi.responses import StreamingResponse
 from stormhelm.config.models import AppConfig
 from stormhelm.core.api.schemas import (
     ChatRequest,
+    CleanupExecutionRequest,
+    LifecycleResolutionRequest,
     EventsResponse,
     JobsResponse,
     NoteCreateRequest,
     NotesResponse,
     ShellPresenceRequest,
+    StartupPolicyMutationRequest,
 )
 from stormhelm.core.container import CoreContainer, build_container
 from stormhelm.core.lifecycle import ShellPresenceUpdate
 from stormhelm.version import __version__
+
+
+def _schedule_process_shutdown(delay_seconds: float = 0.15) -> None:
+    timer = threading.Timer(delay_seconds, _terminate_current_process)
+    timer.daemon = True
+    timer.start()
+
+
+def _terminate_current_process() -> None:
+    try:
+        os.kill(os.getpid(), signal.SIGTERM)
+    except Exception:
+        os._exit(0)
 
 
 def create_app(config: AppConfig | None = None) -> FastAPI:
@@ -256,6 +274,88 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         else:
             current.lifecycle.record_shell_presence(update)
         return {"runtime": current.lifecycle.status_snapshot().get("runtime", {})}
+
+    @app.post("/lifecycle/startup")
+    def update_startup_registration(payload: StartupPolicyMutationRequest, request: Request) -> dict[str, object]:
+        current = _current_container(request)
+        policy = current.lifecycle.configure_startup_policy(
+            startup_enabled=payload.startup_enabled,
+            start_core_with_windows=payload.start_core_with_windows,
+            start_shell_with_windows=payload.start_shell_with_windows,
+            tray_only_startup=payload.tray_only_startup,
+            ghost_ready_on_startup=payload.ghost_ready_on_startup,
+        )
+        return {
+            "startup_policy": policy.to_dict(),
+            "bootstrap": current.lifecycle.status_snapshot().get("bootstrap", {}),
+        }
+
+    @app.post("/lifecycle/resolution/plan")
+    def prepare_lifecycle_resolution_plan(request: Request) -> dict[str, object]:
+        current = _current_container(request)
+        plan = current.lifecycle.prepare_resolution_plan()
+        return {
+            "resolution_plan": plan.to_dict(),
+            "bootstrap": current.lifecycle.status_snapshot().get("bootstrap", {}),
+        }
+
+    @app.post("/lifecycle/resolution")
+    def execute_lifecycle_resolution(payload: LifecycleResolutionRequest, request: Request) -> dict[str, object]:
+        current = _current_container(request)
+        resolution = current.lifecycle.resolve_lifecycle_hold(
+            plan_id=payload.plan_id,
+            resolution_kind=payload.resolution_kind,
+            confirmation_kind=payload.confirmation_kind,
+            confirmed_summary=payload.confirmed_summary,
+        )
+        return {
+            "resolution_state": resolution.to_dict(),
+            "bootstrap": current.lifecycle.status_snapshot().get("bootstrap", {}),
+            "migration": current.lifecycle.status_snapshot().get("migration", {}),
+        }
+
+    @app.post("/lifecycle/cleanup/plan")
+    def prepare_lifecycle_cleanup_plan(payload: CleanupExecutionRequest, request: Request) -> dict[str, object]:
+        current = _current_container(request)
+        plan = current.lifecycle.prepare_cleanup_plan(
+            remove_startup_registration=payload.remove_startup_registration,
+            remove_logs=payload.remove_logs,
+            remove_caches=payload.remove_caches,
+            remove_durable_state=payload.remove_durable_state,
+        )
+        return {
+            "destructive_cleanup_plan": plan.to_dict(),
+            "uninstall_plan": current.lifecycle.status_snapshot().get("uninstall_plan", {}),
+        }
+
+    @app.post("/lifecycle/cleanup")
+    def execute_lifecycle_cleanup(payload: CleanupExecutionRequest, request: Request) -> dict[str, object]:
+        current = _current_container(request)
+        cleanup = current.lifecycle.execute_cleanup(
+            remove_startup_registration=payload.remove_startup_registration,
+            remove_logs=payload.remove_logs,
+            remove_caches=payload.remove_caches,
+            remove_durable_state=payload.remove_durable_state,
+            destructive_confirmation_received=payload.destructive_confirmation_received,
+            destructive_confirmation=(
+                payload.destructive_confirmation.model_dump() if payload.destructive_confirmation is not None else None
+            ),
+        )
+        return {
+            "cleanup_execution": cleanup.to_dict(),
+            "uninstall_plan": current.lifecycle.status_snapshot().get("uninstall_plan", {}),
+        }
+
+    @app.post("/lifecycle/core/shutdown")
+    def shutdown_core(request: Request) -> dict[str, object]:
+        current = _current_container(request)
+        current.events.publish(
+            level="WARNING",
+            source="api",
+            message="Operator requested a backend shutdown from the shell tray.",
+        )
+        _schedule_process_shutdown()
+        return {"status": "shutting_down", "pid": os.getpid(), "runtime": current.lifecycle.status_snapshot().get("runtime", {})}
 
     @app.get("/snapshot")
     def snapshot(
