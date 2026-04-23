@@ -1483,6 +1483,8 @@ class AssistantOrchestrator:
             }
         if planner_obedience:
             metadata["planner_obedience"] = dict(planner_obedience)
+        if planned_decision is not None and planned_decision.route_state is not None:
+            metadata["route_state"] = planned_decision.route_state.to_dict()
         return metadata
 
     def _publish_screen_awareness_event(

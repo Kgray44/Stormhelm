@@ -12,6 +12,7 @@ from uuid import uuid4
 from PySide6 import QtCore, QtGui
 
 from stormhelm.config.models import AppConfig
+from stormhelm.ui.command_surface_v2 import build_command_surface_model
 from stormhelm.ui.ghost_adaptive import (
     GhostAdaptiveManager,
     default_ghost_diagnostics,
@@ -79,6 +80,8 @@ class UiBridge(QtCore.QObject):
         self._active_task: dict[str, Any] = {}
         self._ghost_messages: list[dict[str, Any]] = []
         self._context_cards: list[dict[str, Any]] = []
+        self._ghost_primary_card: dict[str, Any] = {}
+        self._ghost_action_strip: list[dict[str, Any]] = []
         self._ghost_corner_readouts: list[dict[str, Any]] = []
         self._deck_modules: list[dict[str, Any]] = []
         self._active_deck_module: dict[str, Any] = {}
@@ -87,6 +90,9 @@ class UiBridge(QtCore.QObject):
         self._hidden_deck_panels: list[dict[str, Any]] = []
         self._deck_panel_catalog: list[dict[str, Any]] = []
         self._status_strip_items: list[dict[str, Any]] = []
+        self._request_composer: dict[str, Any] = {}
+        self._route_inspector: dict[str, Any] = {}
+        self._command_stations: list[dict[str, Any]] = []
         self._ghost_capture_active = False
         self._ghost_draft_text = ""
         self._ghost_reveal_target = 1.0
@@ -260,6 +266,21 @@ class UiBridge(QtCore.QObject):
     def environmentLabel(self) -> str:
         return self._environment_label
 
+    @QtCore.Property(bool, notify=statusChanged)
+    def embeddedBrowserPreviewEnabled(self) -> bool:
+        if self._environment_label.strip().lower() == "test":
+            return False
+        platform_name = ""
+        app = QtGui.QGuiApplication.instance()
+        if app is not None:
+            try:
+                platform_name = str(app.platformName() or "")
+            except Exception:
+                platform_name = ""
+        if not platform_name:
+            platform_name = str(os.environ.get("QT_QPA_PLATFORM", ""))
+        return platform_name.strip().lower() not in {"offscreen", "minimal", "headless"}
+
     @QtCore.Property(str, notify=statusChanged)
     def localTimeLabel(self) -> str:
         return self._local_time_label
@@ -314,6 +335,14 @@ class UiBridge(QtCore.QObject):
     def contextCards(self) -> list[dict[str, Any]]:
         return list(self._context_cards)
 
+    @QtCore.Property("QVariantMap", notify=collectionsChanged)
+    def ghostPrimaryCard(self) -> dict[str, Any]:
+        return dict(self._ghost_primary_card)
+
+    @QtCore.Property("QVariantList", notify=collectionsChanged)
+    def ghostActionStrip(self) -> list[dict[str, Any]]:
+        return list(self._ghost_action_strip)
+
     @QtCore.Property("QVariantList", notify=collectionsChanged)
     def deckModules(self) -> list[dict[str, Any]]:
         return list(self._deck_modules)
@@ -362,6 +391,14 @@ class UiBridge(QtCore.QObject):
     @QtCore.Property("QVariantMap", notify=collectionsChanged)
     def workspaceCanvas(self) -> dict[str, Any]:
         return dict(self._workspace_canvas)
+
+    @QtCore.Property("QVariantMap", notify=collectionsChanged)
+    def requestComposer(self) -> dict[str, Any]:
+        return dict(self._request_composer)
+
+    @QtCore.Property("QVariantMap", notify=collectionsChanged)
+    def routeInspector(self) -> dict[str, Any]:
+        return dict(self._route_inspector)
 
     @QtCore.Property("QVariantList", notify=collectionsChanged)
     def openedItems(self) -> list[dict[str, Any]]:
@@ -623,6 +660,30 @@ class UiBridge(QtCore.QObject):
         self.statusChanged.emit()
         self.collectionsChanged.emit()
         self.sendMessageRequested.emit(text)
+
+    @QtCore.Slot(str)
+    def performLocalSurfaceAction(self, action_name: str) -> None:
+        normalized = str(action_name or "").strip().lower()
+        if not normalized:
+            return
+        if normalized == "open_route_inspector":
+            self.setMode("deck")
+            self.restoreDeckPanel("route-inspector")
+            return
+        if normalized.startswith("open_panel:"):
+            panel_id = normalized.split(":", 1)[1].strip()
+            if panel_id:
+                self.setMode("deck")
+                self.restoreDeckPanel(panel_id)
+            return
+        if normalized.startswith("open_workspace:"):
+            _, module_key, *section_parts = normalized.split(":")
+            section_key = section_parts[0] if section_parts else ""
+            if module_key:
+                self.setMode("deck")
+                self.activateModule(module_key)
+                if section_key:
+                    self.activateWorkspaceSection(section_key)
 
     @QtCore.Slot(str, str)
     def saveNote(self, title: str, content: str) -> None:
@@ -1296,6 +1357,12 @@ class UiBridge(QtCore.QObject):
         display_history = self._display_history()
         self._ghost_messages = [self._ghost_message_variant(item) for item in display_history[-3:]]
         self._context_cards = self._build_context_cards()
+        command_surface = self._build_command_surface()
+        self._ghost_primary_card = dict(command_surface.get("ghostPrimaryCard") or {})
+        self._ghost_action_strip = list(command_surface.get("ghostActionStrip") or [])
+        self._request_composer = dict(command_surface.get("requestComposer") or {})
+        self._route_inspector = dict(command_surface.get("routeInspector") or {})
+        self._command_stations = [dict(item) for item in command_surface.get("deckStations") or [] if isinstance(item, dict)]
         self._command_rail_items = self._build_command_rail_items()
         self._workspace_sections = self._build_workspace_sections()
         self._workspace_rail_items = self._build_workspace_rail_items()
@@ -1307,6 +1374,16 @@ class UiBridge(QtCore.QObject):
         self._deck_panel_catalog = self._build_deck_panel_catalog()
         self._ghost_corner_readouts = self._build_ghost_corner_readouts()
         self._status_strip_items = self._build_status_strip_items()
+
+    def _build_command_surface(self) -> dict[str, Any]:
+        return build_command_surface_model(
+            active_request_state=self._active_request_state,
+            active_task=self._active_task,
+            recent_context_resolutions=self._recent_context_resolutions,
+            latest_message=self._latest_assistant_message(),
+            status=self._status,
+            workspace_focus=self._workspace_focus,
+        )
 
     def _build_context_cards(self) -> list[dict[str, Any]]:
         cards: list[dict[str, Any]] = []
@@ -1646,6 +1723,7 @@ class UiBridge(QtCore.QObject):
         return catalog
 
     def _default_deck_panel_specs(self) -> list[dict[str, Any]]:
+        command_surface_active = bool(self._route_inspector or self._command_stations)
         panels: list[dict[str, Any]] = [
             {
                 "panelId": "command-spine",
@@ -1669,7 +1747,7 @@ class UiBridge(QtCore.QObject):
                 "edge": "center",
                 "gridX": 3,
                 "gridY": 0,
-                "colSpan": 6,
+                "colSpan": 5 if command_surface_active else 6,
                 "rowSpan": 6,
                 "minCols": 4,
                 "minRows": 4,
@@ -1677,22 +1755,69 @@ class UiBridge(QtCore.QObject):
             },
         ]
 
-        if self._active_module_key == "chartroom":
+        if self._route_inspector:
+            panels.append(
+                {
+                    "panelId": "route-inspector",
+                    "title": "Route Inspector",
+                    "subtitle": str(self._route_inspector.get("subtitle", "")),
+                    "contentKind": "route-inspector",
+                    "edge": "right",
+                    "gridX": 8 if command_surface_active else 9,
+                    "gridY": 0,
+                    "colSpan": 4 if command_surface_active else 3,
+                    "rowSpan": 3 if command_surface_active else 6,
+                    "minCols": 2,
+                    "minRows": 3,
+                    "inspectorData": dict(self._route_inspector),
+                }
+            )
+
+        for station in self._command_stations:
+            panel_id = str(station.get("stationId", "")).strip()
+            if not panel_id:
+                continue
+            layout_slot = str(station.get("layoutSlot", "")).strip().lower()
+            if layout_slot == "secondary":
+                grid_x, grid_y, col_span, row_span = 8, 5, 4, 3
+            elif layout_slot == "tertiary":
+                grid_x, grid_y, col_span, row_span = 3, 6, 5, 2
+            else:
+                grid_x, grid_y, col_span, row_span = 8, 3, 4, 2
+            panels.append(
+                {
+                    "panelId": panel_id,
+                    "title": str(station.get("title", panel_id.replace("-", " ").title())),
+                    "subtitle": str(station.get("subtitle", "")),
+                    "contentKind": "command-station",
+                    "edge": "right" if layout_slot != "tertiary" else "bottom",
+                    "gridX": grid_x,
+                    "gridY": grid_y,
+                    "colSpan": col_span,
+                    "rowSpan": row_span,
+                    "minCols": 3 if layout_slot == "tertiary" else 2,
+                    "minRows": 2,
+                    "stationData": dict(station),
+                }
+            )
+
+        if not command_surface_active and self._active_module_key == "chartroom":
             if self._active_workspace_section_key != "active-thread":
                 panels.append(self._workspace_section_panel("thread-section", "chartroom", "active-thread", "left"))
             if self._active_workspace_section_key != "tasks":
                 panels.append(self._workspace_section_panel("tasks-section", "chartroom", "tasks", "bottom"))
             if self._opened_items and self._active_workspace_section_key not in {"opened-items", "open-pages", "working-set"}:
                 panels.append(self._workspace_section_panel("opened-items-section", "chartroom", "opened-items", "right"))
-        elif self._active_module_key in {"files", "browser"}:
+        elif not command_surface_active and self._active_module_key in {"files", "browser"}:
             panels.append(self._workspace_section_panel("tasks-section", "chartroom", "tasks", "bottom"))
             if self._opened_items and self._active_workspace_section_key not in {"opened-items", "open-pages", "working-set"}:
                 section_key = "references" if self._active_module_key == "browser" else "opened-items"
                 panels.append(self._workspace_section_panel("opened-items-section", self._active_module_key, section_key, "right"))
-        elif self._active_module_key in {"systems", "watch", "signals"}:
+        elif not command_surface_active and self._active_module_key in {"systems", "watch", "signals"}:
             panels.append(self._workspace_section_panel("session-section", "chartroom", "session", "bottom"))
 
-        for module in self._deck_support_modules[:3]:
+        support_modules = [] if command_surface_active else self._deck_support_modules[:3]
+        for module in support_modules:
             panels.append(
                 {
                     "panelId": f"{module['key']}-module",
@@ -1711,7 +1836,7 @@ class UiBridge(QtCore.QObject):
             )
 
         preview_item = self._get_active_opened_item()
-        if preview_item and (
+        if not command_surface_active and preview_item and (
             self._active_module_key in {"files", "browser"}
             or self._active_workspace_section_key not in {"opened-items", "open-pages", "working-set"}
         ):
@@ -1775,9 +1900,11 @@ class UiBridge(QtCore.QObject):
 
     def _default_panel_layouts(self, preset: str, panels: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
         ids = {panel["panelId"] for panel in panels}
+        has_command_stations = any(str(panel.get("contentKind", "")) == "command-station" for panel in panels)
         layout: dict[str, dict[str, int]] = {
             "command-spine": {"gridX": 0, "gridY": 0, "colSpan": 3, "rowSpan": 8},
-            "workspace-main": {"gridX": 3, "gridY": 2, "colSpan": 6, "rowSpan": 5},
+            "workspace-main": {"gridX": 3, "gridY": 2, "colSpan": 5 if has_command_stations else 6, "rowSpan": 5},
+            "route-inspector": {"gridX": 8 if has_command_stations else 9, "gridY": 0, "colSpan": 4 if has_command_stations else 3, "rowSpan": 3 if has_command_stations else 6},
             "preview-surface": {"gridX": 8, "gridY": 0, "colSpan": 4, "rowSpan": 5},
             "thread-section": {"gridX": 3, "gridY": 6, "colSpan": 3, "rowSpan": 2},
             "tasks-section": {"gridX": 3, "gridY": 6, "colSpan": 5, "rowSpan": 2},
@@ -1820,6 +1947,19 @@ class UiBridge(QtCore.QObject):
                     "logbook-module": {"gridX": 8, "gridY": 5, "colSpan": 4, "rowSpan": 3},
                 }
             )
+
+        if has_command_stations:
+            for panel in panels:
+                if str(panel.get("contentKind", "")) != "command-station":
+                    continue
+                panel_id = str(panel.get("panelId", ""))
+                slot = str(panel.get("stationData", {}).get("layoutSlot") if isinstance(panel.get("stationData"), dict) else panel.get("layoutSlot", "")).strip().lower()
+                if slot == "secondary":
+                    layout[panel_id] = {"gridX": 8, "gridY": 5, "colSpan": 4, "rowSpan": 3}
+                elif slot == "tertiary":
+                    layout[panel_id] = {"gridX": 3, "gridY": 6, "colSpan": 5, "rowSpan": 2}
+                else:
+                    layout[panel_id] = {"gridX": 8, "gridY": 3, "colSpan": 4, "rowSpan": 2}
 
         return {panel_id: values for panel_id, values in layout.items() if panel_id in ids}
 

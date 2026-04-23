@@ -3,10 +3,14 @@ import QtQuick 2.15
 Item {
     id: root
 
+    signal actionRequested(var action)
+
     property real coreBottom: 0
     property real deckProgress: 0
     property var messages: []
     property var contextCards: []
+    property var primaryCard: ({})
+    property var actionStrip: []
     property var cornerReadouts: []
     property string statusLine: ""
     property string connectionLabel: ""
@@ -86,7 +90,7 @@ Item {
 
         Column {
             anchors.horizontalCenter: parent.horizontalCenter
-            width: Math.min(parent.width * 0.7, 620)
+            width: Math.min(parent.width * 0.74, 680)
             spacing: 7
             visible: root.messages.length > 0
 
@@ -114,6 +118,29 @@ Item {
                         styleColor: Qt.rgba(0.01, 0.04, 0.07, root.adaptiveShadowOpacity)
                     }
                 }
+            }
+        }
+
+        CommandSurfaceCard {
+            id: ghostPrimaryCommandCard
+            objectName: "ghostPrimaryCommandCard"
+            anchors.horizontalCenter: parent.horizontalCenter
+            width: Math.min(parent.width * 0.82, 560)
+            compact: true
+            card: root.primaryCard
+            visible: Boolean((root.primaryCard || {}).title)
+        }
+
+        CommandActionStrip {
+            id: ghostActionStrip
+            objectName: "ghostActionStrip"
+            anchors.horizontalCenter: parent.horizontalCenter
+            width: Math.min(parent.width * 0.84, 600)
+            actions: root.actionStrip
+            compact: true
+            visible: (root.actionStrip || []).length > 0
+            onActionTriggered: function(action) {
+                root.actionRequested(action)
             }
         }
 

@@ -44,32 +44,89 @@ def _capture_qt_messages() -> Iterator[list[str]]:
 
 def _drain_qt_cleanup(app: QtWidgets.QApplication, *, wait_ms: int = 0) -> None:
     app.processEvents()
-    QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
-    app.processEvents()
     if wait_ms > 0:
         QtTest.QTest.qWait(wait_ms)
         app.processEvents()
-    QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
     app.processEvents()
 
 
 def _dispose_qt_objects(app: QtWidgets.QApplication, *objects: QtCore.QObject | QtGui.QWindow | None) -> None:
+    def key_for(obj: QtCore.QObject | QtGui.QWindow) -> int:
+        try:
+            return int(shiboken6.getCppPointer(obj)[0])
+        except Exception:
+            return id(obj)
+
+    seen: set[int] = set()
+    engines: list[QtQml.QQmlEngine] = []
+    windows: list[QtGui.QWindow] = []
+    others: list[QtCore.QObject] = []
+    engine_root_keys: set[int] = set()
+
     for obj in objects:
         if obj is None or not shiboken6.isValid(obj):
             continue
-        if isinstance(obj, QtGui.QWindow):
-            obj.close()
-        obj.deleteLater()
+        object_key = key_for(obj)
+        if object_key in seen:
+            continue
+        seen.add(object_key)
+        if isinstance(obj, QtQml.QQmlEngine):
+            engines.append(obj)
+        elif isinstance(obj, QtGui.QWindow):
+            windows.append(obj)
+        else:
+            others.append(obj)
+
+    for engine in engines:
+        if not shiboken6.isValid(engine):
+            continue
+        root_objects_getter = getattr(engine, "rootObjects", None)
+        if not callable(root_objects_getter):
+            continue
+        for root_object in root_objects_getter():
+            if root_object is None or not shiboken6.isValid(root_object):
+                continue
+            engine_root_keys.add(key_for(root_object))
 
     for window in list(app.topLevelWindows()):
         if not shiboken6.isValid(window):
             continue
-        window.close()
-        window.deleteLater()
+        object_key = key_for(window)
+        if object_key in seen:
+            continue
+        seen.add(object_key)
+        windows.append(window)
 
-    _drain_qt_cleanup(app, wait_ms=5)
+    for engine in engines:
+        try:
+            engine.rootContext().setContextProperty("stormhelmBridge", None)
+            engine.rootContext().setContextProperty("stormhelmGhostInput", None)
+        except Exception:
+            pass
+        try:
+            engine.collectGarbage()
+            engine.clearComponentCache()
+        except Exception:
+            pass
+
+    for window in windows:
+        if shiboken6.isValid(window):
+            window.close()
+
+    _drain_qt_cleanup(app, wait_ms=10)
+
+    delete_later_queue: list[QtCore.QObject] = []
+    delete_later_queue.extend(others)
+    delete_later_queue.extend(window for window in windows if key_for(window) not in engine_root_keys)
+    delete_later_queue.extend(engines)
+
+    for obj in delete_later_queue:
+        if shiboken6.isValid(obj):
+            obj.deleteLater()
+
+    _drain_qt_cleanup(app, wait_ms=20)
     gc.collect()
-    _drain_qt_cleanup(app)
+    _drain_qt_cleanup(app, wait_ms=20)
 
 
 def _load_main_qml_scene() -> tuple[
@@ -373,6 +430,92 @@ def test_main_qml_exposes_deck_panel_launcher_and_layout_presets() -> None:
         _dispose_qt_objects(app, root, engine, bridge)
 
 
+def test_main_qml_surfaces_command_card_and_route_inspector() -> None:
+    app, _, bridge, engine, root = _load_main_qml_scene()
+    try:
+        bridge.apply_snapshot(
+            {
+                "history": [
+                    {
+                        "message_id": "assistant-route-1",
+                        "role": "assistant",
+                        "content": "Relay preview is ready for Baby once you approve it.",
+                        "created_at": "2026-04-23T12:00:00Z",
+                        "metadata": {
+                            "bearing_title": "Relay Preview",
+                            "micro_response": "Relay preview ready for Baby.",
+                            "route_state": {
+                                "winner": {
+                                    "route_family": "discord_relay",
+                                    "query_shape": "discord_relay_request",
+                                    "posture": "clear_winner",
+                                    "status": "preview_ready",
+                                    "clarification_needed": False,
+                                },
+                                "deictic_binding": {
+                                    "resolved": True,
+                                    "selected_source": "selection",
+                                    "selected_target": {
+                                        "source": "selection",
+                                        "target_type": "text",
+                                        "label": "Selected launch notes",
+                                        "freshness": "current",
+                                    },
+                                },
+                            },
+                        },
+                    }
+                ],
+                "active_request_state": {
+                    "family": "discord_relay",
+                    "subject": "Baby",
+                    "request_type": "discord_relay_dispatch",
+                    "query_shape": "discord_relay_request",
+                    "route": {"tool_name": "", "response_mode": "action_result", "route_mode": "local_client_automation"},
+                    "parameters": {
+                        "destination_alias": "Baby",
+                        "payload_hint": "selected_text",
+                        "request_stage": "preview",
+                    },
+                    "trust": {
+                        "decision": "confirmation_required",
+                        "approval_state": "pending_operator_confirmation",
+                        "available_scopes": ["once", "session"],
+                    },
+                },
+            }
+        )
+        app.processEvents()
+        QtTest.QTest.qWait(60)
+        app.processEvents()
+
+        ghost_shell = root.findChild(QtCore.QObject, "ghostShell")
+        ghost_card = root.findChild(QtCore.QObject, "ghostPrimaryCommandCard")
+        ghost_actions = root.findChild(QtCore.QObject, "ghostActionStrip")
+
+        assert ghost_shell is not None
+        assert ghost_card is not None
+        assert ghost_actions is not None
+        assert ghost_shell.property("primaryCard")["title"] == "Relay Preview"
+
+        bridge.setMode("deck")
+        app.processEvents()
+        QtTest.QTest.qWait(60)
+        app.processEvents()
+
+        panel_workspace = root.findChild(QtCore.QObject, "deckPanelWorkspace")
+        assert panel_workspace is not None
+        panel_ids = {
+            str(panel["panelId"])
+            for panel in panel_workspace.property("panels")
+        }
+        assert "route-inspector" in panel_ids
+        assert "relay-station" in panel_ids
+        assert "trust-station" in panel_ids
+    finally:
+        _dispose_qt_objects(app, root, engine, bridge)
+
+
 def test_qml_scene_disposal_releases_window_and_qt_objects() -> None:
     app = _ensure_app()
     QQuickStyle.setStyle("Basic")
@@ -394,3 +537,96 @@ def test_qml_scene_disposal_releases_window_and_qt_objects() -> None:
     assert not shiboken6.isValid(engine)
     assert not shiboken6.isValid(bridge)
     assert app.topLevelWindows() == []
+
+
+def test_main_qml_repeated_scene_load_and_dispose_keeps_command_station_surfaces_stable() -> None:
+    app = _ensure_app()
+    for _ in range(3):
+        _, _, bridge, engine, root = _load_main_qml_scene()
+        try:
+            bridge.apply_snapshot(
+                {
+                    "history": [
+                        {
+                            "message_id": "assistant-recovery-loop",
+                            "role": "assistant",
+                            "content": "Firefox recovery remains live.",
+                            "created_at": "2026-04-23T12:40:00Z",
+                            "metadata": {
+                                "bearing_title": "Software Recovery",
+                                "micro_response": "Firefox recovery is still live.",
+                                "next_suggestion": {
+                                    "title": "Retry Recovery",
+                                    "command": "retry the firefox recovery",
+                                },
+                                "route_state": {
+                                    "winner": {
+                                        "route_family": "software_control",
+                                        "query_shape": "software_control_request",
+                                        "posture": "conditional_winner",
+                                        "status": "recovery_ready",
+                                        "clarification_needed": False,
+                                    },
+                                    "deictic_binding": {
+                                        "resolved": True,
+                                        "selected_source": "active_preview",
+                                        "selected_target": {
+                                            "source": "active_preview",
+                                            "target_type": "software_target",
+                                            "label": "Firefox",
+                                            "freshness": "current",
+                                        },
+                                    },
+                                },
+                            },
+                        }
+                    ],
+                    "status": {
+                        "watch_state": {
+                            "active_jobs": 1,
+                            "queued_jobs": 1,
+                            "recent_failures": 1,
+                            "health": "degraded",
+                        }
+                    },
+                    "active_task": {
+                        "taskId": "task-loop",
+                        "title": "Repair Firefox install",
+                        "state": "paused",
+                        "continuity": {
+                            "posture": "resumable",
+                            "freshness": "current",
+                            "active_step": "Recover package state",
+                            "next_step": "Retry the recovery flow.",
+                            "resumable": True,
+                        },
+                    },
+                    "active_request_state": {
+                        "family": "software_control",
+                        "subject": "firefox",
+                        "query_shape": "software_control_request",
+                        "parameters": {
+                            "operation_type": "install",
+                            "target_name": "firefox",
+                            "request_stage": "recovery_ready",
+                        },
+                    },
+                }
+            )
+            bridge.setMode("deck")
+            app.processEvents()
+            QtTest.QTest.qWait(40)
+            app.processEvents()
+
+            panel_workspace = root.findChild(QtCore.QObject, "deckPanelWorkspace")
+            assert panel_workspace is not None
+            panel_ids = {
+                str(panel["panelId"])
+                for panel in panel_workspace.property("panels")
+            }
+            assert "software-recovery-station" in panel_ids
+            assert "runtime-station" in panel_ids
+            assert "continuity-station" in panel_ids
+        finally:
+            _dispose_qt_objects(app, root, engine, bridge)
+        assert app.topLevelWindows() == []

@@ -30,7 +30,8 @@ _DENIAL_PHRASES = {
 }
 
 _DIRECT_REQUEST_PATTERNS: tuple[tuple[re.Pattern[str], str, bool], ...] = (
-    (re.compile(r"^(?:downloads? and install|install)\s+(?P<target>.+)$"), "install", False),
+    (re.compile(r"^(?:(?:can|could)\s+you\s+)?(?:please\s+)?(?:downloads? and install|install)\s+(?P<target>.+)$"), "install", False),
+    (re.compile(r"^(?:(?:can|could)\s+you\s+)?(?:please\s+)?(?:get|put)\s+(?P<target>.+?)\s+(?:on here|on this computer|on my computer|installed)$"), "install", False),
     (re.compile(r"^get\s+(?P<target>.+?)\s+installed$"), "install", False),
     (re.compile(r"^(?:set up|setup)\s+(?P<target>.+)$"), "install", True),
     (re.compile(r"^(?:update|upgrade)\s+(?P<target>.+)$"), "update", False),
@@ -40,8 +41,10 @@ _DIRECT_REQUEST_PATTERNS: tuple[tuple[re.Pattern[str], str, bool], ...] = (
     (re.compile(r"^(?:repair|reinstall)\s+(?P<target>.+)$"), "repair", False),
     (re.compile(r"^fix\s+(?P<target>.+?)(?: installation)?$"), "repair", True),
     (re.compile(r"^(?:launch|open|start)\s+(?P<target>.+)$"), "launch", True),
+    (re.compile(r"^(?:get)\s+(?P<target>.+?)\s+running$"), "launch", True),
     (re.compile(r"^check if\s+(?P<target>.+?)\s+is installed(?: correctly)?$"), "verify", False),
     (re.compile(r"^check whether\s+(?P<target>.+?)\s+is installed(?: correctly)?$"), "verify", False),
+    (re.compile(r"^do\s+i\s+have\s+(?P<target>.+?)\s+installed(?: correctly)?$"), "verify", False),
     (re.compile(r"^is\s+(?P<target>.+?)\s+installed(?: correctly)?$"), "verify", False),
     (re.compile(r"^verify\s+(?P<target>.+?)\s+is installed(?: correctly)?$"), "verify", False),
     (re.compile(r"^what version of\s+(?P<target>.+?)\s+is installed$"), "verify", False),

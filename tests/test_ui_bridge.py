@@ -1769,3 +1769,741 @@ def test_ui_bridge_default_chartroom_layout_preserves_anchor_clearance_notch(tem
         return max(left, notch_left) < min(right, notch_right) and max(top, notch_top) < min(bottom, notch_bottom)
 
     assert not any(overlaps_anchor_notch(panel) for panel in bridge.deckPanels)
+
+
+def test_ui_bridge_builds_route_aware_relay_surface_with_backend_grounded_actions(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+    bridge.apply_snapshot(
+        {
+            "history": [
+                {
+                    "message_id": "assistant-1",
+                    "role": "assistant",
+                    "content": "Relay preview is ready for Baby once you approve it.",
+                    "created_at": "2026-04-23T11:20:00Z",
+                    "metadata": {
+                        "bearing_title": "Relay Preview",
+                        "micro_response": "Relay preview ready for Baby.",
+                        "route_state": {
+                            "normalized_summary": {"normalized_text": "send this to Baby"},
+                            "decomposition": {
+                                "action_intent": "dispatch",
+                                "subject": "Baby",
+                                "deictic_references": ["this"],
+                                "continuity_cues": ["preview_live"],
+                                "approval_hints": ["preview_before_send"],
+                                "verification_hints": ["delivery_confirmation"],
+                            },
+                            "winner": {
+                                "route_family": "discord_relay",
+                                "query_shape": "discord_relay_request",
+                                "confidence": 0.99,
+                                "posture": "clear_winner",
+                                "status": "preview_ready",
+                                "score": 0.99,
+                                "dominant_evidence": ["relay phrasing matched a trusted-send request"],
+                                "unresolved_targets": [],
+                                "clarification_needed": False,
+                                "provider_fallback_reason": None,
+                            },
+                            "deictic_binding": {
+                                "resolved": True,
+                                "selected_source": "selection",
+                                "selected_target": {
+                                    "source": "selection",
+                                    "target_type": "text",
+                                    "label": "Selected launch notes",
+                                    "freshness": "current",
+                                },
+                                "candidates": [
+                                    {
+                                        "source": "selection",
+                                        "target_type": "text",
+                                        "label": "Selected launch notes",
+                                        "freshness": "current",
+                                    }
+                                ],
+                                "binding_posture": "resolved",
+                                "source_summary": "The current selection is bound to the live relay preview.",
+                            },
+                        },
+                    },
+                }
+            ],
+            "active_request_state": {
+                "family": "discord_relay",
+                "subject": "Baby",
+                "request_type": "discord_relay_dispatch",
+                "query_shape": "discord_relay_request",
+                "route": {
+                    "tool_name": "",
+                    "response_mode": "action_result",
+                    "route_mode": "local_client_automation",
+                },
+                "parameters": {
+                    "destination_alias": "Baby",
+                    "payload_hint": "selected_text",
+                    "note_text": "",
+                    "request_stage": "preview",
+                    "pending_preview": {
+                        "preview_id": "relay-preview-1",
+                        "route_mode": "local_client_automation",
+                        "destination": {"alias": "Baby", "label": "Baby"},
+                        "payload": {
+                            "kind": "selected_text",
+                            "summary": "Selected launch notes",
+                            "preview_text": "Selected launch notes",
+                        },
+                    },
+                },
+                "trust": {
+                    "decision": "confirmation_required",
+                    "approval_state": "pending_operator_confirmation",
+                    "operator_message": "Approval is required before Stormhelm sends this to Baby. Choose once or session.",
+                    "request_id": "trust-1",
+                    "suggested_scope": "once",
+                    "available_scopes": ["once", "session"],
+                },
+            },
+            "recent_context_resolutions": [
+                {
+                    "kind": "discord_relay",
+                    "summary": "Selected text bound to the relay preview.",
+                    "selected_source": "selection",
+                    "selected_target": {"label": "Selected launch notes", "freshness": "current"},
+                }
+            ],
+        }
+    )
+
+    primary = bridge.ghostPrimaryCard
+    assert primary["title"] == "Relay Preview"
+    assert primary["resultState"] == "preview_ready"
+    assert primary["routeLabel"] == "Discord Relay"
+    provenance = {entry["label"]: entry["value"] for entry in primary["provenance"]}
+    assert provenance["Binding"] == "Selection"
+    assert provenance["Payload"] == "Selected Text"
+    assert provenance["Trust"] == "Pending Operator Confirmation"
+
+    actions = {entry["label"]: entry for entry in bridge.ghostActionStrip}
+    assert actions["Approve Once"]["sendText"] == "approve once"
+    assert actions["Approve Session"]["sendText"] == "approve for session"
+    assert actions["Deny"]["sendText"] == "deny"
+    assert actions["Inspect Route"]["localAction"] == "open_route_inspector"
+
+    composer = bridge.requestComposer
+    chips = {entry["label"]: entry["value"] for entry in composer["chips"]}
+    assert chips["Route"] == "Discord Relay"
+    assert chips["Request Stage"] == "Preview"
+    assert chips["Binding"] == "Selection"
+    assert chips["Trust"] == "Pending Operator Confirmation"
+    assert composer["placeholder"] == "Continue the live request or redirect it with a grounded follow-up."
+    quick_actions = {entry["label"]: entry["sendText"] for entry in composer["quickActions"]}
+    assert quick_actions["Approve Once"] == "approve once"
+
+
+def test_ui_bridge_surfaces_clarification_choices_in_ghost_and_request_composer(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+    bridge.apply_snapshot(
+        {
+            "history": [
+                {
+                    "message_id": "assistant-2",
+                    "role": "assistant",
+                    "content": 'This looks like a relay request, but I still need to know whether "this" means the page, the file, or the selected text.',
+                    "created_at": "2026-04-23T11:24:00Z",
+                    "metadata": {
+                        "bearing_title": "Relay Clarification",
+                        "micro_response": "Relay payload still needs binding.",
+                        "route_state": {
+                            "normalized_summary": {"normalized_text": "send this to Baby"},
+                            "decomposition": {
+                                "action_intent": "dispatch",
+                                "subject": "Baby",
+                                "deictic_references": ["this"],
+                            },
+                            "winner": {
+                                "route_family": "discord_relay",
+                                "query_shape": "discord_relay_request",
+                                "confidence": 0.82,
+                                "posture": "conditional_winner",
+                                "status": "clarify_payload",
+                                "score": 0.82,
+                                "dominant_evidence": ["relay phrasing matched a trusted-send request"],
+                                "unresolved_targets": ["payload"],
+                                "clarification_needed": True,
+                                "clarification_reason": "ambiguous_relay_payload",
+                            },
+                            "deictic_binding": {
+                                "resolved": False,
+                                "selected_source": None,
+                                "selected_target": None,
+                                "candidates": [
+                                    {"source": "browser", "target_type": "page", "label": "Stormhelm docs", "freshness": "current"},
+                                    {"source": "workspace", "target_type": "file", "label": "notes.md", "freshness": "current"},
+                                    {"source": "selection", "target_type": "text", "label": "Selected launch notes", "freshness": "current"},
+                                ],
+                                "binding_posture": "ambiguous",
+                                "unresolved_reason": "multiple_live_binding_candidates",
+                                "source_summary": "Multiple live sources still match the relay payload.",
+                            },
+                        },
+                    },
+                }
+            ],
+            "active_request_state": {
+                "family": "discord_relay",
+                "subject": "Baby",
+                "request_type": "discord_relay_dispatch",
+                "query_shape": "discord_relay_request",
+                "route": {"tool_name": "", "response_mode": "action_result", "route_mode": "local_client_automation"},
+                "parameters": {
+                    "destination_alias": "Baby",
+                    "request_stage": "clarify_payload",
+                    "ambiguity_choices": ["page", "file", "text"],
+                },
+            },
+        }
+    )
+
+    primary = bridge.ghostPrimaryCard
+    assert primary["title"] == "Relay Clarification"
+    assert primary["resultState"] == "unresolved"
+    assert primary["routeLabel"] == "Discord Relay"
+
+    actions = {entry["label"]: entry for entry in bridge.ghostActionStrip}
+    assert actions["Page"]["sendText"] == "page"
+    assert actions["File"]["sendText"] == "file"
+    assert actions["Text"]["sendText"] == "text"
+
+    composer = bridge.requestComposer
+    assert [entry["label"] for entry in composer["clarificationChoices"]] == ["Page", "File", "Text"]
+    assert [entry["sendText"] for entry in composer["clarificationChoices"]] == ["page", "file", "text"]
+    assert composer["placeholder"] == "Clarify the live request or ask Stormhelm to rebind it."
+
+
+def test_ui_bridge_builds_route_inspector_with_support_system_summaries(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+    bridge.apply_snapshot(
+        {
+            "history": [
+                {
+                    "message_id": "assistant-3",
+                    "role": "assistant",
+                    "content": "Firefox is prepared through winget and is waiting on operator approval.",
+                    "created_at": "2026-04-23T11:28:00Z",
+                    "metadata": {
+                        "bearing_title": "Software Approval",
+                        "micro_response": "Firefox is prepared and waiting for approval.",
+                        "route_state": {
+                            "normalized_summary": {"normalized_text": "install firefox"},
+                            "decomposition": {
+                                "action_intent": "install",
+                                "subject": "Firefox",
+                                "approval_hints": ["approval_required"],
+                                "verification_hints": ["software_verification"],
+                            },
+                            "winner": {
+                                "route_family": "software_control",
+                                "query_shape": "software_control_request",
+                                "confidence": 0.98,
+                                "posture": "clear_winner",
+                                "status": "ready_after_approval",
+                                "score": 0.98,
+                                "dominant_evidence": ["native software route selected"],
+                                "unresolved_targets": [],
+                                "clarification_needed": False,
+                            },
+                            "deictic_binding": {
+                                "resolved": True,
+                                "selected_source": "active_preview",
+                                "selected_target": {
+                                    "source": "active_preview",
+                                    "target_type": "software_target",
+                                    "label": "Firefox",
+                                    "freshness": "current",
+                                },
+                                "candidates": [
+                                    {
+                                        "source": "active_preview",
+                                        "target_type": "software_target",
+                                        "label": "Firefox",
+                                        "freshness": "current",
+                                    }
+                                ],
+                                "binding_posture": "resolved",
+                                "source_summary": "The prepared software target is still live.",
+                            },
+                        },
+                    },
+                }
+            ],
+            "status": {
+                "watch_state": {"active_jobs": 1, "queued_jobs": 2, "recent_failures": 0},
+                "memory": {"families": {"session": 2, "workspace": 1}},
+                "lifecycle": {"bootstrap": {"lifecycle_hold_reason": "Restart review is still waiting on operator confirmation."}},
+            },
+            "active_task": {
+                "taskId": "task-77",
+                "title": "Package Firefox for the portable deck",
+                "state": "paused",
+                "whereLeftOff": "Prepared the software plan and held at approval.",
+            },
+            "active_request_state": {
+                "family": "software_control",
+                "subject": "firefox",
+                "request_type": "software_control_response",
+                "query_shape": "software_control_request",
+                "parameters": {
+                    "operation_type": "install",
+                    "target_name": "firefox",
+                    "request_stage": "awaiting_confirmation",
+                    "selected_source_route": "winget",
+                    "task_id": "task-77",
+                },
+                "trust": {
+                    "decision": "confirmation_required",
+                    "approval_state": "pending_operator_confirmation",
+                    "operator_message": "Approval is required before Stormhelm can install Firefox. Choose once, task, or session.",
+                    "request_id": "trust-77",
+                    "suggested_scope": "task",
+                    "available_scopes": ["once", "task", "session"],
+                },
+            },
+        }
+    )
+
+    inspector = bridge.routeInspector
+    assert inspector["title"] == "Software Approval"
+    assert inspector["resultState"] == "awaiting_approval"
+    trace = {entry["label"]: entry["value"] for entry in inspector["trace"]}
+    assert trace["Route"] == "Software Control"
+    assert trace["Request Stage"] == "Awaiting Confirmation"
+    assert trace["Selected Route"] == "winget"
+
+    support = {entry["label"]: entry["value"] for entry in inspector["supportSystems"]}
+    assert support["Task"] == "Package Firefox for the portable deck"
+    assert support["Trust"] == "Pending Operator Confirmation"
+    assert support["Memory"] == "3 family records"
+    assert support["Lifecycle"] == "Restart review is still waiting on operator confirmation."
+    assert support["Watch"] == "1 active / 2 queued"
+
+    panels = {panel["panelId"]: panel for panel in bridge.deckPanels}
+    assert panels["route-inspector"]["contentKind"] == "route-inspector"
+    assert panels["route-inspector"]["title"] == "Route Inspector"
+
+
+def test_ui_bridge_surfaces_stale_relay_preview_with_degraded_actions_and_native_stations(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+    bridge.apply_snapshot(
+        {
+            "history": [
+                {
+                    "message_id": "assistant-stale-relay",
+                    "role": "assistant",
+                    "content": "The relay preview is no longer live because the original selection changed.",
+                    "created_at": "2026-04-23T12:10:00Z",
+                    "metadata": {
+                        "bearing_title": "Relay Preview Stale",
+                        "micro_response": "The relay preview needs a fresh binding before it can continue.",
+                        "route_state": {
+                            "decomposition": {
+                                "action_intent": "dispatch",
+                                "subject": "Baby",
+                            },
+                            "winner": {
+                                "route_family": "discord_relay",
+                                "query_shape": "discord_relay_request",
+                                "posture": "conditional_winner",
+                                "status": "preview_ready",
+                                "clarification_needed": False,
+                            },
+                            "deictic_binding": {
+                                "resolved": False,
+                                "selected_source": "selection",
+                                "selected_target": {
+                                    "source": "selection",
+                                    "target_type": "text",
+                                    "label": "Original launch notes",
+                                    "freshness": "stale",
+                                },
+                                "binding_posture": "invalidated",
+                                "unresolved_reason": "selection_replaced_since_preview",
+                                "source_summary": "The selection changed after the preview was prepared, so the original payload binding is no longer live.",
+                            },
+                            "continuation": {
+                                "posture": "invalidated",
+                                "reason": "The preview continuity lost to the fresher current selection.",
+                            },
+                        },
+                    },
+                }
+            ],
+            "recent_context_resolutions": [
+                {
+                    "kind": "discord_relay",
+                    "summary": "The original relay payload came from the old selection and is now stale.",
+                    "selected_source": "selection",
+                    "selected_target": {"label": "Original launch notes", "freshness": "stale"},
+                }
+            ],
+            "active_task": {
+                "taskId": "task-relay-stale",
+                "title": "Share launch notes with Baby",
+                "state": "superseded",
+                "whereLeftOff": "The original relay preview lost freshness after the selection changed.",
+                "continuity": {
+                    "posture": "superseded",
+                    "freshness": "stale",
+                    "active_step": "Rebind payload",
+                    "stale_reason": "A fresher selection replaced the payload used by the old preview.",
+                    "next_step": "Choose the new payload source before sending.",
+                    "resumable": True,
+                },
+            },
+            "active_request_state": {
+                "family": "discord_relay",
+                "subject": "Baby",
+                "request_type": "discord_relay_dispatch",
+                "query_shape": "discord_relay_request",
+                "route": {
+                    "tool_name": "",
+                    "response_mode": "action_result",
+                    "route_mode": "local_client_automation",
+                },
+                "parameters": {
+                    "destination_alias": "Baby",
+                    "payload_hint": "selected_text",
+                    "request_stage": "preview",
+                    "pending_preview": {
+                        "preview_id": "relay-preview-stale",
+                        "route_mode": "local_client_automation",
+                        "freshness": "stale",
+                        "invalidated_reason": "The selection changed after the preview was prepared.",
+                        "destination": {"alias": "Baby", "label": "Baby"},
+                        "payload": {
+                            "kind": "selected_text",
+                            "summary": "Original launch notes",
+                            "preview_text": "Original launch notes",
+                        },
+                    },
+                },
+                "trust": {
+                    "decision": "confirmation_required",
+                    "approval_state": "expired",
+                    "operator_message": "The approval request expired after the preview lost freshness.",
+                    "request_id": "trust-expired-1",
+                    "available_scopes": ["once", "session"],
+                },
+            },
+        }
+    )
+
+    primary = bridge.ghostPrimaryCard
+    assert primary["title"] == "Relay Preview Stale"
+    assert primary["resultState"] == "stale"
+    assert primary["statusLabel"] == "Stale"
+
+    actions = {entry["label"]: entry for entry in bridge.ghostActionStrip}
+    assert "Approve Once" not in actions
+    assert "Approve Session" not in actions
+    assert "Deny" not in actions
+    assert actions["Inspect Route"]["localAction"] == "open_route_inspector"
+
+    composer = bridge.requestComposer
+    chips = {entry["label"]: entry["value"] for entry in composer["chips"]}
+    assert chips["Status"] == "Stale"
+    assert chips["Trust"] == "Expired"
+    assert chips["Continuity"] == "Superseded"
+    assert composer["placeholder"] == "Refresh the stale request, rebind the target, or start a fresh command."
+
+    invalidations = {entry["label"]: entry["reason"] for entry in bridge.routeInspector["invalidations"]}
+    assert "selection changed" in invalidations["Preview"].lower()
+    assert "expired" in invalidations["Approval"].lower()
+    assert "no longer live" in invalidations["Binding"].lower()
+    assert "fresher selection" in invalidations["Continuity"].lower()
+
+    panels = {panel["panelId"]: panel for panel in bridge.deckPanels}
+    assert panels["relay-station"]["contentKind"] == "command-station"
+    assert panels["trust-station"]["contentKind"] == "command-station"
+    assert panels["continuity-station"]["contentKind"] == "command-station"
+
+    trust_station = panels["trust-station"]["stationData"]
+    assert trust_station["resultState"] == "stale"
+    assert not any(action.get("category") == "approve" for action in trust_station["actions"])
+
+    continuity_station = panels["continuity-station"]["stationData"]
+    continuity_entries = {
+        entry["primary"]: entry
+        for section in continuity_station["sections"]
+        for entry in section["entries"]
+    }
+    assert continuity_entries["Posture"]["secondary"] == "Superseded"
+    assert "rebind payload" in continuity_entries["Active Step"]["secondary"].lower()
+
+
+def test_ui_bridge_deepens_software_recovery_and_runtime_stations(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+    bridge.apply_snapshot(
+        {
+            "history": [
+                {
+                    "message_id": "assistant-recovery-1",
+                    "role": "assistant",
+                    "content": "Firefox needs a recovery pass before Stormhelm can verify the install.",
+                    "created_at": "2026-04-23T12:18:00Z",
+                    "metadata": {
+                        "bearing_title": "Software Recovery",
+                        "micro_response": "Firefox is in a recovery-ready posture.",
+                        "next_suggestion": {
+                            "title": "Retry Recovery",
+                            "command": "retry the firefox recovery",
+                        },
+                        "route_state": {
+                            "decomposition": {
+                                "action_intent": "install",
+                                "subject": "Firefox",
+                            },
+                            "winner": {
+                                "route_family": "software_control",
+                                "query_shape": "software_control_request",
+                                "posture": "conditional_winner",
+                                "status": "recovery_ready",
+                                "clarification_needed": False,
+                            },
+                            "deictic_binding": {
+                                "resolved": True,
+                                "selected_source": "active_preview",
+                                "selected_target": {
+                                    "source": "active_preview",
+                                    "target_type": "software_target",
+                                    "label": "Firefox",
+                                    "freshness": "current",
+                                },
+                                "binding_posture": "resolved",
+                                "source_summary": "The recovery target is still bound to the live Firefox install plan.",
+                            },
+                        },
+                    },
+                }
+            ],
+            "status": {
+                "watch_state": {
+                    "active_jobs": 1,
+                    "queued_jobs": 1,
+                    "recent_failures": 2,
+                    "health": "degraded",
+                    "current_tool": "winget",
+                },
+                "lifecycle": {
+                    "bootstrap": {
+                        "state": "ready",
+                        "lifecycle_hold_reason": "",
+                    }
+                },
+            },
+            "active_task": {
+                "taskId": "task-firefox-recovery",
+                "title": "Repair Firefox install",
+                "state": "paused",
+                "whereLeftOff": "The install attempted, but verification could not confirm Firefox yet.",
+                "continuity": {
+                    "posture": "resumable",
+                    "freshness": "current",
+                    "active_step": "Recover package state",
+                    "blocker_state": "No active blocker",
+                    "next_step": "Retry the recovery flow.",
+                    "resumable": True,
+                },
+            },
+            "active_request_state": {
+                "family": "software_control",
+                "subject": "firefox",
+                "request_type": "software_control_response",
+                "query_shape": "software_control_request",
+                "parameters": {
+                    "operation_type": "install",
+                    "target_name": "firefox",
+                    "request_stage": "recovery_ready",
+                    "selected_source_route": "winget",
+                    "repair_kind": "install_recovery",
+                    "workflow_kind": "software_recovery",
+                    "recovery_summary": "The first install pass did not verify cleanly.",
+                    "task_id": "task-firefox-recovery",
+                },
+                "trust": {
+                    "decision": "allowed",
+                    "approval_state": "approved_for_task",
+                    "request_id": "trust-firefox-recovery",
+                    "task_id": "task-firefox-recovery",
+                },
+            },
+        }
+    )
+
+    primary = bridge.ghostPrimaryCard
+    assert primary["resultState"] == "recovery_in_progress"
+    assert primary["routeLabel"] == "Software Recovery"
+
+    actions = {entry["label"]: entry for entry in bridge.ghostActionStrip}
+    assert actions["Retry Recovery"]["sendText"] == "retry the firefox recovery"
+
+    composer = bridge.requestComposer
+    chips = {entry["label"]: entry["value"] for entry in composer["chips"]}
+    assert chips["Route"] == "Software Recovery"
+    assert chips["Continuity"] == "Resumable"
+    quick_actions = {entry["label"]: entry["sendText"] for entry in composer["quickActions"]}
+    assert quick_actions["Retry Recovery"] == "retry the firefox recovery"
+
+    panels = {panel["panelId"]: panel for panel in bridge.deckPanels}
+    assert panels["software-recovery-station"]["contentKind"] == "command-station"
+    assert panels["runtime-station"]["contentKind"] == "command-station"
+    assert panels["continuity-station"]["contentKind"] == "command-station"
+
+    recovery_station = panels["software-recovery-station"]["stationData"]
+    recovery_entries = {
+        entry["primary"]: entry
+        for section in recovery_station["sections"]
+        for entry in section["entries"]
+    }
+    assert recovery_entries["Operation"]["secondary"] == "Install Firefox"
+    assert recovery_entries["Recovery Route"]["secondary"] == "Winget"
+    assert any(action.get("sendText") == "retry the firefox recovery" for action in recovery_station["actions"])
+
+    runtime_station = panels["runtime-station"]["stationData"]
+    runtime_entries = {
+        entry["primary"]: entry
+        for section in runtime_station["sections"]
+        for entry in section["entries"]
+    }
+    assert runtime_entries["Watch Health"]["secondary"] == "Degraded"
+    assert runtime_entries["Queue"]["secondary"] == "1 active / 1 queued"
+
+    continuity_station = panels["continuity-station"]["stationData"]
+    continuity_entries = {
+        entry["primary"]: entry
+        for section in continuity_station["sections"]
+        for entry in section["entries"]
+    }
+    assert continuity_entries["Posture"]["secondary"] == "Resumable"
+    assert continuity_entries["Next Move"]["detail"] == "Retry the recovery flow."
+
+
+def test_ui_bridge_expands_screen_awareness_and_memory_command_surfaces(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+    bridge.apply_snapshot(
+        {
+            "history": [
+                {
+                    "message_id": "assistant-screen-1",
+                    "role": "assistant",
+                    "content": "OBS is on screen and ready for a guided follow-up.",
+                    "created_at": "2026-04-23T12:24:00Z",
+                    "metadata": {
+                        "bearing_title": "Screen Guidance",
+                        "micro_response": "OBS is visible and Stormhelm can stay grounded to the current screen state.",
+                        "route_state": {
+                            "decomposition": {
+                                "action_intent": "guide",
+                                "subject": "OBS",
+                            },
+                            "winner": {
+                                "route_family": "screen_awareness",
+                                "query_shape": "screen_guided_request",
+                                "posture": "clear_winner",
+                                "status": "attempted",
+                                "clarification_needed": False,
+                            },
+                            "deictic_binding": {
+                                "resolved": True,
+                                "selected_source": "browser",
+                                "selected_target": {
+                                    "source": "browser",
+                                    "target_type": "window",
+                                    "label": "OBS Studio",
+                                    "freshness": "current",
+                                },
+                                "binding_posture": "resolved",
+                                "source_summary": "The live OBS window is still the current grounding target.",
+                            },
+                        },
+                    },
+                }
+            ],
+            "recent_context_resolutions": [
+                {
+                    "kind": "screen_awareness",
+                    "summary": "Recent traces still point at OBS Studio settings.",
+                    "selected_source": "browser",
+                    "selected_target": {"label": "OBS Studio", "freshness": "current"},
+                }
+            ],
+            "status": {
+                "memory": {
+                    "families": {"session": 2, "workspace": 1},
+                    "active_contributors": [
+                        {"family": "session", "summary": "Recent traces still point at OBS Studio settings."}
+                    ],
+                },
+                "screen_awareness": {
+                    "enabled": True,
+                    "phase": "phase12",
+                    "policy_state": {
+                        "action_policy_mode": "confirm_before_act",
+                        "summary": "Phase 12 keeps confirm-before-act posture while OBS remains on screen.",
+                    },
+                    "hardening": {
+                        "recent_trace_count": 1,
+                        "latest_trace": {
+                            "trace_id": "trace-obs-1",
+                            "total_duration_ms": 18.4,
+                            "slowest_stage": "verification",
+                            "audit_passed": True,
+                        },
+                    },
+                },
+            },
+            "active_request_state": {
+                "family": "screen_awareness",
+                "subject": "OBS",
+                "request_type": "screen_guided_request",
+                "query_shape": "screen_guided_request",
+                "parameters": {
+                    "request_stage": "prepare_plan",
+                    "selected_source_route": "screen_context",
+                    "result_state": "attempted",
+                },
+            },
+        }
+    )
+
+    primary = bridge.ghostPrimaryCard
+    assert primary["resultState"] == "attempted"
+    assert primary["routeLabel"] == "Visual Context"
+
+    composer = bridge.requestComposer
+    chips = {entry["label"]: entry["value"] for entry in composer["chips"]}
+    assert chips["Route"] == "Visual Context"
+    assert chips["Request Stage"] == "Prepare Plan"
+
+    panels = {panel["panelId"]: panel for panel in bridge.deckPanels}
+    assert panels["screen-awareness-station"]["contentKind"] == "command-station"
+    assert panels["memory-station"]["contentKind"] == "command-station"
+
+    screen_station = panels["screen-awareness-station"]["stationData"]
+    screen_entries = {
+        entry["primary"]: entry
+        for section in screen_station["sections"]
+        for entry in section["entries"]
+    }
+    assert screen_entries["Policy"]["secondary"] == "Confirm Before Act"
+    assert screen_entries["Trace"]["secondary"] == "18.4 ms"
+
+    memory_station = panels["memory-station"]["stationData"]
+    memory_entries = {
+        entry["primary"]: entry
+        for section in memory_station["sections"]
+        for entry in section["entries"]
+    }
+    assert memory_entries["Role"]["secondary"] == "Support Only"
+    assert "obs studio settings" in memory_entries["Recent Support"]["detail"].lower()

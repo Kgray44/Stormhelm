@@ -24,6 +24,7 @@ class QueryShape(StrEnum):
     SOFTWARE_CONTROL_REQUEST = "software_control_request"
     SCREEN_AWARENESS_REQUEST = "screen_awareness_request"
     DISCORD_RELAY_REQUEST = "discord_relay_request"
+    TRUST_APPROVAL_REQUEST = "trust_approval_request"
     CURRENT_METRIC = "current_metric"
     CURRENT_STATUS = "current_status"
     DIAGNOSTIC_CAUSAL = "diagnostic_causal"
@@ -63,6 +64,202 @@ class ResponseMode(StrEnum):
     CLARIFICATION = "clarification"
     UNSUPPORTED = "unsupported"
     FORECAST_SUMMARY = "forecast_summary"
+
+
+class RoutePosture(StrEnum):
+    CLEAR_WINNER = "clear_winner"
+    LIKELY_WINNER = "likely_winner"
+    CONDITIONAL_WINNER = "conditional_winner"
+    BLOCKED_WINNER = "blocked_winner"
+    UNRESOLVED_COMPETITION = "unresolved_competition"
+    NATIVE_UNSUPPORTED = "native_unsupported"
+    GENUINE_PROVIDER_FALLBACK = "genuine_provider_fallback"
+
+
+@dataclass(slots=True)
+class RouteTargetCandidate:
+    target_type: str
+    label: str
+    value: Any | None = None
+    source: str = "operator_text"
+    confidence: float = 0.0
+    freshness: str = "current"
+    selected: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "target_type": self.target_type,
+            "label": self.label,
+            "value": _serialize(self.value),
+            "source": self.source,
+            "confidence": self.confidence,
+            "freshness": self.freshness,
+            "selected": self.selected,
+        }
+
+
+@dataclass(slots=True)
+class RequestDecomposition:
+    action_intent: str | None = None
+    subject: str | None = None
+    explicit_targets: list[RouteTargetCandidate] = field(default_factory=list)
+    deictic_references: list[str] = field(default_factory=list)
+    continuity_cues: list[str] = field(default_factory=list)
+    correction_cues: list[str] = field(default_factory=list)
+    result_expectation: str | None = None
+    approval_hints: list[str] = field(default_factory=list)
+    verification_hints: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "action_intent": self.action_intent,
+            "subject": self.subject,
+            "explicit_targets": _serialize(self.explicit_targets),
+            "deictic_references": list(self.deictic_references),
+            "continuity_cues": list(self.continuity_cues),
+            "correction_cues": list(self.correction_cues),
+            "result_expectation": self.result_expectation,
+            "approval_hints": list(self.approval_hints),
+            "verification_hints": list(self.verification_hints),
+        }
+
+
+@dataclass(slots=True)
+class DeicticBindingCandidate:
+    source: str
+    target_type: str
+    label: str
+    value: Any | None = None
+    confidence: float = 0.0
+    freshness: str = "current"
+    route_family: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "source": self.source,
+            "target_type": self.target_type,
+            "label": self.label,
+            "value": _serialize(self.value),
+            "confidence": self.confidence,
+            "freshness": self.freshness,
+            "route_family": self.route_family,
+        }
+
+
+@dataclass(slots=True)
+class DeicticBinding:
+    resolved: bool = False
+    selected_source: str | None = None
+    selected_target: DeicticBindingCandidate | None = None
+    candidates: list[DeicticBindingCandidate] = field(default_factory=list)
+    unresolved_reason: str | None = None
+    binding_posture: str = "none"
+    source_summary: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "resolved": self.resolved,
+            "selected_source": self.selected_source,
+            "selected_target": _serialize(self.selected_target),
+            "candidates": _serialize(self.candidates),
+            "unresolved_reason": self.unresolved_reason,
+            "binding_posture": self.binding_posture,
+            "source_summary": self.source_summary,
+        }
+
+
+@dataclass(slots=True)
+class RouteCandidate:
+    route_family: str
+    query_shape: str | None = None
+    score: float = 0.0
+    posture_seed: str = "weak"
+    semantic_reasons: list[str] = field(default_factory=list)
+    score_factors: dict[str, float] = field(default_factory=dict)
+    required_targets: list[str] = field(default_factory=list)
+    target_candidates: list[RouteTargetCandidate] = field(default_factory=list)
+    missing_evidence: list[str] = field(default_factory=list)
+    disqualifiers: list[str] = field(default_factory=list)
+    clarification_pressure: float = 0.0
+    support_augmentation: list[str] = field(default_factory=list)
+    provider_fallback_reason: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "route_family": self.route_family,
+            "query_shape": self.query_shape,
+            "score": self.score,
+            "posture_seed": self.posture_seed,
+            "semantic_reasons": list(self.semantic_reasons),
+            "score_factors": dict(self.score_factors),
+            "required_targets": list(self.required_targets),
+            "target_candidates": _serialize(self.target_candidates),
+            "missing_evidence": list(self.missing_evidence),
+            "disqualifiers": list(self.disqualifiers),
+            "clarification_pressure": self.clarification_pressure,
+            "support_augmentation": list(self.support_augmentation),
+            "provider_fallback_reason": self.provider_fallback_reason,
+        }
+
+
+@dataclass(slots=True)
+class RouteWinnerPosture:
+    route_family: str
+    query_shape: str | None = None
+    confidence: float = 0.0
+    posture: RoutePosture = RoutePosture.LIKELY_WINNER
+    status: str = "immediate"
+    score: float = 0.0
+    dominant_evidence: list[str] = field(default_factory=list)
+    unresolved_targets: list[str] = field(default_factory=list)
+    clarification_needed: bool = False
+    clarification_reason: str | None = None
+    runner_up_summary: dict[str, Any] | None = None
+    support_system_augmentation: list[str] = field(default_factory=list)
+    provider_fallback_reason: str | None = None
+    margin_to_runner_up: float | None = None
+    ambiguity_live: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "route_family": self.route_family,
+            "query_shape": self.query_shape,
+            "confidence": self.confidence,
+            "posture": self.posture.value,
+            "status": self.status,
+            "score": self.score,
+            "dominant_evidence": list(self.dominant_evidence),
+            "unresolved_targets": list(self.unresolved_targets),
+            "clarification_needed": self.clarification_needed,
+            "clarification_reason": self.clarification_reason,
+            "runner_up_summary": _serialize(self.runner_up_summary),
+            "support_system_augmentation": list(self.support_system_augmentation),
+            "provider_fallback_reason": self.provider_fallback_reason,
+            "margin_to_runner_up": self.margin_to_runner_up,
+            "ambiguity_live": self.ambiguity_live,
+        }
+
+
+@dataclass(slots=True)
+class RoutingTelemetry:
+    normalized_summary: dict[str, Any]
+    decomposition: RequestDecomposition
+    candidates: list[RouteCandidate]
+    winner: RouteWinnerPosture
+    runner_up: RouteCandidate | None = None
+    deictic_binding: DeicticBinding = field(default_factory=DeicticBinding)
+    support_augmentation_summary: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "normalized_summary": dict(self.normalized_summary),
+            "decomposition": self.decomposition.to_dict(),
+            "candidates": _serialize(self.candidates),
+            "winner": self.winner.to_dict(),
+            "runner_up": _serialize(self.runner_up),
+            "deictic_binding": self.deictic_binding.to_dict(),
+            "support_augmentation_summary": list(self.support_augmentation_summary),
+        }
 
 
 @dataclass(slots=True)

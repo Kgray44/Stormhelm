@@ -6,6 +6,13 @@ from typing import Iterable
 
 
 _WORD_REPLACEMENTS = {
+    "u": "you",
+    "ur": "your",
+    "pls": "please",
+    "plz": "please",
+    "bc": "because",
+    "cuz": "because",
+    "tho": "though",
     "tmrw": "tomorrow",
     "tmr": "tomorrow",
     "rn": "right now",

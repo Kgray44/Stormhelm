@@ -13,6 +13,7 @@ Item {
     property var messages: []
     property string statusLine: ""
     property real deckProgress: 1.0
+    property var requestComposer: ({})
     property int gridColumns: 12
     property int gridRows: 8
     property int reservedGridX: 4
@@ -72,6 +73,10 @@ Item {
                         return spineComponent
                     case "module":
                         return moduleComponent
+                    case "route-inspector":
+                        return routeInspectorComponent
+                    case "command-station":
+                        return commandStationComponent
                     case "preview":
                         return previewComponent
                     default:
@@ -88,8 +93,16 @@ Item {
                     messages: root.messages
                     statusLine: root.statusLine
                     panelMode: true
+                    composerState: root.requestComposer || ({})
                     onSend: function(text) { stormhelmBridge.sendMessage(text) }
                     onComposerFocusChanged: function(focused) { stormhelmBridge.setComposerFocus(focused) }
+                    onActionRequested: function(action) {
+                        if (action.sendText) {
+                            stormhelmBridge.sendMessage(action.sendText)
+                        } else if (action.localAction) {
+                            stormhelmBridge.performLocalSurfaceAction(action.localAction)
+                        }
+                    }
                 }
             }
 
@@ -124,6 +137,40 @@ Item {
                     sourceComponent: {
                         var item = panelModel.itemData || ({})
                         return item.viewer === "browser" ? browserPreview : filePreview
+                    }
+                }
+            }
+
+            Component {
+                id: routeInspectorComponent
+
+                RouteInspectorSurface {
+                    anchors.fill: parent
+                    inspectorData: panelModel.inspectorData || ({})
+                    panelMode: true
+                    onActionRequested: function(action) {
+                        if (action.sendText) {
+                            stormhelmBridge.sendMessage(action.sendText)
+                        } else if (action.localAction) {
+                            stormhelmBridge.performLocalSurfaceAction(action.localAction)
+                        }
+                    }
+                }
+            }
+
+            Component {
+                id: commandStationComponent
+
+                CommandStationPanel {
+                    anchors.fill: parent
+                    stationData: panelModel.stationData || ({})
+                    panelMode: true
+                    onActionRequested: function(action) {
+                        if (action.sendText) {
+                            stormhelmBridge.sendMessage(action.sendText)
+                        } else if (action.localAction) {
+                            stormhelmBridge.performLocalSurfaceAction(action.localAction)
+                        }
                     }
                 }
             }

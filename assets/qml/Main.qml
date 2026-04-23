@@ -111,6 +111,8 @@ ApplicationWindow {
         deckProgress: root.deckProgress
         messages: bridge ? bridge.ghostMessages : []
         contextCards: bridge ? bridge.contextCards : []
+        primaryCard: bridge ? bridge.ghostPrimaryCard : ({})
+        actionStrip: bridge ? bridge.ghostActionStrip : []
         cornerReadouts: bridge ? bridge.ghostCornerReadouts : []
         statusLine: bridge ? bridge.statusLine : ""
         connectionLabel: bridge ? bridge.connectionLabel : ""
@@ -133,6 +135,14 @@ ApplicationWindow {
         Behavior on scale {
             NumberAnimation { duration: 360; easing.type: Easing.InOutQuad }
         }
+
+        onActionRequested: function(action) {
+            if (action.sendText) {
+                stormhelmBridge.sendMessage(action.sendText)
+            } else if (action.localAction) {
+                stormhelmBridge.performLocalSurfaceAction(action.localAction)
+            }
+        }
     }
 
     CommandDeckShell {
@@ -151,6 +161,7 @@ ApplicationWindow {
         activeDeckLayoutPreset: bridge ? bridge.activeDeckLayoutPreset : ""
         workspaceItems: bridge ? bridge.workspaceRailItems : []
         workspaceCanvas: bridge ? bridge.workspaceCanvas : ({})
+        requestComposer: bridge ? bridge.requestComposer : ({})
         railItems: bridge ? bridge.commandRailItems : []
         statusItems: bridge ? bridge.statusStripItems : []
         statusLine: bridge ? bridge.statusLine : ""

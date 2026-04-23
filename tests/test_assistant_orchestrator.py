@@ -3206,6 +3206,26 @@ def test_assistant_orchestrator_enforces_workspace_restore_contract(temp_config)
     assert planner_obedience["authority_enforced"] is True
 
 
+def test_assistant_response_metadata_exposes_compact_route_state(temp_config) -> None:
+    assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+
+    payload = _run_assistant_once(
+        assistant,
+        jobs,
+        executor,
+        message="what is my current internet speed",
+        surface_mode="ghost",
+        active_module="systems",
+    )
+    planner_debug = _planner_debug(payload)
+    metadata = payload["assistant_message"]["metadata"]
+
+    assert planner_debug["routing"] == metadata["route_state"]
+    assert metadata["route_state"]["winner"]["route_family"] == "network"
+    assert metadata["route_state"]["winner"]["posture"] == "clear_winner"
+    assert metadata["route_state"]["winner"]["clarification_needed"] is False
+
+
 def test_assistant_orchestrator_enforces_workspace_continuity_contract(temp_config) -> None:
     assistant, jobs, executor, _, workspace_service = _build_assistant_with_workspace(temp_config)
     workspace = workspace_service.repository.upsert_workspace(

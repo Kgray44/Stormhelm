@@ -7,11 +7,54 @@ Item {
 
     signal send(string text)
     signal composerFocusChanged(bool focused)
+    signal actionRequested(var action)
 
     property bool compact: false
+    property var composerState: ({})
     property string placeholderText: "Give Stormhelm a bearing..."
 
-    implicitHeight: compact ? 88 : 128
+    implicitHeight: {
+        var baseHeight = compact ? 96 : 132
+        if ((root.safeComposer.chips || []).length > 0)
+            baseHeight += compact ? 28 : 34
+        if ((root.safeComposer.quickActions || []).length > 0)
+            baseHeight += compact ? 32 : 38
+        if ((root.safeComposer.clarificationChoices || []).length > 0)
+            baseHeight += compact ? 38 : 44
+        return baseHeight
+    }
+
+    readonly property var safeComposer: root.composerState || ({})
+
+    function chipFill(tone) {
+        switch (String(tone || "")) {
+        case "live":
+            return "#133129"
+        case "attention":
+            return "#173041"
+        case "warning":
+            return "#352126"
+        case "stale":
+            return "#2c2428"
+        default:
+            return "#10202a"
+        }
+    }
+
+    function chipBorder(tone) {
+        switch (String(tone || "")) {
+        case "live":
+            return "#71c4a7"
+        case "attention":
+            return "#7ebed7"
+        case "warning":
+            return "#c88b92"
+        case "stale":
+            return "#b79aa6"
+        default:
+            return "#34586a"
+        }
+    }
 
     function submitCurrentText() {
         var text = input.text.trim()
@@ -34,17 +77,100 @@ Item {
         lineOpacity: 0.06
     }
 
-    RowLayout {
+    ColumnLayout {
         anchors.fill: parent
         anchors.margins: compact ? 14 : 18
-        spacing: 14
+        spacing: compact ? 10 : 12
+
+        Flow {
+            Layout.fillWidth: true
+            spacing: 8
+            visible: (root.safeComposer.chips || []).length > 0
+
+            Repeater {
+                model: root.safeComposer.chips || []
+
+                delegate: Rectangle {
+                    required property var modelData
+
+                    radius: 12
+                    height: 26
+                    width: chipRow.implicitWidth + 16
+                    color: root.chipFill(modelData.tone)
+                    border.width: 1
+                    border.color: root.chipBorder(modelData.tone)
+
+                    Row {
+                        id: chipRow
+                        anchors.centerIn: parent
+                        spacing: 6
+
+                        Text {
+                            text: modelData.label
+                            color: "#7e9baa"
+                            font.family: "Bahnschrift SemiCondensed"
+                            font.pixelSize: 10
+                            font.letterSpacing: 1.0
+                        }
+
+                        Text {
+                            text: modelData.value
+                            color: "#e8f4f9"
+                            font.family: "Segoe UI Semibold"
+                            font.pixelSize: 10
+                        }
+                    }
+                }
+            }
+        }
+
+        CommandActionStrip {
+            Layout.fillWidth: true
+            actions: root.safeComposer.quickActions || []
+            compact: true
+            visible: (root.safeComposer.quickActions || []).length > 0
+            onActionTriggered: function(action) {
+                if (action.sendText) {
+                    root.send(action.sendText)
+                } else {
+                    root.actionRequested(action)
+                }
+            }
+        }
+
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 6
+            visible: (root.safeComposer.clarificationChoices || []).length > 0
+
+            Text {
+                text: "Clarify"
+                color: "#b98a56"
+                font.family: "Bahnschrift SemiCondensed"
+                font.pixelSize: 10
+                font.letterSpacing: 1.2
+            }
+
+            CommandActionStrip {
+                Layout.fillWidth: true
+                actions: root.safeComposer.clarificationChoices || []
+                compact: true
+                onActionTriggered: function(action) {
+                    if (action.sendText) {
+                        root.send(action.sendText)
+                    } else {
+                        root.actionRequested(action)
+                    }
+                }
+            }
+        }
 
         TextArea {
             id: input
             Layout.fillWidth: true
             Layout.fillHeight: true
             wrapMode: TextEdit.Wrap
-            placeholderText: root.placeholderText
+            placeholderText: root.safeComposer.placeholder || root.placeholderText
             color: "#eff7fb"
             placeholderTextColor: "#7d98ab"
             font.family: "Segoe UI"
@@ -65,25 +191,40 @@ Item {
             }
         }
 
-        Button {
-            text: compact ? "Send" : "Plot"
-            Layout.alignment: Qt.AlignBottom
-            background: Rectangle {
-                radius: 18
-                color: "#17364a6a"
-                border.width: 1
-                border.color: "#7ab3c8c4"
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 14
+
+            Text {
+                Layout.fillWidth: true
+                text: root.safeComposer.summary || ""
+                color: "#89a5b2"
+                font.family: "Segoe UI"
+                font.pixelSize: 11
+                wrapMode: Text.Wrap
+                visible: text.length > 0
             }
-            contentItem: Text {
-                text: parent.text
-                color: "#eef8fb"
-                font.family: "Bahnschrift SemiCondensed"
-                font.pixelSize: 12
-                horizontalAlignment: Text.AlignHCenter
-                verticalAlignment: Text.AlignVCenter
-            }
-            onClicked: {
-                root.submitCurrentText()
+
+            Button {
+                text: compact ? "Send" : "Plot"
+                Layout.alignment: Qt.AlignBottom
+                background: Rectangle {
+                    radius: 18
+                    color: "#17364a6a"
+                    border.width: 1
+                    border.color: "#7ab3c8c4"
+                }
+                contentItem: Text {
+                    text: parent.text
+                    color: "#eef8fb"
+                    font.family: "Bahnschrift SemiCondensed"
+                    font.pixelSize: 12
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                }
+                onClicked: {
+                    root.submitCurrentText()
+                }
             }
         }
     }

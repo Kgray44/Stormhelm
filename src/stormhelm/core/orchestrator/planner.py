@@ -22,10 +22,18 @@ from stormhelm.core.orchestrator.browser_destinations import BrowserOpenFailureR
 from stormhelm.core.orchestrator.browser_destinations import BrowserSearchFailureReason
 from stormhelm.core.orchestrator.planner_models import CapabilityPlan
 from stormhelm.core.orchestrator.planner_models import ClarificationReason
+from stormhelm.core.orchestrator.planner_models import DeicticBinding
+from stormhelm.core.orchestrator.planner_models import DeicticBindingCandidate
 from stormhelm.core.orchestrator.planner_models import ExecutionPlan
 from stormhelm.core.orchestrator.planner_models import NormalizedCommand
 from stormhelm.core.orchestrator.planner_models import QueryShape
+from stormhelm.core.orchestrator.planner_models import RequestDecomposition
 from stormhelm.core.orchestrator.planner_models import ResponseMode
+from stormhelm.core.orchestrator.planner_models import RouteCandidate
+from stormhelm.core.orchestrator.planner_models import RoutePosture
+from stormhelm.core.orchestrator.planner_models import RouteTargetCandidate
+from stormhelm.core.orchestrator.planner_models import RouteWinnerPosture
+from stormhelm.core.orchestrator.planner_models import RoutingTelemetry
 from stormhelm.core.orchestrator.planner_models import SemanticParseProposal
 from stormhelm.core.orchestrator.planner_models import StructuredQuery
 from stormhelm.core.orchestrator.planner_models import UnsupportedReason
@@ -127,6 +135,7 @@ DISCORD_RELAY_CONFIRM_PHRASES = {
     "send it",
     "go ahead",
     "do it",
+    "do that",
     "confirm",
     "send",
 }
@@ -145,6 +154,7 @@ class PlannerDecision:
     response_mode: str | None = None
     unsupported_reason: UnsupportedReason | None = None
     clarification_reason: ClarificationReason | None = None
+    route_state: RoutingTelemetry | None = None
     debug: dict[str, Any] = field(default_factory=dict)
 
 
@@ -238,9 +248,25 @@ class DeterministicPlanner:
         available_tools: set[str] | None = None,
     ) -> PlannerDecision:
         normalized = self._normalize_command(message, surface_mode=surface_mode, active_module=active_module)
-        debug: dict[str, Any] = {"normalized_command": normalized.to_dict()}
+        decomposition = self._decompose_request(
+            normalized,
+            active_context=active_context or {},
+            active_request_state=active_request_state or {},
+            recent_tool_results=recent_tool_results or [],
+        )
+        debug: dict[str, Any] = {
+            "normalized_command": normalized.to_dict(),
+            "request_decomposition": decomposition.to_dict(),
+        }
         if not normalized.normalized_text:
-            return PlannerDecision(debug=debug)
+            return self._finalize_decision(
+                PlannerDecision(debug=debug),
+                normalized=normalized,
+                decomposition=decomposition,
+                active_context=active_context or {},
+                active_request_state=active_request_state or {},
+                recent_tool_results=recent_tool_results or [],
+            )
 
         lower = normalized.normalized_text
         guardrail_message = self._guardrail_message(message, lower, active_context=active_context)
@@ -248,12 +274,20 @@ class DeterministicPlanner:
             clarification = ClarificationReason(code="guardrail", message=guardrail_message)
             debug["clarification_reason"] = clarification.to_dict()
             debug["response_mode"] = ResponseMode.CLARIFICATION.value
-            return PlannerDecision(
-                request_type="guardrail_clarify",
-                assistant_message=guardrail_message,
+            return self._finalize_decision(
+                PlannerDecision(
+                    request_type="guardrail_clarify",
+                    assistant_message=guardrail_message,
+                    clarification_reason=clarification,
+                    response_mode=ResponseMode.CLARIFICATION.value,
+                    debug=debug,
+                ),
+                normalized=normalized,
+                decomposition=decomposition,
                 clarification_reason=clarification,
-                response_mode=ResponseMode.CLARIFICATION.value,
-                debug=debug,
+                active_context=active_context or {},
+                active_request_state=active_request_state or {},
+                recent_tool_results=recent_tool_results or [],
             )
 
         calculation_evaluation = self._calculations_seam.evaluate(
@@ -264,6 +298,23 @@ class DeterministicPlanner:
             active_context=active_context or {},
         )
         debug["calculations"] = calculation_evaluation.to_dict()
+        software_control_evaluation = self._software_control_seam.evaluate(
+            raw_text=message,
+            normalized_text=normalized.normalized_text,
+            surface_mode=surface_mode,
+            active_module=active_module,
+            active_request_state=active_request_state or {},
+            active_context=active_context or {},
+        )
+        debug["software_control"] = software_control_evaluation.to_dict()
+        screen_awareness_evaluation = self._screen_awareness_seam.evaluate(
+            raw_text=message,
+            normalized_text=normalized.normalized_text,
+            surface_mode=surface_mode,
+            active_module=active_module,
+            active_context=active_context or {},
+        )
+        debug["screen_awareness"] = screen_awareness_evaluation.to_dict()
         if (
             calculation_evaluation.candidate
             and calculation_evaluation.disposition
@@ -320,7 +371,8 @@ class DeterministicPlanner:
             debug["capability_plan"] = capability_plan.to_dict()
             debug["execution_plan"] = execution_plan.to_dict()
             debug["response_mode"] = execution_plan.response_mode.value
-            return PlannerDecision(
+            return self._finalize_decision(
+                PlannerDecision(
                 request_type=execution_plan.request_type,
                 tool_requests=[],
                 assistant_message=None,
@@ -331,17 +383,17 @@ class DeterministicPlanner:
                 execution_plan=execution_plan,
                 response_mode=execution_plan.response_mode.value,
                 debug=debug,
+                ),
+                normalized=normalized,
+                decomposition=decomposition,
+                calculation_evaluation=calculation_evaluation,
+                software_control_evaluation=software_control_evaluation,
+                screen_awareness_evaluation=screen_awareness_evaluation,
+                active_context=active_context or {},
+                active_request_state=active_request_state or {},
+                recent_tool_results=recent_tool_results or [],
             )
 
-        software_control_evaluation = self._software_control_seam.evaluate(
-            raw_text=message,
-            normalized_text=normalized.normalized_text,
-            surface_mode=surface_mode,
-            active_module=active_module,
-            active_request_state=active_request_state or {},
-            active_context=active_context or {},
-        )
-        debug["software_control"] = software_control_evaluation.to_dict()
         if (
             software_control_evaluation.candidate
             and software_control_evaluation.disposition
@@ -394,7 +446,8 @@ class DeterministicPlanner:
             debug["capability_plan"] = capability_plan.to_dict()
             debug["execution_plan"] = execution_plan.to_dict()
             debug["response_mode"] = execution_plan.response_mode.value
-            return PlannerDecision(
+            return self._finalize_decision(
+                PlannerDecision(
                 request_type=execution_plan.request_type,
                 tool_requests=[],
                 assistant_message=None,
@@ -405,29 +458,66 @@ class DeterministicPlanner:
                 execution_plan=execution_plan,
                 response_mode=execution_plan.response_mode.value,
                 debug=debug,
+                ),
+                normalized=normalized,
+                decomposition=decomposition,
+                calculation_evaluation=calculation_evaluation,
+                software_control_evaluation=software_control_evaluation,
+                screen_awareness_evaluation=screen_awareness_evaluation,
+                active_context=active_context or {},
+                active_request_state=active_request_state or {},
+                recent_tool_results=recent_tool_results or [],
             )
 
-        screen_awareness_evaluation = self._screen_awareness_seam.evaluate(
-            raw_text=message,
-            normalized_text=normalized.normalized_text,
-            surface_mode=surface_mode,
-            active_module=active_module,
-            active_context=active_context or {},
-        )
-        debug["screen_awareness"] = screen_awareness_evaluation.to_dict()
-
-        semantic = self._semantic_parse_proposal(
-            message,
-            normalized=normalized,
-            session_id=session_id,
-            workspace_context=workspace_context,
-            active_posture=active_posture,
-            active_request_state=active_request_state or {},
-            recent_tool_results=recent_tool_results or [],
-            learned_preferences=learned_preferences or {},
-            active_context=active_context or {},
-            screen_awareness_evaluation=screen_awareness_evaluation,
-        )
+        semantic: SemanticParseProposal
+        if (
+            software_control_evaluation.candidate
+            and software_control_evaluation.disposition
+            in {
+                SoftwareRouteDisposition.FEATURE_DISABLED,
+                SoftwareRouteDisposition.ROUTING_DISABLED,
+            }
+            and software_control_evaluation.operation_type
+            and software_control_evaluation.target_name
+        ):
+            semantic = self._tool_proposal(
+                query_shape=QueryShape.SOFTWARE_CONTROL_REQUEST,
+                domain="software_control",
+                request_type_hint="software_control_response",
+                family="software_control",
+                subject=software_control_evaluation.target_name,
+                requested_action=software_control_evaluation.operation_type,
+                confidence=software_control_evaluation.route_confidence,
+                evidence=list(software_control_evaluation.reasons or ["software-control route remains the native owner"]),
+                execution_type="software_control_execute",
+                output_mode=ResponseMode.ACTION_RESULT.value,
+                output_type="action",
+                slots={
+                    "software_control_request": software_control_evaluation.to_dict(),
+                    "operation_type": software_control_evaluation.operation_type,
+                    "target_name": software_control_evaluation.target_name,
+                    "request_stage": software_control_evaluation.request_stage,
+                    "follow_up_reuse": software_control_evaluation.follow_up_reuse,
+                    "approval_scope": software_control_evaluation.approval_scope,
+                    "approval_outcome": software_control_evaluation.approval_outcome,
+                    "trust_request_id": software_control_evaluation.trust_request_id,
+                    "family": "software_control",
+                    "subject": software_control_evaluation.target_name,
+                },
+            )
+        else:
+            semantic = self._semantic_parse_proposal(
+                message,
+                normalized=normalized,
+                session_id=session_id,
+                workspace_context=workspace_context,
+                active_posture=active_posture,
+                active_request_state=active_request_state or {},
+                recent_tool_results=recent_tool_results or [],
+                learned_preferences=learned_preferences or {},
+                active_context=active_context or {},
+                screen_awareness_evaluation=screen_awareness_evaluation,
+            )
         debug["semantic_parse_proposal"] = semantic.to_dict()
 
         structured_query, clarification_reason = self._validate_structured_query(
@@ -439,22 +529,45 @@ class DeterministicPlanner:
         if clarification_reason is not None:
             debug["clarification_reason"] = clarification_reason.to_dict()
             debug["response_mode"] = ResponseMode.CLARIFICATION.value
-            return PlannerDecision(
-                request_type="clarification_request",
-                assistant_message=clarification_reason.message,
-                structured_query=structured_query,
+            return self._finalize_decision(
+                PlannerDecision(
+                    request_type="clarification_request",
+                    assistant_message=clarification_reason.message,
+                    structured_query=structured_query,
+                    clarification_reason=clarification_reason,
+                    response_mode=ResponseMode.CLARIFICATION.value,
+                    debug=debug,
+                ),
+                normalized=normalized,
+                decomposition=decomposition,
+                calculation_evaluation=calculation_evaluation,
+                software_control_evaluation=software_control_evaluation,
+                screen_awareness_evaluation=screen_awareness_evaluation,
+                semantic=semantic,
                 clarification_reason=clarification_reason,
-                response_mode=ResponseMode.CLARIFICATION.value,
-                debug=debug,
+                active_context=active_context or {},
+                active_request_state=active_request_state or {},
+                recent_tool_results=recent_tool_results or [],
             )
 
         if structured_query.query_shape == QueryShape.UNCLASSIFIED:
             debug["response_mode"] = ResponseMode.SUMMARY_RESULT.value
-            return PlannerDecision(
-                request_type="unclassified",
-                structured_query=structured_query,
-                response_mode=ResponseMode.SUMMARY_RESULT.value,
-                debug=debug,
+            return self._finalize_decision(
+                PlannerDecision(
+                    request_type="unclassified",
+                    structured_query=structured_query,
+                    response_mode=ResponseMode.SUMMARY_RESULT.value,
+                    debug=debug,
+                ),
+                normalized=normalized,
+                decomposition=decomposition,
+                calculation_evaluation=calculation_evaluation,
+                software_control_evaluation=software_control_evaluation,
+                screen_awareness_evaluation=screen_awareness_evaluation,
+                semantic=semantic,
+                active_context=active_context or {},
+                active_request_state=active_request_state or {},
+                recent_tool_results=recent_tool_results or [],
             )
 
         capability_plan = self._plan_capabilities(
@@ -471,15 +584,27 @@ class DeterministicPlanner:
             debug["unsupported_reason"] = capability_plan.unsupported_reason.to_dict()
             debug["execution_plan"] = provisional_execution_plan.to_dict()
             debug["response_mode"] = ResponseMode.UNSUPPORTED.value
-            return PlannerDecision(
-                request_type="unsupported_capability",
-                assistant_message=capability_plan.unsupported_reason.message,
-                structured_query=structured_query,
-                capability_plan=capability_plan,
-                execution_plan=provisional_execution_plan,
+            return self._finalize_decision(
+                PlannerDecision(
+                    request_type="unsupported_capability",
+                    assistant_message=capability_plan.unsupported_reason.message,
+                    structured_query=structured_query,
+                    capability_plan=capability_plan,
+                    execution_plan=provisional_execution_plan,
+                    unsupported_reason=capability_plan.unsupported_reason,
+                    response_mode=ResponseMode.UNSUPPORTED.value,
+                    debug=debug,
+                ),
+                normalized=normalized,
+                decomposition=decomposition,
+                calculation_evaluation=calculation_evaluation,
+                software_control_evaluation=software_control_evaluation,
+                screen_awareness_evaluation=screen_awareness_evaluation,
+                semantic=semantic,
                 unsupported_reason=capability_plan.unsupported_reason,
-                response_mode=ResponseMode.UNSUPPORTED.value,
-                debug=debug,
+                active_context=active_context or {},
+                active_request_state=active_request_state or {},
+                recent_tool_results=recent_tool_results or [],
             )
 
         execution_plan = provisional_execution_plan
@@ -490,18 +615,759 @@ class DeterministicPlanner:
         if execution_plan.tool_name:
             tool_requests.append(ToolRequest(execution_plan.tool_name, dict(execution_plan.tool_arguments)))
 
-        return PlannerDecision(
-            request_type=execution_plan.request_type,
-            tool_requests=tool_requests,
-            assistant_message=execution_plan.assistant_message,
-            requires_reasoner=execution_plan.requires_reasoner,
-            active_request_state=self._active_request_state_from_structured_query(structured_query, execution_plan),
-            structured_query=structured_query,
-            capability_plan=capability_plan,
-            execution_plan=execution_plan,
-            response_mode=execution_plan.response_mode.value,
-            debug=debug,
+        return self._finalize_decision(
+            PlannerDecision(
+                request_type=execution_plan.request_type,
+                tool_requests=tool_requests,
+                assistant_message=execution_plan.assistant_message,
+                requires_reasoner=execution_plan.requires_reasoner,
+                active_request_state=self._active_request_state_from_structured_query(structured_query, execution_plan),
+                structured_query=structured_query,
+                capability_plan=capability_plan,
+                execution_plan=execution_plan,
+                response_mode=execution_plan.response_mode.value,
+                debug=debug,
+            ),
+            normalized=normalized,
+            decomposition=decomposition,
+            calculation_evaluation=calculation_evaluation,
+            software_control_evaluation=software_control_evaluation,
+            screen_awareness_evaluation=screen_awareness_evaluation,
+            semantic=semantic,
+            active_context=active_context or {},
+            active_request_state=active_request_state or {},
+            recent_tool_results=recent_tool_results or [],
         )
+
+    def _finalize_decision(
+        self,
+        decision: PlannerDecision,
+        *,
+        normalized: NormalizedCommand,
+        decomposition: RequestDecomposition,
+        calculation_evaluation: Any | None = None,
+        software_control_evaluation: Any | None = None,
+        screen_awareness_evaluation: ScreenPlannerEvaluation | None = None,
+        semantic: SemanticParseProposal | None = None,
+        clarification_reason: ClarificationReason | None = None,
+        unsupported_reason: UnsupportedReason | None = None,
+        active_context: dict[str, Any],
+        active_request_state: dict[str, Any],
+        recent_tool_results: list[dict[str, Any]],
+    ) -> PlannerDecision:
+        route_state = self._build_routing_telemetry(
+            normalized=normalized,
+            decomposition=decomposition,
+            decision=decision,
+            calculation_evaluation=calculation_evaluation,
+            software_control_evaluation=software_control_evaluation,
+            screen_awareness_evaluation=screen_awareness_evaluation,
+            semantic=semantic,
+            clarification_reason=clarification_reason or decision.clarification_reason,
+            unsupported_reason=unsupported_reason or decision.unsupported_reason,
+            active_context=active_context,
+            active_request_state=active_request_state,
+            recent_tool_results=recent_tool_results,
+        )
+        decision.route_state = route_state
+        decision.debug["routing"] = route_state.to_dict()
+        return decision
+
+    def _build_routing_telemetry(
+        self,
+        *,
+        normalized: NormalizedCommand,
+        decomposition: RequestDecomposition,
+        decision: PlannerDecision,
+        calculation_evaluation: Any | None,
+        software_control_evaluation: Any | None,
+        screen_awareness_evaluation: ScreenPlannerEvaluation | None,
+        semantic: SemanticParseProposal | None,
+        clarification_reason: ClarificationReason | None,
+        unsupported_reason: UnsupportedReason | None,
+        active_context: dict[str, Any],
+        active_request_state: dict[str, Any],
+        recent_tool_results: list[dict[str, Any]],
+    ) -> RoutingTelemetry:
+        deictic_binding = self._resolve_deictic_binding(
+            decomposition,
+            active_context=active_context,
+            active_request_state=active_request_state,
+            recent_tool_results=recent_tool_results,
+        )
+        semantic_binding = self._semantic_deictic_binding(semantic)
+        if semantic_binding is not None:
+            deictic_binding = semantic_binding
+        candidates = self._route_candidates(
+            normalized=normalized,
+            decomposition=decomposition,
+            calculation_evaluation=calculation_evaluation,
+            software_control_evaluation=software_control_evaluation,
+            screen_awareness_evaluation=screen_awareness_evaluation,
+            semantic=semantic,
+            decision=decision,
+            deictic_binding=deictic_binding,
+            active_request_state=active_request_state,
+        )
+        winner_family = self._route_family_for_decision(decision)
+        winner_candidate = next((candidate for candidate in candidates if candidate.route_family == winner_family), None)
+        if winner_candidate is None:
+            winner_candidate = RouteCandidate(
+                route_family=winner_family,
+                query_shape=decision.structured_query.query_shape.value if decision.structured_query is not None else None,
+                score=0.0,
+                posture_seed="inferred",
+                semantic_reasons=["winner inferred from final planner decision"],
+            )
+            candidates.append(winner_candidate)
+
+        provider_fallback_reason = None
+        posture = RoutePosture.CLEAR_WINNER if winner_candidate.score >= 0.9 else RoutePosture.LIKELY_WINNER
+        status = "immediate"
+        unresolved_targets: list[str] = []
+        clarification_needed = False
+        clarification_message = None
+
+        if decision.request_type == "unclassified" or winner_family == "generic_provider":
+            posture = RoutePosture.GENUINE_PROVIDER_FALLBACK
+            status = "provider_fallback"
+            provider_fallback_reason = winner_candidate.provider_fallback_reason or self._provider_fallback_reason(normalized)
+            winner_candidate.provider_fallback_reason = provider_fallback_reason
+        elif unsupported_reason is not None:
+            posture = RoutePosture.NATIVE_UNSUPPORTED
+            status = "blocked"
+            unresolved_targets = list(winner_candidate.missing_evidence)
+        elif clarification_reason is not None:
+            posture = RoutePosture.CONDITIONAL_WINNER
+            status = "conditional"
+            clarification_needed = True
+            clarification_message = clarification_reason.message
+            unresolved_targets = self._unresolved_targets_from_clarification(clarification_reason)
+        elif winner_candidate.disqualifiers:
+            posture = RoutePosture.BLOCKED_WINNER
+            status = "blocked"
+
+        sorted_candidates = sorted(candidates, key=lambda item: item.score, reverse=True)
+        runner_up = next((candidate for candidate in sorted_candidates if candidate.route_family != winner_family), None)
+        margin_to_runner_up = None if runner_up is None else round(max(0.0, winner_candidate.score - runner_up.score), 3)
+        ambiguity_live = bool(
+            runner_up is not None
+            and runner_up.score >= 0.65
+            and margin_to_runner_up is not None
+            and margin_to_runner_up < 0.1
+        )
+        runner_summary = None
+        if runner_up is not None:
+            runner_summary = {
+                "route_family": runner_up.route_family,
+                "score": runner_up.score,
+                "reason": runner_up.semantic_reasons[0] if runner_up.semantic_reasons else "",
+            }
+        if posture == RoutePosture.CLEAR_WINNER and ambiguity_live:
+            posture = RoutePosture.LIKELY_WINNER
+        support_summary = sorted(
+            {
+                note
+                for candidate in candidates
+                for note in candidate.support_augmentation
+                if str(note).strip()
+            }
+        )
+        winner = RouteWinnerPosture(
+            route_family=winner_family,
+            query_shape=decision.structured_query.query_shape.value if decision.structured_query is not None else winner_candidate.query_shape,
+            confidence=round(max(0.0, min(winner_candidate.score, 1.0)), 3),
+            posture=posture,
+            status=status,
+            score=winner_candidate.score,
+            dominant_evidence=list(winner_candidate.semantic_reasons[:4]),
+            unresolved_targets=unresolved_targets,
+            clarification_needed=clarification_needed,
+            clarification_reason=clarification_message,
+            runner_up_summary=runner_summary,
+            support_system_augmentation=support_summary,
+            provider_fallback_reason=provider_fallback_reason,
+            margin_to_runner_up=margin_to_runner_up,
+            ambiguity_live=ambiguity_live,
+        )
+        return RoutingTelemetry(
+            normalized_summary=normalized.to_dict(),
+            decomposition=decomposition,
+            candidates=sorted_candidates,
+            winner=winner,
+            runner_up=runner_up,
+            deictic_binding=deictic_binding,
+            support_augmentation_summary=support_summary,
+        )
+
+    def _route_candidates(
+        self,
+        *,
+        normalized: NormalizedCommand,
+        decomposition: RequestDecomposition,
+        calculation_evaluation: Any | None,
+        software_control_evaluation: Any | None,
+        screen_awareness_evaluation: ScreenPlannerEvaluation | None,
+        semantic: SemanticParseProposal | None,
+        decision: PlannerDecision,
+        deictic_binding: DeicticBinding,
+        active_request_state: dict[str, Any],
+    ) -> list[RouteCandidate]:
+        candidates_by_family: dict[str, RouteCandidate] = {}
+
+        def upsert(candidate: RouteCandidate) -> None:
+            existing = candidates_by_family.get(candidate.route_family)
+            if existing is None or candidate.score >= existing.score:
+                candidates_by_family[candidate.route_family] = candidate
+
+        if calculation_evaluation is not None and bool(getattr(calculation_evaluation, "candidate", False)):
+            upsert(
+                RouteCandidate(
+                    route_family="calculations",
+                    query_shape=QueryShape.CALCULATION_REQUEST.value,
+                    score=round(float(getattr(calculation_evaluation, "route_confidence", 0.0) or 0.0), 3),
+                    posture_seed="native_candidate",
+                    semantic_reasons=list(getattr(calculation_evaluation, "reasons", []) or ["calculation route candidate detected"]),
+                    score_factors={"semantic_fit": float(getattr(calculation_evaluation, "route_confidence", 0.0) or 0.0)},
+                    required_targets=["expression"],
+                )
+            )
+        if software_control_evaluation is not None and bool(getattr(software_control_evaluation, "candidate", False)):
+            target = str(getattr(software_control_evaluation, "target_name", "") or "").strip()
+            upsert(
+                RouteCandidate(
+                    route_family="software_control",
+                    query_shape=QueryShape.SOFTWARE_CONTROL_REQUEST.value,
+                    score=round(float(getattr(software_control_evaluation, "route_confidence", 0.0) or 0.0), 3),
+                    posture_seed="native_candidate",
+                    semantic_reasons=list(getattr(software_control_evaluation, "reasons", []) or ["software-control route candidate detected"]),
+                    score_factors={
+                        "semantic_fit": float(getattr(software_control_evaluation, "route_confidence", 0.0) or 0.0),
+                        "ownership_priority": 0.18,
+                    },
+                    required_targets=["software_target"],
+                    target_candidates=[
+                        RouteTargetCandidate(
+                            target_type="software",
+                            label=target,
+                            value=target,
+                            source="operator_text",
+                            confidence=0.9,
+                            selected=True,
+                        )
+                    ]
+                    if target
+                    else [],
+                )
+            )
+        if screen_awareness_evaluation is not None and screen_awareness_evaluation.candidate:
+            upsert(
+                RouteCandidate(
+                    route_family="screen_awareness",
+                    query_shape=QueryShape.SCREEN_AWARENESS_REQUEST.value,
+                    score=round(float(screen_awareness_evaluation.route_confidence or 0.0), 3),
+                    posture_seed="native_candidate",
+                    semantic_reasons=list(screen_awareness_evaluation.reasons or ["screen-awareness route candidate detected"]),
+                    score_factors={"semantic_fit": float(screen_awareness_evaluation.route_confidence or 0.0)},
+                    required_targets=["visible_screen"],
+                    support_augmentation=["active screen context"],
+                )
+            )
+        if semantic is not None and semantic.query_shape != QueryShape.UNCLASSIFIED:
+            family = self._route_family_for_semantic(semantic)
+            required_targets = self._required_targets_for_semantic(semantic)
+            targets = self._target_candidates_for_semantic(semantic)
+            score = round(float(semantic.confidence or 0.0), 3)
+            if family == "discord_relay" and deictic_binding.resolved:
+                score = min(0.99, score + 0.02)
+            upsert(
+                RouteCandidate(
+                    route_family=family,
+                    query_shape=semantic.query_shape.value,
+                    score=score,
+                    posture_seed="semantic_candidate",
+                    semantic_reasons=list(semantic.evidence or ["semantic route proposal generated"]),
+                    score_factors={
+                        "semantic_fit": float(semantic.confidence or 0.0),
+                        "target_compatibility": 0.2 if targets else 0.0,
+                        "deictic_binding": 0.16 if deictic_binding.resolved else 0.0,
+                    },
+                    required_targets=required_targets,
+                    target_candidates=targets,
+                    missing_evidence=list(semantic.slots.get("missing_evidence") or []),
+                    clarification_pressure=float(semantic.slots.get("clarification_pressure") or 0.0),
+                    support_augmentation=list(semantic.slots.get("support_augmentation") or []),
+                )
+            )
+
+        if decomposition.action_intent in {"send", "share", "message"} and "discord_relay" not in candidates_by_family:
+            upsert(
+                RouteCandidate(
+                    route_family="discord_relay",
+                    query_shape=QueryShape.DISCORD_RELAY_REQUEST.value,
+                    score=0.76,
+                    posture_seed="phrase_candidate",
+                    semantic_reasons=["send/share wording suggests a relay route"],
+                    required_targets=["destination", "payload"],
+                    clarification_pressure=0.25 if decomposition.deictic_references else 0.0,
+                )
+            )
+        if decomposition.approval_hints and "trust_approvals" not in candidates_by_family:
+            upsert(
+                RouteCandidate(
+                    route_family="trust_approvals",
+                    query_shape=QueryShape.TRUST_APPROVAL_REQUEST.value,
+                    score=0.78,
+                    posture_seed="phrase_candidate",
+                    semantic_reasons=["approval or permission wording suggests the trust route"],
+                    required_targets=["approval_object"],
+                )
+            )
+        if decomposition.correction_cues and self._active_search_parameters(active_request_state):
+            upsert(
+                RouteCandidate(
+                    route_family="desktop_search",
+                    query_shape=QueryShape.SEARCH_AND_OPEN.value,
+                    score=0.86,
+                    posture_seed="follow_up_candidate",
+                    semantic_reasons=["correction phrase can reuse the active search ambiguity"],
+                    required_targets=["search_target"],
+                    support_augmentation=["active request state"],
+                )
+            )
+
+        native_candidates = [candidate for candidate in candidates_by_family.values() if candidate.route_family != "generic_provider" and candidate.score >= 0.35]
+        provider_reason = self._provider_fallback_reason(normalized)
+        provider_score = 0.72 if not native_candidates and provider_reason == "open_ended_reasoning_or_generation" else 0.35 if not native_candidates else 0.08
+        provider_disqualifiers = ["native_route_candidate_present"] if native_candidates else []
+        candidates_by_family["generic_provider"] = RouteCandidate(
+            route_family="generic_provider",
+            query_shape=QueryShape.UNCLASSIFIED.value,
+            score=provider_score,
+            posture_seed="fallback_candidate",
+            semantic_reasons=[
+                "provider fallback is available only when no native family truthfully owns the request"
+            ],
+            score_factors={"fallback_fit": provider_score},
+            disqualifiers=provider_disqualifiers,
+            provider_fallback_reason=provider_reason,
+        )
+        return list(candidates_by_family.values())
+
+    def _decompose_request(
+        self,
+        normalized: NormalizedCommand,
+        *,
+        active_context: dict[str, Any],
+        active_request_state: dict[str, Any],
+        recent_tool_results: list[dict[str, Any]],
+    ) -> RequestDecomposition:
+        del active_context, recent_tool_results
+        lower = normalized.normalized_text
+        tokens = list(normalized.tokens)
+        deictic = [token for token in tokens if token in {"this", "that", "it", "these", "those"}]
+        if any(phrase in lower for phrase in {"same as before", "same thing as before", "again", "continue", "resume", "where we left off"}):
+            continuity = ["continuity"]
+        else:
+            continuity = []
+        correction = []
+        if lower.startswith(("no ", "no,", "nah ", "not ")) or any(phrase in lower for phrase in {"not that", "instead", "the other one"}):
+            correction.append("correction")
+        approval = []
+        if any(phrase in lower for phrase in {"why are you asking", "why do you need confirmation", "permission", "allow this", "approve", "confirmation"}):
+            approval.append("approval")
+        verification = []
+        if any(phrase in lower for phrase in {"did it work", "did that work", "verify", "check if", "actually do anything"}):
+            verification.append("verification")
+
+        action_intent = None
+        for action, verbs in {
+            "send": {"send", "share", "message", "post"},
+            "open": {"open", "show", "launch", "start"},
+            "install": {"install", "download", "get", "put", "setup", "set"},
+            "resume": {"continue", "resume", "restore"},
+            "explain": {"why", "explain", "what"},
+        }.items():
+            if tokens and tokens[0] in verbs:
+                action_intent = action
+                break
+        if action_intent is None and any(token in tokens for token in {"send", "share", "message"}):
+            action_intent = "send"
+        if action_intent is None and approval:
+            action_intent = "explain"
+
+        subject = None
+        if active_request_state.get("subject"):
+            subject = str(active_request_state.get("subject") or "").strip() or None
+        quoted_targets = [
+            RouteTargetCandidate(
+                target_type="quoted_text",
+                label=match.group(1),
+                value=match.group(1),
+                source="operator_text",
+                confidence=0.95,
+                selected=True,
+            )
+            for match in re.finditer(r"\"([^\"]+)\"", normalized.raw_text)
+        ]
+        return RequestDecomposition(
+            action_intent=action_intent,
+            subject=subject,
+            explicit_targets=quoted_targets,
+            deictic_references=deictic,
+            continuity_cues=continuity,
+            correction_cues=correction,
+            result_expectation="verification" if verification else None,
+            approval_hints=approval,
+            verification_hints=verification,
+        )
+
+    def _resolve_deictic_binding(
+        self,
+        decomposition: RequestDecomposition,
+        *,
+        active_context: dict[str, Any],
+        active_request_state: dict[str, Any],
+        recent_tool_results: list[dict[str, Any]],
+    ) -> DeicticBinding:
+        if not decomposition.deictic_references and not decomposition.correction_cues:
+            return DeicticBinding(binding_posture="none", source_summary="No deictic reference was present.")
+        candidates = self._deictic_binding_candidates(
+            active_context=active_context,
+            active_request_state=active_request_state,
+            recent_tool_results=recent_tool_results,
+        )
+        if not candidates:
+            return DeicticBinding(
+                resolved=False,
+                candidates=[],
+                unresolved_reason="no_current_binding_source",
+                binding_posture="unbound",
+                source_summary="No current preview, selection, workspace item, or recent entity could bind the reference.",
+            )
+        strongest = sorted(candidates, key=lambda item: item.confidence, reverse=True)
+        top = strongest[0]
+        if len(strongest) > 1 and abs(top.confidence - strongest[1].confidence) < 0.08:
+            return DeicticBinding(
+                resolved=False,
+                candidates=strongest,
+                unresolved_reason="multiple_live_binding_candidates",
+                binding_posture="ambiguous",
+                source_summary="Multiple current binding sources remain live.",
+            )
+        return DeicticBinding(
+            resolved=True,
+            selected_source=top.source,
+            selected_target=top,
+            candidates=strongest,
+            binding_posture=self._binding_posture(top),
+            source_summary=f"Bound deictic reference from {top.source}.",
+        )
+
+    def _deictic_binding_candidates(
+        self,
+        *,
+        active_context: dict[str, Any],
+        active_request_state: dict[str, Any],
+        recent_tool_results: list[dict[str, Any]],
+    ) -> list[DeicticBindingCandidate]:
+        candidates: list[DeicticBindingCandidate] = []
+        parameters = active_request_state.get("parameters") if isinstance(active_request_state.get("parameters"), dict) else {}
+        pending_preview = parameters.get("pending_preview") if isinstance(parameters.get("pending_preview"), dict) else {}
+        if pending_preview:
+            candidates.append(
+                DeicticBindingCandidate(
+                    source="active_preview",
+                    target_type="preview",
+                    label=str(active_request_state.get("subject") or parameters.get("destination_alias") or "active preview"),
+                    value=dict(pending_preview),
+                    confidence=0.99,
+                    route_family=str(active_request_state.get("family") or "").strip() or None,
+                )
+            )
+        trust = active_request_state.get("trust") if isinstance(active_request_state.get("trust"), dict) else {}
+        if trust:
+            candidates.append(
+                DeicticBindingCandidate(
+                    source="active_approval",
+                    target_type="approval",
+                    label=str(active_request_state.get("subject") or "approval request"),
+                    value=dict(trust),
+                    confidence=0.88,
+                    route_family="trust_approvals",
+                )
+            )
+        selection = active_context.get("selection") if isinstance(active_context.get("selection"), dict) else {}
+        if selection.get("value"):
+            candidates.append(
+                DeicticBindingCandidate(
+                    source="selection",
+                    target_type=str(selection.get("kind") or "selected_text"),
+                    label=str(selection.get("preview") or "selected text"),
+                    value=selection.get("value"),
+                    confidence=0.9,
+                    route_family="context",
+                )
+            )
+        clipboard = active_context.get("clipboard") if isinstance(active_context.get("clipboard"), dict) else {}
+        if clipboard.get("value"):
+            candidates.append(
+                DeicticBindingCandidate(
+                    source="clipboard",
+                    target_type=str(clipboard.get("kind") or "clipboard"),
+                    label=str(clipboard.get("preview") or "clipboard"),
+                    value=clipboard.get("value"),
+                    confidence=0.84,
+                    route_family="context",
+                )
+            )
+        subject = str(active_request_state.get("subject") or "").strip()
+        family = str(active_request_state.get("family") or "").strip()
+        if subject and family:
+            candidates.append(
+                DeicticBindingCandidate(
+                    source="current_route_target",
+                    target_type=family,
+                    label=subject,
+                    value=subject,
+                    confidence=0.72,
+                    route_family=family,
+                )
+            )
+        recent_entities = active_context.get("recent_entities", []) if isinstance(active_context.get("recent_entities"), list) else []
+        for index, entity in enumerate(recent_entities):
+            if not isinstance(entity, dict):
+                continue
+            url = str(entity.get("url") or "").strip()
+            path = str(entity.get("path") or "").strip()
+            title = str(entity.get("title") or entity.get("name") or url or path or "recent entity").strip()
+            kind = str(entity.get("kind") or ("page" if url else "file" if path else "entity")).strip()
+            if not url and not path:
+                continue
+            freshness = self._entity_freshness(entity, index=index)
+            candidates.append(
+                DeicticBindingCandidate(
+                    source="recent_session_entity",
+                    target_type=kind,
+                    label=title,
+                    value=url or path,
+                    confidence=self._recent_entity_confidence(freshness),
+                    freshness=freshness,
+                    route_family="browser_destination" if url else "files",
+                )
+            )
+        if recent_tool_results:
+            latest = recent_tool_results[0]
+            if isinstance(latest, dict):
+                candidates.append(
+                    DeicticBindingCandidate(
+                        source="recent_subsystem_result",
+                        target_type=str(latest.get("family") or latest.get("tool_name") or "tool_result"),
+                        label=str(latest.get("tool_name") or latest.get("family") or "recent result"),
+                        value=dict(latest),
+                        confidence=0.64,
+                        freshness="recent",
+                        route_family=str(latest.get("family") or "").strip() or None,
+                    )
+                )
+        return candidates
+
+    def _semantic_deictic_binding(self, semantic: SemanticParseProposal | None) -> DeicticBinding | None:
+        if semantic is None or not isinstance(semantic.slots, dict):
+            return None
+        payload = semantic.slots.get("deictic_binding")
+        if not isinstance(payload, dict):
+            return None
+        selected_target_payload = payload.get("selected_target") if isinstance(payload.get("selected_target"), dict) else None
+        selected_target = self._binding_candidate_from_payload(selected_target_payload) if selected_target_payload else None
+        candidate_payloads = payload.get("candidates") if isinstance(payload.get("candidates"), list) else []
+        candidates = [
+            candidate
+            for candidate in (self._binding_candidate_from_payload(item) for item in candidate_payloads if isinstance(item, dict))
+            if candidate is not None
+        ]
+        binding_posture = str(payload.get("binding_posture") or "").strip() or (
+            self._binding_posture(selected_target) if selected_target is not None else "ambiguous" if candidates else "unbound"
+        )
+        return DeicticBinding(
+            resolved=bool(payload.get("resolved", False)),
+            selected_source=str(payload.get("selected_source") or "").strip() or None,
+            selected_target=selected_target,
+            candidates=candidates,
+            unresolved_reason=str(payload.get("unresolved_reason") or "").strip() or None,
+            binding_posture=binding_posture,
+            source_summary=str(payload.get("source_summary") or "").strip()
+            or (
+                f"Bound deictic reference from {selected_target.source}."
+                if selected_target is not None
+                else "Route-specific binding remains unresolved."
+            ),
+        )
+
+    def _binding_candidate_from_payload(self, payload: dict[str, Any] | None) -> DeicticBindingCandidate | None:
+        if not isinstance(payload, dict):
+            return None
+        label = str(payload.get("label") or payload.get("source") or "context target").strip()
+        source = str(payload.get("source") or "context").strip()
+        target_type = str(payload.get("target_type") or "context").strip()
+        return DeicticBindingCandidate(
+            source=source,
+            target_type=target_type,
+            label=label,
+            value=payload.get("value"),
+            confidence=float(payload.get("confidence") or 0.0),
+            freshness=str(payload.get("freshness") or "current").strip() or "current",
+            route_family=str(payload.get("route_family") or "").strip() or None,
+        )
+
+    def _binding_posture(self, candidate: DeicticBindingCandidate | None) -> str:
+        if candidate is None:
+            return "unbound"
+        if candidate.freshness in {"stale", "superseded", "expired"}:
+            return "stale"
+        if candidate.source in {"active_preview", "current_route_target", "recent_subsystem_result"}:
+            return "continuity_reuse"
+        return "current"
+
+    def _entity_freshness(self, entity: dict[str, Any], *, index: int) -> str:
+        explicit = str(entity.get("freshness") or entity.get("recency") or "").strip().lower()
+        if explicit in {"current", "recent", "cooling", "stale", "superseded", "expired"}:
+            return explicit
+        if bool(entity.get("stale", False)):
+            return "stale"
+        if bool(entity.get("superseded", False)):
+            return "superseded"
+        if index == 0:
+            return "recent"
+        if index == 1:
+            return "cooling"
+        return "stale"
+
+    def _recent_entity_confidence(self, freshness: str) -> float:
+        return {
+            "current": 0.88,
+            "recent": 0.78,
+            "cooling": 0.62,
+            "stale": 0.28,
+            "superseded": 0.16,
+            "expired": 0.12,
+        }.get(freshness, 0.55)
+
+    def _route_family_for_decision(self, decision: PlannerDecision) -> str:
+        if decision.request_type == "unclassified":
+            return "generic_provider"
+        if decision.execution_plan is not None and decision.execution_plan.family:
+            family = str(decision.execution_plan.family).strip()
+            if family:
+                return self._canonical_route_family(family)
+        if decision.structured_query is not None:
+            slots = decision.structured_query.slots if isinstance(decision.structured_query.slots, dict) else {}
+            family = str(slots.get("family") or decision.structured_query.domain or "").strip()
+            if family:
+                return self._canonical_route_family(family)
+            if decision.structured_query.query_shape == QueryShape.TRUST_APPROVAL_REQUEST:
+                return "trust_approvals"
+        if decision.request_type == "guardrail_clarify":
+            return "trust_approvals"
+        return "generic_provider"
+
+    def _route_family_for_semantic(self, semantic: SemanticParseProposal) -> str:
+        slots = semantic.slots if isinstance(semantic.slots, dict) else {}
+        family = str(slots.get("family") or semantic.domain or "").strip()
+        if semantic.query_shape == QueryShape.TRUST_APPROVAL_REQUEST:
+            return "trust_approvals"
+        if semantic.query_shape == QueryShape.DISCORD_RELAY_REQUEST:
+            return "discord_relay"
+        if semantic.query_shape == QueryShape.OPEN_BROWSER_DESTINATION:
+            return "browser_destination"
+        if semantic.query_shape in {QueryShape.SEARCH_REQUEST, QueryShape.SEARCH_AND_OPEN}:
+            return "desktop_search"
+        return self._canonical_route_family(family or semantic.query_shape.value)
+
+    def _canonical_route_family(self, family: str) -> str:
+        aliases = {
+            "workspace": "workspace_operations",
+            "relay": "discord_relay",
+            "discord": "discord_relay",
+            "trust": "trust_approvals",
+            "approval": "trust_approvals",
+            "app_control": "software_control" if family == "software_control" else "app_control",
+        }
+        return aliases.get(family, family)
+
+    def _required_targets_for_semantic(self, semantic: SemanticParseProposal) -> list[str]:
+        if semantic.query_shape == QueryShape.DISCORD_RELAY_REQUEST:
+            return ["destination", "payload"]
+        if semantic.query_shape == QueryShape.SOFTWARE_CONTROL_REQUEST:
+            return ["software_target"]
+        if semantic.query_shape in {QueryShape.OPEN_BROWSER_DESTINATION, QueryShape.SEARCH_AND_OPEN}:
+            return ["target"]
+        if semantic.query_shape == QueryShape.TRUST_APPROVAL_REQUEST:
+            return ["approval_object"]
+        return []
+
+    def _target_candidates_for_semantic(self, semantic: SemanticParseProposal) -> list[RouteTargetCandidate]:
+        slots = semantic.slots if isinstance(semantic.slots, dict) else {}
+        targets: list[RouteTargetCandidate] = []
+        if slots.get("destination_alias"):
+            targets.append(
+                RouteTargetCandidate(
+                    target_type="relay_recipient",
+                    label=str(slots.get("destination_alias")),
+                    value=str(slots.get("destination_alias")),
+                    source="operator_text",
+                    confidence=0.9,
+                    selected=True,
+                )
+            )
+        if slots.get("target_name"):
+            targets.append(
+                RouteTargetCandidate(
+                    target_type="software",
+                    label=str(slots.get("target_name")),
+                    value=str(slots.get("target_name")),
+                    source="operator_text",
+                    confidence=0.9,
+                    selected=True,
+                )
+            )
+        deictic = slots.get("deictic_binding") if isinstance(slots.get("deictic_binding"), dict) else {}
+        selected_target = deictic.get("selected_target") if isinstance(deictic.get("selected_target"), dict) else {}
+        if selected_target:
+            targets.append(
+                RouteTargetCandidate(
+                    target_type=str(selected_target.get("target_type") or "context"),
+                    label=str(selected_target.get("label") or selected_target.get("source") or "context target"),
+                    value=selected_target.get("value"),
+                    source=str(selected_target.get("source") or "context"),
+                    confidence=float(selected_target.get("confidence") or 0.0),
+                    freshness=str(selected_target.get("freshness") or "current"),
+                    selected=True,
+                )
+            )
+        return targets
+
+    def _provider_fallback_reason(self, normalized: NormalizedCommand) -> str:
+        lower = normalized.normalized_text
+        if any(lower.startswith(prefix) for prefix in {"write ", "brainstorm ", "draft ", "compose ", "explain "}) or any(
+            phrase in lower for phrase in {"poetic explanation", "compare these philosophies", "brainstorm ten", "fictional"}
+        ):
+            return "open_ended_reasoning_or_generation"
+        return "no_native_route_family_meaningfully_owns_request"
+
+    def _unresolved_targets_from_clarification(self, clarification: ClarificationReason) -> list[str]:
+        if clarification.code == "ambiguous_relay_payload":
+            return ["payload"]
+        if clarification.code == "ambiguous_open_target":
+            return ["target"]
+        return list(clarification.missing_slots)
+
+    def _active_search_parameters(self, active_request_state: dict[str, Any]) -> dict[str, Any] | None:
+        family = str(active_request_state.get("family") or "").strip().lower()
+        if family not in {"desktop_search", "search"}:
+            return None
+        parameters = active_request_state.get("parameters")
+        return dict(parameters) if isinstance(parameters, dict) else {}
 
     def _tool_proposal(
         self,
@@ -606,6 +1472,23 @@ class DeterministicPlanner:
         weather_location_default = str(self._preference_value(learned_preferences, "weather", "location_mode") or "auto")
         present_in = "deck" if any(token in lower for token in {" in systems", " in the systems", "show in systems"}) else "none"
 
+        trust_approval = self._trust_approval_request(lower, active_request_state=active_request_state)
+        if trust_approval is not None:
+            return trust_approval
+
+        search_correction = self._search_correction_request(message, lower, active_request_state=active_request_state)
+        if search_correction is not None:
+            return search_correction
+
+        deictic_open = self._deictic_open_request(
+            message,
+            lower,
+            surface_mode=normalized.surface_mode,
+            active_context=active_context,
+        )
+        if deictic_open is not None:
+            return deictic_open
+
         if screen_awareness_evaluation.disposition in {
             ScreenRouteDisposition.PHASE1_ANALYZE,
             ScreenRouteDisposition.PHASE2_GROUND,
@@ -697,6 +1580,7 @@ class DeterministicPlanner:
             message,
             lower,
             active_request_state=active_request_state,
+            active_context=active_context,
         )
         if discord_relay is not None:
             return discord_relay
@@ -1719,6 +2603,10 @@ class DeterministicPlanner:
             output_mode = output_mode or ResponseMode.ACTION_RESULT.value
             output_type = output_type or "action"
             execution_type = execution_type or "discord_relay_preview"
+        elif query_shape == QueryShape.TRUST_APPROVAL_REQUEST:
+            output_mode = output_mode or ResponseMode.SUMMARY_RESULT.value
+            output_type = output_type or "trust"
+            execution_type = execution_type or "explain_approval"
         elif query_shape == QueryShape.CONTROL_COMMAND:
             output_mode = output_mode or ResponseMode.ACTION_RESULT.value
             output_type = output_type or "action"
@@ -1775,6 +2663,8 @@ class DeterministicPlanner:
             capability_requirements.extend(["screen_observation", "screen_interpretation"])
         elif query_shape == QueryShape.DISCORD_RELAY_REQUEST:
             capability_requirements.append("discord_relay")
+        elif query_shape == QueryShape.TRUST_APPROVAL_REQUEST:
+            capability_requirements.append("trust_state")
         elif query_shape == QueryShape.DIAGNOSTIC_CAUSAL:
             capability_requirements.append("diagnostic_telemetry")
         elif query_shape == QueryShape.HISTORY_TREND:
@@ -1808,6 +2698,13 @@ class DeterministicPlanner:
             slots=slots,
         )
 
+        clarification_payload = slots.get("clarification") if isinstance(slots.get("clarification"), dict) else {}
+        if clarification_payload:
+            return structured_query, ClarificationReason(
+                code=str(clarification_payload.get("code") or "route_target_ambiguous"),
+                message=str(clarification_payload.get("message") or "Which target should I use?"),
+                missing_slots=list(clarification_payload.get("missing_slots") or ["target"]),
+            )
         if query_shape == QueryShape.COMPARISON_REQUEST and (
             comparison_target is None
             or comparison_target in {"these two files", "these files", "those files", "these", "those", "this", "that"}
@@ -1862,6 +2759,8 @@ class DeterministicPlanner:
         elif structured_query.query_shape == QueryShape.SOFTWARE_CONTROL_REQUEST:
             freshness_expectation = "current"
         elif structured_query.query_shape == QueryShape.DISCORD_RELAY_REQUEST:
+            freshness_expectation = "current"
+        elif structured_query.query_shape == QueryShape.TRUST_APPROVAL_REQUEST:
             freshness_expectation = "current"
         elif structured_query.query_shape in {QueryShape.CONTROL_COMMAND, QueryShape.REPAIR_REQUEST}:
             freshness_expectation = "immediate"
@@ -2481,6 +3380,7 @@ class DeterministicPlanner:
             "search_and_act",
             "repair_execution",
             "discord_relay_dispatch",
+            "trust_approval_explanation",
         }:
             return False
         if any(
@@ -3274,12 +4174,359 @@ class DeterministicPlanner:
             return {"maintenance_kind": "find_stale_large_files", "target_directory": None, "older_than_days": 30, "dry_run": True}
         return None
 
+    def _trust_approval_request(
+        self,
+        lower: str,
+        *,
+        active_request_state: dict[str, Any],
+    ) -> SemanticParseProposal | None:
+        if not any(
+            phrase in lower
+            for phrase in {
+                "why are you asking",
+                "why do you need confirmation",
+                "why do you need me to confirm",
+                "what are you asking permission for",
+                "what am i approving",
+                "can i allow this just once",
+                "can i approve this once",
+            }
+        ):
+            return None
+        trust = active_request_state.get("trust") if isinstance(active_request_state.get("trust"), dict) else {}
+        parameters = active_request_state.get("parameters") if isinstance(active_request_state.get("parameters"), dict) else {}
+        subject = str(
+            active_request_state.get("subject")
+            or parameters.get("target_name")
+            or parameters.get("destination_alias")
+            or "this action"
+        ).strip()
+        operation = str(parameters.get("operation_type") or parameters.get("request_stage") or "action").strip()
+        reason = str(trust.get("reason") or "").strip()
+        reason_sentence = f" {reason}" if reason else " It needs an explicit approval because the route can affect something outside a simple chat reply."
+        return self._tool_proposal(
+            query_shape=QueryShape.TRUST_APPROVAL_REQUEST,
+            domain="trust",
+            request_type_hint="trust_approval_explanation",
+            family="trust_approvals",
+            subject=subject,
+            requested_action="explain_approval",
+            confidence=0.97,
+            evidence=["approval-explanation wording matched active trust state"],
+            assistant_message=(
+                f"I'm asking for approval before I continue with {subject}"
+                f"{f' ({operation})' if operation and operation != 'action' else ''}."
+                f"{reason_sentence}"
+                " You can allow it once, deny it, or ask me to change the route."
+            ),
+            execution_type="explain_approval",
+            output_mode=ResponseMode.SUMMARY_RESULT.value,
+            output_type="trust",
+            slots={
+                "trust_request_id": str(trust.get("request_id") or "").strip() or None,
+                "approval_reason": reason or None,
+                "active_family": str(active_request_state.get("family") or "").strip() or None,
+                "active_request_stage": str(parameters.get("request_stage") or "").strip() or None,
+            },
+        )
+
+    def _search_correction_request(
+        self,
+        message: str,
+        lower: str,
+        *,
+        active_request_state: dict[str, Any],
+    ) -> SemanticParseProposal | None:
+        parameters = self._active_search_parameters(active_request_state)
+        if parameters is None:
+            return None
+        if not (
+            lower.startswith(("no ", "no,", "nah ", "not "))
+            or any(phrase in lower for phrase in {"not that", "instead", "the other one", "folder one", "file one"})
+        ):
+            return None
+        prefer_folders = "folder" in lower or "directory" in lower
+        query = str(parameters.get("query") or active_request_state.get("subject") or message).strip()
+        search_request = {
+            "query": query or message,
+            "domains": ["files"],
+            "action": "open",
+            "open_target": str(parameters.get("open_target") or "external").strip() or "external",
+            "latest_only": bool(parameters.get("latest_only", False)),
+            "file_extensions": list(parameters.get("file_extensions") or []),
+            "folder_hint": parameters.get("folder_hint"),
+            "prefer_folders": prefer_folders,
+        }
+        return self._tool_proposal(
+            query_shape=QueryShape.SEARCH_AND_OPEN,
+            domain="files",
+            tool_name="desktop_search",
+            tool_arguments=search_request,
+            request_type_hint="search_and_act",
+            family="desktop_search",
+            subject="search",
+            requested_action="open",
+            confidence=0.93,
+            evidence=["correction phrase reused active desktop-search ambiguity"],
+            follow_up=True,
+            execution_type="search_then_open",
+            output_mode=ResponseMode.SEARCH_RESULT.value,
+            slots={
+                "target_scope": "desktop",
+                "support_augmentation": ["active request state"],
+            },
+        )
+
+    def _deictic_open_request(
+        self,
+        message: str,
+        lower: str,
+        *,
+        surface_mode: str,
+        active_context: dict[str, Any],
+    ) -> SemanticParseProposal | None:
+        del message
+        if not any(
+            lower == phrase or lower.startswith(f"{phrase} ")
+            for phrase in {
+                "open it",
+                "open this",
+                "open that",
+                "show it",
+                "show this",
+                "show that",
+                "bring it up",
+                "pull it up",
+            }
+        ):
+            return None
+        candidates = self._recent_entity_open_candidates(active_context)
+        if not candidates:
+            return None
+        kinds = {str(candidate.get("kind") or "").strip().lower() for candidate in candidates}
+        if len(candidates) > 1 and {"page", "file"}.issubset(kinds):
+            leading = candidates[0]
+            message = "I think you mean the recent page, but a recent file is also still live. Which one should I open?"
+            return self._tool_proposal(
+                query_shape=QueryShape.OPEN_BROWSER_DESTINATION,
+                domain="browser",
+                request_type_hint="direct_action",
+                family="browser_destination",
+                subject="recent entity",
+                requested_action="open_browser_destination",
+                confidence=0.86,
+                evidence=["deictic open matched multiple recent entity targets"],
+                assistant_message=message,
+                execution_type="resolve_url_then_open_in_browser",
+                output_mode=ResponseMode.ACTION_RESULT.value,
+                output_type="action",
+                slots={
+                    "clarification": {
+                        "code": "ambiguous_open_target",
+                        "message": message,
+                        "missing_slots": ["target"],
+                    },
+                    "clarification_pressure": 0.86,
+                    "missing_evidence": ["target"],
+                    "target_scope": "browser",
+                    "recent_entity_candidates": candidates,
+                    "deictic_binding": {
+                        "resolved": False,
+                        "selected_source": "recent_session_entity",
+                        "selected_target": {
+                            "source": "recent_session_entity",
+                            "target_type": str(leading.get("kind") or "page"),
+                            "label": str(leading.get("title") or "recent entity"),
+                            "value": leading.get("url") or leading.get("path"),
+                            "confidence": float(leading.get("confidence") or 0.0),
+                            "freshness": str(leading.get("freshness") or "recent"),
+                        },
+                        "candidates": [
+                            {
+                                "source": "recent_session_entity",
+                                "target_type": str(candidate.get("kind") or "entity"),
+                                "label": str(candidate.get("title") or "recent entity"),
+                                "value": candidate.get("url") or candidate.get("path"),
+                                "confidence": float(candidate.get("confidence") or 0.0),
+                                "freshness": str(candidate.get("freshness") or "recent"),
+                            }
+                            for candidate in candidates
+                        ],
+                        "unresolved_reason": "multiple_live_binding_candidates",
+                        "binding_posture": "ambiguous",
+                        "source_summary": "Multiple recent entities remain live for this open request.",
+                    },
+                },
+            )
+        selected = candidates[0]
+        url = str(selected.get("url") or "").strip()
+        path = str(selected.get("path") or "").strip()
+        title = str(selected.get("title") or selected.get("name") or url or path or "recent entity").strip()
+        open_in_deck = surface_mode.strip().lower() == "deck" or " deck" in lower
+        if url:
+            tool_name = "deck_open_url" if open_in_deck else "external_open_url"
+            tool_arguments = {"url": url}
+            family = "browser_destination"
+            query_shape = QueryShape.OPEN_BROWSER_DESTINATION
+            domain = "browser"
+            requested_action = "open_browser_destination"
+            execution_type = "resolve_url_then_open_in_browser"
+        else:
+            tool_name = "deck_open_file" if open_in_deck else "external_open_file"
+            tool_arguments = {"path": path}
+            family = "files"
+            query_shape = QueryShape.CONTEXT_ACTION
+            domain = "files"
+            requested_action = "open_file"
+            execution_type = "execute_control_command"
+        return self._tool_proposal(
+            query_shape=query_shape,
+            domain=domain,
+            tool_name=tool_name,
+            tool_arguments=tool_arguments,
+            request_type_hint="direct_action",
+            family=family,
+            subject=title,
+            requested_action=requested_action,
+            confidence=0.94,
+            evidence=["deictic open bound to a single recent entity"],
+            execution_type=execution_type,
+            output_mode=ResponseMode.ACTION_RESULT.value,
+            output_type="action",
+            slots={
+                "target_scope": "browser" if url else "files",
+                "deictic_binding": {
+                    "resolved": True,
+                    "selected_source": "recent_session_entity",
+                    "selected_target": {
+                        "source": "recent_session_entity",
+                        "target_type": str(selected.get("kind") or ("page" if url else "file")),
+                        "label": title,
+                        "value": url or path,
+                        "confidence": float(selected.get("confidence") or 0.78),
+                        "freshness": str(selected.get("freshness") or "recent"),
+                    },
+                    "binding_posture": "current" if str(selected.get("freshness") or "recent") in {"current", "recent"} else "continuity_reuse",
+                    "source_summary": "Bound deictic open request from the freshest recent entity.",
+                },
+            },
+        )
+
+    def _recent_entity_open_candidates(self, active_context: dict[str, Any]) -> list[dict[str, Any]]:
+        recent_entities = active_context.get("recent_entities")
+        if not isinstance(recent_entities, list):
+            return []
+        candidates: list[dict[str, Any]] = []
+        for index, entity in enumerate(recent_entities):
+            if not isinstance(entity, dict):
+                continue
+            url = str(entity.get("url") or "").strip()
+            path = str(entity.get("path") or "").strip()
+            if not url and not path:
+                continue
+            title = str(entity.get("title") or entity.get("name") or url or path or "recent entity").strip()
+            freshness = self._entity_freshness(entity, index=index)
+            confidence = self._recent_entity_confidence(freshness)
+            candidates.append(
+                {
+                    "title": title,
+                    "kind": str(entity.get("kind") or ("page" if url else "file")).strip(),
+                    "url": url or None,
+                    "path": path or None,
+                    "freshness": freshness,
+                    "confidence": confidence,
+                }
+            )
+        candidates.sort(key=lambda item: float(item.get("confidence") or 0.0), reverse=True)
+        return candidates
+
+    def _relay_payload_hint_from_context(self, active_context: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+        selection = active_context.get("selection") if isinstance(active_context.get("selection"), dict) else {}
+        if selection.get("value"):
+            candidates.append(
+                {
+                    "source": "selection",
+                    "target_type": str(selection.get("kind") or "selected_text"),
+                    "label": str(selection.get("preview") or "selected text"),
+                    "value": selection.get("value"),
+                    "confidence": 0.9,
+                    "freshness": "current",
+                }
+            )
+        clipboard = active_context.get("clipboard") if isinstance(active_context.get("clipboard"), dict) else {}
+        if clipboard.get("value"):
+            candidates.append(
+                {
+                    "source": "clipboard",
+                    "target_type": str(clipboard.get("kind") or "clipboard"),
+                    "label": str(clipboard.get("preview") or "clipboard"),
+                    "value": clipboard.get("value"),
+                    "confidence": 0.84,
+                    "freshness": "current",
+                }
+            )
+        if len(candidates) > 1:
+            message = 'This looks like a relay request, but I still need to know whether "this" means the selected text or the clipboard.'
+            return (
+                "contextual",
+                {
+                    "clarification": {
+                        "code": "ambiguous_relay_payload",
+                        "message": message,
+                        "missing_slots": ["payload"],
+                    },
+                    "clarification_pressure": 0.85,
+                    "missing_evidence": ["payload"],
+                    "deictic_binding": {
+                        "resolved": False,
+                        "candidates": candidates,
+                        "unresolved_reason": "multiple_live_binding_candidates",
+                        "binding_posture": "ambiguous",
+                        "source_summary": "The relay route still needs a payload binding between current sources.",
+                    },
+                },
+            )
+        if not candidates:
+            return (
+                "contextual",
+                {
+                    "missing_evidence": ["payload"],
+                    "deictic_binding": {
+                        "resolved": False,
+                        "candidates": [],
+                        "unresolved_reason": "no_current_binding_source",
+                    },
+                },
+            )
+        selected = candidates[0]
+        target_type = str(selected.get("target_type") or "").strip().lower()
+        payload_hint = "selected_text"
+        if target_type in {"url", "page", "link"}:
+            payload_hint = "page_link"
+        elif target_type in {"file", "path", "document"}:
+            payload_hint = "file"
+        elif selected.get("source") == "clipboard":
+            payload_hint = "clipboard"
+        return (
+            payload_hint,
+            {
+                "deictic_binding": {
+                    "resolved": True,
+                    "selected_source": selected["source"],
+                    "selected_target": selected,
+                    "candidates": candidates,
+                }
+            },
+        )
+
     def _discord_relay_request(
         self,
         message: str,
         lower: str,
         *,
         active_request_state: dict[str, Any],
+        active_context: dict[str, Any],
     ) -> SemanticParseProposal | None:
         family = str(active_request_state.get("family") or "").strip().lower()
         parameters = active_request_state.get("parameters")
@@ -3351,10 +4598,16 @@ class DeterministicPlanner:
                 )
 
         match = re.match(
-            r"^(?:send|share|post)\s+(?P<payload>.+?)\s+to\s+(?P<destination>.+?)(?:\s+with(?:\s+a)?\s+note(?:\s*[:\-]?\s*(?P<note>.+))?)?$",
+            r"^(?:send|share|post|message)\s+(?P<payload>.+?)\s+to\s+(?P<destination>.+?)(?:\s+with(?:\s+a)?\s+note(?:\s*[:\-]?\s*(?P<note>.+))?)?$",
             message,
             flags=re.IGNORECASE,
         )
+        if not match:
+            match = re.match(
+                r"^message\s+(?P<destination>.+?)\s+(?P<payload>this|that|it|these|those|.+?)(?:\s+with(?:\s+a)?\s+note(?:\s*[:\-]?\s*(?P<note>.+))?)?$",
+                message,
+                flags=re.IGNORECASE,
+            )
         if not match:
             return None
         payload_phrase = " ".join(str(match.group("payload") or "").split()).strip(" .,:;!?")
@@ -3362,6 +4615,10 @@ class DeterministicPlanner:
         if not payload_phrase or not destination_alias:
             return None
         note_text = " ".join(str(match.group("note") or "").split()).strip() or None
+        payload_hint = self._discord_payload_hint(payload_phrase)
+        extra_slots: dict[str, Any] = {}
+        if normalize_phrase(payload_phrase) in {"this", "that", "it", "these", "those"}:
+            payload_hint, extra_slots = self._relay_payload_hint_from_context(active_context)
         return self._tool_proposal(
             query_shape=QueryShape.DISCORD_RELAY_REQUEST,
             domain="discord_relay",
@@ -3376,9 +4633,10 @@ class DeterministicPlanner:
             output_type="action",
             slots={
                 "destination_alias": destination_alias,
-                "payload_hint": self._discord_payload_hint(payload_phrase),
+                "payload_hint": payload_hint,
                 "note_text": note_text,
                 "request_stage": "preview",
+                **extra_slots,
             },
         )
 

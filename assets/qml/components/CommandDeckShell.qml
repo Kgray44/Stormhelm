@@ -26,6 +26,7 @@ Item {
     property var supportModules: []
     property var workspaceItems: []
     property var workspaceCanvas: ({})
+    property var requestComposer: ({})
     property var railItems: []
     property var statusItems: []
     property var deckPanels: []
@@ -194,6 +195,7 @@ Item {
             messages: root.messages
             statusLine: root.statusLine
             deckProgress: root.deckProgress
+            requestComposer: root.requestComposer || ({})
 
             onPanelGridCommitted: function(panelId, gridX, gridY, colSpan, rowSpan) {
                 root.updateDeckPanelGrid(panelId, gridX, gridY, colSpan, rowSpan)

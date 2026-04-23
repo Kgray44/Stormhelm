@@ -6,10 +6,12 @@ Item {
 
     signal send(string text)
     signal composerFocusChanged(bool focused)
+    signal actionRequested(var action)
 
     property var messages: []
     property string statusLine: ""
     property bool panelMode: false
+    property var composerState: ({})
 
     ColumnLayout {
         anchors.fill: parent
@@ -59,9 +61,11 @@ Item {
         PromptComposer {
             Layout.fillWidth: true
             compact: true
+            composerState: root.composerState
             placeholderText: "Signal the helm, plot a command, or leave a note..."
             onSend: function(text) { root.send(text) }
             onComposerFocusChanged: function(focused) { root.composerFocusChanged(focused) }
+            onActionRequested: function(action) { root.actionRequested(action) }
         }
     }
 }
