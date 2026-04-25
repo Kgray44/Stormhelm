@@ -195,12 +195,20 @@ class SoftwareControlSubsystem:
                     detail="Waiting for operator confirmation before any install, update, uninstall, or repair attempt.",
                 )
             )
+        selected_route = selected_source.route if selected_source is not None else ""
+        confirmation_guidance = (
+            " Approval controls are held on the command surface; say 'approve once' to continue this install attempt, "
+            "'approve for task' to keep the grant bound to this request, or 'deny' to cancel it."
+            if requires_confirmation
+            else ""
+        )
         response_contract = {
             "bearing_title": "Software Plan",
             "micro_response": f"Prepared a local {operation_type.value} plan for {target.display_name}.",
             "full_response": (
                 f"Prepared a local {operation_type.value} plan for {target.display_name}. "
-                f"Source: {selected_source.route}. I have not {self._completion_verb(operation_type)} anything yet."
+                f"Source: {selected_route}. I have not {self._completion_verb(operation_type)} anything yet."
+                f"{confirmation_guidance}"
                 if selected_source is not None
                 else f"Prepared a local {operation_type.value} plan for {target.display_name}. "
                 "I have not attempted anything yet because no trusted route is selected."

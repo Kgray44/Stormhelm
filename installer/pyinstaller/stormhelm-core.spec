@@ -31,7 +31,7 @@ exe = EXE(
     a.datas,
     [],
     name="stormhelm-core",
-    console=True,
+    console=False,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

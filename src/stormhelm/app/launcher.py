@@ -9,15 +9,17 @@ from urllib.request import urlopen
 
 from stormhelm.config.models import AppConfig
 
+CREATE_NO_WINDOW = 0x08000000
+CREATE_NEW_PROCESS_GROUP = 0x00000200
+DETACHED_PROCESS = 0x00000008
+
 
 def ensure_core_running(config: AppConfig, wait_seconds: float = 8.0) -> bool:
     if core_is_available(config):
         return False
 
     command = build_core_command(config)
-    creationflags = 0
-    if sys.platform.startswith("win"):
-        creationflags = 0x00000008 | 0x00000200
+    creationflags = build_core_creationflags()
 
     child_env = dict()
     child_env.update(
@@ -74,3 +76,9 @@ def build_core_command(config: AppConfig) -> list[str]:
             )
         return [str(executable)]
     return [sys.executable, "-m", "stormhelm.entrypoints.core"]
+
+
+def build_core_creationflags() -> int:
+    if not sys.platform.startswith("win"):
+        return 0
+    return DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW

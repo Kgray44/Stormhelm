@@ -987,6 +987,22 @@ class SystemProbe:
                     matches=[selected_window],
                     resolution_source=str(selected_window.get("resolution_source") or "window_title"),
                 )
+            if process_group == "ambiguous":
+                return {
+                    "success": False,
+                    "action": normalized_action,
+                    "reason": "multiple_matches",
+                    "requested_name": requested_name,
+                    "match_scope": "process",
+                    "match_count": process_count,
+                }
+            if process_group:
+                return self._execute_graceful_exit(
+                    action="close",
+                    requested_name=requested_name,
+                    matches=process_group,
+                    resolution_source="process_group",
+                )
             if process_count:
                 return {
                     "success": False,
@@ -1403,6 +1419,15 @@ class SystemProbe:
         )
         if isinstance(payload, dict):
             payload.setdefault("requested_name", requested_name)
+            if (
+                not bool(payload.get("success"))
+                and str(payload.get("reason") or "").strip().lower() == "graceful_close_unavailable"
+                and self._target_absent_after_graceful_exit(requested_name)
+            ):
+                payload["success"] = True
+                payload["reason"] = None
+                payload["post_close_verification"] = "target_disappeared"
+                payload["verification_observed"] = "window_and_process_absent"
             return payload
         return {
             "success": False,
@@ -1414,6 +1439,11 @@ class SystemProbe:
             "window_title": str(primary.get("window_title") or "").strip() or None,
             "resolution_source": resolution_source,
         }
+
+    def _target_absent_after_graceful_exit(self, requested_name: str) -> bool:
+        if not str(requested_name or "").strip():
+            return False
+        return not self._matching_window_targets(requested_name) and not self._matching_running_processes(requested_name)
 
     def _execute_force_quit(
         self,
@@ -2342,6 +2372,8 @@ class SystemProbe:
             return live
         if isinstance(live, dict):
             live_reason = str(live.get("reason") or "").strip() or None
+        elif live is None:
+            live_reason = "device_lookup_unavailable"
 
         approximate_device = self._approximate_device_location()
         approximate_reason = None
@@ -2349,6 +2381,8 @@ class SystemProbe:
             return approximate_device
         if isinstance(approximate_device, dict):
             approximate_reason = str(approximate_device.get("reason") or "").strip() or None
+        elif approximate_device is None:
+            approximate_reason = "approximate_device_lookup_unavailable"
 
         if allow_home_fallback:
             home = self._saved_home_location()
@@ -2366,6 +2400,11 @@ class SystemProbe:
                 ip_estimate["fallback_reason"] = live_reason
             elif approximate_reason:
                 ip_estimate["fallback_reason"] = approximate_reason
+            ip_estimate["fallback_sources_attempted"] = [
+                "device_live",
+                "approximate_device",
+                "saved_home" if allow_home_fallback else "home_fallback_disabled",
+            ]
             return ip_estimate
 
         return {

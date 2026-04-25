@@ -102,6 +102,7 @@ Item {
                 }
 
                 Flow {
+                    id: heroChipFlow
                     Layout.fillWidth: true
                     spacing: 8
 
@@ -119,14 +120,20 @@ Item {
                             border.width: 1
                             border.color: "#385263"
                             height: 28
-                            width: chipRow.implicitWidth + 18
+                            width: Math.min(chipLabel.implicitWidth + chipValue.implicitWidth + 31, Math.max(120, heroChipFlow.width))
+                            clip: true
 
                             Row {
                                 id: chipRow
-                                anchors.centerIn: parent
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.leftMargin: 9
+                                anchors.rightMargin: 9
                                 spacing: 6
 
                                 Text {
+                                    id: chipLabel
                                     text: modelData.label
                                     color: "#8aa5b2"
                                     font.family: "Bahnschrift SemiCondensed"
@@ -135,10 +142,12 @@ Item {
                                 }
 
                                 Text {
+                                    id: chipValue
                                     text: modelData.value
                                     color: "#edf7fb"
                                     font.family: "Segoe UI Semibold"
                                     font.pixelSize: 11
+                                    width: Math.max(20, parent.width - chipLabel.width - chipRow.spacing)
                                     elide: Text.ElideRight
                                 }
                             }
@@ -248,7 +257,8 @@ Item {
                         border.width: 1
                         border.color: "#39596b"
                         height: 24
-                        width: trendBadge.implicitWidth + 14
+                        width: Math.min(trendBadge.implicitWidth + 14, parent.width)
+                        clip: true
 
                         Text {
                             id: trendBadge
@@ -487,7 +497,8 @@ Item {
                         border.width: 1
                         border.color: "#39596b"
                         height: 24
-                        width: providerStateText.implicitWidth + 14
+                        width: Math.min(providerStateText.implicitWidth + 14, parent.width)
+                        clip: true
 
                         Text {
                             id: providerStateText

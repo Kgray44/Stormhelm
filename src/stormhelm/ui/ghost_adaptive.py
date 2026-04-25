@@ -25,10 +25,10 @@ def default_ghost_style() -> dict[str, float | str]:
         "textContrast": 0.08,
         "secondaryTextContrast": 0.05,
         "glowBoost": 0.06,
-        "anchorGlowBoost": 0.08,
-        "anchorStrokeBoost": 0.12,
-        "anchorFillBoost": 0.04,
-        "anchorBackdropOpacity": 0.05,
+        "anchorGlowBoost": 0.12,
+        "anchorStrokeBoost": 0.18,
+        "anchorFillBoost": 0.08,
+        "anchorBackdropOpacity": 0.09,
         "shadowOpacity": 0.1,
         "backdropOpacity": 0.04,
         "backgroundState": "balanced",
@@ -258,10 +258,10 @@ class GhostReadabilityScorer:
         core_washout = _clamp((core.brightness - 0.56) * 1.95)
         core_low_contrast = _clamp((0.24 - core.contrast) * 3.2)
         anchor_emphasis = _clamp(core_washout * 0.72 + core_low_contrast * 0.28)
-        anchor_glow_boost = _clamp(0.06 + anchor_emphasis * 0.34 + core_busy * 0.05 + core.motion * 0.04, 0.04, 0.5)
-        anchor_stroke_boost = _clamp(0.08 + anchor_emphasis * 0.44 + core_busy * 0.08 + core.motion * 0.05, 0.04, 0.58)
-        anchor_fill_boost = _clamp(0.03 + anchor_emphasis * 0.24 + core_busy * 0.04 + (1.0 - core.contrast) * 0.02, 0.02, 0.32)
-        anchor_backdrop_opacity = _clamp(0.04 + anchor_emphasis * 0.24 + core_busy * 0.06 + (1.0 - core.contrast) * 0.04, 0.03, 0.28)
+        anchor_glow_boost = _clamp(0.1 + anchor_emphasis * 0.36 + core_busy * 0.05 + core.motion * 0.04, 0.08, 0.56)
+        anchor_stroke_boost = _clamp(0.14 + anchor_emphasis * 0.46 + core_busy * 0.08 + core.motion * 0.05, 0.1, 0.64)
+        anchor_fill_boost = _clamp(0.06 + anchor_emphasis * 0.26 + core_busy * 0.04 + (1.0 - core.contrast) * 0.02, 0.04, 0.38)
+        anchor_backdrop_opacity = _clamp(0.08 + anchor_emphasis * 0.26 + core_busy * 0.06 + (1.0 - core.contrast) * 0.04, 0.06, 0.34)
         return {
             "tone": tone,
             "surfaceOpacity": surface_opacity,

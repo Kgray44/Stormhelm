@@ -438,6 +438,8 @@ class UiBridge(QtCore.QObject):
         self.ghostCaptureChanged.emit()
         self.statusChanged.emit()
         self._sync_ghost_adaptive_monitoring()
+        if normalized != "ghost":
+            self._activate_deck_window()
 
     @QtCore.Slot()
     def toggleMode(self) -> None:
@@ -730,8 +732,15 @@ class UiBridge(QtCore.QObject):
         self._window.show()
         self._window.raise_()
         if self._mode != "ghost":
-            self._window.requestActivate()
+            self._activate_deck_window()
         self._sync_ghost_adaptive_monitoring()
+
+    def _activate_deck_window(self) -> None:
+        if self._window is None:
+            return
+        self._window.show()
+        self._window.raise_()
+        self._window.requestActivate()
 
     @QtCore.Slot()
     def hideWindow(self) -> None:
@@ -2163,7 +2172,7 @@ class UiBridge(QtCore.QObject):
             "logbook": "notes",
             "watch": "active-jobs",
             "signals": "live",
-            "systems": "runtime",
+            "systems": "overview",
             "files": "opened-items",
             "browser": "references",
             "visual-context": "focus-surface",
@@ -2410,6 +2419,12 @@ class UiBridge(QtCore.QObject):
         module = self._active_module_key
         if section in {"opened-items", "open-pages", "working-set"} and self._opened_items:
             return "workspace-items"
+        if section == "session":
+            return "session"
+        if section == "tasks":
+            return "tasks"
+        if section == "findings":
+            return "findings"
         if module == "systems":
             return "facts"
         if module == "watch":
@@ -2428,12 +2443,6 @@ class UiBridge(QtCore.QObject):
             return "thread"
         if module == "chartroom" and section == "references":
             return "collection"
-        if module == "chartroom" and section == "findings":
-            return "findings"
-        if module == "chartroom" and section == "session":
-            return "session"
-        if module == "chartroom" and section == "tasks":
-            return "tasks"
         return "overview"
 
     def _workspace_canvas_stats(self) -> list[dict[str, str]]:
@@ -2617,10 +2626,29 @@ class UiBridge(QtCore.QObject):
                     ],
                 }
             )
-        return groups
+        return self._filter_system_fact_groups(groups)
+
+    def _filter_system_fact_groups(self, groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        section = self._active_workspace_section_key
+        if section == "overview":
+            return groups
+        title_map = {
+            "runtime": {"Machine", "Storage and Tooling", "Lifecycle", "Bridge Authority"},
+            "diagnostics": {"Operational State", "Power and Resources", "Bridge Authority"},
+            "jobs": {"Storage and Tooling", "Event Spine", "Bridge Authority"},
+            "logs": {"Event Spine", "Bridge Authority"},
+            "network": {"Operational State"},
+        }
+        allowed = title_map.get(section)
+        if not allowed:
+            return groups
+        filtered = [group for group in groups if str(group.get("title", "")) in allowed]
+        return filtered or groups[:2]
 
     def _network_display_data(self) -> dict[str, Any]:
         if self._active_module_key != "systems":
+            return {}
+        if self._active_workspace_section_key not in {"overview", "network", "diagnostics"}:
             return {}
         network = self._network_state()
         if not isinstance(network, dict):
@@ -2742,6 +2770,19 @@ class UiBridge(QtCore.QObject):
     def _workspace_canvas_watch_lanes(self) -> list[dict[str, Any]]:
         if self._active_module_key != "watch":
             return []
+        section = self._active_workspace_section_key
+        if section == "active-jobs":
+            return [
+                {"title": "In Flight", "summary": "Live operations currently moving across the worker deck.", "entries": self._job_lane_entries({"running"})},
+                {"title": "Recently Completed", "summary": "Finished work that can still explain recent replies.", "entries": self._job_lane_entries({"completed"})},
+                {"title": "Attention", "summary": "Failures, timeouts, cancellations, or stalled work that need review.", "entries": self._job_lane_entries({"failed", "timed_out", "cancelled"})},
+            ]
+        if section == "queue":
+            return [
+                {"title": "Queued", "summary": "Work waiting on a worker slot or execution gate.", "entries": self._job_lane_entries({"queued"})},
+                {"title": "Pending", "summary": "Requests prepared but not yet running.", "entries": self._job_lane_entries({"pending"})},
+                {"title": "Blocked", "summary": "Queued work that needs operator attention before dispatch.", "entries": self._job_lane_entries({"blocked", "failed", "timed_out"})},
+            ]
         return [
             {"title": "In Flight", "summary": "Live operations currently moving across the worker deck.", "entries": self._job_lane_entries({"running"})},
             {"title": "Queued", "summary": "Work waiting on a worker slot or execution gate.", "entries": self._job_lane_entries({"queued"})},
@@ -3773,6 +3814,10 @@ class UiBridge(QtCore.QObject):
             return [{"title": "No active jobs", "eyebrow": "Watch", "meta": "", "detail": "The worker deck is clear right now.", "severity": "steady"}]
         if "queued" in statuses:
             return [{"title": "Queue clear", "eyebrow": "Dispatch", "meta": "", "detail": "Nothing is waiting on a worker slot at the moment.", "severity": "steady"}]
+        if "completed" in statuses:
+            return [{"title": "No recent completions", "eyebrow": "Watch", "meta": "", "detail": "Completed tool work will collect here after the next run.", "severity": "steady"}]
+        if "pending" in statuses:
+            return [{"title": "No pending work", "eyebrow": "Dispatch", "meta": "", "detail": "No prepared jobs are waiting to enter the queue.", "severity": "steady"}]
         return [{"title": "No held failures", "eyebrow": "Attention", "meta": "", "detail": "Watch is not carrying a recent failure, timeout, or cancellation right now.", "severity": "steady"}]
 
     def _signal_timeline_entries(self) -> list[dict[str, Any]]:

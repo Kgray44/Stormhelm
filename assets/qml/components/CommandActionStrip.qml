@@ -61,7 +61,8 @@ Item {
 
                 radius: root.compact ? 16 : 18
                 height: root.compact ? 30 : 34
-                width: label.implicitWidth + (root.compact ? 22 : 26)
+                width: Math.min(label.implicitWidth + (root.compact ? 22 : 26), Math.max(root.compact ? 104 : 128, flow.width))
+                clip: true
                 color: root.fillColor(modelData.category)
                 border.width: 1
                 border.color: root.borderColor(modelData.category)
@@ -70,11 +71,14 @@ Item {
                 Text {
                     id: label
                     anchors.centerIn: parent
+                    width: parent.width - (root.compact ? 18 : 22)
                     text: modelData.label
                     color: "#edf7fb"
                     font.family: "Bahnschrift SemiCondensed"
                     font.pixelSize: root.compact ? 11 : 12
                     font.letterSpacing: 1.0
+                    horizontalAlignment: Text.AlignHCenter
+                    elide: Text.ElideRight
                 }
 
                 MouseArea {

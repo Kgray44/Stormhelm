@@ -29,7 +29,9 @@ _VAGUE_TOPIC_TOKENS = {
     "again",
     "before",
     "bring",
+    "can",
     "continue",
+    "could",
     "doing",
     "files",
     "for",
@@ -48,6 +50,8 @@ _VAGUE_TOPIC_TOKENS = {
     "we",
     "were",
     "what",
+    "would",
+    "you",
 }
 
 _SURFACE_PURPOSES = {
@@ -87,13 +91,18 @@ _WORKSPACE_COMMAND_TOKENS = {
     "bring",
     "back",
     "build",
+    "can",
     "continue",
+    "could",
     "create",
     "environment",
     "for",
     "from",
+    "make",
     "my",
+    "new",
     "open",
+    "please",
     "prepare",
     "reopen",
     "restore",
@@ -103,8 +112,16 @@ _WORKSPACE_COMMAND_TOKENS = {
     "start",
     "the",
     "up",
+    "would",
     "workspace",
     "workspaces",
+    "you",
+}
+
+_TOPIC_TOKEN_NORMALIZATIONS = {
+    "researching": "research",
+    "investigating": "research",
+    "studying": "research",
 }
 
 
@@ -1574,9 +1591,13 @@ class WorkspaceService:
         normalized = normalize_phrase(query)
         alias_tokens: set[str] = set()
         for value in [template.key, template.title, *template.aliases]:
-            alias_tokens.update(normalize_phrase(value).split())
+            for token in normalize_phrase(value).split():
+                alias_tokens.add(token)
+                for source, normalized_token in _TOPIC_TOKEN_NORMALIZATIONS.items():
+                    if normalized_token == token:
+                        alias_tokens.add(source)
         tokens = [
-            token
+            _TOPIC_TOKEN_NORMALIZATIONS.get(token, token)
             for token in normalized.split()
             if token
             and token not in _WORKSPACE_COMMAND_TOKENS
@@ -2734,7 +2755,11 @@ class WorkspaceService:
         topic = normalize_lookup_phrase(query)
         if not topic:
             return "current work"
-        filtered_tokens = [token for token in topic.split() if token not in _VAGUE_TOPIC_TOKENS]
+        filtered_tokens = [
+            _TOPIC_TOKEN_NORMALIZATIONS.get(token, token)
+            for token in topic.split()
+            if token not in _VAGUE_TOPIC_TOKENS and token not in _WORKSPACE_COMMAND_TOKENS
+        ]
         filtered = " ".join(filtered_tokens).strip()
         if not filtered or self._is_vague_topic(filtered):
             return "current work"

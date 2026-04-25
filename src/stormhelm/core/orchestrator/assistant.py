@@ -1820,7 +1820,7 @@ class AssistantOrchestrator:
         tool_name = str(primary_job.get("tool_name", "")).strip().lower()
         arguments = primary_job.get("arguments") if isinstance(primary_job.get("arguments"), dict) else {}
 
-        if tool_name in {"network_status", "power_status", "storage_status", "location_status", "saved_locations", "active_apps", "recent_files"}:
+        if tool_name in {"clock", "network_status", "power_status", "storage_status", "location_status", "saved_locations", "active_apps", "recent_files"}:
             return "status_summary"
         if tool_name == "network_throughput":
             return "numeric_metric"
@@ -1906,6 +1906,7 @@ class AssistantOrchestrator:
                 "power_status": "Power",
                 "power_projection": "Power",
                 "power_diagnosis": "Power",
+                "clock": "Time",
                 "machine_status": "Machine",
                 "resource_status": "Resources",
                 "resource_diagnosis": "Resources",

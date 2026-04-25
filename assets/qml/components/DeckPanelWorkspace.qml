@@ -93,6 +93,7 @@ Item {
                     messages: root.messages
                     statusLine: root.statusLine
                     panelMode: true
+                    autoFocus: root.deckProgress > 0.96
                     composerState: root.requestComposer || ({})
                     onSend: function(text) { stormhelmBridge.sendMessage(text) }
                     onComposerFocusChanged: function(focused) { stormhelmBridge.setComposerFocus(focused) }

@@ -91,7 +91,7 @@ Item {
 
             Text {
                 text: root.safeData.body
-                color: "#8ea8b4"
+                color: "#bdd0da"
                 font.family: "Segoe UI"
                 font.pixelSize: root.panelMode ? 12 : 13
                 wrapMode: Text.Wrap
@@ -102,6 +102,7 @@ Item {
         }
 
         Flow {
+            id: chipFlow
             Layout.fillWidth: true
             spacing: 8
             visible: root.safeData.chips.length > 0
@@ -116,15 +117,21 @@ Item {
                     border.width: 1
                     border.color: "#2f526171"
                     height: 28
-                    width: chipRow.implicitWidth + 20
+                    width: Math.min(chipLabel.implicitWidth + chipValue.implicitWidth + 34, Math.max(120, chipFlow.width))
+                    clip: true
                     opacity: 0.9
 
                     Row {
                         id: chipRow
-                        anchors.centerIn: parent
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.leftMargin: 10
+                        anchors.rightMargin: 10
                         spacing: 7
 
                         Text {
+                            id: chipLabel
                             text: modelData.label
                             color: "#7f9cab"
                             font.family: "Bahnschrift SemiCondensed"
@@ -133,10 +140,12 @@ Item {
                         }
 
                         Text {
+                            id: chipValue
                             text: modelData.value
                             color: "#e2f1f8"
                             font.family: "Segoe UI Semibold"
                             font.pixelSize: 11
+                            width: Math.max(20, parent.width - chipLabel.width - chipRow.spacing)
                             elide: Text.ElideRight
                         }
                     }
@@ -215,8 +224,10 @@ Item {
     Component {
         id: overviewComponent
 
-        RowLayout {
-            spacing: 20
+        GridLayout {
+            columns: root.panelMode || width < 720 ? 1 : Math.max(1, Math.min(3, root.safeData.columns.length))
+            rowSpacing: 14
+            columnSpacing: 18
 
             Repeater {
                 model: root.safeData.columns
@@ -226,6 +237,7 @@ Item {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     Layout.preferredWidth: 1
+                    Layout.preferredHeight: root.panelMode ? 190 : 1
 
                     ColumnLayout {
                         anchors.fill: parent
@@ -245,7 +257,7 @@ Item {
 
                             Text {
                                 text: modelData.summary
-                                color: "#7f99a6"
+                                color: "#b7ccd6"
                                 font.family: "Segoe UI"
                                 font.pixelSize: 11
                                 wrapMode: Text.Wrap
@@ -299,7 +311,7 @@ Item {
                                     Text {
                                         text: modelData.secondary
                                         width: parent.width
-                                        color: "#88a4b1"
+                                        color: "#b6ccd7"
                                         font.family: "Bahnschrift SemiCondensed"
                                         font.pixelSize: 10
                                         font.letterSpacing: 1.2
@@ -411,7 +423,7 @@ Item {
 
                         Text {
                             text: modelData.summary
-                            color: "#86a0ae"
+                            color: "#b7cbd5"
                             font.family: "Segoe UI"
                             font.pixelSize: 11
                             wrapMode: Text.Wrap
@@ -545,7 +557,7 @@ Item {
 
                             Text {
                                 text: modelData.summary
-                                color: "#849fad"
+                                color: "#b7cbd6"
                                 font.family: "Segoe UI"
                                 font.pixelSize: 11
                                 wrapMode: Text.Wrap
@@ -643,7 +655,7 @@ Item {
 
                     Text {
                         text: modelData.detail
-                        color: "#9bb2bf"
+                        color: "#c0d2dc"
                         font.family: "Segoe UI"
                         font.pixelSize: 12
                         wrapMode: Text.Wrap
@@ -722,7 +734,7 @@ Item {
 
                     Text {
                         text: modelData.subtitle
-                        color: "#84a0ae"
+                        color: "#b7cbd6"
                         font.family: "Bahnschrift SemiCondensed"
                         font.pixelSize: 10
                         font.letterSpacing: 1.2
@@ -739,7 +751,7 @@ Item {
 
                     Text {
                         text: modelData.detail
-                        color: "#7f98a5"
+                        color: "#b1c5d0"
                         font.family: "Segoe UI"
                         font.pixelSize: 11
                         wrapMode: Text.Wrap

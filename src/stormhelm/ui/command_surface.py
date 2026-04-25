@@ -8,9 +8,13 @@ _ROUTE_LABELS = {
     "software_control": "Software Control",
     "software_recovery": "Software Recovery",
     "trust": "Trust",
+    "trust_approvals": "Trust",
     "task_continuity": "Task Continuity",
     "watch_runtime": "Runtime Watch",
     "memory": "Memory",
+    "memory_recall": "Memory",
+    "workspace_operations": "Workspace",
+    "lifecycle": "Lifecycle",
     "desktop_search": "Desktop Search",
     "browser_destination": "Browser",
     "browser_context": "Browser",
@@ -67,9 +71,11 @@ _STATION_IDS = {
     "software_recovery": "software-recovery-station",
     "screen_awareness": "screen-awareness-station",
     "trust": "trust-station",
+    "trust_approvals": "trust-station",
     "task_continuity": "continuity-station",
     "watch_runtime": "runtime-station",
     "memory": "memory-station",
+    "memory_recall": "memory-station",
 }
 
 _STATION_TITLES = {
@@ -78,9 +84,11 @@ _STATION_TITLES = {
     "software_recovery": "Software Recovery",
     "screen_awareness": "Screen Awareness",
     "trust": "Trust Station",
+    "trust_approvals": "Trust Station",
     "task_continuity": "Task Continuity",
     "watch_runtime": "Runtime Station",
     "memory": "Memory Support",
+    "memory_recall": "Memory Support",
 }
 
 _WORKSPACE_ACTIONS = {
@@ -88,6 +96,7 @@ _WORKSPACE_ACTIONS = {
     "task_continuity": ("chartroom", "tasks", "Open Tasks"),
     "watch_runtime": ("watch", "overview", "Open Watch"),
     "memory": ("logbook", "memory", "Open Memory"),
+    "memory_recall": ("logbook", "memory", "Open Memory"),
 }
 
 _RESULT_TONES = {

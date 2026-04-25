@@ -46,7 +46,7 @@ Item {
     readonly property color secondaryColor: root.stateName === "warning" ? root.contrastColor("#cda980", root.visualAdaptiveSecondaryTextContrast * 0.14) : root.contrastColor("#8eabb8", root.visualAdaptiveSecondaryTextContrast * 0.34)
 
     implicitWidth: 440
-    implicitHeight: root.captureActive ? 72 : 64
+    implicitHeight: Math.max(root.captureActive ? 72 : 64, contentColumn.implicitHeight + 28)
 
     function toneColor(baseColor) {
         if (root.visualAdaptiveTone > 0) {
@@ -112,10 +112,12 @@ Item {
         lineOpacity: root.shellMode === "ghost" ? root.visualAdaptiveLineOpacity : 0.08 + root.deckProgress * 0.05
 
         Column {
+            id: contentColumn
             anchors.fill: parent
             spacing: 4
 
             Text {
+                width: parent.width
                 text: root.eyebrow
                 color: root.contrastColor(Qt.tint("#90afbe", Qt.rgba(root.accentColor.r, root.accentColor.g, root.accentColor.b, 0.28)), root.visualAdaptiveSecondaryTextContrast * 0.2)
                 font.family: "Bahnschrift SemiCondensed"
@@ -131,11 +133,12 @@ Item {
             }
 
             Text {
+                width: parent.width
                 text: root.visiblePrimary + (root.captureActive && root.showCaret ? " |" : "")
                 color: root.primaryColor
                 font.family: "Segoe UI Semibold"
                 font.pixelSize: 15
-                wrapMode: Text.Wrap
+                wrapMode: Text.WordWrap
                 maximumLineCount: root.captureActive ? 3 : 2
                 elide: root.captureActive ? Text.ElideNone : Text.ElideRight
                 style: Text.Raised
@@ -147,11 +150,12 @@ Item {
             }
 
             Text {
+                width: parent.width
                 text: root.visibleSecondary
                 color: root.secondaryColor
                 font.family: "Segoe UI"
                 font.pixelSize: 11
-                wrapMode: Text.Wrap
+                wrapMode: Text.WordWrap
                 visible: text.length > 0
                 style: Text.Raised
                 styleColor: Qt.rgba(0.01, 0.04, 0.07, root.visualAdaptiveShadowOpacity)

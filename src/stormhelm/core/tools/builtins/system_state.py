@@ -64,6 +64,20 @@ def _location_permission_guidance(location: dict[str, Any]) -> str:
     return ""
 
 
+def _location_fallback_note(location: dict[str, Any]) -> str:
+    if str(location.get("source") or "").strip().lower() != "ip_estimate":
+        return ""
+    reason = str(
+        location.get("fallback_reason")
+        or location.get("live_reason")
+        or location.get("approximate_reason")
+        or ""
+    ).replace("_", " ").strip()
+    if reason:
+        return f" Stormhelm tried Windows live and coarse device location first, but Windows returned {reason}."
+    return " Stormhelm tried Windows live and coarse device location first, but neither path returned a usable fix."
+
+
 def _has_numeric_signal(value: object) -> bool:
     return isinstance(value, (int, float))
 
@@ -1207,8 +1221,10 @@ class LocationStatusTool(BaseTool):
         elif data.get("source") == "approximate_device":
             summary = persona.report(f"Current position resolves approximately from device bearings near {data.get('label', 'the current area')}.")
         elif data.get("source") == "ip_estimate":
+            fallback_note = _location_fallback_note(data)
+            settings_note = guidance or " Say 'open location settings' to check Windows location access, or save a home location for future fallback."
             summary = persona.report(
-                f"Only an IP-based estimate is available right now, placing you roughly near {data.get('label', 'the current area')}.{guidance}"
+                f"Only an IP-based estimate is available right now, placing you roughly near {data.get('label', 'the current area')}.{fallback_note}{settings_note}"
             )
         else:
             summary = persona.report(f"Current location resolves to {data.get('label', 'the current area')}.")

@@ -313,3 +313,33 @@ def test_disabled_software_route_stays_native_unsupported_not_provider_fallback(
     assert routing["winner"]["route_family"] == "software_control"
     assert routing["winner"]["posture"] == "native_unsupported"
     assert routing["winner"]["provider_fallback_reason"] is None
+
+
+def test_repair_phrase_routes_to_software_recovery_family() -> None:
+    decision = _plan("fix my wifi")
+
+    routing = _route_state(decision)
+    assert decision.request_type == "repair_execution"
+    assert decision.tool_requests[0].tool_name == "repair_action"
+    assert routing["winner"]["route_family"] == "software_recovery"
+    assert routing["winner"]["provider_fallback_reason"] is None
+
+
+def test_continue_where_i_left_off_routes_to_task_continuity_family() -> None:
+    decision = _plan("continue where I left off")
+
+    routing = _route_state(decision)
+    assert decision.request_type == "workspace_restore"
+    assert decision.tool_requests[0].tool_name == "workspace_where_left_off"
+    assert routing["winner"]["route_family"] == "task_continuity"
+    assert routing["winner"]["provider_fallback_reason"] is None
+
+
+def test_recent_activity_summary_routes_to_watch_runtime_family() -> None:
+    decision = _plan("what did I miss?")
+
+    routing = _route_state(decision)
+    assert decision.request_type == "activity_summary"
+    assert decision.tool_requests[0].tool_name == "activity_summary"
+    assert routing["winner"]["route_family"] == "watch_runtime"
+    assert routing["winner"]["provider_fallback_reason"] is None

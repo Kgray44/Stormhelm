@@ -214,11 +214,14 @@ class RouteWinnerPosture:
     unresolved_targets: list[str] = field(default_factory=list)
     clarification_needed: bool = False
     clarification_reason: str | None = None
+    clarification_code: str | None = None
     runner_up_summary: dict[str, Any] | None = None
     support_system_augmentation: list[str] = field(default_factory=list)
     provider_fallback_reason: str | None = None
     margin_to_runner_up: float | None = None
     ambiguity_live: bool = False
+    planned_tools: list[str] = field(default_factory=list)
+    capability_requirements: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -232,11 +235,14 @@ class RouteWinnerPosture:
             "unresolved_targets": list(self.unresolved_targets),
             "clarification_needed": self.clarification_needed,
             "clarification_reason": self.clarification_reason,
+            "clarification_code": self.clarification_code,
             "runner_up_summary": _serialize(self.runner_up_summary),
             "support_system_augmentation": list(self.support_system_augmentation),
             "provider_fallback_reason": self.provider_fallback_reason,
             "margin_to_runner_up": self.margin_to_runner_up,
             "ambiguity_live": self.ambiguity_live,
+            "planned_tools": list(self.planned_tools),
+            "capability_requirements": list(self.capability_requirements),
         }
 
 

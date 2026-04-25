@@ -45,6 +45,8 @@ Item {
     readonly property real deckTop: 60
     readonly property real mainFieldX: root.sideInset + root.workspaceRailWidth + 24
     readonly property real mainFieldWidth: parent.width - root.mainFieldX - root.sideInset
+    readonly property bool panelUtilityVisible: root.panelCatalog.length > 0 || root.hiddenPanels.length > 0
+    readonly property real panelUtilityReserve: root.panelUtilityVisible ? 186 : 18
     readonly property rect collaborationRect: Qt.rect(panelWorkspace.x + deckField.x, panelWorkspace.y + deckField.y, panelWorkspace.width, panelWorkspace.height)
     readonly property rect contextRect: Qt.rect(utilityColumn.x + deckField.x, utilityColumn.y + deckField.y, utilityColumn.width, utilityColumn.height)
     readonly property rect railRect: Qt.rect(commandRail.x, commandRail.y, commandRail.width, commandRail.height)
@@ -69,10 +71,10 @@ Item {
         x: (parent.width / 2 - width * 0.5) * (1 - root.deckProgress) + root.sideInset * root.deckProgress
         y: root.deckTop + 8
         width: root.workspaceRailWidth
-        height: commandRail.y - y - 18
+        height: Math.max(220, commandRail.y - y - root.panelUtilityReserve)
         items: root.workspaceItems
         revealProgress: root.deckProgress
-        opacity: root.deckProgress
+        opacity: root.deckProgress > 0.02 ? 1 : 0
         onActivateItem: function(key) { root.activateWorkspaceItem(key) }
     }
 
@@ -82,14 +84,13 @@ Item {
         y: root.deckTop
         width: root.mainFieldWidth
         height: commandRail.y - y - 10
-        opacity: 0.3 + root.deckProgress * 0.7
+        opacity: root.deckProgress > 0.02 ? 1 : 0
 
         Row {
             id: controlDeck
             anchors.top: parent.top
             anchors.left: parent.left
-            anchors.right: utilityColumn.left
-            anchors.rightMargin: utilityColumn.visible ? 14 : 0
+            anchors.right: parent.right
             spacing: 12
 
             Row {
@@ -188,8 +189,7 @@ Item {
             anchors.top: controlDeck.bottom
             anchors.topMargin: 10
             anchors.left: parent.left
-            anchors.right: utilityColumn.left
-            anchors.rightMargin: utilityColumn.visible ? 14 : 0
+            anchors.right: parent.right
             anchors.bottom: parent.bottom
             panels: root.deckPanels
             messages: root.messages
@@ -213,18 +213,20 @@ Item {
 
         Column {
             id: utilityColumn
-            anchors.top: controlDeck.bottom
-            anchors.topMargin: 10
-            anchors.right: parent.right
-            anchors.bottom: parent.bottom
-            width: 132
+            x: -root.workspaceRailWidth - 24
+            y: workspaceRail.y + workspaceRail.height + 12 - deckField.y
+            z: 8
+            width: root.workspaceRailWidth
+            height: Math.max(92, commandRail.y - (deckField.y + y) - 18)
             spacing: 10
-            visible: root.panelCatalog.length > 0 || root.hiddenPanels.length > 0
+            clip: true
+            visible: root.panelUtilityVisible
 
             Rectangle {
                 id: panelLauncher
                 objectName: "deckPanelLauncher"
                 width: parent.width
+                height: Math.min(implicitHeight, Math.max(64, utilityColumn.height - (hiddenRail.visible ? 84 : 0)))
                 radius: 20
                 color: "#0f1820"
                 border.width: 1
@@ -240,17 +242,24 @@ Item {
                     Row {
                         id: launcherHeader
                         width: parent.width
+                        height: Math.max(22, panelLabel.implicitHeight, launcherToggle.height)
                         spacing: 8
 
                         Text {
+                            id: panelLabel
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: Math.max(0, parent.width - launcherToggle.width - 8)
                             text: "Panels"
                             color: "#edf7fb"
                             font.family: "Bahnschrift SemiCondensed"
                             font.pixelSize: 12
                             font.letterSpacing: 1.2
+                            elide: Text.ElideRight
                         }
 
                         Rectangle {
+                            id: launcherToggle
+                            anchors.verticalCenter: parent.verticalCenter
                             width: 22
                             height: 22
                             radius: 11
@@ -302,7 +311,7 @@ Item {
 
                                     Text {
                                         anchors.verticalCenter: parent.verticalCenter
-                                        text: hidden ? "+" : "•"
+                                        text: hidden ? "+" : "*"
                                         color: hidden ? "#b5eeff" : "#8fb5c3"
                                         font.family: "Bahnschrift SemiCondensed"
                                         font.pixelSize: 12

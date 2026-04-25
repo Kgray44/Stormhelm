@@ -245,6 +245,7 @@ def test_helper_wrapper_uses_elevated_payload_when_gigabyte_metrics_require_admi
     def fake_elevated(self, *, sampling_tier: str):
         return deepcopy(elevated_payload), {"state": "succeeded", "timeout_seconds": 20.0}, None
 
+    monkeypatch.setattr("stormhelm.core.system.hardware_telemetry._is_elevated", lambda: False)
     monkeypatch.setattr(HardwareTelemetryHelperClient, "_run_standard_helper", fake_standard)
     monkeypatch.setattr(HardwareTelemetryHelperClient, "_run_elevated_helper", fake_elevated)
 
@@ -268,6 +269,7 @@ def test_helper_wrapper_appends_exact_elevated_retry_failure_reason(temp_config,
     def fake_elevated(self, *, sampling_tier: str):
         return None, {"state": "denied", "timeout_seconds": 20.0, "detail": "The operation was canceled by the user."}, "elevation_denied"
 
+    monkeypatch.setattr("stormhelm.core.system.hardware_telemetry._is_elevated", lambda: False)
     monkeypatch.setattr(HardwareTelemetryHelperClient, "_run_standard_helper", fake_standard)
     monkeypatch.setattr(HardwareTelemetryHelperClient, "_run_elevated_helper", fake_elevated)
 
@@ -294,6 +296,7 @@ def test_helper_wrapper_skips_reprompt_during_elevated_retry_cooldown(temp_confi
     def fail_if_elevated(*args, **kwargs):
         raise AssertionError("elevated helper retry should be suppressed during cooldown")
 
+    monkeypatch.setattr("stormhelm.core.system.hardware_telemetry._is_elevated", lambda: False)
     monkeypatch.setattr(HardwareTelemetryHelperClient, "_run_standard_helper", fake_standard)
     monkeypatch.setattr(HardwareTelemetryHelperClient, "_run_elevated_helper", fail_if_elevated)
     monkeypatch.setattr("stormhelm.core.system.hardware_telemetry.monotonic", lambda: 100.0)

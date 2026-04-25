@@ -92,6 +92,7 @@ Item {
                 }
 
                 Flow {
+                    id: stationChipFlow
                     Layout.fillWidth: true
                     spacing: 8
                     visible: (root.safeData.chips || []).length > 0
@@ -104,17 +105,23 @@ Item {
 
                             radius: 13
                             height: 28
-                            width: chipRow.implicitWidth + 18
+                            width: Math.min(chipLabel.implicitWidth + chipValue.implicitWidth + 31, Math.max(120, stationChipFlow.width))
+                            clip: true
                             color: root.chipFill(modelData.tone)
                             border.width: 1
                             border.color: root.chipBorder(modelData.tone)
 
                             Row {
                                 id: chipRow
-                                anchors.centerIn: parent
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.leftMargin: 9
+                                anchors.rightMargin: 9
                                 spacing: 6
 
                                 Text {
+                                    id: chipLabel
                                     text: modelData.label
                                     color: "#7f9cab"
                                     font.family: "Bahnschrift SemiCondensed"
@@ -122,10 +129,13 @@ Item {
                                 }
 
                                 Text {
+                                    id: chipValue
                                     text: modelData.value
                                     color: "#e2f1f8"
                                     font.family: "Segoe UI Semibold"
                                     font.pixelSize: 10
+                                    width: Math.max(20, parent.width - chipLabel.width - chipRow.spacing)
+                                    elide: Text.ElideRight
                                 }
                             }
                         }
@@ -198,6 +208,8 @@ Item {
                                 color: "#e5f2f8"
                                 font.family: "Bahnschrift SemiCondensed"
                                 font.pixelSize: 14
+                                wrapMode: Text.Wrap
+                                Layout.fillWidth: true
                             }
 
                             Repeater {
@@ -210,9 +222,11 @@ Item {
 
                                     Text {
                                         text: modelData.primary
-                                        color: "#89a6b3"
+                                        color: "#bed2dc"
                                         font.family: "Bahnschrift SemiCondensed"
                                         font.pixelSize: 10
+                                        wrapMode: Text.Wrap
+                                        Layout.fillWidth: true
                                     }
 
                                     Text {

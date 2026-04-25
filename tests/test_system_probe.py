@@ -104,6 +104,12 @@ def test_resolve_location_uses_ip_estimate_when_home_fallback_is_disabled(temp_c
     result = probe.resolve_location(mode="current", allow_home_fallback=False)
 
     assert result["source"] == "ip_estimate"
+    assert result["fallback_reason"] == "device_lookup_unavailable"
+    assert result["fallback_sources_attempted"] == [
+        "device_live",
+        "approximate_device",
+        "home_fallback_disabled",
+    ]
 
 
 def test_saved_home_location_prefers_persistent_memory_over_config(temp_config) -> None:
@@ -724,6 +730,103 @@ def test_app_control_closes_snipping_tool_via_window_title_resolution(temp_confi
     assert any("CloseMainWindow" in script or "PostMessage" in script for script in scripts)
 
 
+def test_app_control_close_falls_back_to_process_group_when_window_title_is_missing(
+    temp_config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe = SystemProbe(temp_config)
+    scripts: list[str] = []
+
+    monkeypatch.setattr(SystemProbe, "active_apps", lambda self: {"applications": []})
+    monkeypatch.setattr(
+        SystemProbe,
+        "window_status",
+        lambda self: {"focused_window": None, "windows": [], "monitors": []},
+    )
+    monkeypatch.setattr(
+        SystemProbe,
+        "_running_processes",
+        lambda self: [
+            {
+                "process_name": "Discord",
+                "pid": 9360,
+                "path": "C:/Users/test/AppData/Local/Discord/app-1.0.9233/Discord.exe",
+            }
+        ],
+    )
+
+    def fake_run(self, script: str):
+        scripts.append(script)
+        return {
+            "success": True,
+            "action": "close",
+            "process_name": "Discord",
+            "pid": 9360,
+            "affected_pids": [9360],
+            "resolution_source": "process_group",
+        }
+
+    monkeypatch.setattr(SystemProbe, "_run_powershell_json", fake_run)
+
+    result = probe.app_control(action="close", app_name="Discord")
+
+    assert result["success"] is True
+    assert result["resolution_source"] == "process_group"
+    assert any("CloseMainWindow" in script for script in scripts)
+
+
+def test_app_control_treats_disappeared_window_as_successful_graceful_close(
+    temp_config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe = SystemProbe(temp_config)
+    calls = {"window_status": 0}
+
+    monkeypatch.setattr(SystemProbe, "active_apps", lambda self: {"applications": []})
+
+    def fake_window_status(self):
+        calls["window_status"] += 1
+        if calls["window_status"] == 1:
+            return {
+                "focused_window": None,
+                "windows": [
+                    {
+                        "process_name": "Notepad",
+                        "window_title": "notes.txt - Notepad",
+                        "window_handle": 5511,
+                        "pid": 8421,
+                        "path": "C:/Windows/System32/notepad.exe",
+                    }
+                ],
+                "monitors": [],
+            }
+        return {"focused_window": None, "windows": [], "monitors": []}
+
+    monkeypatch.setattr(SystemProbe, "window_status", fake_window_status)
+    monkeypatch.setattr(SystemProbe, "_running_processes", lambda self: [])
+    monkeypatch.setattr(
+        SystemProbe,
+        "_run_powershell_json",
+        lambda self, script: {
+            "success": False,
+            "action": "close",
+            "process_name": "Notepad",
+            "window_title": "notes.txt - Notepad",
+            "pid": 8421,
+            "reason": "graceful_close_unavailable",
+            "attempted_count": 1,
+            "successful_count": 0,
+            "graceful_close_attempted": True,
+        },
+    )
+
+    result = probe.app_control(action="close", app_name="Notepad")
+
+    assert result["success"] is True
+    assert result["reason"] is None
+    assert result["post_close_verification"] == "target_disappeared"
+
+
 def test_app_control_force_quits_snipping_tool_preferring_real_process_over_false_positive_package_match(
     temp_config,
     monkeypatch: pytest.MonkeyPatch,
@@ -898,11 +1001,12 @@ def test_app_control_reports_builtin_app_not_running_precisely(temp_config, monk
     assert result["reason"] == "app_not_running"
 
 
-def test_app_control_reports_missing_window_when_discord_is_running_but_no_window_is_visible(
+def test_app_control_attempts_process_group_close_when_discord_is_running_but_no_window_is_visible(
     temp_config,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     probe = SystemProbe(temp_config)
+    scripts: list[str] = []
 
     monkeypatch.setattr(SystemProbe, "active_apps", lambda self: {"applications": []})
     monkeypatch.setattr(
@@ -926,11 +1030,26 @@ def test_app_control_reports_missing_window_when_discord_is_running_but_no_windo
             },
         ],
     )
+    monkeypatch.setattr(
+        SystemProbe,
+        "_run_powershell_json",
+        lambda self, script: scripts.append(script)
+        or {
+            "success": False,
+            "action": "close",
+            "reason": "graceful_close_unavailable",
+            "attempted_count": 2,
+            "successful_count": 0,
+            "resolution_source": "process_group",
+        },
+    )
 
     result = probe.app_control(action="close", app_name="Discord")
 
     assert result["success"] is False
-    assert result["reason"] == "no_matching_window_found"
+    assert result["reason"] == "graceful_close_unavailable"
+    assert result["resolution_source"] == "process_group"
+    assert any("CloseMainWindow" in script for script in scripts)
 
 
 def test_window_status_reports_focused_window_and_monitors(temp_config, monkeypatch: pytest.MonkeyPatch) -> None:

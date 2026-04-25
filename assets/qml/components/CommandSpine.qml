@@ -11,7 +11,23 @@ Item {
     property var messages: []
     property string statusLine: ""
     property bool panelMode: false
+    property bool autoFocus: false
     property var composerState: ({})
+
+    function forceComposerFocus() {
+        promptComposer.forceComposerFocus()
+    }
+
+    onAutoFocusChanged: {
+        if (root.autoFocus) {
+            Qt.callLater(root.forceComposerFocus)
+        }
+    }
+    Component.onCompleted: {
+        if (root.autoFocus) {
+            Qt.callLater(root.forceComposerFocus)
+        }
+    }
 
     ColumnLayout {
         anchors.fill: parent
@@ -59,6 +75,7 @@ Item {
         }
 
         PromptComposer {
+            id: promptComposer
             Layout.fillWidth: true
             compact: true
             composerState: root.composerState

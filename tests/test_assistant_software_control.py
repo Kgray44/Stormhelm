@@ -83,6 +83,7 @@ def test_assistant_routes_install_request_through_native_software_control_and_pe
     assert planner_debug["software_control"]["result"]["status"] == "prepared"
     assert metadata["bearing_title"] == "Software Plan"
     assert metadata["micro_response"] == "Prepared a local install plan for Firefox."
+    assert "approve once" in metadata["full_response"].lower()
     assert request_state["family"] == "software_control"
     assert request_state["parameters"]["request_stage"] == "awaiting_confirmation"
 
@@ -114,6 +115,7 @@ def test_assistant_routes_download_and_install_minecraft_through_native_software
     assert planner_debug["software_control"]["result"]["status"] == "prepared"
     assert metadata["bearing_title"] == "Software Plan"
     assert metadata["micro_response"] == "Prepared a local install plan for Minecraft."
+    assert "approve once" in metadata["full_response"].lower()
     assert request_state["family"] == "software_control"
     assert request_state["parameters"]["selected_source_route"] == "winget"
 

@@ -34,11 +34,11 @@ Item {
     implicitHeight: {
         switch (safeData.kind) {
         case "notes":
-            return root.panelMode ? 260 : 320
+            return root.panelMode ? 300 : 320
         case "system":
-            return root.panelMode ? 220 : 248
+            return root.panelMode ? 260 : 248
         default:
-            return root.panelMode ? 208 : 228
+            return root.panelMode ? 236 : 228
         }
     }
 
@@ -58,23 +58,28 @@ Item {
             spacing: root.panelMode ? 10 : 12
 
             Text {
+                Layout.fillWidth: true
                 text: root.safeData.eyebrow
                 color: "#b98a56"
                 font.family: "Bahnschrift SemiCondensed"
                 font.pixelSize: 11
                 font.letterSpacing: 1.9
+                elide: Text.ElideRight
             }
 
             Text {
+                Layout.fillWidth: true
                 text: root.safeData.title
                 color: "#eef7fb"
                 font.family: "Bahnschrift SemiCondensed"
                 font.pixelSize: root.panelMode ? 18 : 22
+                wrapMode: Text.Wrap
             }
 
             Text {
+                Layout.fillWidth: true
                 text: root.safeData.headline
-                color: "#d2e3eb"
+                color: "#e0edf3"
                 wrapMode: Text.Wrap
                 font.family: "Segoe UI Semibold"
                 font.pixelSize: root.panelMode ? 13 : 14
@@ -82,7 +87,7 @@ Item {
 
             Text {
                 text: root.safeData.body
-                color: "#94afbc"
+                color: "#bed1db"
                 wrapMode: Text.Wrap
                 font.family: "Segoe UI"
                 font.pixelSize: root.panelMode ? 11 : 12
@@ -92,6 +97,7 @@ Item {
             }
 
             Flow {
+                id: statsFlow
                 Layout.fillWidth: true
                 spacing: 8
                 visible: (root.safeData.stats || []).length > 0
@@ -106,14 +112,20 @@ Item {
                         border.width: 1
                         border.color: "#33586b"
                         height: 28
-                        width: statRow.implicitWidth + 18
+                        width: Math.min(statLabel.implicitWidth + statValue.implicitWidth + 31, Math.max(112, statsFlow.width))
+                        clip: true
 
                         Row {
                             id: statRow
-                            anchors.centerIn: parent
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.leftMargin: 9
+                            anchors.rightMargin: 9
                             spacing: 6
 
                             Text {
+                                id: statLabel
                                 text: modelData.label
                                 color: "#84a0ae"
                                 font.family: "Bahnschrift SemiCondensed"
@@ -122,10 +134,13 @@ Item {
                             }
 
                             Text {
+                                id: statValue
                                 text: modelData.value
                                 color: "#edf7fb"
                                 font.family: "Segoe UI Semibold"
                                 font.pixelSize: 10
+                                width: Math.max(20, parent.width - statLabel.width - statRow.spacing)
+                                elide: Text.ElideRight
                             }
                         }
                     }
@@ -157,7 +172,7 @@ Item {
                     Text {
                         text: modelData.summary
                         width: parent.width
-                        color: "#7f9aa8"
+                        color: "#b7ccd6"
                         font.family: "Segoe UI"
                         font.pixelSize: 11
                         wrapMode: Text.Wrap
@@ -183,7 +198,7 @@ Item {
                             Text {
                                 text: modelData.secondary
                                 width: parent.width
-                                color: "#8ca7b5"
+                                color: "#b5cbd6"
                                 font.family: "Bahnschrift SemiCondensed"
                                 font.pixelSize: 10
                                 font.letterSpacing: 1.1
@@ -232,6 +247,7 @@ Item {
                         spacing: 4
 
                         Text {
+                            width: parent.width
                             text: modelData.primary
                             color: "#eaf4f9"
                             font.family: "Segoe UI Semibold"
@@ -240,14 +256,17 @@ Item {
                         }
 
                         Text {
+                            width: parent.width
                             text: modelData.secondary
-                            color: "#92adbc"
+                            color: "#b9ced9"
                             font.family: "Bahnschrift SemiCondensed"
                             font.pixelSize: 11
                             font.letterSpacing: 1.2
+                            wrapMode: Text.Wrap
                         }
 
                         Text {
+                            width: parent.width
                             text: modelData.detail
                             visible: text.length > 0
                             color: "#c5d7e1"

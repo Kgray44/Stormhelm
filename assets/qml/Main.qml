@@ -37,22 +37,50 @@ ApplicationWindow {
     readonly property bool ghostMode: !bridge || bridge.mode === "ghost"
     property real deckProgress: bridge && bridge.mode === "deck" ? 1 : 0
     property real ghostRevealProgress: bridge ? bridge.ghostRevealTarget : 1.0
-    readonly property real coreSize: root.mix(Math.min(width * 0.18, 238), 176, deckProgress)
+    readonly property real coreSize: root.mix(Math.min(width * 0.20, 272), 196, deckProgress)
     readonly property real coreCenterY: root.mix(height * 0.42, height * 0.22, deckProgress)
     readonly property real coreY: coreCenterY - coreSize / 2 + (1 - ghostRevealProgress) * 10
     readonly property int ghostDraftLength: bridge ? bridge.ghostDraftText.length : 0
-    readonly property real ghostStripWidth: Math.min(root.width * 0.62, 540 + root.ghostDraftLength * 8)
+    readonly property real ghostStripWidth: Math.min(root.width * 0.62, 580)
     readonly property real deckStripWidth: Math.min(root.width * 0.52, 820)
     readonly property var ghostAdaptiveStyle: bridge ? bridge.ghostAdaptiveStyle : ({})
     readonly property var ghostPlacement: bridge ? bridge.ghostPlacement : ({})
     readonly property real ghostOffsetX: root.ghostMode ? root.ghostPlacementNumber("offsetX", 0) : 0
     readonly property real ghostOffsetY: root.ghostMode ? root.ghostPlacementNumber("offsetY", 0) : 0
+    property real typingDarkProgress: bridge && bridge.ghostCaptureActive && root.ghostMode ? 1.0 : 0.0
 
     function ghostStyleNumber(key, fallback) {
+        var adjusted = fallback
         if (!root.ghostAdaptiveStyle || root.ghostAdaptiveStyle[key] === undefined || root.ghostAdaptiveStyle[key] === null) {
-            return fallback
+            adjusted = fallback
+        } else {
+            adjusted = Number(root.ghostAdaptiveStyle[key])
         }
-        return Number(root.ghostAdaptiveStyle[key])
+        if (key === "tone")
+            return Math.max(adjusted, 0) + root.typingDarkProgress * 0.46
+        if (key === "surfaceOpacity")
+            return Math.min(0.96, adjusted + root.typingDarkProgress * 0.14)
+        if (key === "edgeOpacity")
+            return Math.min(0.58, adjusted + root.typingDarkProgress * 0.08)
+        if (key === "lineOpacity")
+            return Math.min(0.24, adjusted + root.typingDarkProgress * 0.06)
+        if (key === "textContrast")
+            return Math.min(0.48, adjusted + root.typingDarkProgress * 0.16)
+        if (key === "secondaryTextContrast")
+            return Math.min(0.34, adjusted + root.typingDarkProgress * 0.12)
+        if (key === "shadowOpacity")
+            return Math.min(0.42, adjusted + root.typingDarkProgress * 0.14)
+        if (key === "backdropOpacity")
+            return Math.min(0.42, adjusted + root.typingDarkProgress * 0.18)
+        if (key === "anchorGlowBoost")
+            return Math.min(0.62, adjusted + root.typingDarkProgress * 0.12)
+        if (key === "anchorStrokeBoost")
+            return Math.min(0.68, adjusted + root.typingDarkProgress * 0.14)
+        if (key === "anchorFillBoost")
+            return Math.min(0.42, adjusted + root.typingDarkProgress * 0.08)
+        if (key === "anchorBackdropOpacity")
+            return Math.min(0.42, adjusted + root.typingDarkProgress * 0.16)
+        return adjusted
     }
 
     function ghostPlacementNumber(key, fallback) {
@@ -67,6 +95,9 @@ ApplicationWindow {
     }
     Behavior on ghostRevealProgress {
         NumberAnimation { duration: 320; easing.type: Easing.InOutCubic }
+    }
+    Behavior on typingDarkProgress {
+        NumberAnimation { duration: 460; easing.type: Easing.InOutCubic }
     }
 
     onClosing: function(close) {
@@ -101,6 +132,18 @@ ApplicationWindow {
         anchors.fill: parent
         mode: bridge ? bridge.mode : "ghost"
         deckProgress: root.deckProgress
+    }
+
+    Rectangle {
+        anchors.fill: parent
+        color: "#02070b"
+        opacity: root.typingDarkProgress * 0.22
+        visible: opacity > 0.01
+        z: 5
+
+        Behavior on opacity {
+            NumberAnimation { duration: 460; easing.type: Easing.InOutCubic }
+        }
     }
 
     GhostShell {
@@ -169,7 +212,7 @@ ApplicationWindow {
         modeSubtitle: bridge ? bridge.modeSubtitle : ""
         assistantState: bridge ? bridge.assistantState : "idle"
         visible: opacity > 0.02
-        opacity: root.deckProgress
+        opacity: root.deckProgress > 0.02 ? 1 : 0
         scale: 1.02 - root.deckProgress * 0.02
         z: 10
 
@@ -272,6 +315,7 @@ ApplicationWindow {
             id: fieldStrip
             objectName: "ghostFieldStrip"
             width: root.mix(root.ghostStripWidth, root.deckStripWidth, root.deckProgress)
+            height: implicitHeight
             anchors.horizontalCenter: parent.horizontalCenter
             y: voiceCore.y + voiceCore.height + 14
             shellMode: bridge ? bridge.mode : "ghost"
@@ -287,6 +331,13 @@ ApplicationWindow {
             opacity: root.mix(0.0, 1.0, root.ghostRevealProgress)
             scale: root.mix(0.992, 1.0, root.ghostRevealProgress)
             z: 0
+
+            Behavior on width {
+                NumberAnimation { duration: 360; easing.type: Easing.InOutCubic }
+            }
+            Behavior on height {
+                NumberAnimation { duration: 260; easing.type: Easing.InOutCubic }
+            }
         }
     }
 

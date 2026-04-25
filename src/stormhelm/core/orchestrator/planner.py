@@ -81,6 +81,7 @@ KNOWN_FOLDER_ALIASES: dict[str, tuple[str, ...]] = {
     "Videos": ("videos", "my videos", "videos folder", "the videos folder"),
 }
 DEFAULT_AVAILABLE_TOOLS = {
+    "clock",
     "machine_status",
     "power_status",
     "power_projection",
@@ -784,11 +785,16 @@ class DeterministicPlanner:
             unresolved_targets=unresolved_targets,
             clarification_needed=clarification_needed,
             clarification_reason=clarification_message,
+            clarification_code=clarification_reason.code if clarification_reason is not None else None,
             runner_up_summary=runner_summary,
             support_system_augmentation=support_summary,
             provider_fallback_reason=provider_fallback_reason,
             margin_to_runner_up=margin_to_runner_up,
             ambiguity_live=ambiguity_live,
+            planned_tools=[request.tool_name for request in decision.tool_requests],
+            capability_requirements=list(
+                decision.structured_query.capability_requirements if decision.structured_query is not None else []
+            ),
         )
         return RoutingTelemetry(
             normalized_summary=normalized.to_dict(),
@@ -1620,6 +1626,22 @@ class DeterministicPlanner:
                 follow_up=True,
             )
 
+        if self._looks_like_clock_time(lower):
+            return self._tool_proposal(
+                query_shape=QueryShape.CURRENT_STATUS,
+                domain="time",
+                tool_name="clock",
+                tool_arguments={},
+                request_type_hint="direct_deterministic_fact",
+                family="time",
+                subject="clock",
+                requested_metric="local_time",
+                confidence=0.97,
+                evidence=["simple time/date phrasing matched the local clock lane"],
+                execution_type="retrieve_current_status",
+                output_mode=ResponseMode.STATUS_SUMMARY.value,
+            )
+
         active_item_decision = self._plan_active_item_follow_up(
             message,
             surface_mode=normalized.surface_mode,
@@ -1667,7 +1689,7 @@ class DeterministicPlanner:
                 tool_name="workspace_where_left_off",
                 tool_arguments={},
                 request_type_hint="workspace_restore",
-                family="workspace",
+                family="task_continuity",
                 subject="where_left_off",
                 requested_action="where_left_off",
                 confidence=0.96,
@@ -1682,7 +1704,7 @@ class DeterministicPlanner:
                 tool_name="workspace_next_steps",
                 tool_arguments={},
                 request_type_hint="direct_deterministic_fact",
-                family="workspace",
+                family="task_continuity",
                 subject="next_steps",
                 requested_action="next_steps",
                 confidence=0.95,
@@ -1937,7 +1959,7 @@ class DeterministicPlanner:
                 tool_name="activity_summary",
                 tool_arguments=activity_request,
                 request_type_hint="activity_summary",
-                family="activity",
+                family="watch_runtime",
                 subject="summary",
                 requested_action="summarize_activity",
                 confidence=0.94,
@@ -1953,7 +1975,7 @@ class DeterministicPlanner:
                 tool_name="context_action",
                 tool_arguments=context_action,
                 request_type_hint="context_action",
-                family="context_action",
+                family="task_continuity" if str(context_action.get("operation") or "") == "extract_tasks" else "context_action",
                 subject=str(context_action.get("operation") or "context_action"),
                 requested_action=str(context_action.get("operation") or "context_action"),
                 confidence=0.94,
@@ -1993,7 +2015,7 @@ class DeterministicPlanner:
                 tool_name="repair_action",
                 tool_arguments=repair_request,
                 request_type_hint="repair_execution",
-                family="repair",
+                family="software_recovery",
                 subject=str(repair_request.get("repair_kind") or "repair"),
                 requested_action=str(repair_request.get("repair_kind") or "repair"),
                 confidence=0.94,
@@ -2211,14 +2233,8 @@ class DeterministicPlanner:
                 execution_type="retrieve_current_status",
                 output_mode=ResponseMode.STATUS_SUMMARY.value,
             )
-        if any(token in lower for token in {"download speed", "downloads speed", "upload speed", "uploads speed", "internet speed", "throughput"}) and any(
-            token in lower for token in {"internet", "network", "wi-fi", "wifi", "download speed", "downloads speed", "upload speed", "uploads speed"}
-        ):
-            metric = "internet_speed"
-            if "download speed" in lower or "downloads speed" in lower:
-                metric = "download_speed"
-            elif "upload speed" in lower or "uploads speed" in lower:
-                metric = "upload_speed"
+        if self._looks_like_network_throughput(lower):
+            metric = self._network_throughput_metric(lower)
             return self._tool_proposal(
                 query_shape=QueryShape.CURRENT_METRIC,
                 domain="network",
@@ -2272,7 +2288,7 @@ class DeterministicPlanner:
                 execution_type="diagnose_from_telemetry",
                 output_mode=ResponseMode.DIAGNOSTIC_SUMMARY.value,
             )
-        if any(phrase in lower for phrase in {"am i connected", "are we connected", "what network am i on", "what is my ip", "what's my ip", "my ip", "ip address", "wifi signal", "wi-fi signal", "signal strength", "rssi"}):
+        if any(phrase in lower for phrase in {"am i connected", "are we connected", "what network am i on", "what is my ip", "what's my ip", "my ip", "ip address", "wifi signal", "wi-fi signal", "signal strength", "rssi"}) or self._looks_like_network_status(lower):
             focus = self._network_status_focus(lower)
             return self._tool_proposal(
                 query_shape=QueryShape.CURRENT_STATUS,
@@ -2531,6 +2547,22 @@ class DeterministicPlanner:
                 follow_up=follow_up,
                 execution_type="analyze_history" if query_shape == QueryShape.HISTORY_TREND else "diagnose_from_telemetry",
                 output_mode=output_mode,
+            )
+        if classification.family == "network":
+            return self._tool_proposal(
+                query_shape=QueryShape.CURRENT_STATUS,
+                domain="network",
+                tool_name="network_status",
+                tool_arguments={"focus": classification.focus, "present_in": classification.present_in},
+                request_type_hint=classification.request_type,
+                family="network",
+                subject="network",
+                requested_metric=classification.focus,
+                confidence=0.94,
+                evidence=["classification grounded network status routing"],
+                follow_up=follow_up,
+                execution_type="retrieve_current_status",
+                output_mode=ResponseMode.STATUS_SUMMARY.value,
             )
         return self._tool_proposal(
             query_shape=QueryShape.UNCLASSIFIED,
@@ -3846,6 +3878,8 @@ class DeterministicPlanner:
         )
 
     def _resource_query_kind(self, lower: str, *, recent_family: str | None) -> str | None:
+        if self._looks_like_network_throughput(lower):
+            return None
         if self._looks_like_resource_interpretation(lower):
             return "diagnostic"
         if self._looks_like_resource_telemetry(lower):
@@ -4009,10 +4043,84 @@ class DeterministicPlanner:
     def _looks_like_network_status(self, lower: str) -> bool:
         return any(token in lower for token in {"wifi", "wi-fi", "network", "internet", "connected", " ip", "my ip", "address"})
 
+    def _looks_like_clock_time(self, lower: str) -> bool:
+        if "timezone" in lower or "time zone" in lower:
+            return False
+        return any(
+            phrase in lower
+            for phrase in {
+                "what time is it",
+                "whats the time",
+                "what's the time",
+                "current time",
+                "local time",
+                "tell me the time",
+                "what date is it",
+                "what is today's date",
+                "whats todays date",
+                "what's today's date",
+            }
+        )
+
+    def _looks_like_network_throughput(self, lower: str) -> bool:
+        speed_phrase = any(
+            phrase in lower
+            for phrase in {
+                "download speed",
+                "downloads speed",
+                "upload speed",
+                "uploads speed",
+                "internet speed",
+                "network speed",
+                "connection speed",
+                "speed test",
+                "internet test",
+                "network test",
+                "top speed",
+                "throughput",
+            }
+        )
+        network_scope = any(
+            token in lower
+            for token in {
+                "internet",
+                "network",
+                "wi-fi",
+                "wifi",
+                "connection",
+                "download speed",
+                "downloads speed",
+                "upload speed",
+                "uploads speed",
+                "throughput",
+            }
+        )
+        return speed_phrase and network_scope
+
+    def _network_throughput_metric(self, lower: str) -> str:
+        if "download speed" in lower or "downloads speed" in lower:
+            return "download_speed"
+        if "upload speed" in lower or "uploads speed" in lower:
+            return "upload_speed"
+        return "internet_speed"
+
     def _looks_like_network_diagnosis(self, lower: str) -> bool:
         return any(
             token in lower
             for token in {
+                "how is my internet",
+                "how's my internet",
+                "how is the internet",
+                "how's the internet",
+                "how is my connection",
+                "how's my connection",
+                "internet health",
+                "network health",
+                "connection health",
+                "is my internet ok",
+                "is my internet okay",
+                "is my connection ok",
+                "is my connection okay",
                 "why does my internet keep skipping",
                 "why does my internet keep",
                 "why is my wifi unstable",

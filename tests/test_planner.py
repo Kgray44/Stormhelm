@@ -68,6 +68,92 @@ def test_planner_routes_direct_weather_to_structured_tool_without_open() -> None
     assert decision.tool_requests[0].arguments["forecast_target"] == "current"
 
 
+def test_planner_routes_simple_time_question_to_clock_without_provider() -> None:
+    planner = DeterministicPlanner()
+
+    decision = planner.plan(
+        "what time is it",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "direct_deterministic_fact"
+    assert decision.requires_reasoner is False
+    assert len(decision.tool_requests) == 1
+    assert decision.tool_requests[0].tool_name == "clock"
+    assert decision.response_mode == "status_summary"
+
+
+def test_planner_routes_internet_health_to_network_diagnostics() -> None:
+    planner = DeterministicPlanner()
+
+    decision = planner.plan(
+        "How is my internet?",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "deterministic_diagnostic_request"
+    assert len(decision.tool_requests) == 1
+    assert decision.tool_requests[0].tool_name == "network_diagnosis"
+    assert decision.tool_requests[0].arguments["diagnostic_burst"] is True
+    assert decision.requires_reasoner is False
+
+
+def test_planner_routes_internet_top_speed_test_to_throughput_tool() -> None:
+    planner = DeterministicPlanner()
+
+    decision = planner.plan(
+        "can you run a internet test to get my top speed",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "direct_deterministic_fact"
+    assert len(decision.tool_requests) == 1
+    assert decision.tool_requests[0].tool_name == "network_throughput"
+    assert decision.tool_requests[0].arguments["metric"] == "internet_speed"
+    assert decision.requires_reasoner is False
+
+
+def test_planner_routes_download_speed_question_to_throughput_tool() -> None:
+    planner = DeterministicPlanner()
+
+    decision = planner.plan(
+        "what is my download speed right now",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="systems",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "direct_deterministic_fact"
+    assert len(decision.tool_requests) == 1
+    assert decision.tool_requests[0].tool_name == "network_throughput"
+    assert decision.tool_requests[0].arguments["metric"] == "download_speed"
+    assert decision.execution_plan is not None
+    assert decision.execution_plan.plan_type == "run_measurement"
+    assert decision.requires_reasoner is False
+
+
 def test_planner_routes_direct_arithmetic_to_builtin_calculation_lane() -> None:
     planner = DeterministicPlanner()
 

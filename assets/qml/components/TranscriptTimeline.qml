@@ -53,15 +53,11 @@ Item {
         clip: true
         model: root.messages
         boundsBehavior: Flickable.StopAtBounds
-        onMovementStarted: {
-            if (!root.nearBottom()) {
-                root.autoFollow = false
-                root.followPending = false
-            }
-        }
-        onMovementEnded: root.autoFollow = root.nearBottom()
+        onMovementEnded: root.autoFollow = true
+        onCountChanged: Qt.callLater(root.followToBottom)
+        onHeightChanged: Qt.callLater(root.followToBottom)
         onContentHeightChanged: {
-            if (root.followPending) {
+            if (root.followPending || root.autoFollow) {
                 Qt.callLater(root.followToBottom)
             }
         }

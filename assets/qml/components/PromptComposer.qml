@@ -65,6 +65,10 @@ Item {
         input.clear()
     }
 
+    function forceComposerFocus() {
+        input.forceActiveFocus()
+    }
+
     FieldSurface {
         anchors.fill: parent
         radius: compact ? 26 : 30
@@ -83,9 +87,10 @@ Item {
         spacing: compact ? 10 : 12
 
         Flow {
+            id: composerChipFlow
             Layout.fillWidth: true
             spacing: 8
-            visible: (root.safeComposer.chips || []).length > 0
+            visible: !root.compact && (root.safeComposer.chips || []).length > 0
 
             Repeater {
                 model: root.safeComposer.chips || []
@@ -95,17 +100,23 @@ Item {
 
                     radius: 12
                     height: 26
-                    width: chipRow.implicitWidth + 16
+                    width: Math.min(chipLabel.implicitWidth + chipValue.implicitWidth + 28, Math.max(112, composerChipFlow.width))
+                    clip: true
                     color: root.chipFill(modelData.tone)
                     border.width: 1
                     border.color: root.chipBorder(modelData.tone)
 
                     Row {
                         id: chipRow
-                        anchors.centerIn: parent
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.leftMargin: 8
+                        anchors.rightMargin: 8
                         spacing: 6
 
                         Text {
+                            id: chipLabel
                             text: modelData.label
                             color: "#7e9baa"
                             font.family: "Bahnschrift SemiCondensed"
@@ -114,10 +125,13 @@ Item {
                         }
 
                         Text {
+                            id: chipValue
                             text: modelData.value
                             color: "#e8f4f9"
                             font.family: "Segoe UI Semibold"
                             font.pixelSize: 10
+                            width: Math.max(20, parent.width - chipLabel.width - chipRow.spacing)
+                            elide: Text.ElideRight
                         }
                     }
                 }
@@ -167,8 +181,10 @@ Item {
 
         TextArea {
             id: input
+            objectName: "promptComposerInput"
             Layout.fillWidth: true
             Layout.fillHeight: true
+            Layout.minimumHeight: compact ? 44 : 70
             wrapMode: TextEdit.Wrap
             placeholderText: root.safeComposer.placeholder || root.placeholderText
             color: "#eff7fb"

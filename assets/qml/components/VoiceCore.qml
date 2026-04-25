@@ -370,9 +370,9 @@ Item {
              : "Warning"
         color: root.contrastColor("#c7dbe5", root.visualAdaptiveLabelContrast * 0.3)
         font.family: "Bahnschrift SemiCondensed"
-        font.pixelSize: root.shellMode === "ghost" ? 13 : 12
+        font.pixelSize: root.shellMode === "ghost" ? 14 : 13
         font.letterSpacing: 2.1
-        opacity: 0.58
+        opacity: 0.76
         style: Text.Raised
         styleColor: Qt.rgba(0.01, 0.04, 0.07, 0.16 + root.visualAdaptiveLabelContrast * 0.22)
     }

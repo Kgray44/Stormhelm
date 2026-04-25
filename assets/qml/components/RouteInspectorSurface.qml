@@ -54,7 +54,7 @@ Item {
 
                 Text {
                     text: root.safeData.subtitle || ""
-                    color: "#d2e3eb"
+                    color: "#e1eef4"
                     font.family: "Segoe UI Semibold"
                     font.pixelSize: root.panelMode ? 12 : 13
                     wrapMode: Text.Wrap
@@ -64,7 +64,7 @@ Item {
 
                 Text {
                     text: root.safeData.body || ""
-                    color: "#9cb6c2"
+                    color: "#c1d6df"
                     font.family: "Segoe UI"
                     font.pixelSize: root.panelMode ? 11 : 12
                     wrapMode: Text.Wrap
@@ -73,6 +73,7 @@ Item {
                 }
 
                 Flow {
+                    id: provenanceFlow
                     Layout.fillWidth: true
                     spacing: 8
                     visible: (root.safeData.provenance || []).length > 0
@@ -85,28 +86,38 @@ Item {
 
                             radius: 13
                             height: 28
-                            width: chipRow.implicitWidth + 18
+                            width: Math.min(chipLabel.implicitWidth + chipValue.implicitWidth + 31, Math.max(120, provenanceFlow.width))
+                            clip: true
                             color: "#10202a"
                             border.width: 1
                             border.color: "#33586b"
 
                             Row {
                                 id: chipRow
-                                anchors.centerIn: parent
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.leftMargin: 9
+                                anchors.rightMargin: 9
                                 spacing: 6
 
                                 Text {
+                                    id: chipLabel
                                     text: modelData.label
                                     color: "#7f9cab"
                                     font.family: "Bahnschrift SemiCondensed"
                                     font.pixelSize: 10
+                                    elide: Text.ElideRight
                                 }
 
                                 Text {
+                                    id: chipValue
                                     text: modelData.value
                                     color: "#e2f1f8"
                                     font.family: "Segoe UI Semibold"
                                     font.pixelSize: 10
+                                    width: Math.max(20, parent.width - chipLabel.width - chipRow.spacing)
+                                    elide: Text.ElideRight
                                 }
                             }
                         }
@@ -156,9 +167,9 @@ Item {
                     }
                 }
 
-                RowLayout {
+                ColumnLayout {
                     Layout.fillWidth: true
-                    spacing: 14
+                    spacing: 10
 
                     Rectangle {
                         Layout.fillWidth: true

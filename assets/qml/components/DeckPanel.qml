@@ -32,8 +32,13 @@ Item {
     readonly property int minCols: Math.max(2, Number((panelData || {}).minCols || 2))
     readonly property int minRows: Math.max(2, Number((panelData || {}).minRows || 2))
     readonly property string edgeHint: String((panelData || {}).edge || "center")
-    readonly property real revealOffsetX: edgeHint === "left" ? -26 : edgeHint === "right" ? 26 : 0
-    readonly property real revealOffsetY: edgeHint === "bottom" ? 22 : edgeHint === "center" ? 10 : 0
+    readonly property bool revealFromLeft: edgeHint === "left" || (edgeHint === "center" && liveGridX < gridColumns / 2)
+    readonly property real revealOffsetX: edgeHint === "bottom"
+                                             ? 0
+                                             : revealFromLeft
+                                               ? -root.width - root.gutter - root.x
+                                               : root.layoutWidth + root.gutter - root.x
+    readonly property real revealOffsetY: edgeHint === "bottom" ? root.layoutHeight + root.gutter - root.y : 0
     readonly property bool engaged: dragArea.drag.active
                                   || rightResize.pressed
                                   || bottomResize.pressed
@@ -47,7 +52,7 @@ Item {
 
     z: engaged ? 40 : (livePinned ? 24 : 12)
     scale: engaged ? 1.01 : 1.0
-    opacity: root.revealProgress
+    opacity: root.revealProgress > 0.02 ? 1 : 0
 
     Behavior on x {
         enabled: !root.engaged
@@ -69,7 +74,7 @@ Item {
         NumberAnimation { duration: 140; easing.type: Easing.InOutQuad }
     }
     Behavior on opacity {
-        NumberAnimation { duration: 180; easing.type: Easing.InOutQuad }
+        NumberAnimation { duration: 80; easing.type: Easing.InOutQuad }
     }
 
     transform: [
@@ -213,6 +218,7 @@ Item {
                 Layout.fillWidth: true
                 implicitHeight: headerRow.implicitHeight + 8
                 radius: 18
+                clip: true
                 color: Qt.rgba(0.07, 0.12, 0.16, root.engaged ? 0.38 : 0.24)
                 border.width: 1
                 border.color: Qt.rgba(0.47, 0.74, 0.84, root.engaged ? 0.34 : 0.18)
@@ -224,6 +230,8 @@ Item {
                     spacing: 8
 
                     Row {
+                        Layout.preferredWidth: 16
+                        Layout.alignment: Qt.AlignVCenter
                         spacing: 4
 
                         Repeater {
@@ -241,9 +249,11 @@ Item {
 
                     ColumnLayout {
                         Layout.fillWidth: true
+                        Layout.minimumWidth: 0
                         spacing: 1
 
                         Text {
+                            Layout.fillWidth: true
                             text: String((root.panelData || {}).title || "")
                             color: "#edf7fb"
                             font.family: "Bahnschrift SemiCondensed"
@@ -253,9 +263,10 @@ Item {
                         }
 
                         Text {
+                            Layout.fillWidth: true
                             text: String((root.panelData || {}).subtitle || "")
                             visible: text.length > 0
-                            color: "#86a2af"
+                            color: "#bdd2dc"
                             font.family: "Segoe UI"
                             font.pixelSize: 10
                             elide: Text.ElideRight
@@ -264,6 +275,8 @@ Item {
 
                     Row {
                         id: headerButtons
+                        Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
+                        Layout.preferredWidth: implicitWidth
                         z: 3
                         spacing: 6
 

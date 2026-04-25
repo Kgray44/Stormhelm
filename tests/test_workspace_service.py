@@ -44,6 +44,31 @@ def test_workspace_service_assembles_relevant_local_items(temp_project_root: Pat
     assert any(item.get("path", "").endswith("packaging-notes.md") for item in result["items"])
 
 
+def test_workspace_service_names_research_workspace_from_command_phrase(temp_config) -> None:
+    database = SQLiteDatabase(temp_config.storage.database_path)
+    database.initialize()
+    conversations = ConversationRepository(database)
+    notes = NotesRepository(database)
+    preferences = PreferencesRepository(database)
+    repository = WorkspaceRepository(database)
+    service = WorkspaceService(
+        config=temp_config,
+        repository=repository,
+        notes=notes,
+        conversations=conversations,
+        preferences=preferences,
+        session_state=ConversationStateStore(preferences),
+        indexer=WorkspaceIndexer(temp_config),
+        events=EventBuffer(),
+        persona=PersonaContract(temp_config),
+    )
+
+    result = service.assemble_workspace("can you make a workspace for researching", session_id="default")
+
+    assert result["workspace"]["name"] == "Research"
+    assert result["workspace"]["topic"] == "research"
+
+
 def test_workspace_service_restores_recent_workspace_memory(temp_config) -> None:
     database = SQLiteDatabase(temp_config.storage.database_path)
     database.initialize()
