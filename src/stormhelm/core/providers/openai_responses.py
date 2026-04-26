@@ -6,6 +6,7 @@ from typing import Any
 import httpx
 
 from stormhelm.config.models import OpenAIConfig
+from stormhelm.core.providers.audit import record_provider_call
 from stormhelm.core.providers.base import AssistantProvider, ProviderToolCall, ProviderTurnResult
 
 
@@ -23,11 +24,23 @@ class OpenAIResponsesProvider(AssistantProvider):
         model: str | None = None,
         max_output_tokens: int | None = None,
     ) -> ProviderTurnResult:
+        selected_model = model or self.config.model
+        record_provider_call(
+            provider_name="openai",
+            provider_type="openai_responses",
+            source="stormhelm.core.providers.openai_responses.OpenAIResponsesProvider.generate",
+            purpose=self._purpose_for_model(selected_model),
+            model_name=selected_model,
+            openai_called=True,
+            llm_called=True,
+            embedding_called=False,
+            metadata={"tool_count": len(tools)},
+        )
         if not self.config.api_key:
             raise RuntimeError("OPENAI_API_KEY is not configured.")
 
         payload: dict[str, Any] = {
-            "model": model or self.config.model,
+            "model": selected_model,
             "instructions": instructions,
             "input": input_items,
             "tools": tools,
@@ -95,3 +108,10 @@ class OpenAIResponsesProvider(AssistantProvider):
                 )
             )
         return calls
+
+    def _purpose_for_model(self, model_name: str) -> str:
+        if model_name == self.config.reasoning_model:
+            return "reasoner_summary"
+        if model_name == self.config.planner_model:
+            return "planner_or_tool_fallback"
+        return "assistant_generation"

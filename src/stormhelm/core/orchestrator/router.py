@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import re
 from urllib.parse import urlparse
 
 
@@ -19,7 +20,7 @@ class RoutedCommand:
 
 class IntentRouter:
     def route(self, message: str, *, surface_mode: str = "ghost") -> RoutedCommand:
-        text = message.strip()
+        text = self._strip_operator_wrappers(message)
         lower = text.lower()
         normalized_surface = surface_mode.strip().lower() if surface_mode else "ghost"
         if not text:
@@ -136,6 +137,14 @@ class IntentRouter:
             )
 
         return RoutedCommand()
+
+    def _strip_operator_wrappers(self, message: str) -> str:
+        text = " ".join(str(message or "").split()).strip()
+        text = re.sub(r"^\s*stormhelm\s*[,:\-]\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"^\s*i\s+need\s+the\s+stormhelm\s+route\s+for\s+this\s*:\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"^\s*(?:hey\s+)?(?:can|could)\s+you\s+", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"^\s*(?:please|pls)\s+", "", text, flags=re.IGNORECASE)
+        return text.strip()
 
     def _route_open_target(self, target: str, *, prefer_deck: bool) -> RoutedCommand:
         if self._looks_like_url(target):

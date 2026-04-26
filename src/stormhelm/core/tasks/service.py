@@ -92,6 +92,8 @@ _JOB_STATUS_RANK = {
 _DUPLICATE_SUPPRESSION_WINDOW_SECONDS = 300
 _TASK_ARCHIVE_AFTER_SECONDS = 7 * 24 * 60 * 60
 _TASK_EXPIRE_AFTER_SECONDS = 14 * 24 * 60 * 60
+_TASK_PAYLOAD_STRING_LIMIT = 600
+_TASK_PAYLOAD_LIST_LIMIT = 20
 
 
 class DurableTaskService:
@@ -302,6 +304,145 @@ class DurableTaskService:
         self._sync_task_memory(saved)
         return saved
 
+    def _compact_result_payload_for_task(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {}
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        compact: dict[str, Any] = {}
+        if payload.get("summary"):
+            compact["summary"] = str(payload.get("summary"))[:_TASK_PAYLOAD_STRING_LIMIT]
+        if not isinstance(data, dict):
+            return compact
+        for key in (
+            "dry_run",
+            "tool_name",
+            "display_name",
+            "classification",
+            "execution_mode",
+            "approval_required",
+            "preview_required",
+            "payloadGuardrails",
+            "payload_guardrails",
+        ):
+            if key in data:
+                compact[key] = self._compact_task_payload_value(data.get(key))
+        workspace = data.get("workspace")
+        if isinstance(workspace, dict):
+            compact["workspace"] = {
+                key: self._compact_task_payload_value(workspace.get(key))
+                for key in (
+                    "workspaceId",
+                    "name",
+                    "topic",
+                    "summary",
+                    "whereLeftOff",
+                    "likelyNext",
+                    "referencesSummary",
+                    "findingsSummary",
+                    "sessionNotesSummary",
+                    "payloadGuardrails",
+                )
+                if key in workspace
+            }
+        action = data.get("action")
+        if isinstance(action, dict):
+            compact["action"] = {
+                key: self._compact_task_payload_value(action.get(key))
+                for key in (
+                    "type",
+                    "module",
+                    "section",
+                    "active_item_id",
+                    "bearing_title",
+                    "micro_response",
+                    "full_response",
+                )
+                if key in action
+            }
+            items = action.get("items")
+            if isinstance(items, list):
+                compact["action"]["itemsSummary"] = {
+                    "total_count": len(items),
+                    "displayed_count": min(len(items), _TASK_PAYLOAD_LIST_LIMIT),
+                    "truncated": len(items) > _TASK_PAYLOAD_LIST_LIMIT,
+                    "omitted_count": max(0, len(items) - _TASK_PAYLOAD_LIST_LIMIT),
+                }
+        items = data.get("items")
+        if isinstance(items, list):
+            compact["itemsSummary"] = {
+                "total_count": len(items),
+                "displayed_count": min(len(items), _TASK_PAYLOAD_LIST_LIMIT),
+                "truncated": len(items) > _TASK_PAYLOAD_LIST_LIMIT,
+                "omitted_count": max(0, len(items) - _TASK_PAYLOAD_LIST_LIMIT),
+            }
+        debug = data.get("debug")
+        if isinstance(debug, dict) and isinstance(debug.get("route_handler_subspans"), dict):
+            compact["route_handler_subspans"] = dict(debug.get("route_handler_subspans") or {})
+        return compact
+
+    def _compact_task_payload_value(self, value: Any, *, depth: int = 0) -> Any:
+        if depth > 4:
+            return {"truncated": True, "reason": "max_task_payload_depth"}
+        if isinstance(value, dict):
+            compact: dict[str, Any] = {}
+            for key, item in value.items():
+                normalized_key = str(key)
+                if normalized_key in {"data", "workspace", "action", "items", "references", "findings", "sessionNotes"}:
+                    if normalized_key == "data" and isinstance(item, dict):
+                        compact[normalized_key] = self._compact_result_payload_for_task({"data": item})
+                    elif isinstance(item, list):
+                        compact[f"{normalized_key}Summary"] = {
+                            "total_count": len(item),
+                            "displayed_count": min(len(item), _TASK_PAYLOAD_LIST_LIMIT),
+                            "truncated": len(item) > _TASK_PAYLOAD_LIST_LIMIT,
+                            "omitted_count": max(0, len(item) - _TASK_PAYLOAD_LIST_LIMIT),
+                        }
+                    else:
+                        compact[normalized_key] = self._compact_task_payload_value(item, depth=depth + 1)
+                    continue
+                compact[normalized_key] = self._compact_task_payload_value(item, depth=depth + 1)
+            return compact
+        if isinstance(value, list):
+            displayed = [self._compact_task_payload_value(item, depth=depth + 1) for item in value[:_TASK_PAYLOAD_LIST_LIMIT]]
+            if len(value) > _TASK_PAYLOAD_LIST_LIMIT:
+                displayed.append(
+                    {
+                        "truncated": True,
+                        "total_count": len(value),
+                        "displayed_count": _TASK_PAYLOAD_LIST_LIMIT,
+                        "omitted_count": len(value) - _TASK_PAYLOAD_LIST_LIMIT,
+                    }
+                )
+            return displayed
+        if isinstance(value, str):
+            return value[:_TASK_PAYLOAD_STRING_LIMIT]
+        return value
+
+    def _compact_active_task_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        compact = self._compact_task_payload_value(payload)
+        if not isinstance(compact, dict):
+            return {}
+        evidence = compact.get("evidence")
+        if isinstance(evidence, list):
+            compact["evidence"] = evidence[:_TASK_PAYLOAD_LIST_LIMIT]
+            compact["evidenceSummary"] = {
+                "total_count": len(evidence),
+                "displayed_count": min(len(evidence), _TASK_PAYLOAD_LIST_LIMIT),
+                "truncated": len(evidence) > _TASK_PAYLOAD_LIST_LIMIT,
+                "omitted_count": max(0, len(evidence) - _TASK_PAYLOAD_LIST_LIMIT),
+            }
+        try:
+            payload_bytes = len(json.dumps(compact, default=str, separators=(",", ":")).encode("utf-8"))
+        except (TypeError, ValueError):
+            payload_bytes = 0
+        compact["payloadGuardrails"] = {
+            "response_json_bytes": payload_bytes,
+            "truncated_task_payload": payload_bytes > 1_000_000,
+            "payload_guardrail_triggered": payload_bytes > 1_000_000,
+            "payload_guardrail_reason": "active_task_payload_over_warn_guardrail" if payload_bytes > 1_000_000 else "",
+        }
+        return compact
+
     def record_verification_summary(self, task_id: str, summary: str, *, source: str = "verification") -> TaskRecord | None:
         task = self.repository.get_task(task_id)
         if task is None:
@@ -478,7 +619,7 @@ class DurableTaskService:
         memory_context = self._task_memory_context(task)
         if memory_context:
             payload["memoryContext"] = memory_context
-        return payload
+        return self._compact_active_task_payload(payload)
 
     def where_we_left_off(self, *, session_id: str) -> dict[str, Any] | None:
         resolution = self._resolve_continuity_task(session_id)
@@ -1540,7 +1681,7 @@ class DurableTaskService:
                 kind=kind,
                 summary=summary,
                 source=tool_name,
-                metadata={"data": dict(payload.get("data") or {}) if isinstance(payload.get("data"), dict) else {}},
+                metadata={"data": self._compact_result_payload_for_task(payload)},
                 created_at=created_at,
             )
         )

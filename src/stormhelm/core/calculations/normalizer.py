@@ -13,10 +13,22 @@ from stormhelm.core.calculations.models import NormalizedCalculation
 DIRECT_EXPRESSION_PATTERN = re.compile(r"^[0-9eE+\-*/^().,\sA-Za-z\u00b5\u03a9\u2212\u2012\u2013\u2014\u00d7\u00f7]+$")
 NORMALIZED_EXPRESSION_PATTERN = re.compile(r"^[0-9eE+\-*/^().]+$")
 EXPLICIT_REQUEST_PATTERN = re.compile(
-    r"^\s*(?:please\s+)?(?:calculate|compute|evaluate|double[- ]check|recompute|what(?:'s| is))\s+(?P<expr>.+?)\s*[?.!]*\s*$",
+    r"^\s*(?:please\s+)?(?:calculate|compute|evaluate|double[- ]check|recompute|what(?:'s| is| does))\s+(?P<expr>.+?)\s*[?.!]*\s*$",
     re.IGNORECASE,
 )
 SOLVE_REQUEST_PATTERN = re.compile(r"^\s*solve\s+(?P<expr>.+?)\s*[?.!]*\s*$", re.IGNORECASE)
+EMBEDDED_EXPLICIT_REQUEST_PATTERN = re.compile(
+    r"\b(?:calculate|compute|evaluate|calc|solve|what(?:'s| is| does))\s+(?P<expr>[0-9A-Za-z+\-*/^().,\s\u2212\u2012\u2013\u2014\u00d7\u00f7]+)",
+    re.IGNORECASE,
+)
+EMBEDDED_COLON_EXPRESSION_PATTERN = re.compile(
+    r":\s*(?P<expr>[0-9A-Za-z+\-*/^().,\s\u2212\u2012\u2013\u2014\u00d7\u00f7]+)",
+    re.IGNORECASE,
+)
+EMBEDDED_ARITHMETIC_FRAGMENT_PATTERN = re.compile(
+    r"(?P<expr>\d+(?:\s*(?:[+\-*/^x\u00d7\u00f7]|\bplus\b|\bminus\b|\btimes\b|\bmultiplied\s+by\b|\bdivided\s+by\b|\bover\b)\s*\d+)+)",
+    re.IGNORECASE,
+)
 STEP_REQUEST_PATTERN = re.compile(
     r"^\s*(?:please\s+)?(?:show(?: me)?(?: the)? steps?|walk me through|show your work|how did you get)\s+(?:for\s+)?(?P<expr>.+?)\s*[?.!]*\s*$",
     re.IGNORECASE,
@@ -54,6 +66,37 @@ SUPPORTED_UNIT_LABELS = {
     "s": "s",
 }
 UNIT_LABEL_CHAR_PATTERN = re.compile(r"[A-Za-z\u03a9]")
+ARITHMETIC_WORD_REPLACEMENTS = (
+    (re.compile(r"\bdivided\s+by\b", re.IGNORECASE), "/"),
+    (re.compile(r"\bmultiplied\s+by\b", re.IGNORECASE), "*"),
+    (re.compile(r"\btimes\b", re.IGNORECASE), "*"),
+    (re.compile(r"\bover\b", re.IGNORECASE), "/"),
+    (re.compile(r"\bplus\b", re.IGNORECASE), "+"),
+    (re.compile(r"\bminus\b", re.IGNORECASE), "-"),
+)
+NUMBER_WORDS = {
+    "zero": "0",
+    "one": "1",
+    "two": "2",
+    "three": "3",
+    "four": "4",
+    "five": "5",
+    "six": "6",
+    "seven": "7",
+    "eight": "8",
+    "nine": "9",
+    "ten": "10",
+    "eleven": "11",
+    "twelve": "12",
+    "thirteen": "13",
+    "fourteen": "14",
+    "fifteen": "15",
+    "sixteen": "16",
+    "seventeen": "17",
+    "eighteen": "18",
+    "nineteen": "19",
+    "twenty": "20",
+}
 
 
 @dataclass(slots=True)
@@ -114,7 +157,7 @@ def detect_expression_candidate(raw_text: str, normalized_text: str) -> Expressi
         match = pattern.match(raw)
         if not match:
             continue
-        expression = _strip_terminal_punctuation(match.group("expr"))
+        expression = _clean_requested_expression(match.group("expr"))
         if expression and _looks_like_direct_expression(expression):
             return ExpressionCandidate(
                 candidate=True,
@@ -127,7 +170,7 @@ def detect_expression_candidate(raw_text: str, normalized_text: str) -> Expressi
 
     explicit_match = EXPLICIT_REQUEST_PATTERN.match(raw)
     if explicit_match:
-        expression = _strip_terminal_punctuation(explicit_match.group("expr"))
+        expression = _clean_requested_expression(explicit_match.group("expr"))
         raw_lower = raw.lower()
         if raw_lower.startswith(("what is", "what's")):
             candidate_allowed = bool(expression) and _starts_like_expression(expression) and (
@@ -156,7 +199,7 @@ def detect_expression_candidate(raw_text: str, normalized_text: str) -> Expressi
 
     solve_match = SOLVE_REQUEST_PATTERN.match(raw)
     if solve_match:
-        expression = _strip_terminal_punctuation(solve_match.group("expr"))
+        expression = _clean_requested_expression(solve_match.group("expr"))
         if expression and (_contains_numeric_signal(expression) or _contains_alpha(expression)):
             return ExpressionCandidate(
                 candidate=True,
@@ -167,11 +210,19 @@ def detect_expression_candidate(raw_text: str, normalized_text: str) -> Expressi
                 route_confidence=0.88,
             )
 
+    embedded = _embedded_expression_candidate(raw)
+    if embedded is not None:
+        return embedded
+
+    fragment = _embedded_arithmetic_fragment_candidate(raw)
+    if fragment is not None:
+        return fragment
+
     return ExpressionCandidate(candidate=False)
 
 
 def normalize_expression_text(expression: str) -> NormalizedCalculation:
-    normalized = str(expression or "")
+    normalized = _normalize_arithmetic_words(str(expression or ""))
     notes: list[str] = []
     details: list[CalculationNormalizationDetail] = []
 
@@ -268,6 +319,9 @@ def detect_requested_output_mode(raw_text: str, normalized_text: str) -> Calcula
             "how did you get that",
             "show your work",
             "why is that the answer",
+            "show the arithmetic",
+            "show me the arithmetic",
+            "walk through that calculation",
         )
     ):
         return CalculationOutputMode.STEP_BY_STEP
@@ -278,6 +332,73 @@ def detect_requested_output_mode(raw_text: str, normalized_text: str) -> Calcula
 
 def _strip_terminal_punctuation(text: str) -> str:
     return str(text or "").strip().rstrip("?.!").strip()
+
+
+def _clean_requested_expression(text: str) -> str:
+    expression = _strip_terminal_punctuation(text)
+    if ":" in expression and re.match(r"^(?:this|the)?\s*(?:expression|math|calc(?:ulation)?)\s*:", expression, re.IGNORECASE):
+        expression = expression.split(":", 1)[1].strip()
+    expression = re.sub(r"\b(?:equals?|equal to)\s*$", "", expression, flags=re.IGNORECASE).strip()
+    return expression
+
+
+def _embedded_expression_candidate(raw_text: str) -> ExpressionCandidate | None:
+    raw = str(raw_text or "")
+    for pattern, reason, confidence in (
+        (EMBEDDED_EXPLICIT_REQUEST_PATTERN, "embedded calculation phrase matched", 0.93),
+        (EMBEDDED_COLON_EXPRESSION_PATTERN, "embedded colon expression matched", 0.9),
+    ):
+        for match in pattern.finditer(raw):
+            expression = _strip_terminal_punctuation(match.group("expr"))
+            expression = _trim_embedded_expression(expression)
+            if expression and _looks_like_direct_expression(expression):
+                operator_count = _operator_count(expression)
+                requested_mode = (
+                    CalculationOutputMode.SHORT_EXPRESSION
+                    if operator_count >= 4
+                    else CalculationOutputMode.ANSWER_ONLY
+                )
+                return ExpressionCandidate(
+                    candidate=True,
+                    explicit_request=True,
+                    extracted_expression=expression,
+                    requested_mode=requested_mode,
+                    reasons=[reason],
+                    route_confidence=confidence,
+                )
+    return None
+
+
+def _embedded_arithmetic_fragment_candidate(raw_text: str) -> ExpressionCandidate | None:
+    raw = str(raw_text or "")
+    if not re.search(r"\b(?:math|arithmetic|answer|result|solve|compute|calculate|calc|diagnose|route|check)\b", raw, re.IGNORECASE):
+        return None
+    for match in EMBEDDED_ARITHMETIC_FRAGMENT_PATTERN.finditer(raw):
+        expression = _strip_terminal_punctuation(match.group("expr"))
+        if expression and _looks_like_direct_expression(expression):
+            return ExpressionCandidate(
+                candidate=True,
+                explicit_request=True,
+                extracted_expression=expression,
+                requested_mode=CalculationOutputMode.ANSWER_ONLY,
+                reasons=["embedded arithmetic fragment matched"],
+                route_confidence=0.91,
+            )
+    return None
+
+
+def _trim_embedded_expression(expression: str) -> str:
+    text = str(expression or "").strip()
+    text = re.split(
+        r"\b(?:without|unless|please|quick|quickly|thanks|then|and then|but)\b",
+        text,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0].strip(" ,;:")
+    text = re.sub(r"\b(?:equals?|equal to)\s*$", "", text, flags=re.IGNORECASE).strip()
+    while text and not _ends_like_expression(text):
+        text = text[:-1].strip()
+    return text
 
 
 def _looks_like_direct_expression(text: str) -> bool:
@@ -445,11 +566,14 @@ def _contains_alpha(text: str) -> bool:
 
 
 def _contains_operator(text: str) -> bool:
-    return bool(re.search(r"[+\-*/^()]", text))
+    return bool(re.search(r"[+\-*/^()]", _normalize_arithmetic_words(text)))
 
 
 def _starts_like_expression(text: str) -> bool:
-    return bool(re.match(r"^[\s(.\-0-9]", text))
+    if re.match(r"^[\s(.\-0-9]", text):
+        return True
+    first = str(text or "").strip().split(maxsplit=1)[0].lower()
+    return first in NUMBER_WORDS
 
 
 def _looks_like_engineeringish_expression(text: str) -> bool:
@@ -465,4 +589,29 @@ def _looks_like_engineeringish_expression(text: str) -> bool:
 
 
 def _operator_count(text: str) -> int:
-    return sum(1 for character in text if character in "+-*/^")
+    return sum(1 for character in _normalize_arithmetic_words(text) if character in "+-*/^")
+
+
+def _normalize_arithmetic_words(text: str) -> str:
+    normalized = str(text or "")
+    for pattern, replacement in ARITHMETIC_WORD_REPLACEMENTS:
+        normalized = pattern.sub(f" {replacement} ", normalized)
+    normalized = re.sub(
+        r"\b(" + "|".join(re.escape(word) for word in NUMBER_WORDS) + r")\b",
+        lambda match: NUMBER_WORDS[match.group(1).lower()],
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if re.search(r"\d\s*x\s*\d", normalized, flags=re.IGNORECASE):
+        normalized = re.sub(r"(?<=\d)\s*x\s*(?=\d)", " * ", normalized, flags=re.IGNORECASE)
+    return normalized
+
+
+def _ends_like_expression(text: str) -> bool:
+    stripped = str(text or "").strip()
+    if not stripped:
+        return False
+    if stripped[-1].isdigit() or stripped[-1] in ")]":
+        return True
+    last = stripped.split()[-1].strip(".,;:").lower()
+    return last in NUMBER_WORDS

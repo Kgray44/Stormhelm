@@ -176,6 +176,11 @@ VISUAL_REFERENT_HINTS = {
     "button",
     "checkbox",
     "dropdown",
+    "field",
+    "icon",
+    "menu",
+    "panel",
+    "tab",
     "warning",
     "error",
 }
@@ -191,7 +196,30 @@ INSPECTION_MARKERS = {
     "why ",
     "can you",
 }
-ACTION_VERBS = {"click", "press", "type", "enter", "fill", "focus", "select", "scroll", "hover", "open"}
+ACTION_VERBS = {"click", "press", "type", "enter", "fill", "focus", "select", "scroll", "hover", "open", "tap"}
+UI_CONTROL_LABELS = {
+    "accept",
+    "apply",
+    "back",
+    "cancel",
+    "close",
+    "confirm",
+    "continue",
+    "done",
+    "finish",
+    "log in",
+    "login",
+    "next",
+    "no",
+    "ok",
+    "okay",
+    "save",
+    "search",
+    "sign in",
+    "sign up",
+    "submit",
+    "yes",
+}
 
 
 @dataclass(slots=True)
@@ -396,8 +424,15 @@ class ScreenAwarenessPlannerSeam:
         if not lower:
             return None, [], 0.0
 
+        if any(token in lower for token in {" code", "programming", " pattern", " regex", " api"}):
+            return None, [], 0.0
         if self.config.phase in {"phase10", "phase11", "phase12"} and any(phrase in lower for phrase in BRAIN_INTEGRATION_PHRASES):
             return ScreenIntentType.BRAIN_INTEGRATION, ["explicit brain-integration phrase matched"], 0.96
+        if re.search(
+            r"\b(?:what|which|show|list)\b.{0,24}\bwindows?\b.{0,24}\b(?:open|active|focused)\b",
+            lower,
+        ) or re.search(r"\b(?:open|active|focused)\b.{0,16}\bwindows?\b", lower):
+            return None, [], 0.0
         if self.config.phase in {"phase11", "phase12"} and self._is_power_request(lower):
             return self._power_request_intent(lower), ["explicit phase11 power-feature phrase matched"], 0.95
         if any(phrase in lower for phrase in WORKFLOW_REUSE_PHRASES):
@@ -455,19 +490,41 @@ class ScreenAwarenessPlannerSeam:
         return any(marker in normalized_text for marker in INSPECTION_MARKERS)
 
     def _looks_like_action_request(self, normalized_text: str, *, input_signals: dict[str, Any]) -> bool:
-        tokens = normalized_text.split()
+        action_text = re.sub(
+            r"^(?:please|pls|can\s+you|could\s+you|would\s+you)\s+",
+            "",
+            normalized_text,
+        ).strip()
+        tokens = action_text.split()
         if not tokens:
             return False
-        if tokens[0] in ACTION_VERBS and (
-            self._contains_visible_referent(normalized_text)
-            or any(token in {"this", "that", "it", "here"} for token in tokens)
-        ):
-            return True
+        if tokens[0] in ACTION_VERBS:
+            if self._contains_visible_referent(action_text):
+                return True
+            if self._looks_like_named_ui_control(action_text):
+                return True
+            if input_signals.get("recent_screen_resolution_available") and any(
+                token in {"this", "that", "it", "here"} for token in tokens
+            ):
+                return True
         if input_signals.get("recent_screen_resolution_available") and any(
             phrase in normalized_text for phrase in _CONFIRMATION_FOLLOW_UPS
         ):
             return True
         return False
+
+    def _looks_like_named_ui_control(self, action_text: str) -> bool:
+        target = re.sub(
+            r"^(?:click|press|tap|select|open|focus)\s+",
+            "",
+            action_text,
+        ).strip(" .")
+        target = re.sub(r"^(?:the|this|that)\s+", "", target)
+        if not target or target in {"it", "this", "that", "here"}:
+            return False
+        if target in UI_CONTROL_LABELS:
+            return True
+        return any(re.search(rf"\b{re.escape(label)}\b", target) for label in UI_CONTROL_LABELS if " " in label)
 
     def _is_power_request(self, normalized_text: str) -> bool:
         return any(

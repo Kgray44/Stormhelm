@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 from uuid import uuid4
 
@@ -84,6 +86,31 @@ _SURFACE_PRESENTATION_KINDS = {
     "logbook": "collection",
 }
 
+WORKSPACE_DEFAULT_EMBEDDED_ITEM_LIMIT = 100
+WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT = 100
+WORKSPACE_PAYLOAD_WARN_BYTES = 1_000_000
+WORKSPACE_PAYLOAD_FAIL_BYTES = 5_000_000
+_WORKSPACE_COMPACT_STRING_LIMIT = 600
+_WORKSPACE_COMPACT_ITEM_KEYS = (
+    "itemId",
+    "id",
+    "kind",
+    "viewer",
+    "title",
+    "subtitle",
+    "module",
+    "section",
+    "url",
+    "path",
+    "summary",
+    "detail",
+    "badge",
+    "role",
+    "source",
+    "score",
+    "status",
+)
+
 _WORKSPACE_COMMAND_TOKENS = {
     "a",
     "an",
@@ -117,6 +144,24 @@ _WORKSPACE_COMMAND_TOKENS = {
     "workspaces",
     "you",
 }
+
+
+def _add_workspace_subspan(subspans: dict[str, float], key: str, started_at: float) -> None:
+    subspans[key] = round(float(subspans.get(key, 0.0)) + (perf_counter() - started_at) * 1000, 3)
+
+
+def _empty_workspace_subspans() -> dict[str, float]:
+    return {
+        "workspace_state_load_ms": 0.0,
+        "workspace_db_query_ms": 0.0,
+        "workspace_file_scan_ms": 0.0,
+        "workspace_index_or_search_ms": 0.0,
+        "workspace_save_write_ms": 0.0,
+        "workspace_task_graph_ms": 0.0,
+        "workspace_event_emit_ms": 0.0,
+        "workspace_dto_build_ms": 0.0,
+        "workspace_payload_build_ms": 0.0,
+    }
 
 _TOPIC_TOKEN_NORMALIZATIONS = {
     "researching": "research",
@@ -261,6 +306,223 @@ class WorkspaceService:
         self.persona = persona
         self.memory = memory or SemanticMemoryService(SemanticMemoryRepository(repository.database))
         self.templates = _default_workspace_templates()
+
+    def _compact_workspace_item(self, item: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(item, dict):
+            return {}
+        compact: dict[str, Any] = {}
+        for key in _WORKSPACE_COMPACT_ITEM_KEYS:
+            if key not in item:
+                continue
+            value = item.get(key)
+            if isinstance(value, str):
+                compact[key] = value[:_WORKSPACE_COMPACT_STRING_LIMIT]
+            elif isinstance(value, (int, float, bool)) or value is None:
+                compact[key] = value
+            elif isinstance(value, list):
+                compact[key] = [
+                    str(entry)[:_WORKSPACE_COMPACT_STRING_LIMIT]
+                    if not isinstance(entry, dict)
+                    else self._compact_workspace_item(entry)
+                    for entry in value[:8]
+                ]
+            elif isinstance(value, dict):
+                compact[key] = {
+                    str(child_key): (
+                        str(child_value)[:_WORKSPACE_COMPACT_STRING_LIMIT]
+                        if not isinstance(child_value, (int, float, bool, type(None)))
+                        else child_value
+                    )
+                    for child_key, child_value in list(value.items())[:8]
+                    if str(child_key) in {"label", "value", "type", "source", "reason", "code"}
+                }
+        if not compact.get("itemId"):
+            identity = str(item.get("itemId") or item.get("url") or item.get("path") or item.get("title") or "").strip()
+            if identity:
+                compact["itemId"] = identity[:_WORKSPACE_COMPACT_STRING_LIMIT]
+        if not compact.get("title") and item.get("name"):
+            compact["title"] = str(item.get("name"))[:_WORKSPACE_COMPACT_STRING_LIMIT]
+        return compact
+
+    def _bounded_workspace_items(
+        self,
+        items: object,
+        *,
+        limit: int = WORKSPACE_DEFAULT_EMBEDDED_ITEM_LIMIT,
+        query: str = "",
+        filters: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized = self._normalize_item_list(items)
+        effective_limit = max(0, int(limit))
+        displayed = [self._compact_workspace_item(item) for item in normalized[:effective_limit]]
+        total_count = len(normalized)
+        omitted_count = max(0, total_count - len(displayed))
+        summary: dict[str, Any] = {
+            "total_count": total_count,
+            "displayed_count": len(displayed),
+            "truncated": omitted_count > 0,
+            "omitted_count": omitted_count,
+            "limit": effective_limit,
+        }
+        if query:
+            summary["query"] = query
+        if filters:
+            summary["filters"] = dict(filters)
+        if omitted_count > 0:
+            summary["continuation_token"] = f"offset:{len(displayed)}"
+        return {"items": displayed, "summary": summary}
+
+    def _cap_payload_list(
+        self,
+        payload: dict[str, Any],
+        key: str,
+        summary_key: str,
+        *,
+        limit: int = WORKSPACE_DEFAULT_EMBEDDED_ITEM_LIMIT,
+    ) -> None:
+        bounded = self._bounded_workspace_items(payload.get(key), limit=limit)
+        payload[key] = bounded["items"]
+        payload[summary_key] = bounded["summary"]
+
+    def _compact_workspace_payload(
+        self,
+        workspace: WorkspaceRecord,
+        *,
+        limit: int = WORKSPACE_DEFAULT_EMBEDDED_ITEM_LIMIT,
+    ) -> dict[str, Any]:
+        payload = workspace.to_dict()
+        self._cap_payload_list(payload, "references", "referencesSummary", limit=limit)
+        self._cap_payload_list(payload, "findings", "findingsSummary", limit=limit)
+        self._cap_payload_list(payload, "sessionNotes", "sessionNotesSummary", limit=limit)
+        return payload
+
+    def _compact_continuity_payload(
+        self,
+        continuity: WorkspaceContinuitySnapshot,
+        *,
+        limit: int = WORKSPACE_DEFAULT_EMBEDDED_ITEM_LIMIT,
+    ) -> dict[str, Any]:
+        payload = continuity.to_dict()
+        payload["activeItem"] = self._compact_workspace_item(payload.get("activeItem"))
+        self._cap_payload_list(payload, "openedItems", "openedItemsSummary", limit=limit)
+        self._cap_payload_list(payload, "references", "referencesSummary", limit=limit)
+        self._cap_payload_list(payload, "findings", "findingsSummary", limit=limit)
+        self._cap_payload_list(payload, "sessionNotes", "sessionNotesSummary", limit=limit)
+        return payload
+
+    def _compact_snapshot_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        compact = dict(payload) if isinstance(payload, dict) else {}
+        workspace_payload = compact.get("workspace")
+        if isinstance(workspace_payload, dict):
+            for key, summary_key in (
+                ("references", "referencesSummary"),
+                ("findings", "findingsSummary"),
+                ("sessionNotes", "sessionNotesSummary"),
+            ):
+                self._cap_payload_list(workspace_payload, key, summary_key, limit=WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT)
+        for key, summary_key in (
+            ("opened_items", "openedItemsSummary"),
+            ("references", "referencesSummary"),
+            ("findings", "findingsSummary"),
+            ("session_notes", "sessionNotesSummary"),
+        ):
+            if key in compact:
+                bounded = self._bounded_workspace_items(compact.get(key), limit=WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT)
+                compact[key] = bounded["items"]
+                compact[summary_key] = bounded["summary"]
+        continuity = compact.get("continuity")
+        if isinstance(continuity, dict):
+            for key, summary_key in (
+                ("openedItems", "openedItemsSummary"),
+                ("references", "referencesSummary"),
+                ("findings", "findingsSummary"),
+                ("sessionNotes", "sessionNotesSummary"),
+            ):
+                self._cap_payload_list(continuity, key, summary_key, limit=WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT)
+        if isinstance(compact.get("surface_content"), dict):
+            compact["surface_content"] = self._normalize_surface_content(compact.get("surface_content"))
+        compact["payloadGuardrails"] = self._payload_guardrail_metadata(compact)
+        return compact
+
+    def _payload_guardrail_metadata(self, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            payload_bytes = len(json.dumps(payload, default=str, separators=(",", ":")).encode("utf-8"))
+        except (TypeError, ValueError):
+            payload_bytes = 0
+        item_count = self._count_embedded_workspace_items(payload)
+        truncated = self._contains_truncated_workspace_items(payload)
+        reasons: list[str] = []
+        if payload_bytes >= WORKSPACE_PAYLOAD_FAIL_BYTES:
+            reasons.append("response_payload_over_fail_guardrail")
+        elif payload_bytes >= WORKSPACE_PAYLOAD_WARN_BYTES:
+            reasons.append("response_payload_over_warn_guardrail")
+        if truncated:
+            reasons.append("workspace_items_truncated")
+        return {
+            "response_json_bytes": payload_bytes,
+            "workspace_item_count": item_count,
+            "active_context_bytes": payload_bytes,
+            "active_context_item_count": item_count,
+            "truncated_workspace_items": truncated,
+            "payload_guardrail_triggered": bool(reasons),
+            "payload_guardrail_reason": ",".join(reasons),
+            "warn_threshold_bytes": WORKSPACE_PAYLOAD_WARN_BYTES,
+            "fail_threshold_bytes": WORKSPACE_PAYLOAD_FAIL_BYTES,
+        }
+
+    def _count_embedded_workspace_items(self, value: Any) -> int:
+        if isinstance(value, dict):
+            count = 0
+            for key, item in value.items():
+                if key in {"items", "opened_items", "openedItems", "references", "findings", "session_notes", "sessionNotes"} and isinstance(item, list):
+                    count += len(item)
+                    continue
+                count += self._count_embedded_workspace_items(item)
+            return count
+        if isinstance(value, list):
+            return sum(self._count_embedded_workspace_items(item) for item in value)
+        return 0
+
+    def _contains_truncated_workspace_items(self, value: Any) -> bool:
+        if isinstance(value, dict):
+            if bool(value.get("truncated")):
+                return True
+            return any(self._contains_truncated_workspace_items(item) for item in value.values())
+        if isinstance(value, list):
+            return any(self._contains_truncated_workspace_items(item) for item in value)
+        return False
+
+    def _compact_context_payload(self, value: Any, *, depth: int = 0) -> Any:
+        if depth > 5:
+            return {"truncated": True, "reason": "max_context_depth"}
+        if isinstance(value, dict):
+            compact: dict[str, Any] = {}
+            for key, item in value.items():
+                normalized_key = str(key)
+                if normalized_key in {"embedding", "vector", "raw", "content"}:
+                    continue
+                if normalized_key in {"items", "references", "findings", "sessionNotes", "session_notes", "openedItems", "opened_items"} and isinstance(item, list):
+                    bounded = self._bounded_workspace_items(item, limit=WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT)
+                    compact[normalized_key] = bounded["items"]
+                    compact[f"{normalized_key}Summary"] = bounded["summary"]
+                    continue
+                compact[normalized_key] = self._compact_context_payload(item, depth=depth + 1)
+            return compact
+        if isinstance(value, list):
+            displayed = [self._compact_context_payload(item, depth=depth + 1) for item in value[:WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT]]
+            if len(value) > WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT:
+                displayed.append(
+                    {
+                        "truncated": True,
+                        "total_count": len(value),
+                        "displayed_count": WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT,
+                        "omitted_count": len(value) - WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT,
+                    }
+                )
+            return displayed
+        if isinstance(value, str):
+            return value[:_WORKSPACE_COMPACT_STRING_LIMIT]
+        return value
 
     def capture_workspace_context(
         self,
@@ -411,6 +673,23 @@ class WorkspaceService:
             opened_items=opened_items,
             source_surface="capture_workspace_context",
         )
+        bounded_opened_items = self._bounded_workspace_items(
+            opened_items,
+            limit=WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT,
+        )["items"]
+        bounded_references = self._bounded_workspace_items(
+            references,
+            limit=WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT,
+        )["items"]
+        bounded_findings = self._bounded_workspace_items(
+            findings,
+            limit=WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT,
+        )["items"]
+        bounded_session_notes = self._bounded_workspace_items(
+            session_notes,
+            limit=WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT,
+        )["items"]
+        bounded_surface_content = self._normalize_surface_content(surface_content)
         self.session_state.set_active_workspace_id(session_id, workspace.workspace_id)
         self.session_state.set_active_posture(
             session_id,
@@ -423,38 +702,41 @@ class WorkspaceService:
                     continuity=continuity,
                     session_posture=session_posture,
                     capabilities=capabilities,
-                    surface_content=surface_content,
+                    surface_content=bounded_surface_content,
                 ),
                 "surface_mode": surface_mode,
                 "active_module": active_module,
                 "section": section,
-                "opened_items": opened_items,
-                "active_item": dict(active_item) if active_item else (opened_items[0] if opened_items else {}),
+                "opened_items": bounded_opened_items,
+                "active_item": self._compact_workspace_item(active_item if active_item else (opened_items[0] if opened_items else {})),
                 "active_goal": active_goal,
                 "current_task_state": current_task_state,
                 "last_completed_action": last_completed_action,
                 "pending_next_steps": pending_next_steps,
-                "references": references,
-                "findings": findings,
-                "session_notes": session_notes,
+                "references": bounded_references,
+                "findings": bounded_findings,
+                "session_notes": bounded_session_notes,
                 "where_left_off": where_left_off,
                 "likely_next": likely_next,
                 "template_key": template_key,
                 "template_source": template_source,
                 "problem_domain": problem_domain,
-                "continuity": continuity.to_dict(),
+                "continuity": self._compact_continuity_payload(continuity, limit=WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT),
                 "session_posture": session_posture.to_dict(),
                 "capabilities": capabilities,
-                "surface_content": surface_content,
+                "surface_content": bounded_surface_content,
             },
         )
 
     def assemble_workspace(self, query: str, *, session_id: str) -> dict[str, Any]:
+        subspans = _empty_workspace_subspans()
+        state_started = perf_counter()
         assembly_focus = self._resolve_assembly_focus(session_id=session_id, query=query)
         topic = str(assembly_focus.get("topic") or "current work")
         workspace = assembly_focus.get("workspace")
         if not isinstance(workspace, WorkspaceRecord):
             workspace = self._ensure_workspace(topic)
+        _add_workspace_subspan(subspans, "workspace_state_load_ms", state_started)
         template, template_source, template_confidence, template_reasons = self._resolve_template(
             query=query,
             topic=topic,
@@ -462,6 +744,7 @@ class WorkspaceService:
             active_context=self.session_state.get_active_context(session_id),
             allow_generic=True,
         )
+        index_started = perf_counter()
         plan = self._build_workspace_plan(
             query=query,
             session_id=session_id,
@@ -479,6 +762,7 @@ class WorkspaceService:
                 limitations=["No saved posture existed yet, so template defaults were used."],
             ),
         )
+        _add_workspace_subspan(subspans, "workspace_index_or_search_ms", index_started)
         return self._finalize_workspace_plan(
             plan=plan,
             query=query,
@@ -487,6 +771,7 @@ class WorkspaceService:
             description=f"Assembled workspace for {topic}.",
             bearing_title=self._workspace_bearing_title("assemble", template=template, query=query, workspace=plan.workspace),
             summary=self._workspace_summary("assemble", query=query, plan=plan),
+            route_handler_subspans=subspans,
         )
 
     def restore_workspace(self, query: str, *, session_id: str) -> dict[str, Any]:
@@ -760,6 +1045,21 @@ class WorkspaceService:
                 if part
             ),
         )
+        bounded_items = self._bounded_workspace_items(items, limit=WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT)["items"]
+        bounded_references = self._bounded_workspace_items(
+            self._normalize_item_list(posture.get("references") or workspace.references),
+            limit=WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT,
+        )["items"]
+        bounded_findings = self._bounded_workspace_items(
+            self._normalize_item_list(posture.get("findings") or workspace.findings),
+            limit=WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT,
+        )["items"]
+        bounded_session_notes = self._bounded_workspace_items(
+            self._normalize_item_list(posture.get("session_notes") or workspace.session_notes),
+            limit=WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT,
+        )["items"]
+        bounded_surface_content = self._normalize_surface_content(surface_content)
+        bounded_active_item = self._compact_workspace_item(active_item)
         return {
             "workspace": self._workspace_view_payload(
                 workspace,
@@ -769,20 +1069,20 @@ class WorkspaceService:
                 continuity=continuity,
                 session_posture=session_posture,
                 capabilities=capabilities,
-                surface_content=surface_content,
+                surface_content=bounded_surface_content,
             ),
-            "opened_items": items,
-            "active_item": active_item,
+            "opened_items": bounded_items,
+            "active_item": bounded_active_item,
             "active_goal": str(posture.get("active_goal") or workspace.active_goal),
             "current_task_state": str(posture.get("current_task_state") or workspace.current_task_state),
             "last_completed_action": str(posture.get("last_completed_action") or workspace.last_completed_action),
             "pending_next_steps": pending_next_steps,
             "where_left_off": where_left_off,
             "likely_next": likely_next,
-            "references": self._normalize_item_list(posture.get("references") or workspace.references),
-            "findings": self._normalize_item_list(posture.get("findings") or workspace.findings),
-            "session_notes": self._normalize_item_list(posture.get("session_notes") or workspace.session_notes),
-            "surface_content": surface_content,
+            "references": bounded_references,
+            "findings": bounded_findings,
+            "session_notes": bounded_session_notes,
+            "surface_content": bounded_surface_content,
             "memoryContext": memory_context,
             "action": {
                 "type": "workspace_restore",
@@ -797,10 +1097,10 @@ class WorkspaceService:
                     continuity=continuity,
                     session_posture=session_posture,
                     capabilities=capabilities,
-                    surface_content=surface_content,
+                    surface_content=bounded_surface_content,
                 ),
-                "items": items,
-                "active_item_id": str(active_item.get("itemId", "")) if active_item else "",
+                "items": bounded_items,
+                "active_item_id": str(bounded_active_item.get("itemId", "")) if bounded_active_item else "",
             },
         }
 
@@ -924,7 +1224,7 @@ class WorkspaceService:
         summary = self.persona.confirmation("Cleared active workspace.")
         return {
             "summary": summary,
-            "workspace": workspace.to_dict(),
+            "workspace": self._workspace_view_payload(workspace),
             "action": {
                 "type": "workspace_clear",
                 "workspace_id": workspace.workspace_id,
@@ -932,6 +1232,8 @@ class WorkspaceService:
         }
 
     def save_workspace(self, *, session_id: str) -> dict[str, Any]:
+        subspans = _empty_workspace_subspans()
+        state_started = perf_counter()
         posture = self.session_state.get_active_posture(session_id)
         workspace = self._workspace_from_posture(session_id, posture)
         if workspace is None:
@@ -945,8 +1247,14 @@ class WorkspaceService:
             }
             self.session_state.set_active_workspace_id(session_id, workspace.workspace_id)
             self.session_state.set_active_posture(session_id, posture)
+        _add_workspace_subspan(subspans, "workspace_state_load_ms", state_started)
+        save_started = perf_counter()
         snapshot = self._save_snapshot_from_posture(session_id=session_id, workspace=workspace, posture=posture)
+        _add_workspace_subspan(subspans, "workspace_save_write_ms", save_started)
+        db_started = perf_counter()
         workspace = self.repository.get_workspace(workspace.workspace_id) or workspace
+        _add_workspace_subspan(subspans, "workspace_db_query_ms", db_started)
+        event_started = perf_counter()
         self.repository.record_activity(
             workspace_id=workspace.workspace_id,
             session_id=session_id,
@@ -954,10 +1262,22 @@ class WorkspaceService:
             description=f"Saved workspace {workspace.name}.",
             payload={"snapshot_id": snapshot.snapshot_id},
         )
+        _add_workspace_subspan(subspans, "workspace_event_emit_ms", event_started)
+        dto_started = perf_counter()
         summary = self.persona.confirmation(
             f"Saved {workspace.name} and secured the current bearing, opened items, and next steps."
         )
-        return {"summary": summary, "workspace": workspace.to_dict(), "snapshot": snapshot.to_dict()}
+        snapshot_payload = snapshot.to_dict()
+        snapshot_payload["payload"] = self._compact_snapshot_payload(snapshot.payload)
+        response = {
+            "summary": summary,
+            "workspace": self._workspace_view_payload(workspace),
+            "snapshot": snapshot_payload,
+        }
+        _add_workspace_subspan(subspans, "workspace_dto_build_ms", dto_started)
+        response["payloadGuardrails"] = self._payload_guardrail_metadata(response)
+        response["debug"] = {"route_handler_subspans": subspans}
+        return response
 
     def archive_workspace(self, *, session_id: str, query: str | None = None) -> dict[str, Any]:
         selection = self._select_workspace_for_restore(query or "current workspace", session_id=session_id)
@@ -980,37 +1300,55 @@ class WorkspaceService:
             self.session_state.set_active_workspace_id(session_id, None)
             self.session_state.clear_active_posture(session_id)
         summary = self.persona.confirmation(f"Archived {archived.name} and struck it from the active watch.")
-        return {"summary": summary, "workspace": archived.to_dict()}
+        return {"summary": summary, "workspace": self._workspace_view_payload(archived)}
 
     def rename_workspace(self, *, session_id: str, new_name: str) -> dict[str, Any]:
+        subspans = _empty_workspace_subspans()
+        state_started = perf_counter()
         workspace = self._workspace_from_posture(session_id, self.session_state.get_active_posture(session_id))
         if workspace is None:
             return {"summary": self.persona.error("no active workspace is available to rename"), "workspace": {}}
+        _add_workspace_subspan(subspans, "workspace_state_load_ms", state_started)
+        db_started = perf_counter()
         renamed = self.repository.rename_workspace(workspace.workspace_id, new_name) or workspace
+        _add_workspace_subspan(subspans, "workspace_db_query_ms", db_started)
+        dto_started = perf_counter()
         posture = self.session_state.get_active_posture(session_id)
         if posture:
-            posture["workspace"] = renamed.to_dict()
+            posture["workspace"] = self._workspace_view_payload(renamed)
             self.session_state.set_active_posture(session_id, posture)
-        return {
+        response = {
             "summary": self.persona.confirmation(f"Renamed the active workspace to {renamed.name}."),
-            "workspace": renamed.to_dict(),
+            "workspace": self._workspace_view_payload(renamed),
         }
+        _add_workspace_subspan(subspans, "workspace_dto_build_ms", dto_started)
+        response["debug"] = {"route_handler_subspans": subspans}
+        return response
 
     def tag_workspace(self, *, session_id: str, tags: list[str]) -> dict[str, Any]:
+        subspans = _empty_workspace_subspans()
+        state_started = perf_counter()
         workspace = self._workspace_from_posture(session_id, self.session_state.get_active_posture(session_id))
         if workspace is None:
             return {"summary": self.persona.error("no active workspace is available to tag"), "workspace": {}}
+        _add_workspace_subspan(subspans, "workspace_state_load_ms", state_started)
+        db_started = perf_counter()
         tagged = self.repository.set_tags(workspace.workspace_id, tags) or workspace
+        _add_workspace_subspan(subspans, "workspace_db_query_ms", db_started)
+        dto_started = perf_counter()
         posture = self.session_state.get_active_posture(session_id)
         if posture:
-            posture["workspace"] = tagged.to_dict()
+            posture["workspace"] = self._workspace_view_payload(tagged)
             self.session_state.set_active_posture(session_id, posture)
-        return {
+        response = {
             "summary": self.persona.confirmation(
                 f"Tagged {tagged.name} with {', '.join(tagged.tags) if tagged.tags else 'no additional bearings'}."
             ),
-            "workspace": tagged.to_dict(),
+            "workspace": self._workspace_view_payload(tagged),
         }
+        _add_workspace_subspan(subspans, "workspace_dto_build_ms", dto_started)
+        response["debug"] = {"route_handler_subspans": subspans}
+        return response
 
     def list_workspaces(
         self,
@@ -1055,7 +1393,7 @@ class WorkspaceService:
         )
         return {
             "summary": self.persona.report(where_left_off),
-            "workspace": workspace.to_dict(),
+            "workspace": self._workspace_view_payload(workspace),
             "next_steps": self._normalize_string_list(posture.get("pending_next_steps") or workspace.pending_next_steps),
             "memory": memory_context,
         }
@@ -1081,7 +1419,7 @@ class WorkspaceService:
             "summary": self.persona.report(
                 f"Next bearings for {workspace.name}: " + "; ".join(next_steps[:3]) if next_steps else f"{workspace.name} is clear of pending next steps."
             ),
-            "workspace": workspace.to_dict(),
+            "workspace": self._workspace_view_payload(workspace),
             "next_steps": next_steps,
             "memory": memory_context,
         }
@@ -1203,7 +1541,7 @@ class WorkspaceService:
                 caller_subsystem="workspace",
             )
         )
-        return result.to_dict()
+        return self._compact_context_payload(result.to_dict())
 
     def _workspace_match_score(
         self,
@@ -1292,6 +1630,7 @@ class WorkspaceService:
                 cluster = {}
             items = cluster.get("items", [])
             normalized_items = [dict(item) for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+            bounded_items = self._bounded_workspace_items(normalized_items, limit=WORKSPACE_DEFAULT_EMBEDDED_ITEM_LIMIT)
             debug_reasons = cluster.get("debugReasons", [])
             normalized[surface] = {
                 "surface": surface,
@@ -1299,7 +1638,8 @@ class WorkspaceService:
                 "purpose": str(cluster.get("purpose") or purpose).strip() or purpose,
                 "presentationKind": str(cluster.get("presentationKind") or _SURFACE_PRESENTATION_KINDS[surface]).strip()
                 or _SURFACE_PRESENTATION_KINDS[surface],
-                "items": normalized_items,
+                "items": bounded_items["items"],
+                "itemsSummary": bounded_items["summary"],
                 "debugReasons": [
                     str(reason).strip()
                     for reason in debug_reasons
@@ -2326,8 +2666,11 @@ class WorkspaceService:
         description: str,
         bearing_title: str,
         summary: str,
+        route_handler_subspans: dict[str, float] | None = None,
     ) -> dict[str, Any]:
-        surface_content = plan.surface_content()
+        subspans = dict(route_handler_subspans or _empty_workspace_subspans())
+        payload_started = perf_counter()
+        surface_content = self._normalize_surface_content(plan.surface_content())
         workspace_payload = self._workspace_view_payload(
             plan.workspace,
             likely_next=plan.likely_next,
@@ -2342,6 +2685,8 @@ class WorkspaceService:
         workspace_payload["templateTitle"] = plan.template.title
         workspace_payload["templateConfidence"] = round(float(plan.template_confidence), 3)
         workspace_payload["templateReasons"] = list(plan.template_reasons)
+        _add_workspace_subspan(subspans, "workspace_payload_build_ms", payload_started)
+        db_started = perf_counter()
         self.memory.sync_workspace_memory(
             plan.workspace,
             continuity=plan.continuity,
@@ -2349,17 +2694,39 @@ class WorkspaceService:
             opened_items=plan.opened_items,
             source_surface=f"workspace_{activity_type}",
         )
+        _add_workspace_subspan(subspans, "workspace_db_query_ms", db_started)
+        db_started = perf_counter()
         memory_context = self._workspace_memory_context(
             plan.workspace,
             session_id=session_id,
             query=query,
         )
+        _add_workspace_subspan(subspans, "workspace_db_query_ms", db_started)
         workspace_payload["memoryContext"] = memory_context
+        workspace_payload["payloadGuardrails"] = self._payload_guardrail_metadata(workspace_payload)
 
         active_item = next(
             (item for item in plan.opened_items if self._item_identity(item) == plan.active_item_id),
             plan.opened_items[0] if plan.opened_items else {},
         )
+        bounded_opened_items = self._bounded_workspace_items(
+            plan.opened_items,
+            limit=WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT,
+        )["items"]
+        bounded_references = self._bounded_workspace_items(
+            plan.continuity.references,
+            limit=WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT,
+        )["items"]
+        bounded_findings = self._bounded_workspace_items(
+            plan.continuity.findings,
+            limit=WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT,
+        )["items"]
+        bounded_session_notes = self._bounded_workspace_items(
+            plan.continuity.session_notes,
+            limit=WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT,
+        )["items"]
+        bounded_active_item = self._compact_workspace_item(active_item)
+        dto_started = perf_counter()
         self.session_state.set_active_workspace_id(session_id, plan.workspace.workspace_id)
         self.session_state.set_active_posture(
             session_id,
@@ -2368,21 +2735,21 @@ class WorkspaceService:
                 "surface_mode": plan.session_posture.surface_mode,
                 "active_module": plan.session_posture.active_module,
                 "section": plan.session_posture.active_section,
-                "opened_items": [dict(item) for item in plan.opened_items],
-                "active_item": dict(active_item) if active_item else {},
+                "opened_items": bounded_opened_items,
+                "active_item": bounded_active_item,
                 "active_goal": plan.continuity.active_goal,
                 "current_task_state": plan.continuity.current_task_state,
                 "last_completed_action": plan.continuity.last_completed_action,
                 "pending_next_steps": list(plan.continuity.pending_next_steps),
                 "where_left_off": plan.continuity.where_left_off,
                 "likely_next": plan.likely_next,
-                "references": list(plan.continuity.references),
-                "findings": list(plan.continuity.findings),
-                "session_notes": list(plan.continuity.session_notes),
+                "references": bounded_references,
+                "findings": bounded_findings,
+                "session_notes": bounded_session_notes,
                 "template_key": plan.template.key,
                 "template_source": plan.workspace.template_source,
                 "problem_domain": plan.continuity.problem_domain,
-                "continuity": plan.continuity.to_dict(),
+                "continuity": self._compact_continuity_payload(plan.continuity, limit=WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT),
                 "session_posture": plan.session_posture.to_dict(),
                 "capabilities": dict(plan.capabilities),
                 "surface_content": surface_content,
@@ -2390,6 +2757,8 @@ class WorkspaceService:
                 "resume_context": plan.resume_context.to_dict(),
             },
         )
+        _add_workspace_subspan(subspans, "workspace_dto_build_ms", dto_started)
+        event_started = perf_counter()
         self.repository.record_activity(
             workspace_id=plan.workspace.workspace_id,
             session_id=session_id,
@@ -2402,20 +2771,21 @@ class WorkspaceService:
                 "resume_context": plan.resume_context.to_dict(),
             },
         )
+        _add_workspace_subspan(subspans, "workspace_event_emit_ms", event_started)
         if activity_type == "restore":
             self._remember_workspace_alias(query, plan.workspace)
         return {
             "summary": summary,
             "workspace": workspace_payload,
-            "items": [dict(item) for item in plan.opened_items],
+            "items": bounded_opened_items,
             "memory": memory_context,
-            "debug": dict(plan.debug),
+            "debug": {**dict(plan.debug), "route_handler_subspans": subspans},
             "action": {
                 "type": "workspace_restore",
                 "module": plan.session_posture.active_module,
                 "section": plan.session_posture.active_section,
                 "workspace": workspace_payload,
-                "items": [dict(item) for item in plan.opened_items],
+                "items": bounded_opened_items,
                 "active_item_id": plan.active_item_id,
                 "bearing_title": bearing_title,
                 "micro_response": self._workspace_micro_response(activity_type, plan.template, query),
@@ -2535,7 +2905,7 @@ class WorkspaceService:
             session_id=session_id,
             summary=refreshed_workspace.where_left_off or refreshed_workspace.summary,
             payload={
-                "workspace": refreshed_workspace.to_dict(),
+                "workspace": self._compact_workspace_payload(refreshed_workspace, limit=WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT),
                 "surface_mode": session_posture.surface_mode,
                 "active_module": session_posture.active_module,
                 "section": session_posture.active_section,
@@ -2543,16 +2913,16 @@ class WorkspaceService:
                 "current_task_state": refreshed_workspace.current_task_state,
                 "last_completed_action": refreshed_workspace.last_completed_action,
                 "pending_next_steps": refreshed_workspace.pending_next_steps,
-                "opened_items": opened_items,
-                "active_item": active_item,
-                "references": refreshed_workspace.references,
-                "findings": refreshed_workspace.findings,
-                "session_notes": refreshed_workspace.session_notes,
+                "opened_items": self._bounded_workspace_items(opened_items, limit=WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT)["items"],
+                "active_item": self._compact_workspace_item(active_item),
+                "references": self._bounded_workspace_items(refreshed_workspace.references, limit=WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT)["items"],
+                "findings": self._bounded_workspace_items(refreshed_workspace.findings, limit=WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT)["items"],
+                "session_notes": self._bounded_workspace_items(refreshed_workspace.session_notes, limit=WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT)["items"],
                 "where_left_off": refreshed_workspace.where_left_off,
                 "problem_domain": refreshed_workspace.problem_domain,
                 "template_key": refreshed_workspace.template_key,
                 "template_source": refreshed_workspace.template_source,
-                "continuity": continuity.to_dict(),
+                "continuity": self._compact_continuity_payload(continuity, limit=WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT),
                 "session_posture": session_posture.to_dict(),
                 "surface_content": self._normalize_surface_content(posture.get("surface_content"))
                 or self._surface_content_from_workspace_state(
@@ -2578,6 +2948,11 @@ class WorkspaceService:
         capabilities = dict(posture.get("capabilities")) if isinstance(posture.get("capabilities"), dict) else self._workspace_capabilities(
             restore_saved_posture=True
         )
+        bounded_opened_items = self._bounded_workspace_items(opened_items, limit=WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT)["items"]
+        bounded_references = self._bounded_workspace_items(refreshed_workspace.references, limit=WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT)["items"]
+        bounded_findings = self._bounded_workspace_items(refreshed_workspace.findings, limit=WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT)["items"]
+        bounded_session_notes = self._bounded_workspace_items(refreshed_workspace.session_notes, limit=WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT)["items"]
+        bounded_surface_content = self._normalize_surface_content(surface_content)
         self.session_state.set_active_workspace_id(session_id, refreshed_workspace.workspace_id)
         self.session_state.set_active_posture(
             session_id,
@@ -2591,21 +2966,23 @@ class WorkspaceService:
                     continuity=continuity,
                     session_posture=session_posture,
                     capabilities=capabilities,
-                    surface_content=surface_content,
+                    surface_content=bounded_surface_content,
                 ),
                 "pending_next_steps": refreshed_workspace.pending_next_steps,
-                "references": refreshed_workspace.references,
-                "findings": refreshed_workspace.findings,
-                "session_notes": refreshed_workspace.session_notes,
+                "opened_items": bounded_opened_items,
+                "active_item": self._compact_workspace_item(active_item),
+                "references": bounded_references,
+                "findings": bounded_findings,
+                "session_notes": bounded_session_notes,
                 "where_left_off": refreshed_workspace.where_left_off,
                 "likely_next": likely_next,
                 "template_key": refreshed_workspace.template_key,
                 "template_source": refreshed_workspace.template_source,
                 "problem_domain": refreshed_workspace.problem_domain,
-                "continuity": continuity.to_dict(),
+                "continuity": self._compact_continuity_payload(continuity, limit=WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT),
                 "session_posture": session_posture.to_dict(),
                 "capabilities": capabilities,
-                "surface_content": surface_content,
+                "surface_content": bounded_surface_content,
             },
         )
         return snapshot
@@ -2778,7 +3155,7 @@ class WorkspaceService:
         surface_content: dict[str, Any] | None = None,
         resume_context: WorkspaceResumeContext | None = None,
     ) -> dict[str, Any]:
-        payload = workspace.to_dict()
+        payload = self._compact_workspace_payload(workspace)
         if pending_next_steps is not None:
             payload["pendingNextSteps"] = list(pending_next_steps)
         if where_left_off:
@@ -2787,7 +3164,7 @@ class WorkspaceService:
         if likely_next:
             payload["likelyNext"] = likely_next
         if continuity is not None:
-            payload["continuity"] = continuity.to_dict()
+            payload["continuity"] = self._compact_continuity_payload(continuity)
             if continuity.problem_domain:
                 payload["problemDomain"] = continuity.problem_domain
         if session_posture is not None:
@@ -2798,6 +3175,7 @@ class WorkspaceService:
             payload["surfaceContent"] = self._normalize_surface_content(surface_content)
         if resume_context is not None:
             payload["resumeContext"] = resume_context.to_dict()
+        payload["payloadGuardrails"] = self._payload_guardrail_metadata(payload)
         return payload
 
     def _likely_next_bearing(

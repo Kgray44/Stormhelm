@@ -40,7 +40,12 @@ class ActiveContextService:
         input_context = input_context or {}
         opened_items = workspace_context.get("opened_items") if isinstance(workspace_context.get("opened_items"), list) else []
         active_item = workspace_context.get("active_item") if isinstance(workspace_context.get("active_item"), dict) else {}
-        recent_entities = self._recent_entities(active_item=active_item, opened_items=opened_items, fallback=existing.get("recent_entities", []))
+        input_recent_entities = self._input_recent_entities(input_context)
+        recent_entities = self._recent_entities(
+            active_item=active_item,
+            opened_items=opened_items,
+            fallback=[*input_recent_entities, *list(existing.get("recent_entities", []) or [])],
+        )
         context = ActiveWorkContext(
             active_goal=str(active_posture.get("active_goal") or existing.get("active_goal") or "").strip(),
             workspace=dict(workspace_context.get("workspace") or existing.get("workspace") or {}),
@@ -54,7 +59,9 @@ class ActiveContextService:
             updated_at=datetime.now(timezone.utc).isoformat(),
         )
         payload = context.to_dict()
-        recent_resolutions = self.session_state.get_recent_context_resolutions(session_id)
+        recent_resolutions = self._input_recent_context_resolutions(input_context)
+        if not recent_resolutions:
+            recent_resolutions = self.session_state.get_recent_context_resolutions(session_id)
         if recent_resolutions:
             payload["recent_context_resolutions"] = recent_resolutions[:4]
         self.session_state.set_active_context(session_id, payload)
@@ -67,6 +74,45 @@ class ActiveContextService:
         if not isinstance(resolution, dict) or not resolution:
             return
         self.session_state.remember_context_resolution(session_id, resolution)
+
+    def _input_recent_context_resolutions(self, input_context: dict[str, Any]) -> list[dict[str, Any]]:
+        supplied = input_context.get("recent_context_resolutions")
+        if not isinstance(supplied, list):
+            return []
+        compact: list[dict[str, Any]] = []
+        for item in supplied:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("kind") or "").strip()
+            if not kind:
+                continue
+            payload = {
+                key: value
+                for key, value in item.items()
+                if key in {"kind", "result", "trace", "source", "freshness", "label"}
+            }
+            compact.append(payload)
+            if len(compact) >= 4:
+                break
+        return compact
+
+    def _input_recent_entities(self, input_context: dict[str, Any]) -> list[dict[str, Any]]:
+        supplied = input_context.get("recent_entities")
+        if not isinstance(supplied, list):
+            return []
+        entities: list[dict[str, Any]] = []
+        for item in supplied:
+            if not isinstance(item, dict):
+                continue
+            entity = self._entity_from_item(item)
+            if entity is None:
+                continue
+            payload = entity.to_dict()
+            if payload not in entities:
+                entities.append(payload)
+            if len(entities) >= 8:
+                break
+        return entities
 
     def _recent_entities(
         self,

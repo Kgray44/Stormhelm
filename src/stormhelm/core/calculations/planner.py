@@ -25,6 +25,29 @@ EXPLANATION_FOLLOW_UP_PHRASES = (
     "show the formula substitution",
     "show your work",
     "why is that the answer",
+    "show me the arithmetic",
+    "show the arithmetic",
+    "walk through that calculation",
+)
+CONTINUITY_FOLLOW_UP_PHRASES = (
+    "same calculation",
+    "same thing",
+    "as before",
+    "that result",
+    "this result",
+    "that preview",
+    "other one",
+    "use this",
+    "use that",
+    "what about if",
+    "numerator",
+    "denominator",
+    "multiply that",
+    "same setup",
+    "that answer",
+    "redo it",
+    "go ahead",
+    "continue",
 )
 
 
@@ -174,9 +197,11 @@ class CalculationsPlannerSeam:
         active_context: dict[str, object],
     ) -> CalculationPlannerEvaluation | None:
         requested_mode = detect_requested_output_mode(raw_text, normalized_text)
-        if requested_mode == CalculationOutputMode.ANSWER_ONLY:
+        continuity_follow_up = any(phrase in normalized_text for phrase in CONTINUITY_FOLLOW_UP_PHRASES)
+        explanation_follow_up = any(phrase in normalized_text for phrase in EXPLANATION_FOLLOW_UP_PHRASES)
+        if requested_mode == CalculationOutputMode.ANSWER_ONLY and not continuity_follow_up:
             return None
-        if not any(phrase in normalized_text for phrase in EXPLANATION_FOLLOW_UP_PHRASES):
+        if not explanation_follow_up and not continuity_follow_up:
             return None
         recent = active_context.get("recent_context_resolutions")
         if not isinstance(recent, list):
@@ -219,7 +244,7 @@ class CalculationsPlannerSeam:
                     helper_name=helper_name,
                     helper_status="matched",
                     arguments=dict(helper_arguments),
-                    reasons=["explanation follow-up reused prior helper result"],
+                    reasons=["calculation follow-up reused prior helper result"],
                     feature_enabled=self.config.enabled,
                     planner_routing_enabled=self.config.planner_routing_enabled,
                     route_confidence=0.98,
@@ -238,7 +263,7 @@ class CalculationsPlannerSeam:
                     disposition=disposition,
                     extracted_expression=extracted_expression,
                     requested_mode=requested_mode,
-                    reasons=["explanation follow-up reused prior direct expression"],
+                    reasons=["calculation follow-up reused prior direct expression"],
                     feature_enabled=self.config.enabled,
                     planner_routing_enabled=self.config.planner_routing_enabled,
                     route_confidence=0.98,

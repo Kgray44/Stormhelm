@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from time import perf_counter
 from typing import Any
 from urllib.parse import urlparse
 
@@ -40,6 +41,68 @@ from stormhelm.core.tasks import DurableTaskService
 from stormhelm.core.workspace.indexer import WorkspaceIndexer
 from stormhelm.core.workspace.repository import WorkspaceRepository
 from stormhelm.core.workspace.service import WorkspaceService
+
+
+STAGE_TIMING_KEYS = (
+    "session_create_or_load_ms",
+    "history_context_ms",
+    "memory_context_ms",
+    "planner_route_ms",
+    "route_handler_ms",
+    "tool_planning_ms",
+    "dry_run_executor_ms",
+    "event_collection_ms",
+    "job_collection_ms",
+    "db_write_ms",
+    "response_serialization_ms",
+)
+
+
+def _record_stage_ms(stage_timings: dict[str, float], key: str, started_at: float) -> None:
+    elapsed = round((perf_counter() - started_at) * 1000, 3)
+    stage_timings[key] = round(float(stage_timings.get(key, 0.0)) + elapsed, 3)
+
+
+def _add_route_subspan(route_handler_subspans: dict[str, float], key: str, started_at: float) -> None:
+    elapsed = round((perf_counter() - started_at) * 1000, 3)
+    route_handler_subspans[key] = round(float(route_handler_subspans.get(key, 0.0)) + elapsed, 3)
+
+
+def _merge_route_subspans(route_handler_subspans: dict[str, float], values: dict[str, Any]) -> None:
+    for key, value in values.items():
+        try:
+            route_handler_subspans[str(key)] = round(
+                float(route_handler_subspans.get(str(key), 0.0)) + float(value or 0.0),
+                3,
+            )
+        except (TypeError, ValueError):
+            continue
+
+
+def _subspans_from_direct_jobs(jobs: list[dict[str, Any]]) -> dict[str, float]:
+    values: dict[str, float] = {}
+    for job in jobs:
+        result = job.get("result") if isinstance(job.get("result"), dict) else {}
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        debug = data.get("debug") if isinstance(data.get("debug"), dict) else {}
+        subspans = debug.get("route_handler_subspans") if isinstance(debug.get("route_handler_subspans"), dict) else {}
+        _merge_route_subspans(values, subspans)
+    return values
+
+
+def _subspans_from_jobs(jobs: list[Any]) -> dict[str, float]:
+    values: dict[str, float] = {}
+    for job in jobs:
+        result = getattr(job, "result", None)
+        if not isinstance(result, dict):
+            continue
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        subspans = data.get("route_handler_subspans") if isinstance(data.get("route_handler_subspans"), dict) else {}
+        _merge_route_subspans(values, subspans)
+        debug = data.get("debug") if isinstance(data.get("debug"), dict) else {}
+        subspans = debug.get("route_handler_subspans") if isinstance(debug.get("route_handler_subspans"), dict) else {}
+        _merge_route_subspans(values, subspans)
+    return values
 
 
 class AssistantOrchestrator:
@@ -243,7 +306,12 @@ class AssistantOrchestrator:
         workspace_context: dict[str, Any] | None = None,
         input_context: dict[str, Any] | None = None,
     ) -> dict[str, object]:
+        stage_timings: dict[str, float] = {key: 0.0 for key in STAGE_TIMING_KEYS}
+        stage_started = perf_counter()
         self.conversations.ensure_session(session_id)
+        _record_stage_ms(stage_timings, "session_create_or_load_ms", stage_started)
+
+        memory_started = perf_counter()
         self.judgment.observe_operator_turn(session_id, message)
         if self.workspace_service is not None:
             self.workspace_service.capture_workspace_context(
@@ -253,6 +321,9 @@ class AssistantOrchestrator:
                 active_module=active_module,
                 workspace_context=workspace_context,
             )
+        _record_stage_ms(stage_timings, "memory_context_ms", memory_started)
+
+        db_started = perf_counter()
         user_message = self.conversations.add_message(
             session_id,
             "user",
@@ -264,12 +335,19 @@ class AssistantOrchestrator:
                 "input_context": input_context or {},
             },
         )
+        _record_stage_ms(stage_timings, "db_write_ms", db_started)
+
+        route_started = perf_counter()
         routed = self.router.route(message, surface_mode=surface_mode)
+        _record_stage_ms(stage_timings, "planner_route_ms", route_started)
+
         actions: list[dict[str, Any]] = []
         jobs: list[dict[str, Any]] = []
         assistant_text = routed.assistant_message
         planner_debug: dict[str, Any] = {}
+        route_handler_subspans: dict[str, float] = {}
         planned_decision: PlannerDecision | None = None
+        memory_started = perf_counter()
         resolved_workspace_context = workspace_context or (
             self.workspace_service.active_workspace_summary(session_id) if self.workspace_service is not None else {}
         )
@@ -285,8 +363,10 @@ class AssistantOrchestrator:
             recent_tool_results=recent_tool_results,
             input_context=input_context,
         )
+        _record_stage_ms(stage_timings, "memory_context_ms", memory_started)
         response_judgment: dict[str, Any] = {}
 
+        route_handler_started = perf_counter()
         try:
             if routed.tool_calls:
                 assistant_text, jobs, actions = await self._execute_tool_requests(
@@ -295,12 +375,15 @@ class AssistantOrchestrator:
                     prompt=message,
                     surface_mode=surface_mode,
                     active_module=active_module,
+                    stage_timings=stage_timings,
+                    route_handler_subspans=route_handler_subspans,
                 )
                 self.session_state.clear_previous_response_id(session_id, role="planner")
                 self.session_state.clear_previous_response_id(session_id, role="reasoner")
             elif assistant_text is not None:
                 assistant_text = self.persona.report(assistant_text)
             else:
+                route_started = perf_counter()
                 planned = self.planner.plan(
                     message,
                     session_id=session_id,
@@ -327,6 +410,7 @@ class AssistantOrchestrator:
                     workspace_context=resolved_workspace_context,
                     active_context=active_context,
                 )
+                _record_stage_ms(stage_timings, "planner_route_ms", route_started)
                 planned_decision = planned
                 planner_debug = dict(planned.debug)
                 self._publish_calculation_event(
@@ -338,18 +422,22 @@ class AssistantOrchestrator:
                     screen_awareness_debug=planner_debug.get("screen_awareness"),
                 )
                 if planned.tool_requests:
+                    tool_plan_started = perf_counter()
                     pre_action = self.judgment.assess_pre_action(
                         session_id=session_id,
                         message=message,
                         tool_requests=planned.tool_requests,
                         active_context=active_context,
                     )
+                    _record_stage_ms(stage_timings, "tool_planning_ms", tool_plan_started)
                     assistant_text, jobs, actions = await self._execute_tool_requests(
                         planned.tool_requests,
                         session_id=session_id,
                         prompt=message,
                         surface_mode=surface_mode,
                         active_module=active_module,
+                        stage_timings=stage_timings,
+                        route_handler_subspans=route_handler_subspans,
                     )
                     post_action = self.judgment.evaluate_post_action(
                         session_id=session_id,
@@ -722,6 +810,9 @@ class AssistantOrchestrator:
             jobs = []
             actions = []
 
+        _record_stage_ms(stage_timings, "route_handler_ms", route_handler_started)
+
+        response_started = perf_counter()
         planner_obedience = self._planner_obedience_metadata(
             planned_decision=planned_decision,
             jobs=jobs,
@@ -746,6 +837,12 @@ class AssistantOrchestrator:
             planner_obedience=planner_obedience,
             planned_decision=planned_decision,
         )
+        if route_handler_subspans:
+            response_metadata["route_handler_subspans"] = dict(route_handler_subspans)
+            planner_debug["route_handler_subspans"] = dict(route_handler_subspans)
+        _record_stage_ms(stage_timings, "response_serialization_ms", response_started)
+
+        db_started = perf_counter()
         assistant_message = self.conversations.add_message(
             session_id,
             "assistant",
@@ -759,6 +856,12 @@ class AssistantOrchestrator:
                 **response_metadata,
             },
         )
+        _record_stage_ms(stage_timings, "db_write_ms", db_started)
+        assistant_message.metadata["stage_timings_ms"] = dict(stage_timings)
+        if route_handler_subspans:
+            assistant_message.metadata["route_handler_subspans"] = dict(route_handler_subspans)
+        planner_debug["stage_timings_ms"] = dict(stage_timings)
+        response_tail_started = perf_counter()
         self.events.publish(
             event_family="runtime",
             event_type="runtime.assistant_response_ready",
@@ -821,6 +924,13 @@ class AssistantOrchestrator:
                     "next_suggestion": dict(next_suggestion),
                 },
             )
+
+        active_request_state_payload = self.session_state.get_active_request_state(session_id)
+        recent_context_resolutions_payload = self.session_state.get_recent_context_resolutions(session_id)
+        active_task_payload = self.task_service.active_task_summary(session_id) if self.task_service is not None else {}
+        _record_stage_ms(stage_timings, "response_serialization_ms", response_tail_started)
+        assistant_message.metadata["stage_timings_ms"] = dict(stage_timings)
+        planner_debug["stage_timings_ms"] = dict(stage_timings)
         return {
             "session_id": session_id,
             "user_message": user_message.to_dict(),
@@ -828,9 +938,9 @@ class AssistantOrchestrator:
             "job": jobs[0] if jobs else None,
             "jobs": jobs,
             "actions": actions,
-            "active_request_state": self.session_state.get_active_request_state(session_id),
-            "recent_context_resolutions": self.session_state.get_recent_context_resolutions(session_id),
-            "active_task": self.task_service.active_task_summary(session_id) if self.task_service is not None else {},
+            "active_request_state": active_request_state_payload,
+            "recent_context_resolutions": recent_context_resolutions_payload,
+            "active_task": active_task_payload,
         }
 
     async def _execute_tool_requests(
@@ -841,7 +951,14 @@ class AssistantOrchestrator:
         prompt: str,
         surface_mode: str,
         active_module: str,
+        stage_timings: dict[str, float] | None = None,
+        route_handler_subspans: dict[str, float] | None = None,
     ) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
+        tool_names = [
+            request.tool_name if isinstance(request, ToolRequest) else request.name
+            for request in requests
+        ]
+        routine_requested = any(name in {"routine_execute", "routine_save", "trusted_hook_execute", "trusted_hook_register"} for name in tool_names)
         direct_workspace_result = await self._maybe_execute_workspace_requests_directly(
             requests,
             session_id=session_id,
@@ -850,9 +967,13 @@ class AssistantOrchestrator:
             active_module=active_module,
         )
         if direct_workspace_result is not None:
+            if route_handler_subspans is not None:
+                _merge_route_subspans(route_handler_subspans, _subspans_from_direct_jobs(direct_workspace_result[1]))
             return direct_workspace_result
+        job_started = perf_counter()
         task_plan = None
         if self.task_service is not None:
+            task_graph_started = perf_counter()
             task_plan = self.task_service.begin_execution(
                 session_id=session_id,
                 prompt=prompt,
@@ -861,6 +982,13 @@ class AssistantOrchestrator:
                 active_module=active_module,
                 workspace_context=self.workspace_service.active_workspace_summary(session_id) if self.workspace_service is not None else {},
             )
+            if route_handler_subspans is not None:
+                _add_route_subspan(
+                    route_handler_subspans,
+                    "routine_job_create_ms" if routine_requested else "task_graph_ms",
+                    task_graph_started,
+                )
+        job_create_started = perf_counter()
         submitted_jobs = await asyncio.gather(
             *[
                 self.jobs.submit(
@@ -873,7 +1001,24 @@ class AssistantOrchestrator:
                 for index, request in enumerate(requests)
             ]
         )
+        if route_handler_subspans is not None:
+            _add_route_subspan(
+                route_handler_subspans,
+                "routine_job_create_ms" if routine_requested else "job_create_ms",
+                job_create_started,
+            )
+        job_wait_started = perf_counter()
         completed_jobs = await asyncio.gather(*[self.jobs.wait(job.job_id) for job in submitted_jobs])
+        if route_handler_subspans is not None:
+            _add_route_subspan(
+                route_handler_subspans,
+                "routine_job_wait_ms" if routine_requested else "job_wait_ms",
+                job_wait_started,
+            )
+            if routine_requested:
+                _merge_route_subspans(route_handler_subspans, _subspans_from_jobs(completed_jobs))
+        if stage_timings is not None:
+            _record_stage_ms(stage_timings, "job_collection_ms", job_started)
         actions: list[dict[str, Any]] = []
         summaries: list[str] = []
 

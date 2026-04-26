@@ -197,6 +197,7 @@ class SoftwareControlPlannerSeam:
         target = normalize_phrase(raw_target)
         target = re.sub(r"\s+because\b.*$", "", target)
         target = re.sub(r"\b(?:my|the|a|an)\b", " ", target)
+        target = re.sub(r"\s+(?:from|on)\s+(?:this|my|the)\s+(?:machine|computer|pc)$", "", target)
         target = re.sub(r"\b(?:app|application)\b$", "", target)
         target = re.sub(r"\b(?:installation|install)\b$", "", target)
         target = " ".join(target.split()).strip(" .")

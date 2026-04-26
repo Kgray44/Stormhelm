@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 import re
 from typing import Any
@@ -37,6 +38,12 @@ from stormhelm.core.orchestrator.planner_models import RoutingTelemetry
 from stormhelm.core.orchestrator.planner_models import SemanticParseProposal
 from stormhelm.core.orchestrator.planner_models import StructuredQuery
 from stormhelm.core.orchestrator.planner_models import UnsupportedReason
+from stormhelm.core.orchestrator.planner_v2 import PlannerV2
+from stormhelm.core.orchestrator.route_context import RouteContextArbitration
+from stormhelm.core.orchestrator.route_context import RouteContextArbitrator
+from stormhelm.core.orchestrator.route_spine import MIGRATED_ROUTE_FAMILIES
+from stormhelm.core.orchestrator.route_spine import RouteSpine
+from stormhelm.core.orchestrator.route_spine import RouteSpineDecision
 from stormhelm.core.orchestrator.router import ToolRequest
 from stormhelm.core.screen_awareness import ScreenAwarenessPlannerSeam
 from stormhelm.core.screen_awareness import ScreenIntentType
@@ -100,6 +107,7 @@ DEFAULT_AVAILABLE_TOOLS = {
     "active_apps",
     "recent_files",
     "app_control",
+    "window_status",
     "window_control",
     "system_control",
     "desktop_search",
@@ -128,6 +136,7 @@ DEFAULT_AVAILABLE_TOOLS = {
     "external_open_url",
     "deck_open_file",
     "external_open_file",
+    "file_reader",
 }
 
 DISCORD_RELAY_CONFIRM_PHRASES = {
@@ -232,6 +241,9 @@ class DeterministicPlanner:
         )
         self._discord_relay_config = discord_relay_config or DiscordRelayConfig()
         self._adapter_contracts = adapter_contracts or default_adapter_contract_registry()
+        self._route_context_arbitrator = RouteContextArbitrator()
+        self._planner_v2 = PlannerV2()
+        self._route_spine = RouteSpine()
 
     def plan(
         self,
@@ -291,8 +303,120 @@ class DeterministicPlanner:
                 recent_tool_results=recent_tool_results or [],
             )
 
+        planner_v2_context = {
+            **(workspace_context or {}),
+            **(active_context or {}),
+        }
+        planner_v2_trace = self._planner_v2.plan(
+            normalized.raw_text or message,
+            surface_mode=surface_mode,
+            active_module=active_module,
+            active_context=planner_v2_context,
+            active_request_state=active_request_state or {},
+            recent_tool_results=recent_tool_results or [],
+        )
+        debug["planner_v2"] = planner_v2_trace.to_dict()
+        if planner_v2_trace.authoritative:
+            route_spine_decision = planner_v2_trace.to_route_spine_decision()
+            debug["route_spine"] = route_spine_decision.to_dict()
+            debug["routing_engine"] = "planner_v2"
+            debug["intent_frame"] = planner_v2_trace.intent_frame.to_dict()
+            debug["candidate_specs_considered"] = list(route_spine_decision.candidate_specs_considered)
+            debug["selected_route_spec"] = route_spine_decision.selected_route_spec
+            debug["native_decline_reasons"] = route_spine_decision.native_decline_reasons
+            debug["generic_provider_gate_reason"] = route_spine_decision.generic_provider_gate_reason
+            debug["legacy_fallback_used"] = False
+
+            routing_message = normalized.raw_text or message
+            calculation_evaluation = self._calculations_seam.evaluate(
+                raw_text=routing_message,
+                normalized_text=normalized.normalized_text,
+                surface_mode=surface_mode,
+                active_module=active_module,
+                active_context=active_context or {},
+            )
+            debug["calculations"] = calculation_evaluation.to_dict()
+            software_control_evaluation = self._software_control_seam.evaluate(
+                raw_text=routing_message,
+                normalized_text=normalized.normalized_text,
+                surface_mode=surface_mode,
+                active_module=active_module,
+                active_request_state=active_request_state or {},
+                active_context=active_context or {},
+            )
+            debug["software_control"] = software_control_evaluation.to_dict()
+            screen_awareness_evaluation = self._screen_awareness_seam.evaluate(
+                raw_text=routing_message,
+                normalized_text=normalized.normalized_text,
+                surface_mode=surface_mode,
+                active_module=active_module,
+                active_context=active_context or {},
+            )
+            debug["screen_awareness"] = screen_awareness_evaluation.to_dict()
+            semantic = self._semantic_from_route_spine_decision(
+                route_spine_decision,
+                message=routing_message,
+                normalized=normalized,
+                surface_mode=surface_mode,
+                active_context=active_context or {},
+                active_request_state=active_request_state or {},
+                active_posture=active_posture or {},
+                calculation_evaluation=calculation_evaluation,
+                software_control_evaluation=software_control_evaluation,
+            )
+            debug["semantic_parse_proposal"] = semantic.to_dict()
+            return self._decision_from_semantic(
+                semantic,
+                debug=debug,
+                normalized=normalized,
+                decomposition=decomposition,
+                session_id=session_id,
+                active_context=active_context or {},
+                active_request_state=active_request_state or {},
+                recent_tool_results=recent_tool_results or [],
+                calculation_evaluation=calculation_evaluation,
+                software_control_evaluation=software_control_evaluation,
+                screen_awareness_evaluation=screen_awareness_evaluation,
+                available_tools=set(available_tools or self._available_tools),
+            )
+
+        route_spine_context = {
+            **(workspace_context or {}),
+            **(active_context or {}),
+        }
+        route_spine_decision = self._route_spine.route(
+            normalized.raw_text or message,
+            active_context=route_spine_context,
+            active_request_state=active_request_state or {},
+            recent_tool_results=recent_tool_results or [],
+        )
+        debug["route_spine"] = route_spine_decision.to_dict()
+        debug["routing_engine"] = (
+            route_spine_decision.routing_engine
+            if route_spine_decision.authoritative
+            else "legacy_planner"
+        )
+        debug["intent_frame"] = route_spine_decision.intent_frame.to_dict()
+        debug["candidate_specs_considered"] = list(route_spine_decision.candidate_specs_considered)
+        debug["selected_route_spec"] = route_spine_decision.selected_route_spec
+        debug["native_decline_reasons"] = route_spine_decision.native_decline_reasons
+        debug["generic_provider_gate_reason"] = route_spine_decision.generic_provider_gate_reason
+        debug["legacy_fallback_used"] = route_spine_decision.legacy_fallback_used
+        planner_v2_deferred_to_legacy = (
+            bool(planner_v2_trace.route_decision.legacy_fallback_allowed)
+            and bool(planner_v2_trace.route_decision.legacy_family)
+            and route_spine_decision.authoritative
+            and route_spine_decision.winner.route_family == "generic_provider"
+        )
+        if planner_v2_deferred_to_legacy:
+            debug["routing_engine"] = "legacy_planner"
+            debug["legacy_fallback_used"] = True
+            debug["planner_v2_legacy_defer_respected"] = True
+            debug["generic_provider_gate_reason"] = planner_v2_trace.route_decision.generic_provider_gate_reason
+
+        routing_message = normalized.raw_text or message
         calculation_evaluation = self._calculations_seam.evaluate(
-            raw_text=message,
+            raw_text=routing_message,
             normalized_text=normalized.normalized_text,
             surface_mode=surface_mode,
             active_module=active_module,
@@ -300,7 +424,7 @@ class DeterministicPlanner:
         )
         debug["calculations"] = calculation_evaluation.to_dict()
         software_control_evaluation = self._software_control_seam.evaluate(
-            raw_text=message,
+            raw_text=routing_message,
             normalized_text=normalized.normalized_text,
             surface_mode=surface_mode,
             active_module=active_module,
@@ -309,13 +433,40 @@ class DeterministicPlanner:
         )
         debug["software_control"] = software_control_evaluation.to_dict()
         screen_awareness_evaluation = self._screen_awareness_seam.evaluate(
-            raw_text=message,
+            raw_text=routing_message,
             normalized_text=normalized.normalized_text,
             surface_mode=surface_mode,
             active_module=active_module,
             active_context=active_context or {},
         )
         debug["screen_awareness"] = screen_awareness_evaluation.to_dict()
+        if route_spine_decision.authoritative and not planner_v2_deferred_to_legacy:
+            semantic = self._semantic_from_route_spine_decision(
+                route_spine_decision,
+                message=routing_message,
+                normalized=normalized,
+                surface_mode=surface_mode,
+                active_context=active_context or {},
+                active_request_state=active_request_state or {},
+                active_posture=active_posture or {},
+                calculation_evaluation=calculation_evaluation,
+                software_control_evaluation=software_control_evaluation,
+            )
+            debug["semantic_parse_proposal"] = semantic.to_dict()
+            return self._decision_from_semantic(
+                semantic,
+                debug=debug,
+                normalized=normalized,
+                decomposition=decomposition,
+                session_id=session_id,
+                active_context=active_context or {},
+                active_request_state=active_request_state or {},
+                recent_tool_results=recent_tool_results or [],
+                calculation_evaluation=calculation_evaluation,
+                software_control_evaluation=software_control_evaluation,
+                screen_awareness_evaluation=screen_awareness_evaluation,
+                available_tools=set(available_tools or self._available_tools),
+            )
         if (
             calculation_evaluation.candidate
             and calculation_evaluation.disposition
@@ -1297,6 +1448,17 @@ class DeterministicPlanner:
             "discord": "discord_relay",
             "trust": "trust_approvals",
             "approval": "trust_approvals",
+            "files": "file",
+            "power_projection": "power",
+            "resource": "resources",
+            "trusted_hook": "routine",
+            "browser_context": "watch_runtime",
+            "activity_summary": "watch_runtime",
+            "active_apps": "app_control",
+            "recent_files": "machine",
+            "network_diagnosis": "network",
+            "resource_diagnosis": "resources",
+            "storage_diagnosis": "storage",
             "app_control": "software_control" if family == "software_control" else "app_control",
         }
         return aliases.get(family, family)
@@ -1441,7 +1603,8 @@ class DeterministicPlanner:
         surface_mode: str,
         active_module: str,
     ) -> NormalizedCommand:
-        normalized_text = normalize_phrase(message)
+        command_text = self._strip_invocation_prefix(message)
+        normalized_text = normalize_phrase(command_text)
         tokens = [token for token in normalized_text.split() if token]
         explicitness_level = "explicit"
         if len(tokens) <= 3:
@@ -1449,13 +1612,1373 @@ class DeterministicPlanner:
         if tokens and any(token in {"this", "that", "it", "these", "those"} for token in tokens):
             explicitness_level = "deictic"
         return NormalizedCommand(
-            raw_text=message,
+            raw_text=command_text,
             normalized_text=normalized_text,
             tokens=tokens,
             surface_mode=surface_mode,
             active_module=active_module,
             explicitness_level=explicitness_level,
         )
+
+    def _strip_invocation_prefix(self, message: str) -> str:
+        text = re.sub(r"^\s*stormhelm\s*[,:\-]\s*", "", str(message or ""), flags=re.IGNORECASE).strip()
+        return self._strip_operator_wrappers(text)
+
+    def _strip_operator_wrappers(self, message: str) -> str:
+        text = " ".join(str(message or "").split()).strip()
+        if not text:
+            return ""
+        negative_match = re.match(
+            r"^don['’]?t\s+actually\s+(.+?)\s*;\s*tell\s+me\s+the\s+safe\s+route\s*$",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if negative_match:
+            text = str(negative_match.group(1) or "").strip()
+        text = re.sub(r"^\s*i\s+need\s+the\s+stormhelm\s+route\s+for\s+this\s*:\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"^\s*(?:hey\s+)?(?:can|could)\s+you\s+", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"^\s*(?:please|pls)\s+", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"^\s*yo\s+", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"^\s*uh+h+\s+", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s+real\s+quick\s*$", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*--\s*quick\s+quick\s*$", "", text, flags=re.IGNORECASE)
+        return self._repair_common_command_typos(text.strip(" ?"))
+
+    def _repair_common_command_typos(self, message: str) -> str:
+        replacements = (
+            (r"\bopne\b", "open"),
+            (r"\binstal\b", "install"),
+            (r"\bcurrnt\b", "current"),
+            (r"\bwether\b", "weather"),
+            (r"\bbatery\b", "battery"),
+            (r"\bnetwrk\b", "network"),
+            (r"\bwrkspace\b", "workspace"),
+            (r"\bDiscrod\b", "Discord"),
+            (r"\bdiagnoze\b", "diagnose"),
+            (r"\butube\b", "youtube"),
+        )
+        text = message
+        for pattern, replacement in replacements:
+            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+        return text
+
+    def _decision_from_semantic(
+        self,
+        semantic: SemanticParseProposal,
+        *,
+        debug: dict[str, Any],
+        normalized: NormalizedCommand,
+        decomposition: RequestDecomposition,
+        session_id: str,
+        active_context: dict[str, Any],
+        active_request_state: dict[str, Any],
+        recent_tool_results: list[dict[str, Any]],
+        calculation_evaluation: Any | None,
+        software_control_evaluation: Any | None,
+        screen_awareness_evaluation: ScreenPlannerEvaluation | None,
+        available_tools: set[str],
+    ) -> PlannerDecision:
+        structured_query, clarification_reason = self._validate_structured_query(
+            semantic,
+            normalized=normalized,
+            active_context=active_context,
+        )
+        debug["structured_query"] = structured_query.to_dict()
+        if clarification_reason is not None:
+            debug["clarification_reason"] = clarification_reason.to_dict()
+            debug["response_mode"] = ResponseMode.CLARIFICATION.value
+            return self._finalize_decision(
+                PlannerDecision(
+                    request_type="clarification_request",
+                    assistant_message=clarification_reason.message,
+                    structured_query=structured_query,
+                    clarification_reason=clarification_reason,
+                    response_mode=ResponseMode.CLARIFICATION.value,
+                    debug=debug,
+                ),
+                normalized=normalized,
+                decomposition=decomposition,
+                calculation_evaluation=calculation_evaluation,
+                software_control_evaluation=software_control_evaluation,
+                screen_awareness_evaluation=screen_awareness_evaluation,
+                semantic=semantic,
+                clarification_reason=clarification_reason,
+                active_context=active_context,
+                active_request_state=active_request_state,
+                recent_tool_results=recent_tool_results,
+            )
+
+        if structured_query.query_shape == QueryShape.UNCLASSIFIED:
+            debug["response_mode"] = ResponseMode.SUMMARY_RESULT.value
+            return self._finalize_decision(
+                PlannerDecision(
+                    request_type="unclassified",
+                    structured_query=structured_query,
+                    response_mode=ResponseMode.SUMMARY_RESULT.value,
+                    debug=debug,
+                ),
+                normalized=normalized,
+                decomposition=decomposition,
+                calculation_evaluation=calculation_evaluation,
+                software_control_evaluation=software_control_evaluation,
+                screen_awareness_evaluation=screen_awareness_evaluation,
+                semantic=semantic,
+                active_context=active_context,
+                active_request_state=active_request_state,
+                recent_tool_results=recent_tool_results,
+            )
+
+        capability_plan = self._plan_capabilities(structured_query, available_tools=available_tools)
+        debug["capability_plan"] = capability_plan.to_dict()
+        provisional_execution_plan = self._build_execution_plan(
+            structured_query,
+            capability_plan=capability_plan,
+            session_id=session_id,
+        )
+        if not capability_plan.supported and capability_plan.unsupported_reason is not None:
+            debug["unsupported_reason"] = capability_plan.unsupported_reason.to_dict()
+            debug["execution_plan"] = provisional_execution_plan.to_dict()
+            debug["response_mode"] = ResponseMode.UNSUPPORTED.value
+            return self._finalize_decision(
+                PlannerDecision(
+                    request_type="unsupported_capability",
+                    assistant_message=capability_plan.unsupported_reason.message,
+                    structured_query=structured_query,
+                    capability_plan=capability_plan,
+                    execution_plan=provisional_execution_plan,
+                    unsupported_reason=capability_plan.unsupported_reason,
+                    response_mode=ResponseMode.UNSUPPORTED.value,
+                    debug=debug,
+                ),
+                normalized=normalized,
+                decomposition=decomposition,
+                calculation_evaluation=calculation_evaluation,
+                software_control_evaluation=software_control_evaluation,
+                screen_awareness_evaluation=screen_awareness_evaluation,
+                semantic=semantic,
+                unsupported_reason=capability_plan.unsupported_reason,
+                active_context=active_context,
+                active_request_state=active_request_state,
+                recent_tool_results=recent_tool_results,
+            )
+
+        execution_plan = provisional_execution_plan
+        debug["execution_plan"] = execution_plan.to_dict()
+        debug["response_mode"] = execution_plan.response_mode.value
+        tool_requests: list[ToolRequest] = []
+        if execution_plan.tool_name:
+            tool_requests.append(ToolRequest(execution_plan.tool_name, dict(execution_plan.tool_arguments)))
+        return self._finalize_decision(
+            PlannerDecision(
+                request_type=execution_plan.request_type,
+                tool_requests=tool_requests,
+                assistant_message=execution_plan.assistant_message,
+                requires_reasoner=execution_plan.requires_reasoner,
+                active_request_state=self._active_request_state_from_structured_query(structured_query, execution_plan),
+                structured_query=structured_query,
+                capability_plan=capability_plan,
+                execution_plan=execution_plan,
+                response_mode=execution_plan.response_mode.value,
+                debug=debug,
+            ),
+            normalized=normalized,
+            decomposition=decomposition,
+            calculation_evaluation=calculation_evaluation,
+            software_control_evaluation=software_control_evaluation,
+            screen_awareness_evaluation=screen_awareness_evaluation,
+            semantic=semantic,
+            active_context=active_context,
+            active_request_state=active_request_state,
+            recent_tool_results=recent_tool_results,
+        )
+
+    def _semantic_from_route_spine_decision(
+        self,
+        decision: RouteSpineDecision,
+        *,
+        message: str,
+        normalized: NormalizedCommand,
+        surface_mode: str,
+        active_context: dict[str, Any],
+        active_request_state: dict[str, Any],
+        active_posture: dict[str, Any],
+        calculation_evaluation: Any | None,
+        software_control_evaluation: Any | None,
+    ) -> SemanticParseProposal:
+        family = decision.winner.route_family
+        slots = self._route_spine_slots(decision)
+        if family == "generic_provider":
+            return SemanticParseProposal(
+                query_shape=QueryShape.UNCLASSIFIED,
+                confidence=0.0,
+                evidence=["route_spine allowed generic provider only after migrated native specs declined"],
+                fallback_path="route_spine_generic_provider",
+                slots=slots,
+            )
+        lower = decision.intent_frame.normalized_text
+        if family == "unsupported":
+            return self._tool_proposal(
+                query_shape=QueryShape.SUMMARY_REQUEST,
+                domain="unsupported",
+                request_type_hint="unsupported_capability",
+                family="unsupported",
+                subject="external_commitment",
+                requested_action="decline_unsupported_external_commitment",
+                confidence=decision.winner.score or 0.96,
+                evidence=["route_spine selected unsupported external commitment guard"],
+                assistant_message=(
+                    "I can't book, purchase, pay for, or commit to real-world transactions from this command surface. "
+                    "I can help you draft a plan or checklist instead."
+                ),
+                execution_type="decline_unsupported_request",
+                output_mode=ResponseMode.UNSUPPORTED.value,
+                slots=slots,
+            )
+        if family == "routine":
+            routine_save = self._routine_save_request(
+                message,
+                lower,
+                active_request_state=active_request_state,
+                active_context=active_context,
+                active_posture=active_posture,
+            )
+            if routine_save is not None:
+                precondition_state = (
+                    routine_save.get("routine_save_precondition_state")
+                    if isinstance(routine_save.get("routine_save_precondition_state"), dict)
+                    else {}
+                )
+                missing_preconditions = list(precondition_state.get("missing_preconditions") or [])
+                if missing_preconditions:
+                    slots.update(
+                        {
+                            "routine_save_precondition_state": precondition_state,
+                            "routine_name": routine_save.get("routine_name"),
+                            "missing_evidence": list(missing_preconditions),
+                            "clarification": {
+                                "code": "missing_routine_context",
+                                "message": (
+                                    "I can save that as a routine, but I need the steps or the recent action you want me to reuse. "
+                                    "Send the workflow steps, or run the action first and then ask me to save it."
+                                ),
+                                "missing_slots": list(missing_preconditions),
+                            },
+                        }
+                    )
+                    return self._tool_proposal(
+                        query_shape=QueryShape.ROUTINE_REQUEST,
+                        domain="workflow",
+                        request_type_hint="routine_save_preflight",
+                        family="routine",
+                        subject="save",
+                        requested_action="save_routine",
+                        confidence=decision.winner.score or 0.95,
+                        evidence=["route_spine selected routine-save intent but preconditions require clarification"],
+                        assistant_message=str(slots["clarification"]["message"]),
+                        execution_type="save_routine_preflight",
+                        output_mode=ResponseMode.CLARIFICATION.value,
+                        slots=slots,
+                    )
+                return self._tool_proposal(
+                    query_shape=QueryShape.ROUTINE_REQUEST,
+                    domain="workflow",
+                    tool_name="routine_save",
+                    tool_arguments=routine_save,
+                    request_type_hint="routine_save",
+                    family="routine",
+                    subject="save",
+                    requested_action="save_routine",
+                    confidence=decision.winner.score or 0.95,
+                    evidence=["route_spine selected routine-save intent with bounded active context"],
+                    execution_type="save_routine",
+                    output_mode=ResponseMode.ACTION_RESULT.value,
+                    slots=slots,
+                )
+            routine_name = str(decision.intent_frame.target_text or decision.intent_frame.extracted_entities.get("routine") or "routine").strip()
+            slots.update({"routine_name": routine_name, "request_stage": "dry_run"})
+            return self._tool_proposal(
+                query_shape=QueryShape.ROUTINE_REQUEST,
+                domain="workflow",
+                tool_name="routine_execute",
+                tool_arguments={"routine_name": routine_name, "query": message, "dry_run": True},
+                request_type_hint="routine_execution",
+                family="routine",
+                subject=routine_name,
+                requested_action="execute_routine",
+                confidence=decision.winner.score or 0.9,
+                evidence=["planner_v2 selected routine execution from typed routine contract"],
+                execution_type="execute_routine",
+                output_mode=ResponseMode.ACTION_RESULT.value,
+                output_type="action",
+                slots=slots,
+            )
+        if decision.clarification_needed:
+            return self._route_spine_clarification_proposal(decision, slots=slots)
+        if family == "discord_relay":
+            destination_alias = str(decision.intent_frame.target_text or "").strip() or "discord"
+            slots.update(
+                {
+                    "destination_alias": destination_alias,
+                    "payload_hint": "contextual",
+                    "request_stage": "preview",
+                    "planner_v2_policy": "preview_required_before_live_send",
+                }
+            )
+            return self._tool_proposal(
+                query_shape=QueryShape.DISCORD_RELAY_REQUEST,
+                domain="discord_relay",
+                request_type_hint="discord_relay_dispatch",
+                family="discord_relay",
+                subject=destination_alias,
+                requested_action="preview",
+                confidence=decision.winner.score or 0.9,
+                evidence=["planner_v2 selected discord_relay with bounded preview-only policy"],
+                execution_type="discord_relay_preview",
+                output_mode=ResponseMode.ACTION_RESULT.value,
+                output_type="action",
+                slots=slots,
+            )
+        if family == "calculations":
+            calc_payload = (
+                calculation_evaluation.to_dict()
+                if calculation_evaluation is not None and hasattr(calculation_evaluation, "to_dict")
+                else {}
+            )
+            requested_mode = str(calc_payload.get("requested_mode") or "")
+            helper_request = str(calc_payload.get("disposition") or "") == CalculationRouteDisposition.HELPER_REQUEST.value
+            verification_request = str(calc_payload.get("disposition") or "") == CalculationRouteDisposition.VERIFICATION_REQUEST.value
+            slots.update(
+                {
+                    "calculation_request": calc_payload
+                    or {
+                        "candidate": True,
+                        "follow_up_reuse": True,
+                        "raw_text": message,
+                        "intent_frame": decision.intent_frame.to_dict(),
+                    },
+                    "requested_mode": requested_mode,
+                }
+            )
+            return self._tool_proposal(
+                query_shape=QueryShape.CALCULATION_REQUEST,
+                domain="calculations",
+                request_type_hint="calculation_response",
+                family="calculations",
+                subject=str(calc_payload.get("helper_name") or ("verification" if verification_request else "expression")),
+                requested_action="verify_expression"
+                if verification_request
+                else "evaluate_helper"
+                if helper_request
+                else "evaluate_expression",
+                confidence=decision.winner.score or 0.9,
+                evidence=["route_spine selected calculations from IntentFrame and RouteFamilySpec"],
+                execution_type="calculation_evaluate",
+                output_mode=ResponseMode.CALCULATION_RESULT.value,
+                output_type="numeric",
+                slots=slots,
+            )
+        if family == "software_control":
+            software_payload = (
+                software_control_evaluation.to_dict()
+                if software_control_evaluation is not None and hasattr(software_control_evaluation, "to_dict")
+                else {}
+            )
+            operation_type = str(software_payload.get("operation_type") or decision.intent_frame.operation or "software_control")
+            target_name = str(software_payload.get("target_name") or decision.intent_frame.target_text or "software").strip()
+            slots.update(
+                {
+                    "software_control_request": software_payload,
+                    "operation_type": operation_type,
+                    "target_name": target_name,
+                    "request_stage": software_payload.get("request_stage") or "plan",
+                    "follow_up_reuse": bool(software_payload.get("follow_up_reuse", False)),
+                    "approval_scope": software_payload.get("approval_scope"),
+                    "approval_outcome": software_payload.get("approval_outcome"),
+                    "trust_request_id": software_payload.get("trust_request_id"),
+                }
+            )
+            return self._tool_proposal(
+                query_shape=QueryShape.SOFTWARE_CONTROL_REQUEST,
+                domain="software_control",
+                request_type_hint="software_control_response",
+                family="software_control",
+                subject=target_name,
+                requested_action=operation_type,
+                confidence=decision.winner.score or 0.9,
+                evidence=["route_spine selected software_control from operation/risk contract"],
+                execution_type="software_control_execute",
+                output_mode=ResponseMode.ACTION_RESULT.value,
+                output_type="action",
+                slots=slots,
+            )
+        if family == "browser_destination":
+            url = self._route_spine_selected_value(decision) or str(decision.intent_frame.extracted_entities.get("url") or "")
+            tool_name = (
+                "deck_open_url"
+                if surface_mode.strip().lower() == "deck" or "in the deck" in decision.intent_frame.normalized_text
+                else "external_open_url"
+            )
+            return self._tool_proposal(
+                query_shape=QueryShape.OPEN_BROWSER_DESTINATION,
+                domain="browser",
+                tool_name=tool_name,
+                tool_arguments={"url": url or decision.intent_frame.target_text},
+                request_type_hint="direct_action",
+                family="browser_destination",
+                subject=decision.intent_frame.target_text or "browser_destination",
+                requested_action="open_browser_destination",
+                confidence=decision.winner.score or 0.9,
+                evidence=["route_spine selected browser_destination from URL/website contract"],
+                execution_type="resolve_url_then_open_in_browser",
+                output_mode=ResponseMode.ACTION_RESULT.value,
+                output_type="action",
+                slots=slots,
+            )
+        if family == "file":
+            path = self._route_spine_selected_value(decision) or str(decision.intent_frame.extracted_entities.get("path") or decision.intent_frame.target_text)
+            tool_name = (
+                "file_reader"
+                if decision.intent_frame.operation == "inspect"
+                else "deck_open_file"
+                if surface_mode.strip().lower() == "deck" or "in the deck" in decision.intent_frame.normalized_text
+                else "external_open_file"
+            )
+            return self._tool_proposal(
+                query_shape=QueryShape.CONTEXT_ACTION,
+                domain="files",
+                tool_name=tool_name,
+                tool_arguments={"path": path},
+                request_type_hint="file_read" if tool_name == "file_reader" else "direct_action",
+                family="file",
+                subject=path or "file",
+                requested_action="read_file" if tool_name == "file_reader" else "open_file",
+                confidence=decision.winner.score or 0.9,
+                evidence=["route_spine selected file from typed file target"],
+                execution_type="read_file" if tool_name == "file_reader" else "execute_control_command",
+                output_mode=ResponseMode.SUMMARY_RESULT.value if tool_name == "file_reader" else ResponseMode.ACTION_RESULT.value,
+                output_type="file" if tool_name == "file_reader" else "action",
+                slots=slots,
+            )
+        if family == "task_continuity":
+            tool_name = "workspace_where_left_off" if "left off" in lower else "workspace_next_steps"
+            requested_action = "where_left_off" if tool_name == "workspace_where_left_off" else "next_steps"
+            return self._tool_proposal(
+                query_shape=QueryShape.WORKSPACE_REQUEST,
+                domain="workspace",
+                tool_name=tool_name,
+                tool_arguments={},
+                request_type_hint="workspace_restore" if tool_name == "workspace_where_left_off" else "direct_deterministic_fact",
+                family="task_continuity",
+                subject=requested_action,
+                requested_action=requested_action,
+                confidence=decision.winner.score or 0.9,
+                evidence=["route_spine selected task continuity from workspace-context contract"],
+                execution_type="summarize_workspace",
+                output_mode=ResponseMode.WORKSPACE_RESULT.value,
+                slots=slots,
+            )
+        if family == "context_action":
+            operation = "extract_tasks" if "task" in decision.intent_frame.normalized_text else "inspect"
+            return self._tool_proposal(
+                query_shape=QueryShape.CONTEXT_ACTION,
+                domain="context",
+                tool_name="context_action",
+                tool_arguments={"operation": operation, "source": "selection"},
+                request_type_hint="context_action",
+                family=family,
+                subject=operation,
+                requested_action=operation,
+                confidence=decision.winner.score or 0.9,
+                evidence=["route_spine selected context target handling"],
+                execution_type="execute_context_action",
+                output_mode=ResponseMode.ACTION_RESULT.value,
+                output_type="action",
+                slots=slots,
+            )
+        if family == "comparison":
+            comparison_target = re.sub(r"^(?:compare|diff)\s+", "", lower, flags=re.IGNORECASE).strip(" .")
+            return self._tool_proposal(
+                query_shape=QueryShape.COMPARISON_REQUEST,
+                domain="files",
+                request_type_hint="comparison_request",
+                family="comparison",
+                subject="files",
+                requested_action="compare",
+                confidence=decision.winner.score or 0.9,
+                evidence=["route_spine selected comparison because concrete file/context targets were present"],
+                execution_type="compare_items",
+                output_mode=ResponseMode.SUMMARY_RESULT.value,
+                slots={**slots, "comparison_target": comparison_target},
+            )
+        if family == "screen_awareness":
+            return self._tool_proposal(
+                query_shape=QueryShape.SCREEN_AWARENESS_REQUEST,
+                domain="screen_awareness",
+                request_type_hint="screen_awareness_response",
+                family="screen_awareness",
+                subject="visible_screen",
+                requested_action="ground_screen_action",
+                confidence=decision.winner.score or 0.88,
+                evidence=["route_spine selected screen_awareness but requires grounding"],
+                assistant_message=decision.clarification_text,
+                execution_type="screen_awareness_act",
+                output_mode=ResponseMode.CLARIFICATION.value,
+                output_type="screen_action",
+                slots={
+                    **slots,
+                    "clarification": {
+                        "code": "missing_screen_awareness_context",
+                        "message": decision.clarification_text,
+                        "missing_slots": list(decision.missing_preconditions or ("visible_screen",)),
+                    },
+                    "missing_preconditions": list(decision.missing_preconditions or ("visible_screen",)),
+                },
+            )
+        if family == "app_control":
+            if decision.intent_frame.operation == "status" or "active_apps" in decision.tool_candidates:
+                return self._tool_proposal(
+                    query_shape=QueryShape.CURRENT_STATUS,
+                    domain="system",
+                    tool_name="active_apps",
+                    tool_arguments={"focus": "applications"},
+                    request_type_hint="direct_deterministic_fact",
+                    family="app_control",
+                    subject="active_apps",
+                    requested_metric="applications",
+                    confidence=decision.winner.score or 0.9,
+                    evidence=["route_spine selected app_control status from active-app contract"],
+                    execution_type="retrieve_current_status",
+                    output_mode=ResponseMode.STATUS_SUMMARY.value,
+                    slots=slots,
+                )
+            action = "close" if decision.intent_frame.operation in {"quit", "close"} else "open"
+            return self._tool_proposal(
+                query_shape=QueryShape.CONTROL_COMMAND,
+                domain="system",
+                tool_name="app_control",
+                tool_arguments={"action": action, "target": decision.intent_frame.target_text},
+                request_type_hint="direct_action",
+                family="app_control",
+                subject=decision.intent_frame.target_text or "app",
+                requested_action=action,
+                confidence=decision.winner.score or 0.9,
+                evidence=["route_spine selected app_control from app operation contract"],
+                execution_type="execute_control_command",
+                output_mode=ResponseMode.ACTION_RESULT.value,
+                output_type="action",
+                slots=slots,
+            )
+        if family in {"watch_runtime", "network", "machine", "power", "resources", "window_control"}:
+            return self._route_spine_status_proposal(decision, slots=slots)
+        if family == "file_operation":
+            file_operation = self._file_operation_request(message, lower)
+            return self._tool_proposal(
+                query_shape=QueryShape.FILE_OPERATION,
+                domain="files",
+                tool_name="file_operation",
+                tool_arguments=file_operation
+                or {
+                    "operation": decision.intent_frame.operation,
+                    "target": decision.intent_frame.target_text,
+                    "dry_run": True,
+                },
+                request_type_hint="file_operation",
+                family="file_operation",
+                subject=str((file_operation or {}).get("operation") or "file_operation"),
+                requested_action="file_operation",
+                confidence=decision.winner.score or 0.9,
+                evidence=["route_spine selected file_operation from typed file-operation contract"],
+                execution_type="execute_file_operation",
+                output_mode=ResponseMode.ACTION_RESULT.value,
+                slots=slots,
+            )
+        if family == "workspace_operations":
+            if "restore" in lower:
+                tool_name = "workspace_restore"
+                requested_action = "restore"
+            elif "archive" in lower:
+                tool_name = "workspace_archive"
+                requested_action = "archive"
+            elif "save" in lower:
+                tool_name = "workspace_save"
+                requested_action = "save"
+            elif "clear" in lower:
+                tool_name = "workspace_clear"
+                requested_action = "clear"
+            elif "list" in lower or "show" in lower:
+                tool_name = "workspace_list"
+                requested_action = "list"
+            else:
+                tool_name = "workspace_assemble"
+                requested_action = "assemble"
+            return self._tool_proposal(
+                query_shape=QueryShape.WORKSPACE_REQUEST,
+                domain="workspace",
+                tool_name=tool_name,
+                tool_arguments={"query": message} if tool_name in {"workspace_restore", "workspace_assemble", "workspace_archive"} else {},
+                request_type_hint="workspace_restore" if tool_name == "workspace_restore" else "workspace_operation",
+                family="workspace_operations",
+                subject=requested_action,
+                requested_action=requested_action,
+                confidence=decision.winner.score or 0.9,
+                evidence=["route_spine selected workspace_operations from RouteFamilySpec"],
+                execution_type=f"{requested_action}_workspace",
+                output_mode=ResponseMode.WORKSPACE_RESULT.value,
+                slots=slots,
+            )
+        if family == "workflow":
+            workflow_request = self._workflow_execution_request(message, lower) or {
+                "workflow_kind": decision.intent_frame.target_text or "workflow",
+                "query": message,
+            }
+            return self._tool_proposal(
+                query_shape=QueryShape.WORKFLOW_REQUEST,
+                domain="workflow",
+                tool_name="workflow_execute",
+                tool_arguments=workflow_request,
+                request_type_hint="workflow_execution",
+                family="workflow",
+                subject=str(workflow_request.get("workflow_kind") or "workflow"),
+                requested_action="execute_workflow",
+                confidence=decision.winner.score or 0.9,
+                evidence=["route_spine selected workflow from RouteFamilySpec"],
+                execution_type="execute_workflow",
+                output_mode=ResponseMode.ACTION_RESULT.value,
+                output_type="action",
+                slots=slots,
+            )
+        if family == "maintenance":
+            maintenance_request = self._maintenance_action_request(message, lower) or {
+                "maintenance_kind": "bounded_maintenance_plan",
+                "query": message,
+                "dry_run": True,
+            }
+            return self._tool_proposal(
+                query_shape=QueryShape.MAINTENANCE_REQUEST,
+                domain="files",
+                tool_name="maintenance_action",
+                tool_arguments=maintenance_request,
+                request_type_hint="maintenance_execution",
+                family="maintenance",
+                subject=str(maintenance_request.get("maintenance_kind") or "maintenance"),
+                requested_action="execute_maintenance",
+                confidence=decision.winner.score or 0.9,
+                evidence=["route_spine selected maintenance from RouteFamilySpec"],
+                execution_type="execute_maintenance",
+                output_mode=ResponseMode.ACTION_RESULT.value,
+                output_type="action",
+                slots=slots,
+            )
+        if family == "desktop_search":
+            search_request = self._desktop_search_request(message, lower, surface_mode=surface_mode) or {
+                "query": decision.intent_frame.target_text or message,
+                "domains": ["files"],
+                "action": "search",
+                "open_target": "deck" if surface_mode.strip().lower() == "deck" else "external",
+                "latest_only": False,
+                "file_extensions": [],
+                "folder_hint": None,
+                "prefer_folders": False,
+            }
+            return self._tool_proposal(
+                query_shape=QueryShape.SEARCH_AND_OPEN,
+                domain="workflow",
+                tool_name="desktop_search",
+                tool_arguments=search_request,
+                request_type_hint="desktop_search",
+                family="desktop_search",
+                subject=str(search_request.get("query") or "desktop_search"),
+                requested_action=str(search_request.get("action") or "search"),
+                confidence=decision.winner.score or 0.9,
+                evidence=["route_spine selected desktop_search from local file/search contract"],
+                execution_type="search_then_open",
+                output_mode=ResponseMode.SEARCH_RESULT.value,
+                slots=slots,
+            )
+        if family == "trust_approvals":
+            trust_approval = self._trust_approval_request(lower, active_request_state=active_request_state)
+            if trust_approval is not None:
+                trust_approval.slots.update(slots)
+                return trust_approval
+            return self._tool_proposal(
+                query_shape=QueryShape.TRUST_APPROVAL_REQUEST,
+                domain="trust",
+                request_type_hint="trust_approval_explanation",
+                family="trust_approvals",
+                subject="approval",
+                requested_action="explain_approval",
+                confidence=decision.winner.score or 0.9,
+                evidence=["route_spine selected trust_approvals from approval/permission contract"],
+                assistant_message="I can explain or inspect an approval request, but I need the active approval context for a specific allow or deny decision.",
+                execution_type="explain_approval",
+                output_mode=ResponseMode.SUMMARY_RESULT.value,
+                output_type="trust",
+                slots=slots,
+            )
+        if family == "terminal":
+            return self._tool_proposal(
+                query_shape=QueryShape.CONTROL_COMMAND,
+                domain="terminal",
+                tool_name="shell_command",
+                tool_arguments={"command": "open_terminal", "target": decision.intent_frame.target_text, "dry_run": True},
+                request_type_hint="terminal_open",
+                family="terminal",
+                subject=decision.intent_frame.target_text or "terminal",
+                requested_action="open_terminal",
+                confidence=decision.winner.score or 0.9,
+                evidence=["route_spine selected terminal from terminal/folder contract"],
+                execution_type="execute_control_command",
+                output_mode=ResponseMode.ACTION_RESULT.value,
+                output_type="action",
+                slots=slots,
+            )
+        if family == "software_recovery":
+            repair_request = self._repair_action_request(message, lower) or {
+                "repair_kind": "software_recovery",
+                "target": decision.intent_frame.target_text or "system",
+                "dry_run": True,
+            }
+            return self._tool_proposal(
+                query_shape=QueryShape.REPAIR_REQUEST,
+                domain="software_recovery",
+                tool_name="repair_action",
+                tool_arguments=repair_request,
+                request_type_hint="repair_execution",
+                family="software_recovery",
+                subject=str(repair_request.get("target") or repair_request.get("repair_kind") or "repair"),
+                requested_action=str(repair_request.get("repair_kind") or "repair"),
+                confidence=decision.winner.score or 0.9,
+                evidence=["route_spine selected software_recovery from repair/status contract"],
+                execution_type="execute_repair",
+                output_mode=ResponseMode.ACTION_RESULT.value,
+                output_type="action",
+                slots=slots,
+            )
+        return SemanticParseProposal(
+            query_shape=QueryShape.UNCLASSIFIED,
+            confidence=0.0,
+            evidence=["route_spine selected a family without a planner adapter; legacy fallback refused for migrated-family pass"],
+            fallback_path="route_spine_unhandled_family",
+            slots=slots,
+        )
+
+    def _route_spine_clarification_proposal(
+        self,
+        decision: RouteSpineDecision,
+        *,
+        slots: dict[str, Any],
+    ) -> SemanticParseProposal:
+        family = decision.winner.route_family
+        shape = {
+            "calculations": QueryShape.CALCULATION_REQUEST,
+            "browser_destination": QueryShape.OPEN_BROWSER_DESTINATION,
+            "file": QueryShape.CONTEXT_ACTION,
+            "context_action": QueryShape.CONTEXT_ACTION,
+            "screen_awareness": QueryShape.SCREEN_AWARENESS_REQUEST,
+            "discord_relay": QueryShape.DISCORD_RELAY_REQUEST,
+            "routine": QueryShape.ROUTINE_REQUEST,
+            "trust_approvals": QueryShape.TRUST_APPROVAL_REQUEST,
+            "file_operation": QueryShape.FILE_OPERATION,
+            "app_control": QueryShape.CONTROL_COMMAND,
+            "workspace_operations": QueryShape.WORKSPACE_REQUEST,
+            "workflow": QueryShape.WORKFLOW_REQUEST,
+            "maintenance": QueryShape.MAINTENANCE_REQUEST,
+            "desktop_search": QueryShape.SEARCH_AND_OPEN,
+            "terminal": QueryShape.CONTROL_COMMAND,
+            "software_recovery": QueryShape.REPAIR_REQUEST,
+        }.get(family, QueryShape.SUMMARY_REQUEST)
+        domain = {
+            "browser_destination": "browser",
+            "file": "files",
+            "context_action": "context",
+            "screen_awareness": "screen_awareness",
+            "discord_relay": "discord_relay",
+            "routine": "workflow",
+            "trust_approvals": "trust",
+            "file_operation": "files",
+            "app_control": "system",
+            "workspace_operations": "workspace",
+            "workflow": "workflow",
+            "maintenance": "files",
+            "desktop_search": "workflow",
+            "terminal": "terminal",
+            "software_recovery": "software_recovery",
+        }.get(family, family)
+        message = decision.clarification_text or "Which context should I use?"
+        slots.update(
+            {
+                "clarification": {
+                    "code": f"missing_{family}_context",
+                    "message": message,
+                    "missing_slots": list(decision.missing_preconditions or ("context",)),
+                },
+                "missing_preconditions": list(decision.missing_preconditions or ("context",)),
+            }
+        )
+        return self._tool_proposal(
+            query_shape=shape,
+            domain=domain,
+            request_type_hint=f"{family}_context_clarification",
+            family=family,
+            subject=family,
+            requested_action="clarify_context",
+            confidence=decision.winner.score or 0.88,
+            evidence=["route_spine selected native owner with missing/stale/ambiguous context"],
+            assistant_message=message,
+            execution_type="clarify_route_context",
+            output_mode=ResponseMode.CLARIFICATION.value,
+            slots=slots,
+        )
+
+    def _route_spine_status_proposal(self, decision: RouteSpineDecision, *, slots: dict[str, Any]) -> SemanticParseProposal:
+        family = decision.winner.route_family
+        if family == "network":
+            return self._tool_proposal(
+                query_shape=QueryShape.CURRENT_STATUS,
+                domain="network",
+                tool_name="network_status",
+                tool_arguments={"focus": "overview"},
+                request_type_hint="direct_deterministic_fact",
+                family="network",
+                subject="network",
+                requested_metric="overview",
+                confidence=decision.winner.score or 0.9,
+                evidence=["route_spine selected network status from system-status contract"],
+                execution_type="retrieve_current_status",
+                output_mode=ResponseMode.STATUS_SUMMARY.value,
+                slots=slots,
+            )
+        if family == "watch_runtime":
+            lower = decision.intent_frame.normalized_text
+            browser_context = self._browser_context_request(decision.intent_frame.raw_text, lower, active_context={})
+            tool_name = "browser_context" if browser_context is not None else "activity_summary"
+            return self._tool_proposal(
+                query_shape=QueryShape.BROWSER_CONTEXT if tool_name == "browser_context" else QueryShape.SUMMARY_REQUEST,
+                domain="browser" if tool_name == "browser_context" else "activity",
+                tool_name=tool_name,
+                tool_arguments=browser_context or {},
+                request_type_hint="browser_context" if tool_name == "browser_context" else "activity_summary",
+                family="watch_runtime",
+                subject="browser_context" if tool_name == "browser_context" else "summary",
+                requested_action="browser_context" if tool_name == "browser_context" else "summarize_activity",
+                confidence=decision.winner.score or 0.9,
+                evidence=["route_spine selected watch_runtime from runtime status contract"],
+                execution_type="inspect_browser_context" if tool_name == "browser_context" else "summarize_activity",
+                output_mode=ResponseMode.ACTION_RESULT.value if tool_name == "browser_context" else ResponseMode.SUMMARY_RESULT.value,
+                slots=slots,
+            )
+        if family == "window_control":
+            return self._tool_proposal(
+                query_shape=QueryShape.CURRENT_STATUS,
+                domain="system",
+                tool_name="window_status",
+                tool_arguments={"focus": "windows"},
+                request_type_hint="direct_deterministic_fact",
+                family="window_control",
+                subject="windows",
+                requested_metric="windows",
+                confidence=decision.winner.score or 0.9,
+                evidence=["route_spine selected window status from window-control contract"],
+                execution_type="retrieve_current_status",
+                output_mode=ResponseMode.STATUS_SUMMARY.value,
+                slots=slots,
+            )
+        if family == "machine":
+            focus = "time" if "time zone" in decision.intent_frame.normalized_text or "timezone" in decision.intent_frame.normalized_text else "identity"
+            return self._tool_proposal(
+                query_shape=QueryShape.CURRENT_STATUS if focus == "time" else QueryShape.IDENTITY_LOOKUP,
+                domain="machine",
+                tool_name="machine_status",
+                tool_arguments={"focus": focus},
+                request_type_hint="direct_deterministic_fact",
+                family="machine",
+                subject="machine",
+                requested_metric=focus,
+                confidence=decision.winner.score or 0.9,
+                evidence=["route_spine selected machine status"],
+                execution_type="retrieve_current_status" if focus == "time" else "retrieve_identity",
+                output_mode=ResponseMode.STATUS_SUMMARY.value if focus == "time" else ResponseMode.IDENTITY_SUMMARY.value,
+                slots=slots,
+            )
+        if family == "resources":
+            return self._tool_proposal(
+                query_shape=QueryShape.CURRENT_STATUS,
+                domain="system",
+                tool_name="resource_status",
+                tool_arguments={"focus": "cpu_memory"},
+                request_type_hint="direct_deterministic_fact",
+                family="resources",
+                subject="resources",
+                requested_metric="cpu_memory",
+                confidence=decision.winner.score or 0.9,
+                evidence=["route_spine selected resource status from system-resource contract"],
+                execution_type="retrieve_current_status",
+                output_mode=ResponseMode.STATUS_SUMMARY.value,
+                slots=slots,
+            )
+        tool_name = "power_projection" if "power_projection" in decision.tool_candidates else "power_status"
+        return self._tool_proposal(
+            query_shape=QueryShape.CURRENT_STATUS,
+            domain="power",
+            tool_name=tool_name,
+            tool_arguments={"focus": "overview"},
+            request_type_hint="direct_deterministic_fact",
+            family="power",
+            subject="power",
+            requested_metric="projection" if tool_name == "power_projection" else "overview",
+            confidence=decision.winner.score or 0.9,
+            evidence=["route_spine selected power status"],
+            execution_type="retrieve_current_status",
+            output_mode=ResponseMode.STATUS_SUMMARY.value,
+            slots=slots,
+        )
+
+    def _route_spine_slots(self, decision: RouteSpineDecision) -> dict[str, Any]:
+        return {
+            "routing_engine": decision.routing_engine,
+            "route_spine": decision.to_dict(),
+            "intent_frame": decision.intent_frame.to_dict(),
+            "candidate_specs_considered": list(decision.candidate_specs_considered),
+            "selected_route_spec": decision.selected_route_spec,
+            "native_decline_reasons": decision.native_decline_reasons,
+            "generic_provider_gate_reason": decision.generic_provider_gate_reason,
+            "legacy_fallback_used": decision.legacy_fallback_used,
+            "family": decision.winner.route_family,
+            "subject": decision.intent_frame.target_text or decision.winner.route_family,
+        }
+
+    def _route_spine_selected_value(self, decision: RouteSpineDecision) -> str:
+        selected = decision.intent_frame.extracted_entities.get("selected_context")
+        if isinstance(selected, dict) and selected.get("value"):
+            return str(selected.get("value") or "").strip()
+        return ""
+
+    def _calculation_missing_context_follow_up(
+        self,
+        lower: str,
+        *,
+        active_request_state: dict[str, Any],
+    ) -> SemanticParseProposal | None:
+        family = str(active_request_state.get("family") or "").strip().lower()
+        math_follow_up = any(
+            phrase in lower
+            for phrase in (
+                "show the steps",
+                "show me the steps",
+                "show the calculation",
+                "show the arithmetic",
+                "show me the arithmetic",
+                "walk through that calculation",
+                "redo that math",
+                "redo it",
+                "that math",
+                "that number",
+                "that value",
+                "that result",
+                "that answer",
+                "divide that",
+                "multiply that",
+                "compare it to",
+                "compare that answer",
+                "use that number",
+                "what about if",
+                "what changes if",
+                "numerator",
+                "denominator",
+                "same setup",
+            )
+        )
+        continuity_follow_up = any(
+            phrase in lower
+            for phrase in (
+                "same thing",
+                "same calculation",
+                "as before",
+                "that calculation",
+                "same math",
+                "that preview",
+                "other one",
+                "use this",
+                "use that",
+                "go ahead",
+                "continue",
+            )
+        )
+        if family != "calculations" and not math_follow_up:
+            return None
+        if not math_follow_up and not continuity_follow_up:
+            return None
+        return self._tool_proposal(
+            query_shape=QueryShape.CALCULATION_REQUEST,
+            domain="calculations",
+            request_type_hint="calculation_missing_context",
+            family="calculations",
+            subject="calculation_context",
+            requested_action="clarify_calculation_context",
+            confidence=0.86,
+            evidence=["active calculation route owns follow-up but lacks a reusable expression"],
+            follow_up=True,
+            execution_type="clarify_calculation_context",
+            output_mode=ResponseMode.CLARIFICATION.value,
+            output_type="numeric",
+            slots={
+                "clarification": {
+                    "code": "missing_calculation_context",
+                    "message": "Which calculation should I reuse?",
+                    "missing_slots": ["calculation_context"],
+                },
+                "missing_preconditions": ["calculation_context"],
+            },
+        )
+
+    def _route_context_arbitration_request(
+        self,
+        message: str,
+        lower: str,
+        *,
+        surface_mode: str,
+        active_context: dict[str, Any],
+        active_request_state: dict[str, Any],
+        recent_tool_results: list[dict[str, Any]],
+    ) -> SemanticParseProposal | None:
+        arbitration = self._route_context_arbitrator.evaluate(
+            normalized_text=lower,
+            active_context=active_context,
+            active_request_state=active_request_state,
+            recent_tool_results=recent_tool_results,
+        )
+        if arbitration is None or not arbitration.route_family_owners:
+            return None
+        owner = arbitration.route_family_owners[0]
+        if owner == "calculations":
+            return self._arbitrated_clarification(
+                query_shape=QueryShape.CALCULATION_REQUEST,
+                domain="calculations",
+                family="calculations",
+                subject="calculation_context",
+                requested_action="clarify_calculation_context",
+                arbitration=arbitration,
+                default_missing_slot="calculation_context",
+            )
+        if owner == "browser_destination":
+            return self._arbitrated_browser_destination(message, surface_mode=surface_mode, arbitration=arbitration)
+        if owner == "file":
+            return self._arbitrated_file_request(message, surface_mode=surface_mode, arbitration=arbitration)
+        if owner == "context_action":
+            return self._arbitrated_context_action(arbitration=arbitration)
+        if owner == "screen_awareness":
+            return self._arbitrated_clarification(
+                query_shape=QueryShape.SCREEN_AWARENESS_REQUEST,
+                domain="screen_awareness",
+                family="screen_awareness",
+                subject="visible_screen",
+                requested_action="ground_screen_action",
+                arbitration=arbitration,
+                default_missing_slot="visible_screen",
+                execution_type="screen_awareness_act",
+                output_type="screen_action",
+            )
+        if owner == "discord_relay":
+            return self._arbitrated_clarification(
+                query_shape=QueryShape.DISCORD_RELAY_REQUEST,
+                domain="discord_relay",
+                family="discord_relay",
+                subject="relay_context",
+                requested_action="preview",
+                arbitration=arbitration,
+                default_missing_slot="payload",
+                execution_type="discord_relay_preview",
+                output_type="action",
+            )
+        if owner == "trust_approvals":
+            return self._arbitrated_clarification(
+                query_shape=QueryShape.TRUST_APPROVAL_REQUEST,
+                domain="trust",
+                family="trust_approvals",
+                subject="approval",
+                requested_action="explain_approval",
+                arbitration=arbitration,
+                default_missing_slot="approval_object",
+                execution_type="explain_approval",
+                output_type="trust",
+                output_mode=ResponseMode.SUMMARY_RESULT.value,
+            )
+        if owner == "file_operation":
+            return self._arbitrated_clarification(
+                query_shape=QueryShape.FILE_OPERATION,
+                domain="files",
+                family="file_operation",
+                subject="file_operation",
+                requested_action="file_operation",
+                arbitration=arbitration,
+                default_missing_slot="file_context",
+            )
+        if owner == "routine":
+            return self._arbitrated_clarification(
+                query_shape=QueryShape.ROUTINE_REQUEST,
+                domain="workflow",
+                family="routine",
+                subject="routine",
+                requested_action="execute_routine",
+                arbitration=arbitration,
+                default_missing_slot="routine_context",
+            )
+        if owner == "network":
+            return self._tool_proposal(
+                query_shape=QueryShape.CURRENT_STATUS,
+                domain="network",
+                tool_name="network_status",
+                tool_arguments={"focus": "overview"},
+                request_type_hint="direct_deterministic_fact",
+                family="network",
+                subject="network",
+                requested_metric="overview",
+                confidence=0.94,
+                evidence=[arbitration.reason],
+                execution_type="retrieve_current_status",
+                output_mode=ResponseMode.STATUS_SUMMARY.value,
+                slots={"route_context_arbitration": arbitration.to_dict()},
+            )
+        if owner == "watch_runtime":
+            return self._tool_proposal(
+                query_shape=QueryShape.SUMMARY_REQUEST,
+                domain="activity",
+                tool_name="activity_summary",
+                tool_arguments={"query": message},
+                request_type_hint="activity_summary",
+                family="watch_runtime",
+                subject="summary",
+                requested_action="summarize_activity",
+                confidence=0.93,
+                evidence=[arbitration.reason],
+                execution_type="summarize_activity",
+                output_mode=ResponseMode.SUMMARY_RESULT.value,
+                slots={"route_context_arbitration": arbitration.to_dict()},
+            )
+        if owner == "system_control":
+            target = self._settings_target_from_text(lower)
+            return self._tool_proposal(
+                query_shape=QueryShape.CONTROL_COMMAND,
+                domain="system",
+                tool_name="system_control",
+                tool_arguments={"action": "open_settings_page", "target": target},
+                request_type_hint="direct_action",
+                family="system_control",
+                subject="open_settings",
+                requested_action="open_settings_page",
+                confidence=0.92,
+                evidence=[arbitration.reason],
+                execution_type="execute_control_command",
+                output_mode=ResponseMode.ACTION_RESULT.value,
+                slots={"route_context_arbitration": arbitration.to_dict()},
+            )
+        return None
+
+    def _arbitrated_clarification(
+        self,
+        *,
+        query_shape: QueryShape,
+        domain: str,
+        family: str,
+        subject: str,
+        requested_action: str,
+        arbitration: RouteContextArbitration,
+        default_missing_slot: str,
+        execution_type: str | None = None,
+        output_type: str | None = None,
+        output_mode: str | None = None,
+    ) -> SemanticParseProposal:
+        missing = list(arbitration.missing_preconditions or (default_missing_slot,))
+        message = arbitration.clarification_text or "Which context should I use?"
+        return self._tool_proposal(
+            query_shape=query_shape,
+            domain=domain,
+            request_type_hint=f"{family}_context_clarification",
+            family=family,
+            subject=subject,
+            requested_action=requested_action,
+            confidence=0.88,
+            evidence=[arbitration.reason],
+            assistant_message=message,
+            execution_type=execution_type or "clarify_route_context",
+            output_mode=output_mode or ResponseMode.CLARIFICATION.value,
+            output_type=output_type,
+            slots={
+                "clarification": {
+                    "code": f"missing_{family}_context",
+                    "message": message,
+                    "missing_slots": missing,
+                },
+                "missing_preconditions": missing,
+                "route_context_arbitration": arbitration.to_dict(),
+                "fallback_reason": arbitration.reason,
+            },
+        )
+
+    def _arbitrated_browser_destination(
+        self,
+        message: str,
+        *,
+        surface_mode: str,
+        arbitration: RouteContextArbitration,
+    ) -> SemanticParseProposal:
+        binding = arbitration.selected_binding
+        if binding is None or not binding.value:
+            return self._arbitrated_clarification(
+                query_shape=QueryShape.OPEN_BROWSER_DESTINATION,
+                domain="browser",
+                family="browser_destination",
+                subject="browser_destination",
+                requested_action="open_browser_destination",
+                arbitration=arbitration,
+                default_missing_slot="destination_context",
+                execution_type="resolve_url_then_open_in_browser",
+                output_type="action",
+            )
+        open_in_deck = surface_mode.strip().lower() == "deck" or bool(
+            re.search(r"\b(?:in|inside|within)\s+(?:the\s+)?deck\b", message, flags=re.IGNORECASE)
+        )
+        tool_name = "deck_open_url" if open_in_deck else "external_open_url"
+        return self._tool_proposal(
+            query_shape=QueryShape.OPEN_BROWSER_DESTINATION,
+            domain="browser",
+            tool_name=tool_name,
+            tool_arguments={"url": str(binding.value)},
+            request_type_hint="direct_action",
+            family="browser_destination",
+            subject=binding.label,
+            requested_action="open_browser_destination",
+            confidence=0.93,
+            evidence=[arbitration.reason],
+            execution_type="resolve_url_then_open_in_browser",
+            output_mode=ResponseMode.ACTION_RESULT.value,
+            output_type="action",
+            slots={
+                "target_scope": "browser",
+                "route_context_arbitration": arbitration.to_dict(),
+                "deictic_binding": self._arbitration_binding_payload(arbitration),
+                "open_target": message,
+            },
+        )
+
+    def _arbitrated_file_request(
+        self,
+        message: str,
+        *,
+        surface_mode: str,
+        arbitration: RouteContextArbitration,
+    ) -> SemanticParseProposal:
+        explicit_path = self._route_context_arbitrator.explicit_file_path(message)
+        if arbitration.tool_hint == "file_reader" and explicit_path:
+            return self._tool_proposal(
+                query_shape=QueryShape.CONTEXT_ACTION,
+                domain="files",
+                tool_name="file_reader",
+                tool_arguments={"path": explicit_path},
+                request_type_hint="file_read",
+                family="file",
+                subject=explicit_path,
+                requested_action="read_file",
+                confidence=0.96,
+                evidence=[arbitration.reason],
+                execution_type="read_file",
+                output_mode=ResponseMode.SUMMARY_RESULT.value,
+                output_type="file",
+                slots={
+                    "target_scope": "files",
+                    "path": explicit_path,
+                    "route_context_arbitration": arbitration.to_dict(),
+                },
+            )
+        binding = arbitration.selected_binding
+        if binding is None or not binding.value:
+            return self._arbitrated_clarification(
+                query_shape=QueryShape.CONTEXT_ACTION,
+                domain="files",
+                family="file",
+                subject="file_context",
+                requested_action="open_file",
+                arbitration=arbitration,
+                default_missing_slot="file_context",
+                execution_type="execute_control_command",
+                output_type="action",
+            )
+        open_in_deck = surface_mode.strip().lower() == "deck" or bool(
+            re.search(r"\b(?:in|inside|within)\s+(?:the\s+)?deck\b", message, flags=re.IGNORECASE)
+        )
+        tool_name = "deck_open_file" if open_in_deck else "external_open_file"
+        return self._tool_proposal(
+            query_shape=QueryShape.CONTEXT_ACTION,
+            domain="files",
+            tool_name=tool_name,
+            tool_arguments={"path": str(binding.value)},
+            request_type_hint="direct_action",
+            family="file",
+            subject=binding.label,
+            requested_action="open_file",
+            confidence=0.93,
+            evidence=[arbitration.reason],
+            execution_type="execute_control_command",
+            output_mode=ResponseMode.ACTION_RESULT.value,
+            output_type="action",
+            slots={
+                "target_scope": "files",
+                "route_context_arbitration": arbitration.to_dict(),
+                "deictic_binding": self._arbitration_binding_payload(arbitration),
+            },
+        )
+
+    def _arbitrated_context_action(self, *, arbitration: RouteContextArbitration) -> SemanticParseProposal:
+        binding = arbitration.selected_binding
+        if binding is None:
+            return self._arbitrated_clarification(
+                query_shape=QueryShape.CONTEXT_ACTION,
+                domain="context",
+                family="context_action",
+                subject="context",
+                requested_action=arbitration.requested_action or "inspect",
+                arbitration=arbitration,
+                default_missing_slot="context",
+            )
+        source = "clipboard" if binding.context_source == "clipboard" else "selection"
+        operation = arbitration.requested_action or "inspect"
+        return self._tool_proposal(
+            query_shape=QueryShape.CONTEXT_ACTION,
+            domain="context",
+            tool_name="context_action",
+            tool_arguments={"operation": operation, "source": source},
+            request_type_hint="context_action",
+            family="task_continuity" if operation == "extract_tasks" else "context_action",
+            subject=operation,
+            requested_action=operation,
+            confidence=0.92,
+            evidence=[arbitration.reason],
+            execution_type="execute_context_action",
+            output_mode=ResponseMode.ACTION_RESULT.value,
+            slots={
+                "target_scope": "context",
+                "route_context_arbitration": arbitration.to_dict(),
+                "deictic_binding": self._arbitration_binding_payload(arbitration),
+            },
+        )
+
+    def _arbitration_binding_payload(self, arbitration: RouteContextArbitration) -> dict[str, Any]:
+        selected = arbitration.selected_binding
+        return {
+            "resolved": selected is not None,
+            "selected_source": selected.context_source if selected is not None else None,
+            "selected_target": selected.to_dict() if selected is not None else None,
+            "candidates": [binding.to_dict() for binding in arbitration.candidate_bindings],
+            "unresolved_reason": None if selected is not None else "no_current_binding_source",
+            "binding_posture": "current" if selected is not None else "unbound",
+            "source_summary": arbitration.reason,
+        }
+
+    def _settings_target_from_text(self, lower: str) -> str:
+        match = re.match(r"^(?:open|show|bring\s+up)\s+(.+?)\s+settings?$", lower)
+        if not match:
+            return "settings"
+        return re.sub(r"[^a-z0-9_-]+", "_", str(match.group(1) or "settings").strip().lower()).strip("_") or "settings"
 
     def _semantic_parse_proposal(
         self,
@@ -1472,6 +2995,7 @@ class DeterministicPlanner:
         screen_awareness_evaluation: ScreenPlannerEvaluation,
     ) -> SemanticParseProposal:
         del session_id
+        message = normalized.raw_text or self._strip_invocation_prefix(message)
         lower = normalized.normalized_text
         recent_family = self._recent_family(recent_tool_results)
         weather_open_default = str(self._preference_value(learned_preferences, "weather", "open_target") or "none")
@@ -1486,6 +3010,13 @@ class DeterministicPlanner:
         if search_correction is not None:
             return search_correction
 
+        calculation_follow_up = self._calculation_missing_context_follow_up(
+            lower,
+            active_request_state=active_request_state,
+        )
+        if calculation_follow_up is not None:
+            return calculation_follow_up
+
         deictic_open = self._deictic_open_request(
             message,
             lower,
@@ -1494,6 +3025,17 @@ class DeterministicPlanner:
         )
         if deictic_open is not None:
             return deictic_open
+
+        route_context = self._route_context_arbitration_request(
+            message,
+            lower,
+            surface_mode=normalized.surface_mode,
+            active_context=active_context,
+            active_request_state=active_request_state,
+            recent_tool_results=recent_tool_results,
+        )
+        if route_context is not None:
+            return route_context
 
         if screen_awareness_evaluation.disposition in {
             ScreenRouteDisposition.PHASE1_ANALYZE,
@@ -1663,8 +3205,8 @@ class DeterministicPlanner:
                 slots={"compatibility_decision": active_item_decision},
             )
 
-        if lower.startswith("compare ") or " compare " in f" {lower}":
-            comparison_target = re.sub(r"^(?:compare)\s+", "", lower, flags=re.IGNORECASE).strip(" .")
+        if self._looks_like_native_comparison_request(lower):
+            comparison_target = re.sub(r"^(?:compare|diff)\s+", "", lower, flags=re.IGNORECASE).strip(" .")
             return self._tool_proposal(
                 query_shape=QueryShape.COMPARISON_REQUEST,
                 domain="files" if "file" in lower else "system",
@@ -1839,8 +3381,50 @@ class DeterministicPlanner:
                 output_mode=ResponseMode.WORKSPACE_RESULT.value,
             )
 
-        routine_save = self._routine_save_request(message, lower, active_request_state=active_request_state)
+        explicit_file_open = self._explicit_file_open_request(message, lower, surface_mode=normalized.surface_mode)
+        if explicit_file_open is not None:
+            return explicit_file_open
+
+        routine_save = self._routine_save_request(
+            message,
+            lower,
+            active_request_state=active_request_state,
+            active_context=active_context,
+            active_posture=active_posture,
+        )
         if routine_save is not None:
+            precondition_state = (
+                routine_save.get("routine_save_precondition_state")
+                if isinstance(routine_save.get("routine_save_precondition_state"), dict)
+                else {}
+            )
+            missing_preconditions = list(precondition_state.get("missing_preconditions") or [])
+            if missing_preconditions:
+                return self._tool_proposal(
+                    query_shape=QueryShape.ROUTINE_REQUEST,
+                    domain="workflow",
+                    request_type_hint="routine_save_preflight",
+                    family="routine",
+                    subject="save",
+                    requested_action="save_routine",
+                    confidence=0.95,
+                    evidence=["routine-save intent detected but deictic context is missing"],
+                    execution_type="save_routine_preflight",
+                    output_mode=ResponseMode.CLARIFICATION.value,
+                    slots={
+                        "routine_save_precondition_state": precondition_state,
+                        "routine_name": routine_save.get("routine_name"),
+                        "missing_evidence": list(missing_preconditions),
+                        "clarification": {
+                            "code": "missing_routine_context",
+                            "message": (
+                                "I can save that as a routine, but I need the steps or the recent action you want me to reuse. "
+                                "Send the workflow steps, or run the action first and then ask me to save it."
+                            ),
+                            "missing_slots": list(missing_preconditions),
+                        },
+                    },
+                )
             return self._tool_proposal(
                 query_shape=QueryShape.ROUTINE_REQUEST,
                 domain="workflow",
@@ -1863,7 +3447,7 @@ class DeterministicPlanner:
                 tool_name="trusted_hook_execute",
                 tool_arguments=trusted_hook,
                 request_type_hint="trusted_hook_execution",
-                family="trusted_hook",
+                family="routine",
                 subject="execute",
                 requested_action="execute_trusted_hook",
                 confidence=0.95,
@@ -1969,6 +3553,25 @@ class DeterministicPlanner:
             )
         context_action = self._context_action_request(message, lower, active_context=active_context)
         if context_action is not None:
+            clarification_payload = context_action.get("clarification") if isinstance(context_action.get("clarification"), dict) else {}
+            if clarification_payload:
+                return self._tool_proposal(
+                    query_shape=QueryShape.CONTEXT_ACTION,
+                    domain="context",
+                    request_type_hint="context_action",
+                    family="context_action",
+                    subject=str(context_action.get("operation") or "context_action"),
+                    requested_action=str(context_action.get("operation") or "context_action"),
+                    confidence=0.86,
+                    evidence=["context-action phrasing detected but active context was missing"],
+                    execution_type="execute_context_action",
+                    output_mode=ResponseMode.CLARIFICATION.value,
+                    slots={
+                        "clarification": clarification_payload,
+                        "missing_preconditions": list(clarification_payload.get("missing_slots") or ["context"]),
+                        "target_scope": "context",
+                    },
+                )
             return self._tool_proposal(
                 query_shape=QueryShape.CONTEXT_ACTION,
                 domain="context",
@@ -2208,7 +3811,7 @@ class DeterministicPlanner:
                     "assume_unplugged": self._assume_unplugged(lower, previous=False),
                 },
                 request_type_hint="deterministic_projection_request",
-                family="power_projection",
+                family="power",
                 subject="power_projection",
                 requested_metric=metric,
                 output_type="summary",
@@ -2357,7 +3960,7 @@ class DeterministicPlanner:
                 execution_type="retrieve_identity" if query_shape == QueryShape.IDENTITY_LOOKUP else "diagnose_from_telemetry" if diagnostic_mode else "retrieve_live_metric",
                 output_mode=output_mode,
             )
-        if any(token in lower for token in {"running apps", "open apps", "active windows", "what is open", "open windows"}):
+        if any(token in lower for token in {"running apps", "open apps", "what is open"}) and not self._looks_like_application_concept_prompt(lower):
             return self._tool_proposal(
                 query_shape=QueryShape.CURRENT_STATUS,
                 domain="applications",
@@ -2369,6 +3972,36 @@ class DeterministicPlanner:
                 requested_metric="applications",
                 confidence=0.94,
                 evidence=["active apps phrasing detected"],
+                execution_type="retrieve_current_status",
+                output_mode=ResponseMode.STATUS_SUMMARY.value,
+            )
+        if self._looks_like_active_apps_status(lower):
+            return self._tool_proposal(
+                query_shape=QueryShape.CURRENT_STATUS,
+                domain="applications",
+                tool_name="active_apps",
+                tool_arguments={},
+                request_type_hint="direct_deterministic_fact",
+                family="active_apps",
+                subject="active_apps",
+                requested_metric="applications",
+                confidence=0.94,
+                evidence=["active-apps status phrasing detected"],
+                execution_type="retrieve_current_status",
+                output_mode=ResponseMode.STATUS_SUMMARY.value,
+            )
+        if self._looks_like_window_status(lower):
+            return self._tool_proposal(
+                query_shape=QueryShape.CURRENT_STATUS,
+                domain="windows",
+                tool_name="window_status",
+                tool_arguments={},
+                request_type_hint="direct_deterministic_fact",
+                family="window_control",
+                subject="windows",
+                requested_metric="open_windows",
+                confidence=0.94,
+                evidence=["window status phrasing detected"],
                 execution_type="retrieve_current_status",
                 output_mode=ResponseMode.STATUS_SUMMARY.value,
             )
@@ -2448,6 +4081,23 @@ class DeterministicPlanner:
                 output_mode=ResponseMode.SUMMARY_RESULT.value,
                 slots={"requires_reasoner": True},
             )
+        if self._looks_like_unsupported_external_commitment(lower):
+            return self._tool_proposal(
+                query_shape=QueryShape.SUMMARY_REQUEST,
+                domain="unsupported",
+                request_type_hint="unsupported_capability",
+                family="unsupported",
+                subject="external_commitment",
+                requested_action="decline_unsupported_external_commitment",
+                confidence=0.96,
+                evidence=["unsupported external commitment or payment request detected"],
+                assistant_message=(
+                    "I can't book, purchase, pay for, or commit to real-world transactions from this command surface. "
+                    "I can help you draft a plan or checklist instead."
+                ),
+                execution_type="decline_unsupported_request",
+                output_mode=ResponseMode.UNSUPPORTED.value,
+            )
         return SemanticParseProposal(
             query_shape=QueryShape.UNCLASSIFIED,
             confidence=0.0,
@@ -2516,7 +4166,7 @@ class DeterministicPlanner:
                     "assume_unplugged": classification.assume_unplugged,
                 },
                 request_type_hint=classification.request_type,
-                family="power_projection",
+                family="power",
                 subject="power_projection",
                 requested_metric=classification.metric,
                 output_type="summary",
@@ -2627,6 +4277,10 @@ class DeterministicPlanner:
             output_mode = output_mode or ResponseMode.IDENTITY_SUMMARY.value
             output_type = output_type or "identity"
             execution_type = execution_type or "retrieve_identity"
+        elif query_shape == QueryShape.CALCULATION_REQUEST:
+            output_mode = output_mode or ResponseMode.CALCULATION_RESULT.value
+            output_type = output_type or "numeric"
+            execution_type = execution_type or "deterministic_local_expression"
         elif query_shape == QueryShape.SCREEN_AWARENESS_REQUEST:
             output_mode = output_mode or ResponseMode.SUMMARY_RESULT.value
             output_type = output_type or "screen_analysis"
@@ -2689,6 +4343,8 @@ class DeterministicPlanner:
             capability_requirements.append("throughput_measurement" if execution_type == "run_measurement" else "live_telemetry")
         elif query_shape == QueryShape.CURRENT_STATUS:
             capability_requirements.append("status_fetch")
+        elif query_shape == QueryShape.CALCULATION_REQUEST:
+            capability_requirements.append("local_calculation")
         elif query_shape == QueryShape.IDENTITY_LOOKUP:
             capability_requirements.append("identity_lookup")
         elif query_shape == QueryShape.SCREEN_AWARENESS_REQUEST:
@@ -3359,7 +5015,7 @@ class DeterministicPlanner:
                 focus="time" if "timezone" in lower or "time zone" in lower else "identity",
                 present_in=present_in,
             )
-        if any(token in lower for token in {"running apps", "open apps", "active windows", "what is open", "open windows"}):
+        if any(token in lower for token in {"running apps", "open apps", "what is open"}):
             return RequestClassification(request_type="direct_deterministic_fact", family="active_apps")
         if any(token in lower for token in {"recent files", "recent documents", "what was i working on"}):
             return RequestClassification(request_type="direct_deterministic_fact", family="recent_files")
@@ -3583,24 +5239,10 @@ class DeterministicPlanner:
         return None
 
     def _looks_like_workspace_restore(self, lower: str) -> bool:
-        return (
-            any(
-                phrase in lower
-                for phrase in {
-                    "restore the workspace",
-                    "open my workspace",
-                    "open my",
-                    "open the",
-                    "continue where we left off",
-                    "pick up where we left off",
-                    "bring back the workspace",
-                    "bring back the",
-                    "pull up the",
-                    "continue the ",
-                }
-            )
-            and any(token in lower for token in {"workspace", "setup", "environment", "project", "stuff", "thing"})
-        ) or "where we left off" in lower
+        explicit_restore = re.search(r"\brestore\b.{0,32}\b(?:workspace|setup|environment|project)\b", lower)
+        explicit_workspace_open = re.search(r"\b(?:open|bring\s+back|pull\s+up)\b.{0,32}\bworkspace\b", lower)
+        continuity = any(phrase in lower for phrase in {"continue where we left off", "pick up where we left off", "where we left off"})
+        return bool(explicit_restore or explicit_workspace_open or continuity)
 
     def _looks_like_workspace_save(self, lower: str) -> bool:
         return any(
@@ -3621,13 +5263,23 @@ class DeterministicPlanner:
                 "clear workspace",
                 "clear the workspace",
                 "clear this workspace",
+                "clear current workspace",
+                "clear the current workspace",
                 "reset the workspace",
                 "empty the workspace",
             }
         )
 
     def _looks_like_workspace_archive(self, lower: str) -> bool:
-        return any(phrase in lower for phrase in {"archive this workspace", "archive the workspace"})
+        return any(
+            phrase in lower
+            for phrase in {
+                "archive this workspace",
+                "archive the workspace",
+                "archive current workspace",
+                "archive the current workspace",
+            }
+        )
 
     def _looks_like_workspace_rename(self, lower: str) -> bool:
         return "rename this workspace to" in lower or "rename the workspace to" in lower
@@ -3636,13 +5288,25 @@ class DeterministicPlanner:
         return "tag this workspace" in lower or "tag the workspace" in lower
 
     def _looks_like_workspace_list(self, lower: str) -> bool:
+        if lower in {
+            "show my workspace",
+            "show my workspaces",
+            "show workspace",
+            "show workspaces",
+            "my workspace",
+            "my workspaces",
+            "list workspace",
+            "list workspaces",
+            "list my workspace",
+            "list my workspaces",
+        }:
+            return True
         return any(
             phrase in lower
             for phrase in {
                 "list my recent workspaces",
                 "show my recent workspaces",
                 "show my archived workspaces",
-                "list workspaces",
                 "recent workspaces",
                 "archived workspaces",
             }
@@ -3661,7 +5325,18 @@ class DeterministicPlanner:
         )
 
     def _looks_like_next_steps(self, lower: str) -> bool:
-        return any(phrase in lower for phrase in {"what's next", "what is next", "what still needs doing", "what's left"})
+        return any(
+            phrase in lower
+            for phrase in {
+                "what's next",
+                "what is next",
+                "what still needs doing",
+                "what's left",
+                "what should i do next",
+                "what do i do next",
+                "next steps",
+            }
+        )
 
     def _looks_like_workspace_assemble(self, lower: str) -> bool:
         return any(
@@ -3780,7 +5455,7 @@ class DeterministicPlanner:
                 "plugged in",
                 "on ac",
             }
-        ):
+        ) or re.search(r"\b(?:what(?:'s|\s+is)\s+(?:my|the)|how\s+much)\b.{0,16}\bbattery\b(?:\s+at|\s+left)?\b", lower):
             return True
         return recent_family == "power" and "am i charging" in lower
 
@@ -3880,6 +5555,8 @@ class DeterministicPlanner:
     def _resource_query_kind(self, lower: str, *, recent_family: str | None) -> str | None:
         if self._looks_like_network_throughput(lower):
             return None
+        if self._looks_like_active_apps_status(lower) or self._looks_like_window_status(lower):
+            return None
         if self._looks_like_resource_interpretation(lower):
             return "diagnostic"
         if self._looks_like_resource_telemetry(lower):
@@ -3959,7 +5636,7 @@ class DeterministicPlanner:
 
     def _mentions_resource_directly(self, lower: str) -> bool:
         return any(
-            token in lower
+            re.search(rf"\b{re.escape(token)}\b", lower)
             for token in {
                 "cpu",
                 "processor",
@@ -4014,6 +5691,39 @@ class DeterministicPlanner:
             return "overview"
         return "overview"
 
+    def _looks_like_native_comparison_request(self, lower: str) -> bool:
+        if not re.search(r"\b(?:compare|diff)\b", lower):
+            return False
+        native_target_terms = {
+            "file",
+            "files",
+            "document",
+            "documents",
+            "doc",
+            "docs",
+            "folder",
+            "folders",
+            "spreadsheet",
+            "spreadsheets",
+            "pdf",
+            "pdfs",
+            "image",
+            "images",
+            "screenshot",
+            "screenshots",
+            "draft",
+            "drafts",
+            "version",
+            "versions",
+        }
+        if any(re.search(rf"\b{re.escape(term)}\b", lower) for term in native_target_terms):
+            return True
+        if re.search(r"\b[\w.-]+\.(?:txt|md|pdf|docx?|xlsx?|csv|py|ts|tsx|js|jsx|json|ya?ml|toml|ini|log)\b", lower):
+            return True
+        if re.search(r"\b(?:compare|diff)\b.{0,40}\b(?:selected|highlighted)\b", lower):
+            return True
+        return False
+
     def _looks_like_storage_status(self, lower: str) -> bool:
         return any(
             token in lower
@@ -4041,7 +5751,69 @@ class DeterministicPlanner:
         )
 
     def _looks_like_network_status(self, lower: str) -> bool:
-        return any(token in lower for token in {"wifi", "wi-fi", "network", "internet", "connected", " ip", "my ip", "address"})
+        if any(
+            phrase in lower
+            for phrase in {
+                "network effects",
+                "neural network",
+                "network graph",
+                "networking advice",
+            }
+        ):
+            return False
+        if lower.startswith(("explain ", "define ", "what is a ", "what's a ", "draw ")):
+            return False
+        online_question = bool(re.search(r"\b(?:am\s+i|are\s+we|is\s+(?:this\s+)?(?:machine|computer|laptop|pc))\s+online\b", lower))
+        connectivity_question = bool(
+            re.search(
+                r"\b(?:is|are|am|check|show|tell)\b.{0,40}\b(?:online|connected|internet|wi-fi|wifi|connection)\b",
+                lower,
+            )
+        )
+        connection_name_question = bool(
+            any(re.search(rf"\b{term}\b", lower) for term in {"wi-fi", "wifi", "wireless", "ssid", "network", "connection"})
+            and any(re.search(rf"\b{verb}\b", lower) for verb in {"what", "which", "show", "tell"})
+            and (
+                any(
+                    phrase in lower
+                    for phrase in {
+                        "am i on",
+                        "am i using",
+                        "im on",
+                        "connected to",
+                        "connection name",
+                        "network name",
+                        "current",
+                        "using",
+                    }
+                )
+                or bool(
+                    re.search(
+                        r"\b(?:this|my|the)\s+(?:laptop|computer|machine|pc|device|system)\s+(?:is\s+)?(?:on|using)\b",
+                        lower,
+                    )
+                )
+            )
+        )
+        device_scope = bool(re.search(r"\b(?:my|this|the)\s+(?:machine|computer|laptop|pc|device|system)\b", lower))
+        status_phrase = any(
+            phrase in lower
+            for phrase in {
+                "wifi signal",
+                "wi-fi signal",
+                "signal strength",
+                "network status",
+                "internet status",
+                "connection status",
+                "what network am i on",
+                "which network am i on",
+                "my ip",
+                "ip address",
+            }
+        )
+        return online_question or connectivity_question or connection_name_question or status_phrase or (
+            device_scope and any(token in lower for token in {"connected", "online", "internet", "wifi", "wi-fi"})
+        )
 
     def _looks_like_clock_time(self, lower: str) -> bool:
         if "timezone" in lower or "time zone" in lower:
@@ -4181,12 +5953,61 @@ class DeterministicPlanner:
     def _network_status_focus(self, lower: str) -> str:
         if any(token in lower for token in {"signal", "rssi"}):
             return "signal"
+        if any(token in lower for token in {"wifi", "wi-fi", "wireless", "ssid"}):
+            return "wifi"
         if "ip" in lower or "address" in lower:
             return "ip"
         return "overview"
 
     def _looks_like_machine(self, lower: str) -> bool:
         return any(token in lower for token in {"machine name", "os version", "what computer", "what machine", "timezone", "time zone"})
+
+    def _looks_like_active_apps_status(self, lower: str) -> bool:
+        if self._looks_like_application_concept_prompt(lower):
+            return False
+        return bool(
+            re.search(
+                r"\b(?:what|which|show|list)\b.{0,24}\b(?:apps?|applications?|programs?)\b.{0,24}\b(?:open|running|active)\b",
+                lower,
+            )
+            or re.search(
+                r"\b(?:open|running|active)\b.{0,16}\b(?:apps?|applications?|programs?)\b",
+                lower,
+            )
+        )
+
+    def _looks_like_application_concept_prompt(self, lower: str) -> bool:
+        return any(
+            token in lower
+            for token in {
+                "should i build",
+                "marketing",
+                "idea",
+                "ideas",
+                "architecture",
+                "concept",
+                "principle",
+                "principles",
+            }
+        )
+
+    def _looks_like_window_status(self, lower: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(?:what|which|show|list)\b.{0,24}\bwindows?\b.{0,24}\b(?:open|active|focused)\b",
+                lower,
+            )
+            or re.search(
+                r"\b(?:open|active|focused)\b.{0,16}\bwindows?\b",
+                lower,
+            )
+        )
+
+    def _looks_like_unsupported_external_commitment(self, lower: str) -> bool:
+        transactional = any(token in lower for token in {"book", "buy", "purchase", "pay for", "order"})
+        external_target = any(token in lower for token in {"flight", "hotel", "ticket", "reservation", "real "})
+        immediate_commitment = any(token in lower for token in {"now", "for real", "actually", "pay"})
+        return transactional and external_target and immediate_commitment
 
     def _routine_execute_request(self, message: str, lower: str) -> dict[str, object] | None:
         del message
@@ -4202,15 +6023,25 @@ class DeterministicPlanner:
         lower: str,
         *,
         active_request_state: dict[str, object],
+        active_context: dict[str, Any] | None = None,
+        active_posture: dict[str, Any] | None = None,
     ) -> dict[str, object] | None:
-        if "save this as a routine" not in lower:
+        if not self._looks_like_routine_save_request(lower):
             return None
-        match = re.search(r"(?:called|named)\s+(.+)$", message, flags=re.IGNORECASE)
-        routine_name = "saved routine"
-        if match:
-            routine_name = " ".join(str(match.group(1) or "").split()).strip(" .,:;!?")
+        routine_name = self._extract_routine_save_name(message) or "saved routine"
         family = str(active_request_state.get("family") or "").strip().lower()
         parameters = active_request_state.get("parameters") if isinstance(active_request_state.get("parameters"), dict) else {}
+        precondition_state = self._routine_save_precondition_state(
+            active_request_state=active_request_state,
+            active_context=active_context or {},
+            active_posture=active_posture or {},
+        )
+        if precondition_state["missing_preconditions"]:
+            return {
+                "routine_name": routine_name,
+                "routine_save_precondition_state": precondition_state,
+                "missing_preconditions": list(precondition_state["missing_preconditions"]),
+            }
         if family == "repair":
             return {
                 "routine_name": routine_name,
@@ -4220,6 +6051,7 @@ class DeterministicPlanner:
                     "target": str(parameters.get("target") or "system").strip() or "system",
                 },
                 "description": f"Saved repair routine for {routine_name}.",
+                "routine_save_precondition_state": precondition_state,
             }
         if family == "workflow":
             return {
@@ -4230,6 +6062,7 @@ class DeterministicPlanner:
                     "query": str(parameters.get("query") or "").strip(),
                 },
                 "description": f"Saved workflow routine for {routine_name}.",
+                "routine_save_precondition_state": precondition_state,
             }
         if family == "maintenance":
             return {
@@ -4237,6 +6070,7 @@ class DeterministicPlanner:
                 "execution_kind": "maintenance",
                 "parameters": dict(parameters),
                 "description": f"Saved maintenance routine for {routine_name}.",
+                "routine_save_precondition_state": precondition_state,
             }
         if family == "file_operation":
             return {
@@ -4244,8 +6078,78 @@ class DeterministicPlanner:
                 "execution_kind": "file_operation",
                 "parameters": dict(parameters),
                 "description": f"Saved file operation routine for {routine_name}.",
+                "routine_save_precondition_state": precondition_state,
             }
         return None
+
+    def _looks_like_routine_save_request(self, lower: str) -> bool:
+        return any(
+            phrase in lower
+            for phrase in {
+                "save this as a routine",
+                "save that as a routine",
+                "make this a routine",
+                "make that a routine",
+                "turn this into a routine",
+                "turn that into a routine",
+                "remember this workflow as",
+                "remember that workflow as",
+            }
+        )
+
+    def _extract_routine_save_name(self, message: str) -> str:
+        for pattern in (
+            r"(?:called|named)\s+(.+)$",
+            r"remember\s+(?:this|that)\s+workflow\s+as\s+(.+)$",
+            r"(?:make|turn)\s+(?:this|that)\s+(?:into\s+)?a\s+routine\s+(?:called|named)\s+(.+)$",
+        ):
+            match = re.search(pattern, message, flags=re.IGNORECASE)
+            if match:
+                return " ".join(str(match.group(1) or "").split()).strip(" .,:;!?")
+        return ""
+
+    def _routine_save_precondition_state(
+        self,
+        *,
+        active_request_state: dict[str, object],
+        active_context: dict[str, Any],
+        active_posture: dict[str, Any],
+    ) -> dict[str, object]:
+        family = str(active_request_state.get("family") or "").strip().lower()
+        parameters = active_request_state.get("parameters") if isinstance(active_request_state.get("parameters"), dict) else {}
+        context_payload = active_context if isinstance(active_context, dict) else {}
+        posture_payload = active_posture if isinstance(active_posture, dict) else {}
+        active_context_available = bool(family and family not in {"routine", "generic_provider", "unsupported"})
+        if not active_context_available:
+            active_context_available = bool(context_payload.get("current_resolution") or posture_payload.get("current_task_state"))
+        bounded_probe = {
+            "active_request_state": active_request_state,
+            "active_context": context_payload,
+            "active_posture": posture_payload,
+        }
+        try:
+            active_context_bytes = len(json.dumps(bounded_probe, default=str, separators=(",", ":")).encode("utf-8"))
+        except (TypeError, ValueError):
+            active_context_bytes = 0
+        active_context_bounded = active_context_bytes <= WORKSPACE_PAYLOAD_FAIL_BYTES if "WORKSPACE_PAYLOAD_FAIL_BYTES" in globals() else active_context_bytes <= 5_000_000
+        saveable_family = family in {"repair", "workflow", "maintenance", "file_operation"}
+        missing: list[str] = []
+        if not active_context_available or not saveable_family:
+            missing.append("steps_or_recent_action")
+        if not active_context_bounded:
+            missing.append("bounded_active_context")
+        return {
+            "active_context_available": active_context_available and saveable_family,
+            "active_context_fresh": bool(active_context_available),
+            "active_context_bounded": active_context_bounded,
+            "active_context_source": "active_request_state" if saveable_family else "none",
+            "deictic_binding_status": "resolved" if active_context_available and saveable_family else "missing",
+            "family": family,
+            "parameter_keys": sorted(str(key) for key in parameters.keys()),
+            "missing_preconditions": missing,
+            "fallback_reason": "" if not missing else "missing_saveable_active_context",
+            "generic_provider_competed": False,
+        }
 
     def _trusted_hook_register_request(self, message: str, lower: str) -> dict[str, object] | None:
         match = re.match(r"^register trusted hook\s+(.+?)\s+for\s+(.+)$", message, flags=re.IGNORECASE)
@@ -4705,11 +6609,15 @@ class DeterministicPlanner:
                     },
                 )
 
-        match = re.match(
-            r"^(?:send|share|post|message)\s+(?P<payload>.+?)\s+to\s+(?P<destination>.+?)(?:\s+with(?:\s+a)?\s+note(?:\s*[:\-]?\s*(?P<note>.+))?)?$",
-            message,
-            flags=re.IGNORECASE,
+        match = None
+        relay_patterns = (
+            r"^(?:send|share|post|message|relay|forward|dm)\s+(?P<payload>.+?)\s+(?:to|for)\s+(?P<destination>.+?)(?:\s+(?:on|in|via|through)\s+discord)?(?:\s+with(?:\s+a)?\s+note(?:\s*[:\-]?\s*(?P<note>.+))?)?$",
+            r"^pass\s+(?P<payload>.+?)\s+along\s+(?:to|for)\s+(?P<destination>.+?)(?:\s+(?:on|in|via|through)\s+discord)?(?:\s+with(?:\s+a)?\s+note(?:\s*[:\-]?\s*(?P<note>.+))?)?$",
         )
+        for pattern in relay_patterns:
+            match = re.match(pattern, message, flags=re.IGNORECASE)
+            if match:
+                break
         if not match:
             match = re.match(
                 r"^message\s+(?P<destination>.+?)\s+(?P<payload>this|that|it|these|those|.+?)(?:\s+with(?:\s+a)?\s+note(?:\s*[:\-]?\s*(?P<note>.+))?)?$",
@@ -4717,9 +6625,39 @@ class DeterministicPlanner:
                 flags=re.IGNORECASE,
             )
         if not match:
+            if self._looks_like_discord_relay_missing_destination(lower):
+                return self._tool_proposal(
+                    query_shape=QueryShape.DISCORD_RELAY_REQUEST,
+                    domain="discord_relay",
+                    request_type_hint="discord_relay_dispatch",
+                    family="discord_relay",
+                    subject="discord",
+                    requested_action="preview",
+                    confidence=0.84,
+                    evidence=["discord relay wording matched but the destination was missing"],
+                    execution_type="discord_relay_preview",
+                    output_mode=ResponseMode.CLARIFICATION.value,
+                    output_type="action",
+                    slots={
+                        "clarification": {
+                            "code": "missing_discord_destination",
+                            "message": "Which Discord destination should I use?",
+                            "missing_slots": ["destination"],
+                        },
+                        "payload_hint": self._discord_payload_hint(lower),
+                        "missing_preconditions": ["destination"],
+                        "request_stage": "clarification",
+                    },
+                )
             return None
         payload_phrase = " ".join(str(match.group("payload") or "").split()).strip(" .,:;!?")
         destination_alias = " ".join(str(match.group("destination") or "").split()).strip(" .,:;!?")
+        destination_alias = re.sub(
+            r"\s+(?:on|in|via|through)\s+discord$",
+            "",
+            destination_alias,
+            flags=re.IGNORECASE,
+        ).strip(" .,:;!?")
         if not payload_phrase or not destination_alias:
             return None
         note_text = " ".join(str(match.group("note") or "").split()).strip() or None
@@ -4762,6 +6700,13 @@ class DeterministicPlanner:
             return "screenshot_candidate"
         return "contextual"
 
+    def _looks_like_discord_relay_missing_destination(self, lower: str) -> bool:
+        if "discord" not in lower:
+            return False
+        relay_verb = re.match(r"^(?:please\s+|pls\s+)?(?:send|share|post|message|relay|forward|dm|pass)\b", lower)
+        has_destination = bool(re.search(r"\b(?:to|for)\s+\w+", lower))
+        return bool(relay_verb and not has_destination)
+
     def _looks_like_discord_relay_confirmation(self, lower: str) -> bool:
         cleaned = " ".join(str(lower or "").split()).strip()
         return cleaned in DISCORD_RELAY_CONFIRM_PHRASES or cleaned in {"no", "deny", "cancel", "stop"}
@@ -4790,7 +6735,10 @@ class DeterministicPlanner:
 
     def _workflow_execution_request(self, message: str, lower: str) -> dict[str, object] | None:
         del message
-        if any(phrase in lower for phrase in {"set up my writing environment", "setup my writing environment", "open my writing setup", "writing setup"}):
+        if re.search(r"\b(?:set\s+up|setup|open)\b.{0,24}\bwriting\b.{0,18}\b(?:environment|setup)\b", lower) or re.search(
+            r"\bwriting\b.{0,18}\bsetup\b",
+            lower,
+        ):
             return {"workflow_kind": "writing_setup"}
         if any(phrase in lower for phrase in {"prepare a diagnostics setup", "diagnostics setup"}):
             return {"workflow_kind": "diagnostics_setup"}
@@ -4824,6 +6772,11 @@ class DeterministicPlanner:
             return {"operation": "collect_references", "query": message}
         if any(phrase in lower for phrase in {"summarize this article", "summarize this page", "summarize the current page"}):
             return {"operation": "summarize", "query": message}
+        if re.search(r"\b(?:what|which)\b.{0,24}\b(?:browser\s+)?(?:page|tab)\b.{0,24}\bam\s+i\s+on\b", lower) or re.search(
+            r"\bcurrent\b.{0,16}\b(?:browser\s+)?(?:page|tab)\b",
+            lower,
+        ):
+            return {"operation": "current_page", "query": message}
         if any(phrase in lower for phrase in {"show me the source i was just reading", "find the page i was just reading", "find the page from earlier"}):
             return {"operation": "recent_page", "query": message}
         if any(phrase in lower for phrase in {"find the tab", "find the page", "bring up the page", "bring that page forward"}) or (" tab " in lower and lower.startswith(("find ", "show ", "bring "))) or ("page about" in lower and any(lower.startswith(prefix) for prefix in {"find ", "show ", "bring "})):
@@ -4837,6 +6790,8 @@ class DeterministicPlanner:
         *,
         surface_mode: str,
     ) -> SemanticParseProposal | None:
+        if self._looks_like_deictic_browser_destination(lower):
+            return self._browser_destination_context_clarification(message, lower)
         if self._browser_destination_resolver.intent_type(lower) != BrowserIntentType.OPEN_DESTINATION:
             return None
         request = self._browser_destination_resolver.parse(message, surface_mode=surface_mode)
@@ -4916,6 +6871,52 @@ class DeterministicPlanner:
             execution_type="resolve_url_then_open_in_browser",
             output_mode=ResponseMode.ACTION_RESULT.value,
             slots=slots,
+        )
+
+    def _looks_like_deictic_browser_destination(self, lower: str) -> bool:
+        opener = re.match(r"^(?:please\s+|pls\s+|can\s+you\s+|could\s+you\s+)?(?:open|show|bring\s+up|pull\s+up|go\s+to)\b", lower)
+        if opener is None:
+            return False
+        web_referent = bool(re.search(r"\b(?:website|web\s+site|site|page|link|url)\b", lower))
+        deictic_or_prior = bool(re.search(r"\b(?:this|that|these|those|previous|last|earlier|before)\b", lower))
+        return web_referent and deictic_or_prior
+
+    def _browser_destination_context_clarification(self, message: str, lower: str) -> SemanticParseProposal:
+        target = re.sub(
+            r"^(?:please\s+|pls\s+|can\s+you\s+|could\s+you\s+)?(?:open|show|bring\s+up|pull\s+up|go\s+to)\s+",
+            "",
+            message,
+            flags=re.IGNORECASE,
+        ).strip(" .")
+        clarification = {
+            "code": "missing_browser_destination_context",
+            "message": "Which website or page should I open? I need a URL, current page, or recent browser reference first.",
+            "missing_slots": ["destination_context"],
+        }
+        return self._tool_proposal(
+            query_shape=QueryShape.OPEN_BROWSER_DESTINATION,
+            domain="browser",
+            request_type_hint="browser_destination",
+            family="browser_destination",
+            subject=target or "browser_destination",
+            requested_action="open_browser_destination",
+            confidence=0.88,
+            evidence=["browser destination deictic detected without bound website context", "app-control route bypassed"],
+            assistant_message=clarification["message"],
+            execution_type="resolve_url_then_open_in_browser",
+            output_mode=ResponseMode.CLARIFICATION.value,
+            slots={
+                "target_scope": "browser",
+                "clarification": clarification,
+                "missing_preconditions": ["destination_context"],
+                "browser_intent_type": "open_destination",
+                "open_target": target,
+                "fallback_reason": "missing_browser_destination_context",
+                "legacy_routes_bypassed": {
+                    "desktop_search": True,
+                    "app_control": True,
+                },
+            },
         )
 
     def _browser_search_request(
@@ -5005,6 +7006,57 @@ class DeterministicPlanner:
             execution_type="resolve_search_url_then_open_in_browser",
             output_mode=ResponseMode.ACTION_RESULT.value,
             slots=slots,
+        )
+
+    def _explicit_file_open_request(
+        self,
+        message: str,
+        lower: str,
+        *,
+        surface_mode: str,
+    ) -> SemanticParseProposal | None:
+        if any(phrase in lower for phrase in {"without opening", "do not open", "don't open", "just tell me"}):
+            return None
+        if not any(lower.startswith(prefix) for prefix in {"open ", "show ", "bring up ", "pull up "}):
+            return None
+        match = re.search(r"(?<![A-Za-z])(?P<path>[A-Za-z]:[\\/][^\r\n]+)", message)
+        if not match:
+            return None
+        path = " ".join(str(match.group("path") or "").split()).strip(" .,:;!?\"'")
+        path = re.sub(
+            r"\s+(?:externally|outside|in the deck|inside the deck|in deck|in the browser|in browser)$",
+            "",
+            path,
+            flags=re.IGNORECASE,
+        ).strip(" .,:;!?\"'")
+        if not path:
+            return None
+        open_in_deck = surface_mode.strip().lower() == "deck" or " deck" in lower
+        tool_name = "deck_open_file" if open_in_deck else "external_open_file"
+        return self._tool_proposal(
+            query_shape=QueryShape.CONTEXT_ACTION,
+            domain="files",
+            tool_name=tool_name,
+            tool_arguments={"path": path},
+            request_type_hint="direct_action",
+            family="file",
+            subject=path,
+            requested_action="open_file",
+            confidence=0.97,
+            evidence=["explicit filesystem path open request detected before app-control matching"],
+            execution_type="execute_control_command",
+            output_mode=ResponseMode.ACTION_RESULT.value,
+            output_type="action",
+            slots={
+                "target_scope": "files",
+                "path": path,
+                "open_target": "deck" if open_in_deck else "external",
+                "target_extraction_summary": {
+                    "source": "operator_text",
+                    "kind": "filesystem_path",
+                    "path": path,
+                },
+            },
         )
 
     def _desktop_search_request(self, message: str, lower: str, *, surface_mode: str) -> dict[str, object] | None:
@@ -5169,7 +7221,7 @@ class DeterministicPlanner:
         if lower in {"what was i just doing", "what s my current context", "what is my current context"}:
             return {"operation": "inspect"}
 
-        if lower in {"continue where i left off", "continue that", "resume that", "resume where i left off"}:
+        if re.search(r"\b(?:continue|resume|pick\s+up)\b.{0,28}\b(?:that|there|where\s+(?:i|we)\s+left\s+off)\b", lower):
             return {"operation": "restore_context"}
 
         if any(phrase in lower for phrase in {"what i copied", "the thing i copied", "clipboard"}) and lower.startswith(("open ", "show ")):
@@ -5177,10 +7229,25 @@ class DeterministicPlanner:
             if source:
                 return {"operation": "open", "source": source}
 
-        if any(phrase in lower for phrase in {"what i selected", "the thing i selected", "selection"}) and lower.startswith(("open ", "show ")):
+        selected_text_reference = bool(
+            re.search(
+                r"\b(?:open|show|display|bring\s+up)\b.{0,32}\b(?:selected\s+text|highlighted\s+text|what\s+i\s+highlighted|selection)\b",
+                lower,
+            )
+        )
+        if selected_text_reference and not any(phrase in lower for phrase in {"selection bias", "selection criteria"}):
             source = preferred_source("selection")
             if source:
                 return {"operation": "open", "source": source}
+            return {
+                "clarification": {
+                    "code": "missing_context_selection",
+                    "message": "I can open the selected text, but I need an active selection or clipboard context first.",
+                    "missing_slots": ["context"],
+                },
+                "operation": "open",
+                "source": "selection",
+            }
 
         if any(phrase in lower for phrase in {"turn this into tasks", "make tasks from this", "turn that into tasks", "make tasks from that"}):
             source = preferred_source()
@@ -5208,6 +7275,8 @@ class DeterministicPlanner:
     ) -> str | None:
         del active_context
         if lower.startswith(("delete ", "remove ")):
+            if re.match(r"^remove\s+.+?\s+from\s+(?:this|my|the)\s+(?:machine|computer|pc)$", lower):
+                return None
             target = re.sub(r"^(?:delete|remove)\s+", "", message, flags=re.IGNORECASE).strip(" .")
             normalized_target = normalize_phrase(target)
             if normalized_target in {"this", "that", "it", "these", "those", "that folder", "this folder", "that file", "this file"}:
@@ -5216,6 +7285,8 @@ class DeterministicPlanner:
         return None
 
     def _app_control_request(self, message: str, lower: str) -> dict[str, object] | None:
+        if lower.startswith("open up "):
+            return None
         if any(token in lower for token in {" setup", " environment", "workspace", "context"}) and not any(
             lower.startswith(prefix) for prefix in {"force quit ", "quit ", "close ", "restart ", "relaunch "}
         ):
@@ -5355,16 +7426,13 @@ class DeterministicPlanner:
             return {"action": "open_device_manager"}
         if any(phrase in lower for phrase in {"open resource monitor", "open resmon"}):
             return {"action": "open_resource_monitor"}
-        if any(phrase in lower for phrase in {"open bluetooth settings", "open bluetooth setting"}):
-            return {"action": "open_settings_page", "target": "bluetooth"}
-        if any(phrase in lower for phrase in {"open wifi settings", "open wi fi settings", "open wi-fi settings"}):
-            return {"action": "open_settings_page", "target": "wifi"}
-        if "open network settings" in lower:
-            return {"action": "open_settings_page", "target": "network"}
-        if "open sound settings" in lower:
-            return {"action": "open_settings_page", "target": "sound"}
-        if "open display settings" in lower:
-            return {"action": "open_settings_page", "target": "display"}
+        settings_match = re.search(
+            r"\b(?:open|bring\s+up|show)\s+(?P<target>bluetooth|wi\s*fi|wi-fi|wifi|network|sound|display|privacy)\s+settings?\b",
+            lower,
+        )
+        if settings_match:
+            target = settings_match.group("target").replace(" ", "").replace("-", "")
+            return {"action": "open_settings_page", "target": "wifi" if target == "wifi" else target}
         return None
 
     def _normalize_app_candidate(self, raw: str) -> str:
@@ -5378,18 +7446,62 @@ class DeterministicPlanner:
             flags=re.IGNORECASE,
         )
         normalized = normalize_phrase(candidate)
+        if any(
+            re.search(rf"\b{re.escape(marker)}\b", normalized)
+            for marker in {
+                "advice",
+                "architecture",
+                "concept",
+                "concepts",
+                "examples",
+                "ideas",
+                "marketing",
+                "principles",
+                "tutorial",
+            }
+        ):
+            return ""
         if not normalized or normalized in {
             "deck",
             "ghost",
             "workspace",
             "weather",
+            "settings",
             "location settings",
+            "it",
+            "this",
+            "that",
+            "thing",
+            "the thing",
+            "that thing",
+            "this thing",
+            "selected text",
+            "highlighted text",
+            "selection",
+            "website",
+            "web site",
+            "site",
+            "page",
+            "link",
+            "url",
+            "that website",
+            "this website",
+            "that site",
+            "this site",
+            "that page",
+            "this page",
+            "that link",
+            "this link",
             "layout",
             "saved layout",
             "deck layout",
             "panel launcher",
             "launcher",
         }:
+            return ""
+        if normalized.startswith(("selected ", "highlighted ", "selection ")):
+            return ""
+        if "thing" in normalized and any(reference in normalized for reference in {"mentioned", "that", "this", "the"}):
             return ""
         return normalized
 

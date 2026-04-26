@@ -667,10 +667,10 @@ class BrowserDestinationResolver:
             flags=re.IGNORECASE,
         )
         self._normalized_external_suffix = re.compile(
-            r"\s+(?:in\s+(?:a|the)\s+browser|using\s+(?:a|the)\s+browser|externally|outside\s+(?:stormhelm|the deck))\s*$"
+            r"\s+(?:in\s+(?:a\s+|the\s+)?browser|using\s+(?:a\s+|the\s+)?browser|externally|outside\s+(?:stormhelm|the deck))\s*$"
         )
         self._raw_external_suffix = re.compile(
-            r"\s+(?:in\s+(?:a|the)\s+browser|using\s+(?:a|the)\s+browser|externally|outside\s+(?:Stormhelm|the Deck))\s*$",
+            r"\s+(?:in\s+(?:a\s+|the\s+)?browser|using\s+(?:a\s+|the\s+)?browser|externally|outside\s+(?:Stormhelm|the Deck))\s*$",
             flags=re.IGNORECASE,
         )
         self._normalized_deck_suffix = re.compile(

@@ -6,6 +6,7 @@ import os
 import signal
 import threading
 from contextlib import asynccontextmanager
+from time import perf_counter
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -84,7 +85,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     @app.post("/chat/send")
     async def send_chat(payload: ChatRequest, request: Request) -> dict[str, object]:
         current = _current_container(request)
-        return await current.assistant.handle_message(
+        endpoint_started = perf_counter()
+        result = await current.assistant.handle_message(
             payload.message,
             payload.session_id,
             surface_mode=payload.surface_mode,
@@ -92,6 +94,25 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             workspace_context=payload.workspace_context,
             input_context=payload.input_context,
         )
+        endpoint_dispatch_ms = round((perf_counter() - endpoint_started) * 1000, 3)
+        return_started = perf_counter()
+        assistant_message = result.get("assistant_message") if isinstance(result, dict) else {}
+        metadata = assistant_message.get("metadata") if isinstance(assistant_message, dict) else {}
+        if isinstance(metadata, dict):
+            stage_timings = metadata.get("stage_timings_ms") if isinstance(metadata.get("stage_timings_ms"), dict) else {}
+            stage_timings = dict(stage_timings)
+            stage_timings["endpoint_dispatch_ms"] = endpoint_dispatch_ms
+            stage_timings["asgi_request_receive_ms"] = 0.0
+            stage_timings["server_response_write_ms"] = 0.0
+            stage_timings["endpoint_return_to_asgi_ms"] = round((perf_counter() - return_started) * 1000, 3)
+            metadata["stage_timings_ms"] = stage_timings
+            metadata["api_timings_ms"] = {
+                "asgi_request_receive_ms": 0.0,
+                "endpoint_dispatch_ms": endpoint_dispatch_ms,
+                "endpoint_return_to_asgi_ms": stage_timings["endpoint_return_to_asgi_ms"],
+                "server_response_write_ms": 0.0,
+            }
+        return result
 
     @app.get("/chat/history")
     def chat_history(request: Request, session_id: str = "default", limit: int = 100) -> dict[str, object]:

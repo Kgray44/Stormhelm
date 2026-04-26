@@ -27,6 +27,7 @@ from stormhelm.core.tools.builtins.system_state import (
     SaveLocationTool,
     SavedLocationsTool,
     StorageStatusTool,
+    SystemControlTool,
     WeatherCurrentTool,
     WindowControlTool,
     WindowStatusTool,
@@ -92,6 +93,7 @@ def register_builtin_tools(registry) -> None:
     registry.register(AppControlTool())
     registry.register(WindowStatusTool())
     registry.register(WindowControlTool())
+    registry.register(SystemControlTool())
     registry.register(ControlCapabilitiesTool())
     registry.register(RecentFilesTool())
     registry.register(DesktopSearchTool())
