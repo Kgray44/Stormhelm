@@ -23,6 +23,7 @@ This roadmap separates current implementation from partial, scaffolded, and plan
 | Discord relay | Trusted alias preview/dispatch path with provenance, fingerprints, approval, stale/duplicate checks. | `src/stormhelm/core/discord_relay` | `tests/test_discord_relay.py` |
 | Durable task graph | Task steps, blockers, evidence, job links, trust signals, where-left-off summaries. | `src/stormhelm/core/tasks` | `tests/test_task_graph.py` |
 | Lifecycle/startup | Install/runtime/startup/shell/tray/cleanup/resolution state. | `src/stormhelm/core/lifecycle` | `tests/test_lifecycle_service.py` |
+| Voice foundation | Typed voice config/state/models/events, manual voice turns, controlled audio STT, controlled TTS artifacts, push-to-talk capture boundary, playback boundary, voice API actions, and UI bridge state. | `src/stormhelm/core/voice`, `src/stormhelm/core/api/app.py`, `src/stormhelm/ui/bridge.py` | `tests/test_voice_config.py`, `tests/test_voice_manual_turn.py`, `tests/test_voice_audio_turn.py`, `tests/test_voice_events.py` |
 
 ## Implemented But Limited
 
@@ -36,6 +37,7 @@ This roadmap separates current implementation from partial, scaffolded, and plan
 | Hardware telemetry | Helper/provider availability and optional HWiNFO configuration affect detail. Elevated helper disabled by default. | `src/stormhelm/core/system/hardware_telemetry.py` | `tests/test_hardware_telemetry.py` |
 | Packaging | Scripts exist; installer/portable output still needs clean-machine manual verification. | `scripts/package_portable.ps1`, `scripts/package_installer.ps1` | `tests/test_launcher.py` |
 | Semantic memory | Local service and SQLite records exist; no external vector store configured by default. | `src/stormhelm/core/memory/service.py` | `tests/test_semantic_memory.py` |
+| Voice runtime | Disabled by default; local capture/playback require explicit dev gates and dependencies; OpenAI STT/TTS require OpenAI enablement and an API key; UI state shaping includes current worktree files that should be committed with the voice implementation before relying on GitHub links. | `config/default.toml`, `src/stormhelm/core/voice/service.py`, `src/stormhelm/ui/voice_surface.py` | `tests/test_voice_availability.py`, `tests/test_voice_capture_service.py`, `tests/test_voice_playback_service.py`, `tests/test_voice_ui_state_payload.py` |
 
 ## Scaffolded / Partially Wired
 
@@ -43,7 +45,6 @@ This roadmap separates current implementation from partial, scaffolded, and plan
 |---|---|---|---|
 | Official Discord bot/webhook | Scaffold adapter exists, config disables routes. | `src/stormhelm/core/discord_relay/adapters.py`, `config/default.toml` | `tests/test_discord_relay.py` |
 | Shell command | Stub tool exists but is disabled by default and safety-gated. | `src/stormhelm/core/tools/builtins/shell_stub.py`, `src/stormhelm/core/safety/policy.py` | `tests/test_safety.py` |
-| Voice UI | QML `VoiceCore` component exists, but no backend voice pipeline was found in tracked source. | `assets/qml/components/VoiceCore.qml` | `tests/test_qml_shell.py` |
 | Route-v2 / command eval active worktree | Some active files/tests existed locally during rewrite but were not all listed by `git ls-files`; verify before publishing them as repo behavior. | active worktree under `src/stormhelm/core/orchestrator` and `tests` | Needs verification |
 | Installer polish/signing | Packaging scripts exist; signing/notarization-style release hardening is not documented as implemented. | `scripts/package_installer.ps1` | Manual verification needed |
 
@@ -57,12 +58,13 @@ This roadmap separates current implementation from partial, scaffolded, and plan
 | UI approval controls | Keep approval state backend-owned while making once/task/session choices ergonomic. | Trust flow is central to safety. |
 | Docs link/source checker | Add a repeatable docs check for source paths and internal links. | Prevent doc drift. |
 | Packaging verification checklist | Convert manual packaging checks into repeatable smoke tests where possible. | Portable/installer release confidence. |
+| Voice UI hardening | Commit current UI voice-surface work, add QML coverage for voice controls, and keep capture/playback disabled-by-default. | Avoid docs getting ahead of shipped UI files. |
 
 ## Long-Term
 
 | Area | Direction |
 |---|---|
-| Voice pipeline | Wake word, STT, TTS, permissions, voice routing, and voice UX once backend ownership is designed and implemented. |
+| Voice expansion | Wake word, Realtime sessions, VAD, continuous conversation, full interruption/barge-in, production capture/playback, and richer permissions after the current bounded foundation is hardened. |
 | Richer screen perception | More reliable visual grounding with explicit privacy controls and provider boundaries. |
 | Durable workflow automation | More complete task execution, rollback, verification, and recovery with typed adapter contracts. |
 | Semantic retrieval | Stronger retrieval ranking, retention controls, and provenance UI. |
@@ -78,4 +80,4 @@ This roadmap separates current implementation from partial, scaffolded, and plan
 | Self-bot Discord token workflows | Not documented or recommended; current path is local client automation plus future official route scaffolding. |
 | Silent screen control | Screen actions are gated and must be evidence/verification aware. |
 | Provider-first routing | Local deterministic routes should own local-capable work. |
-| Claiming planned voice as implemented | Voice remains planned/scaffolded until backend source/tests exist. |
+| Claiming unavailable voice modes as implemented | Wake word, always-listening, Realtime, VAD, full interruption, production playback guarantees, and direct voice command authority are not current behavior. |

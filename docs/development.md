@@ -17,7 +17,7 @@ If the Windows Store `python`/`py` aliases are unreliable on your machine, use t
 .\.venv\Scripts\python.exe -m pip install -e .[dev,packaging]
 ```
 
-Sources: `pyproject.toml`, `scripts/run_core.ps1`, `scripts/run_ui.ps1`  
+Sources: `pyproject.toml`, `scripts/run_core.ps1`, `scripts/run_ui.ps1`
 Tests: `tests/test_launcher.py`
 
 ## Run The App
@@ -48,7 +48,7 @@ curl http://127.0.0.1:8765/status
 curl http://127.0.0.1:8765/snapshot
 ```
 
-Sources: `scripts/run_core.ps1`, `scripts/run_ui.ps1`, `scripts/dev_launch.ps1`, `src/stormhelm/core/api/app.py`  
+Sources: `scripts/run_core.ps1`, `scripts/run_ui.ps1`, `scripts/dev_launch.ps1`, `src/stormhelm/core/api/app.py`
 Tests: `tests/test_core_container.py`, `tests/test_snapshot_resilience.py`
 
 ## Run Tests
@@ -66,6 +66,7 @@ Focused examples:
 .\.venv\Scripts\python.exe -m pytest tests/test_planner.py tests/test_assistant_orchestrator.py -q
 .\.venv\Scripts\python.exe -m pytest tests/test_ui_bridge.py tests/test_qml_shell.py -q
 .\.venv\Scripts\python.exe -m pytest tests/test_software_control.py tests/test_discord_relay.py -q
+.\.venv\Scripts\python.exe -m pytest tests/test_voice_config.py tests/test_voice_availability.py tests/test_voice_state.py tests/test_voice_events.py -q
 ```
 
 When running from unusual shells or worktrees, pin the local source tree:
@@ -75,7 +76,7 @@ $env:PYTHONPATH = "C:\Stormhelm\src"
 .\.venv\Scripts\python.exe -m pytest tests/test_config_loader.py -q
 ```
 
-Sources: `pyproject.toml`, `tests/conftest.py`  
+Sources: `pyproject.toml`, `tests/conftest.py`
 Tests: all tests under `tests/`
 
 ## Build / Package
@@ -94,7 +95,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\package_installer.ps1
 
 Installer packaging requires Inno Setup (`ISCC.exe`). Verify packaged builds manually on a clean Windows environment before release.
 
-Sources: `scripts/package_portable.ps1`, `scripts/package_installer.ps1`, `pyproject.toml`  
+Sources: `scripts/package_portable.ps1`, `scripts/package_installer.ps1`, `pyproject.toml`
 Tests: `tests/test_launcher.py`; manual package verification still needed
 
 ## Config Development
@@ -114,7 +115,7 @@ $env:OPENAI_API_KEY = "<your key>"
 
 Do not commit real keys.
 
-Sources: `config/default.toml`, `config/development.toml.example`, `src/stormhelm/config/loader.py`  
+Sources: `config/default.toml`, `config/development.toml.example`, `src/stormhelm/config/loader.py`
 Tests: `tests/test_config_loader.py`
 
 ## Add A New Route Family
@@ -135,7 +136,7 @@ Minimum source areas:
 - `tests/test_planner.py`
 - feature-specific tests
 
-Sources: `src/stormhelm/core/orchestrator/planner.py`, `src/stormhelm/core/orchestrator/planner_models.py`, `src/stormhelm/core/orchestrator/assistant.py`, `src/stormhelm/ui/command_surface_v2.py`  
+Sources: `src/stormhelm/core/orchestrator/planner.py`, `src/stormhelm/core/orchestrator/planner_models.py`, `src/stormhelm/core/orchestrator/assistant.py`, `src/stormhelm/ui/command_surface_v2.py`
 Tests: `tests/test_planner.py`, `tests/test_command_surface.py`
 
 ## Add A New Adapter
@@ -154,7 +155,7 @@ Minimum source areas:
 - feature-specific adapter/service files
 - `tests/test_adapter_contracts.py`
 
-Sources: `src/stormhelm/core/adapters/contracts.py`, `src/stormhelm/core/tools/executor.py`, `src/stormhelm/core/safety/policy.py`  
+Sources: `src/stormhelm/core/adapters/contracts.py`, `src/stormhelm/core/tools/executor.py`, `src/stormhelm/core/safety/policy.py`
 Tests: `tests/test_adapter_contracts.py`, `tests/test_safety.py`
 
 ## Add A New Setting
@@ -167,8 +168,33 @@ Tests: `tests/test_adapter_contracts.py`, `tests/test_safety.py`
 6. Add config loader tests.
 7. Update [settings.md](settings.md).
 
-Sources: `src/stormhelm/config/models.py`, `src/stormhelm/config/loader.py`, `config/default.toml`, `src/stormhelm/core/container.py`  
+Sources: `src/stormhelm/config/models.py`, `src/stormhelm/config/loader.py`, `config/default.toml`, `src/stormhelm/core/container.py`
 Tests: `tests/test_config_loader.py`
+
+## Add Or Change Voice Behavior
+
+1. Keep voice disabled by default unless the user explicitly changes config.
+2. Update typed config in `src/stormhelm/config/models.py`, loader parsing in `src/stormhelm/config/loader.py`, and defaults in `config/default.toml`.
+3. Put provider/capture/playback behavior behind `VoiceService` and provider protocols, not QML.
+4. Route speech-derived command text through `src/stormhelm/core/voice/bridge.py` and the existing assistant/orchestrator boundary.
+5. Publish voice events and status fields for blocked, unavailable, provider error, timeout, and success states.
+6. Keep wake word, always-listening, Realtime, VAD, and full interruption claims out of docs/UI until implemented and tested.
+7. Add or update focused voice tests.
+8. Update [voice.md](voice.md), [settings.md](settings.md#voice), and [ui-surfaces.md](ui-surfaces.md#voice-surfaces).
+
+Minimum source areas:
+
+- `src/stormhelm/core/voice/models.py`
+- `src/stormhelm/core/voice/providers.py`
+- `src/stormhelm/core/voice/service.py`
+- `src/stormhelm/core/voice/availability.py`
+- `src/stormhelm/core/api/app.py`
+- `src/stormhelm/ui/bridge.py`
+- `src/stormhelm/ui/client.py`
+- `tests/test_voice_*.py`
+
+Sources: `src/stormhelm/core/voice/service.py`, `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/voice/bridge.py`, `src/stormhelm/core/api/app.py`, `src/stormhelm/ui/bridge.py`
+Tests: `tests/test_voice_config.py`, `tests/test_voice_availability.py`, `tests/test_voice_manual_turn.py`, `tests/test_voice_audio_turn.py`, `tests/test_voice_core_bridge_contracts.py`
 
 ## Add A New UI Surface
 
@@ -186,11 +212,11 @@ Minimum source areas:
 - `src/stormhelm/ui/client.py`
 - `src/stormhelm/ui/controllers/main_controller.py`
 - `assets/qml/Main.qml`
-- `assets/qml/components/<Surface>.qml`
+- a component under `assets/qml/components`
 - `tests/test_ui_bridge.py`
 - `tests/test_qml_shell.py`
 
-Sources: `src/stormhelm/ui/bridge.py`, `src/stormhelm/ui/client.py`, `src/stormhelm/ui/controllers/main_controller.py`, `assets/qml/Main.qml`  
+Sources: `src/stormhelm/ui/bridge.py`, `src/stormhelm/ui/client.py`, `src/stormhelm/ui/controllers/main_controller.py`, `assets/qml/Main.qml`
 Tests: `tests/test_ui_bridge.py`, `tests/test_main_controller.py`, `tests/test_qml_shell.py`
 
 ## Add A Tool
@@ -202,7 +228,7 @@ Tests: `tests/test_ui_bridge.py`, `tests/test_main_controller.py`, `tests/test_q
 5. Add planner/provider integration only after the tool contract is stable.
 6. Add registry, safety, and execution tests.
 
-Sources: `src/stormhelm/core/tools/base.py`, `src/stormhelm/core/tools/builtins/__init__.py`, `src/stormhelm/core/tools/executor.py`, `src/stormhelm/config/models.py`, `src/stormhelm/core/safety/policy.py`  
+Sources: `src/stormhelm/core/tools/base.py`, `src/stormhelm/core/tools/builtins/__init__.py`, `src/stormhelm/core/tools/executor.py`, `src/stormhelm/config/models.py`, `src/stormhelm/core/safety/policy.py`
 Tests: `tests/test_tool_registry.py`, `tests/test_safety.py`, `tests/test_job_manager.py`
 
 ## Working With Dirty Worktrees
@@ -216,5 +242,5 @@ git ls-files docs src/stormhelm tests config scripts pyproject.toml README.md
 
 Do not assume untracked route/eval files are published behavior until they are intentionally added. When documenting features, mark active-worktree seams as needs verification if they are not tracked by `git ls-files`.
 
-Sources: Git worktree state, `src/stormhelm/core/orchestrator/planner.py` imports, tracked source list  
+Sources: Git worktree state, `src/stormhelm/core/orchestrator/planner.py` imports, tracked source list
 Tests: Not applicable

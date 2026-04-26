@@ -14,8 +14,24 @@ Stormhelm is local-first, but it has optional or platform-specific integration p
 | Data sent externally | Prompt/context passed to provider when enabled. |
 | Unavailable behavior | Provider is not built or used when disabled/missing key. |
 
-Sources: `config/default.toml`, `src/stormhelm/config/loader.py`, `src/stormhelm/core/container.py`, `src/stormhelm/core/providers/openai_responses.py`, `src/stormhelm/core/providers/base.py`, `src/stormhelm/core/providers/audit.py`  
+Sources: `config/default.toml`, `src/stormhelm/config/loader.py`, `src/stormhelm/core/container.py`, `src/stormhelm/core/providers/openai_responses.py`, `src/stormhelm/core/providers/base.py`, `src/stormhelm/core/providers/audit.py`
 Tests: `tests/test_config_loader.py`, `tests/test_command_eval_provider_audit.py`
+
+## OpenAI Voice STT/TTS
+
+| Item | Current behavior |
+|---|---|
+| Default | Disabled through `voice.enabled=false`, `voice.mode="disabled"`, and `openai.enabled=false`. |
+| Enable | Requires OpenAI enabled, an API key, voice enabled, non-disabled voice mode, and configured voice OpenAI models. |
+| STT | Controlled audio input through configured `voice.openai.stt_model`; bounded by audio duration/size/timeouts. |
+| TTS | Controlled speech artifact generation through configured `voice.openai.tts_model`, voice, format, speed, and text length limit. |
+| Capture/playback | Separate local provider gates; STT/TTS availability does not imply microphone capture or audible playback. |
+| Not implemented | Wake word, always-listening, Realtime sessions, VAD, full interruption, and direct voice command authority. |
+| Data sent externally | Audio or speech text sent to OpenAI only when the relevant voice/OpenAI path is enabled and invoked. |
+| Unavailable behavior | Voice status/action results should report disabled, missing key, blocked, unsupported, timeout, or provider error states. |
+
+Sources: `config/default.toml`, `src/stormhelm/config/loader.py`, `src/stormhelm/core/voice/availability.py`, `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/voice/service.py`
+Tests: `tests/test_voice_config.py`, `tests/test_voice_availability.py`, `tests/test_voice_stt_provider.py`, `tests/test_voice_tts_provider.py`
 
 ## Discord
 
@@ -29,7 +45,7 @@ Tests: `tests/test_config_loader.py`, `tests/test_command_eval_provider_audit.py
 | Official bot/webhook | Scaffold adapter exists, but `bot_webhook_routes_enabled=false` by default. |
 | Unavailable behavior | Fails with route/adapter/transport-specific state; should not claim delivery without evidence. |
 
-Sources: `config/default.toml`, `src/stormhelm/core/discord_relay/service.py`, `src/stormhelm/core/discord_relay/adapters.py`, `src/stormhelm/core/discord_relay/models.py`, `src/stormhelm/core/adapters/contracts.py`  
+Sources: `config/default.toml`, `src/stormhelm/core/discord_relay/service.py`, `src/stormhelm/core/discord_relay/adapters.py`, `src/stormhelm/core/discord_relay/models.py`, `src/stormhelm/core/adapters/contracts.py`
 Tests: `tests/test_discord_relay.py`, `tests/test_adapter_contracts.py`
 
 ## Browser And File Surfaces
@@ -43,7 +59,7 @@ Tests: `tests/test_discord_relay.py`, `tests/test_adapter_contracts.py`
 | Resolver | Known destinations, search providers, browser targets, direct domains. |
 | Unavailable behavior | Falls back to external open/action failure or route clarification depending on request. |
 
-Sources: `src/stormhelm/core/orchestrator/browser_destinations.py`, `src/stormhelm/core/tools/builtins/workspace_actions.py`, `assets/qml/components/BrowserSurface.qml`, `assets/qml/components/FileViewerSurface.qml`, `src/stormhelm/ui/controllers/main_controller.py`  
+Sources: `src/stormhelm/core/orchestrator/browser_destinations.py`, `src/stormhelm/core/tools/builtins/workspace_actions.py`, `assets/qml/components/BrowserSurface.qml`, `assets/qml/components/FileViewerSurface.qml`, `src/stormhelm/ui/controllers/main_controller.py`
 Tests: `tests/test_browser_destination_resolution.py`, `tests/test_main_controller.py`, `tests/test_qml_shell.py`
 
 ## Windows APIs And Native Control
@@ -60,7 +76,7 @@ Tests: `tests/test_browser_destination_resolution.py`, `tests/test_main_controll
 
 Actions that can change local state are trust-gated or policy-gated.
 
-Sources: `src/stormhelm/ui/ghost_input.py`, `src/stormhelm/ui/tray.py`, `src/stormhelm/ui/windows_effects.py`, `src/stormhelm/core/system/probe.py`, `src/stormhelm/core/tools/builtins/system_state.py`, `src/stormhelm/core/lifecycle/service.py`, `src/stormhelm/core/discord_relay/adapters.py`  
+Sources: `src/stormhelm/ui/ghost_input.py`, `src/stormhelm/ui/tray.py`, `src/stormhelm/ui/windows_effects.py`, `src/stormhelm/core/system/probe.py`, `src/stormhelm/core/tools/builtins/system_state.py`, `src/stormhelm/core/lifecycle/service.py`, `src/stormhelm/core/discord_relay/adapters.py`
 Tests: `tests/test_ghost_input.py`, `tests/test_ui_tray.py`, `tests/test_windows_effects.py`, `tests/test_system_probe.py`, `tests/test_lifecycle_service.py`
 
 ## Package Managers And Software Sources
@@ -73,7 +89,7 @@ Tests: `tests/test_ghost_input.py`, `tests/test_ui_tray.py`, `tests/test_windows
 | Browser-guided | Can be selected when enabled and source passes trusted-source filtering. |
 | Privileged operations | Disabled by default through `software_control.privileged_operations_allowed=false`. |
 
-Sources: `src/stormhelm/core/software_control/catalog.py`, `src/stormhelm/core/software_control/service.py`, `src/stormhelm/core/safety/policy.py`, `config/default.toml`  
+Sources: `src/stormhelm/core/software_control/catalog.py`, `src/stormhelm/core/software_control/service.py`, `src/stormhelm/core/safety/policy.py`, `config/default.toml`
 Tests: `tests/test_software_control.py`, `tests/test_safety.py`
 
 ## Qt / QML / PySide
@@ -86,7 +102,7 @@ Tests: `tests/test_software_control.py`, `tests/test_safety.py`
 | Shader assets | QML shader assets are present and tested. |
 | Unavailable behavior | QML load failure prevents UI startup; core can still run separately. |
 
-Sources: `src/stormhelm/ui/app.py`, `assets/qml/Main.qml`, `assets/qml/components/*.qml`, `assets/qml/shaders/*.frag`  
+Sources: `src/stormhelm/ui/app.py`, `assets/qml/Main.qml`, `assets/qml/components/*.qml`, `assets/qml/shaders/*.frag`
 Tests: `tests/test_qml_shell.py`, `tests/test_shader_assets.py`
 
 ## Storage / SQLite
@@ -98,7 +114,7 @@ Tests: `tests/test_qml_shell.py`, `tests/test_shader_assets.py`
 | Runtime state | JSON state files for lifecycle/core/session/layout-like state. |
 | Unavailable behavior | Startup/storage tests should surface DB/path failures; UI state may be incomplete if storage is unavailable. |
 
-Sources: `src/stormhelm/core/memory/database.py`, `src/stormhelm/core/memory/repositories.py`, `src/stormhelm/core/runtime_state.py`, `src/stormhelm/shared/paths.py`  
+Sources: `src/stormhelm/core/memory/database.py`, `src/stormhelm/core/memory/repositories.py`, `src/stormhelm/core/runtime_state.py`, `src/stormhelm/shared/paths.py`
 Tests: `tests/test_storage.py`, `tests/test_runtime_state.py`, `tests/test_snapshot_resilience.py`
 
 ## Weather And Location
@@ -110,7 +126,7 @@ Tests: `tests/test_storage.py`, `tests/test_runtime_state.py`, `tests/test_snaps
 | Units | Default `imperial`. |
 | Unavailable behavior | Weather/location tools should return bounded failure or unavailable state rather than provider fantasy. |
 
-Sources: `config/default.toml`, `src/stormhelm/core/tools/builtins/system_state.py`, `src/stormhelm/config/loader.py`  
+Sources: `config/default.toml`, `src/stormhelm/core/tools/builtins/system_state.py`, `src/stormhelm/config/loader.py`
 Tests: `tests/test_long_tail_power.py`, `tests/test_tool_registry.py`
 
 ## Hardware Telemetry
@@ -123,7 +139,7 @@ Tests: `tests/test_long_tail_power.py`, `tests/test_tool_registry.py`
 | HWiNFO | Enabled flag and executable path setting exist. |
 | Unavailable behavior | Telemetry status should report helper/provider availability rather than blocking core startup. |
 
-Sources: `src/stormhelm/core/system/hardware_telemetry.py`, `src/stormhelm/entrypoints/telemetry_helper.py`, `config/default.toml`  
+Sources: `src/stormhelm/core/system/hardware_telemetry.py`, `src/stormhelm/entrypoints/telemetry_helper.py`, `config/default.toml`
 Tests: `tests/test_hardware_telemetry.py`
 
 ## Packaging Integrations
@@ -135,18 +151,19 @@ Tests: `tests/test_hardware_telemetry.py`
 | Assets/config | Portable script copies runtime resources/config. |
 | Unavailable behavior | Installer build fails or is skipped if Inno Setup is not available. |
 
-Sources: `scripts/package_portable.ps1`, `scripts/package_installer.ps1`, `pyproject.toml`  
+Sources: `scripts/package_portable.ps1`, `scripts/package_installer.ps1`, `pyproject.toml`
 Tests: `tests/test_launcher.py`, manual packaging verification needed
 
 ## Optional / Unavailable Integrations
 
 | Integration | Status | Notes |
 |---|---|---|
-| Voice STT/TTS/wake word | Planned | Historical docs exist; no backend voice subsystem in tracked source tree. |
+| Voice wake word / always-listening / Realtime / VAD | Planned | The voice foundation exists, but these modes are unavailable and must be reported as such. |
+| Voice local capture/playback | Implemented but limited | Provider boundaries exist, disabled by default, and gated for development/local dependency readiness. |
 | External vector database | Not configured | Semantic memory uses local SQLite/service logic. |
 | Official Discord bot/webhook | Scaffolded | Disabled by default. |
 | Unrestricted shell | Scaffolded/disabled | Shell command tool is a disabled stub by default. |
 | Full autonomous computer use | Not implemented | Screen awareness/action is bounded and policy-gated. |
 
-Sources: `docs/archive/phase-documents.md`, `src/stormhelm/core/memory/database.py`, `src/stormhelm/core/discord_relay/adapters.py`, `src/stormhelm/core/tools/builtins/shell_stub.py`, `src/stormhelm/core/screen_awareness/action.py`  
-Tests: `tests/test_discord_relay.py`, `tests/test_safety.py`, `tests/test_screen_awareness_action.py`
+Sources: `docs/archive/phase-documents.md`, `src/stormhelm/core/voice/service.py`, `src/stormhelm/core/memory/database.py`, `src/stormhelm/core/discord_relay/adapters.py`, `src/stormhelm/core/tools/builtins/shell_stub.py`, `src/stormhelm/core/screen_awareness/action.py`
+Tests: `tests/test_voice_availability.py`, `tests/test_voice_capture_service.py`, `tests/test_voice_playback_service.py`, `tests/test_discord_relay.py`, `tests/test_safety.py`, `tests/test_screen_awareness_action.py`

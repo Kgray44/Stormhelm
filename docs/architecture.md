@@ -20,15 +20,16 @@ Stormhelm is split into a local core service and a desktop shell. The core is th
 | `src/stormhelm/core/software_control` | Software target catalog, planner seam, operation planning/execution status. |
 | `src/stormhelm/core/software_recovery` | Local/cloud-advisory recovery planning. |
 | `src/stormhelm/core/discord_relay` | Discord alias/payload/preview/dispatch subsystem. |
+| `src/stormhelm/core/voice` | Disabled-by-default voice config/state, manual turns, controlled STT/TTS, capture/playback boundaries, diagnostics, and events. |
 | `src/stormhelm/core/system`, `core/network`, `core/power`, `core/operations` | Machine state, native control, telemetry, diagnostics. |
 | `src/stormhelm/config` | TOML/env loader and dataclass config models. |
-| `src/stormhelm/ui` | PySide app, bridge, client, controller, tray, Ghost adaptation. |
+| `src/stormhelm/ui` | PySide app, bridge, client, controller, tray, Ghost adaptation, voice UI state shaping. |
 | `assets/qml` | Ghost, Command Deck, panels, browser/file surfaces, route inspector, visual layers. |
 | `scripts` | Source launch and packaging scripts. |
 | `tests` | Unit/integration/QML/contract tests. |
 
-Sources: `git ls-files`, `pyproject.toml`, `src/stormhelm/core/container.py`, `src/stormhelm/ui/app.py`  
-Tests: `tests/test_core_container.py`, `tests/test_qml_shell.py`, `tests/test_launcher.py`
+Sources: `git ls-files`, `pyproject.toml`, `src/stormhelm/core/container.py`, `src/stormhelm/core/voice/service.py`, `src/stormhelm/ui/app.py`, `src/stormhelm/ui/voice_surface.py`
+Tests: `tests/test_core_container.py`, `tests/test_voice_config.py`, `tests/test_voice_state.py`, `tests/test_qml_shell.py`, `tests/test_launcher.py`
 
 ## Runtime Flow
 
@@ -40,6 +41,7 @@ sequenceDiagram
     participant Client as CoreApiClient
     participant API as FastAPI
     participant Assistant as AssistantOrchestrator
+    participant Voice as VoiceService
     participant Planner as Router/Planner
     participant Runtime as Subsystems/Tools/Provider
     participant Store as SQLite/EventBuffer
@@ -56,10 +58,16 @@ sequenceDiagram
     API-->>Client: chat response
     Client-->>Bridge: chat/status/stream payloads
     Bridge-->>QML: QML properties
+    User->>QML: Voice action
+    QML->>Bridge: voice control signal
+    Bridge->>Client: voice action request
+    Client->>API: POST /voice/*
+    API->>Voice: capture/STT/TTS/playback action
+    Voice->>Assistant: core request when a voice turn is submitted
 ```
 
-Sources: `src/stormhelm/ui/bridge.py`, `src/stormhelm/ui/client.py`, `src/stormhelm/ui/controllers/main_controller.py`, `src/stormhelm/core/api/app.py`, `src/stormhelm/core/orchestrator/assistant.py`, `src/stormhelm/core/orchestrator/planner.py`  
-Tests: `tests/test_main_controller.py`, `tests/test_ui_client_streaming.py`, `tests/test_assistant_orchestrator.py`, `tests/test_planner.py`
+Sources: `src/stormhelm/ui/bridge.py`, `src/stormhelm/ui/client.py`, `src/stormhelm/ui/controllers/main_controller.py`, `src/stormhelm/core/api/app.py`, `src/stormhelm/core/orchestrator/assistant.py`, `src/stormhelm/core/orchestrator/planner.py`, `src/stormhelm/core/voice/service.py`
+Tests: `tests/test_main_controller.py`, `tests/test_ui_client_streaming.py`, `tests/test_assistant_orchestrator.py`, `tests/test_planner.py`, `tests/test_voice_bridge_controls.py`, `tests/test_voice_core_bridge_contracts.py`
 
 ## Core Container
 
@@ -78,11 +86,12 @@ Owned services include:
 - Lifecycle controller.
 - Optional OpenAI provider.
 - Calculations, screen awareness, software control/recovery, Discord relay.
+- Voice service with typed manual turns, controlled STT/TTS, capture/playback providers, diagnostics, and status snapshot.
 - Durable task service.
 - Workspace/environment/context/judgment/operations services.
 
-Sources: `src/stormhelm/core/container.py`, `src/stormhelm/core/runtime_state.py`, `src/stormhelm/core/events.py`, `src/stormhelm/core/memory/database.py`  
-Tests: `tests/test_core_container.py`, `tests/test_runtime_state.py`, `tests/test_snapshot_resilience.py`
+Sources: `src/stormhelm/core/container.py`, `src/stormhelm/core/runtime_state.py`, `src/stormhelm/core/events.py`, `src/stormhelm/core/memory/database.py`, `src/stormhelm/core/voice/service.py`
+Tests: `tests/test_core_container.py`, `tests/test_runtime_state.py`, `tests/test_snapshot_resilience.py`, `tests/test_voice_state.py`
 
 ## Orchestrator Flow
 
@@ -96,7 +105,7 @@ Tests: `tests/test_core_container.py`, `tests/test_runtime_state.py`, `tests/tes
 6. Otherwise submit local tool jobs or optional provider fallback.
 7. Persist assistant response and publish events.
 
-Sources: `src/stormhelm/core/orchestrator/assistant.py`, `src/stormhelm/core/orchestrator/router.py`, `src/stormhelm/core/orchestrator/planner.py`, `src/stormhelm/core/orchestrator/planner_models.py`  
+Sources: `src/stormhelm/core/orchestrator/assistant.py`, `src/stormhelm/core/orchestrator/router.py`, `src/stormhelm/core/orchestrator/planner.py`, `src/stormhelm/core/orchestrator/planner_models.py`
 Tests: `tests/test_assistant_orchestrator.py`, `tests/test_planner.py`, `tests/test_planner_structured_pipeline.py`
 
 ## Planner Flow
@@ -113,7 +122,7 @@ Tracked route-support sources include:
 
 Active worktree note: route-v2 files were present during this rewrite but not listed by `git ls-files`. Treat route-v2-specific guarantees as needs-verification until those files are intentionally added to the repository.
 
-Sources: `src/stormhelm/core/orchestrator/planner.py`, `src/stormhelm/core/orchestrator/planner_models.py`, `src/stormhelm/core/orchestrator/browser_destinations.py`, `src/stormhelm/core/orchestrator/fuzzy_eval/runner.py`  
+Sources: `src/stormhelm/core/orchestrator/planner.py`, `src/stormhelm/core/orchestrator/planner_models.py`, `src/stormhelm/core/orchestrator/browser_destinations.py`, `src/stormhelm/core/orchestrator/fuzzy_eval/runner.py`
 Tests: `tests/test_planner.py`, `tests/test_browser_destination_resolution.py`, `tests/test_fuzzy_language_evaluation.py`
 
 ## Bridge / UI Flow
@@ -132,7 +141,7 @@ flowchart TD
 
 The bridge exposes QML properties and methods. It can submit messages, update local layout, open local surfaces through actions, and display pending approvals. Backend authority remains in the core.
 
-Sources: `src/stormhelm/ui/client.py`, `src/stormhelm/ui/bridge.py`, `src/stormhelm/ui/command_surface_v2.py`, `assets/qml/Main.qml`, `assets/qml/components/GhostShell.qml`, `assets/qml/components/CommandDeckShell.qml`  
+Sources: `src/stormhelm/ui/client.py`, `src/stormhelm/ui/bridge.py`, `src/stormhelm/ui/command_surface_v2.py`, `assets/qml/Main.qml`, `assets/qml/components/GhostShell.qml`, `assets/qml/components/CommandDeckShell.qml`
 Tests: `tests/test_ui_bridge.py`, `tests/test_ui_bridge_authority_contracts.py`, `tests/test_command_surface.py`, `tests/test_qml_shell.py`
 
 ## Subsystem Boundaries
@@ -146,16 +155,17 @@ Tests: `tests/test_ui_bridge.py`, `tests/test_ui_bridge_authority_contracts.py`,
 | Discord relay | Destination/payload resolution, preview, dispatch attempt, provenance, duplicate/stale checks. | Official Discord bot delivery by default. |
 | Trust | Approval/grant/audit state. | UI-only confirmation without backend decision. |
 | Tasks | Durable task state and continuity. | Workspace fallback masquerading as durable task memory. |
+| Voice | Manual voice turns, controlled STT/TTS, explicit capture/playback state, diagnostics, and voice events. | Wake word, always-listening, Realtime, VAD, direct tool execution, or bypassing trust/safety. |
 | UI bridge | Presentation state and local UI actions. | Backend truth or safety policy. |
 
-Sources: `src/stormhelm/core/calculations/service.py`, `src/stormhelm/core/screen_awareness/service.py`, `src/stormhelm/core/software_control/service.py`, `src/stormhelm/core/software_recovery/service.py`, `src/stormhelm/core/discord_relay/service.py`, `src/stormhelm/core/trust/service.py`, `src/stormhelm/core/tasks/service.py`, `src/stormhelm/ui/bridge.py`  
-Tests: `tests/test_calculations.py`, `tests/test_screen_awareness_service.py`, `tests/test_software_control.py`, `tests/test_software_recovery.py`, `tests/test_discord_relay.py`, `tests/test_trust_service.py`, `tests/test_task_graph.py`
+Sources: `src/stormhelm/core/calculations/service.py`, `src/stormhelm/core/screen_awareness/service.py`, `src/stormhelm/core/software_control/service.py`, `src/stormhelm/core/software_recovery/service.py`, `src/stormhelm/core/discord_relay/service.py`, `src/stormhelm/core/trust/service.py`, `src/stormhelm/core/tasks/service.py`, `src/stormhelm/core/voice/service.py`, `src/stormhelm/ui/bridge.py`
+Tests: `tests/test_calculations.py`, `tests/test_screen_awareness_service.py`, `tests/test_software_control.py`, `tests/test_software_recovery.py`, `tests/test_discord_relay.py`, `tests/test_trust_service.py`, `tests/test_task_graph.py`, `tests/test_voice_manual_turn.py`, `tests/test_voice_audio_turn.py`
 
 ## Adapter Boundaries
 
 Adapter contracts describe whether a tool/action has preview, approval, verification, rollback, and trust-tier metadata. The safety policy and tool executor use contract status to avoid executing invalid adapter routes.
 
-Sources: `src/stormhelm/core/adapters/contracts.py`, `src/stormhelm/core/tools/executor.py`, `src/stormhelm/core/safety/policy.py`  
+Sources: `src/stormhelm/core/adapters/contracts.py`, `src/stormhelm/core/tools/executor.py`, `src/stormhelm/core/safety/policy.py`
 Tests: `tests/test_adapter_contracts.py`, `tests/test_safety.py`
 
 ## Configuration Loading
@@ -171,7 +181,7 @@ Config load order:
 
 Runtime paths default under `%LOCALAPPDATA%\Stormhelm` unless storage paths are configured.
 
-Sources: `src/stormhelm/config/loader.py`, `src/stormhelm/config/models.py`, `config/default.toml`, `config/development.toml.example`  
+Sources: `src/stormhelm/config/loader.py`, `src/stormhelm/config/models.py`, `config/default.toml`, `config/development.toml.example`
 Tests: `tests/test_config_loader.py`
 
 ## Persistence And Storage Paths
@@ -189,7 +199,7 @@ SQLite table families:
 - trust approval/grant/audit records
 - semantic memory records/query logs
 
-Sources: `src/stormhelm/core/memory/database.py`, `src/stormhelm/core/memory/repositories.py`, `src/stormhelm/core/runtime_state.py`, `src/stormhelm/shared/paths.py`  
+Sources: `src/stormhelm/core/memory/database.py`, `src/stormhelm/core/memory/repositories.py`, `src/stormhelm/core/runtime_state.py`, `src/stormhelm/shared/paths.py`
 Tests: `tests/test_storage.py`, `tests/test_runtime_state.py`, `tests/test_workspace_service.py`, `tests/test_task_graph.py`, `tests/test_trust_service.py`, `tests/test_semantic_memory.py`
 
 ## External Integrations
@@ -197,6 +207,7 @@ Tests: `tests/test_storage.py`, `tests/test_runtime_state.py`, `tests/test_works
 | Integration | Boundary |
 |---|---|
 | OpenAI Responses API | Optional, disabled by default, used through provider abstraction only when key/enabled. |
+| OpenAI voice STT/TTS | Optional, disabled by default, used for controlled audio transcription and speech artifact generation when voice/OpenAI gates pass. |
 | Discord local client | Local Windows automation route for trusted aliases; preview/trust/fingerprint required. |
 | Qt/PySide/QML | UI shell and surfaces. |
 | Windows APIs | Hotkeys, tray/window behavior, app/window/system control, startup registry. |
@@ -204,5 +215,5 @@ Tests: `tests/test_storage.py`, `tests/test_runtime_state.py`, `tests/test_works
 | HWiNFO/helper telemetry | Optional hardware telemetry path. |
 | PyInstaller/Inno Setup | Packaging. |
 
-Sources: `src/stormhelm/core/providers/openai_responses.py`, `src/stormhelm/core/discord_relay/adapters.py`, `src/stormhelm/ui/app.py`, `src/stormhelm/ui/ghost_input.py`, `src/stormhelm/core/system/probe.py`, `src/stormhelm/core/tools/builtins/system_state.py`, `scripts/package_portable.ps1`, `scripts/package_installer.ps1`  
-Tests: `tests/test_discord_relay.py`, `tests/test_windows_effects.py`, `tests/test_ghost_input.py`, `tests/test_system_probe.py`, `tests/test_hardware_telemetry.py`
+Sources: `src/stormhelm/core/providers/openai_responses.py`, `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/discord_relay/adapters.py`, `src/stormhelm/ui/app.py`, `src/stormhelm/ui/ghost_input.py`, `src/stormhelm/core/system/probe.py`, `src/stormhelm/core/tools/builtins/system_state.py`, `scripts/package_portable.ps1`, `scripts/package_installer.ps1`
+Tests: `tests/test_discord_relay.py`, `tests/test_voice_stt_provider.py`, `tests/test_voice_tts_provider.py`, `tests/test_windows_effects.py`, `tests/test_ghost_input.py`, `tests/test_system_probe.py`, `tests/test_hardware_telemetry.py`

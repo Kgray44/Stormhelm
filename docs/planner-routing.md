@@ -2,7 +2,7 @@
 
 Stormhelm routing is designed to prefer implemented local capabilities before generic provider fallback. The planner should be truthful about wrong-route risk, missing context, unsupported behavior, and approval/verification boundaries.
 
-Sources: `src/stormhelm/core/orchestrator/assistant.py`, `src/stormhelm/core/orchestrator/router.py`, `src/stormhelm/core/orchestrator/planner.py`, `src/stormhelm/core/orchestrator/planner_models.py`  
+Sources: `src/stormhelm/core/orchestrator/assistant.py`, `src/stormhelm/core/orchestrator/router.py`, `src/stormhelm/core/orchestrator/planner.py`, `src/stormhelm/core/orchestrator/planner_models.py`
 Tests: `tests/test_assistant_orchestrator.py`, `tests/test_planner.py`, `tests/test_planner_command_routing_state.py`
 
 ## Entry Points
@@ -34,7 +34,7 @@ flowchart TD
     Provider --> Result
 ```
 
-Sources: `src/stormhelm/core/orchestrator/assistant.py`, `src/stormhelm/core/orchestrator/router.py`, `src/stormhelm/core/orchestrator/planner.py`, `src/stormhelm/core/safety/policy.py`  
+Sources: `src/stormhelm/core/orchestrator/assistant.py`, `src/stormhelm/core/orchestrator/router.py`, `src/stormhelm/core/orchestrator/planner.py`, `src/stormhelm/core/safety/policy.py`
 Tests: `tests/test_planner.py`, `tests/test_safety.py`
 
 ## Route Families
@@ -57,7 +57,7 @@ Tests: `tests/test_planner.py`, `tests/test_safety.py`
 | `app_control`, `window_control`, `system_control` | Native control tools through system probe/executor. | Implemented but limited | `src/stormhelm/core/tools/builtins/system_state.py`, `src/stormhelm/core/system/probe.py` | `tests/test_system_probe.py`, `tests/test_long_tail_power.py` |
 | `semantic_memory` | Local memory service/retrieval. | Implemented but limited | `src/stormhelm/core/memory/service.py` | `tests/test_semantic_memory.py` |
 | `generic_provider` | Optional OpenAI fallback. | Implemented but disabled by default | `src/stormhelm/core/providers/openai_responses.py`, `src/stormhelm/core/providers/base.py` | `tests/test_config_loader.py` |
-| `voice` | Historical design docs/QML component only. | Planned | `assets/qml/components/VoiceCore.qml`, `docs/archive/phase-documents.md` | No backend voice tests found |
+| `voice_control` | Voice API/UI actions for explicit capture/playback plus voice turns entering the core bridge. | Implemented but limited | `src/stormhelm/core/voice/service.py`, `src/stormhelm/core/api/app.py`, `src/stormhelm/ui/bridge.py` | `tests/test_voice_bridge_controls.py`, `tests/test_voice_core_bridge_contracts.py` |
 
 ## Route Hypothesis Generation
 
@@ -75,7 +75,7 @@ The tracked planner uses structured route models such as:
 
 These models are used to represent what the request appears to be, which route families are plausible, what context was bound, and why a route won or needs clarification.
 
-Sources: `src/stormhelm/core/orchestrator/planner_models.py`, `src/stormhelm/core/orchestrator/planner.py`  
+Sources: `src/stormhelm/core/orchestrator/planner_models.py`, `src/stormhelm/core/orchestrator/planner.py`
 Tests: `tests/test_planner_structured_pipeline.py`, `tests/test_planner_phase3c.py`
 
 ## Deictic And Follow-Up Resolution
@@ -93,9 +93,10 @@ Rules documented by current code:
 - Clipboard can be supporting evidence but must not impersonate the current screen.
 - Stale Discord previews are invalidated by TTL, fingerprint mismatch, payload mutation, or destination changes.
 - Trust grants are scoped and can expire or become invalid after runtime/task changes.
+- Voice deictic behavior is intentionally narrow: speech-derived text enters the same core request path as typed text, while voice providers/capture controls do not resolve targets or execute tools themselves.
 
-Sources: `src/stormhelm/core/discord_relay/service.py`, `src/stormhelm/core/screen_awareness/observation.py`, `src/stormhelm/core/screen_awareness/verification.py`, `src/stormhelm/core/software_control/service.py`, `src/stormhelm/core/trust/service.py`, `src/stormhelm/core/tasks/service.py`  
-Tests: `tests/test_discord_relay.py`, `tests/test_screen_awareness_phase12.py`, `tests/test_software_control.py`, `tests/test_trust_service.py`, `tests/test_task_graph.py`
+Sources: `src/stormhelm/core/discord_relay/service.py`, `src/stormhelm/core/screen_awareness/observation.py`, `src/stormhelm/core/screen_awareness/verification.py`, `src/stormhelm/core/software_control/service.py`, `src/stormhelm/core/trust/service.py`, `src/stormhelm/core/tasks/service.py`, `src/stormhelm/core/voice/bridge.py`, `src/stormhelm/core/voice/service.py`
+Tests: `tests/test_discord_relay.py`, `tests/test_screen_awareness_phase12.py`, `tests/test_software_control.py`, `tests/test_trust_service.py`, `tests/test_task_graph.py`, `tests/test_voice_core_bridge_contracts.py`
 
 ## Route Scoring And Wrong-Route Risks
 
@@ -109,6 +110,7 @@ Wrong-route risks called out by the codebase and tests:
 | Discord "this" sends stale artifact. | Relay suppresses stale recent candidates when current context is requested. | `src/stormhelm/core/discord_relay/service.py` | `tests/test_discord_relay.py` |
 | Screen answer overclaims from clipboard. | Screen observation/truthfulness separates source channels and limitations. | `src/stormhelm/core/screen_awareness/observation.py`, `src/stormhelm/core/screen_awareness/models.py` | `tests/test_screen_awareness_phase12.py` |
 | Destructive action bypasses trust. | Safety policy and trust service gate action tools and subsystem dispatch. | `src/stormhelm/core/safety/policy.py`, `src/stormhelm/core/trust/service.py` | `tests/test_safety.py`, `tests/test_trust_service.py` |
+| Voice capture is mistaken for always-listening command authority. | Voice actions are explicit and provider output re-enters the core bridge; unavailable modes are exposed as truth flags. | `src/stormhelm/core/voice/service.py`, `src/stormhelm/core/voice/availability.py` | `tests/test_voice_availability.py`, `tests/test_voice_core_bridge_contracts.py` |
 
 ## Provider Fallback Boundaries
 
@@ -120,8 +122,10 @@ Provider fallback is optional and disabled by default. It requires:
 
 Provider fallback should not handle requests owned by deterministic local subsystems when those subsystems can truthfully answer, clarify, or refuse.
 
-Sources: `config/default.toml`, `src/stormhelm/config/loader.py`, `src/stormhelm/core/container.py`, `src/stormhelm/core/providers/openai_responses.py`, `src/stormhelm/core/providers/audit.py`  
-Tests: `tests/test_config_loader.py`, `tests/test_command_eval_provider_audit.py`
+Voice STT/TTS uses provider-specific OpenAI calls only inside the voice subsystem. That does not make the generic provider route available, and it does not bypass the planner/orchestrator boundary for command execution.
+
+Sources: `config/default.toml`, `src/stormhelm/config/loader.py`, `src/stormhelm/core/container.py`, `src/stormhelm/core/providers/openai_responses.py`, `src/stormhelm/core/providers/audit.py`, `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/voice/bridge.py`
+Tests: `tests/test_config_loader.py`, `tests/test_command_eval_provider_audit.py`, `tests/test_voice_stt_provider.py`, `tests/test_voice_tts_provider.py`, `tests/test_voice_core_bridge_contracts.py`
 
 ## Clarification Behavior
 
@@ -142,7 +146,7 @@ Examples:
 | `install that app` with no known target | Ask for the app name or return unresolved target. |
 | `compare it to before` with no prior observation | Say a prior observation is required. |
 
-Sources: `src/stormhelm/core/discord_relay/service.py`, `src/stormhelm/core/screen_awareness/service.py`, `src/stormhelm/core/software_control/service.py`, `src/stormhelm/core/orchestrator/planner.py`  
+Sources: `src/stormhelm/core/discord_relay/service.py`, `src/stormhelm/core/screen_awareness/service.py`, `src/stormhelm/core/software_control/service.py`, `src/stormhelm/core/orchestrator/planner.py`
 Tests: `tests/test_discord_relay.py`, `tests/test_screen_awareness_verification.py`, `tests/test_software_control.py`
 
 ## Trace Fields
@@ -157,8 +161,9 @@ Important trace/debug fields surfaced by route families:
 | Screen awareness | intent, source type, confidence, limitations, action/verification result, truthfulness audit, latency trace. | `src/stormhelm/core/screen_awareness/models.py` |
 | Events | family, severity, visibility, retention, provenance, payload. | `src/stormhelm/core/events.py` |
 | Trust | approval state, scope, expiry, audit record, operator message. | `src/stormhelm/core/trust/models.py` |
+| Voice | input source, capture state, transcription result, core request/result, synthesis/playback state, blocked/unavailable reasons. | `src/stormhelm/core/voice/models.py`, `src/stormhelm/core/voice/state.py` |
 
-Tests: `tests/test_calculations.py`, `tests/test_software_control.py`, `tests/test_discord_relay.py`, `tests/test_screen_awareness_phase12.py`, `tests/test_events.py`, `tests/test_trust_service.py`
+Tests: `tests/test_calculations.py`, `tests/test_software_control.py`, `tests/test_discord_relay.py`, `tests/test_screen_awareness_phase12.py`, `tests/test_events.py`, `tests/test_trust_service.py`, `tests/test_voice_state.py`
 
 ## Fuzzy Evaluation Support
 
@@ -168,7 +173,7 @@ Tracked fuzzy evaluation support lives under `src/stormhelm/core/orchestrator/fu
 .\.venv\Scripts\python.exe -m pytest tests/test_fuzzy_language_evaluation.py -q
 ```
 
-Sources: `src/stormhelm/core/orchestrator/fuzzy_eval/corpus.py`, `src/stormhelm/core/orchestrator/fuzzy_eval/runner.py`, `src/stormhelm/core/orchestrator/fuzzy_eval/models.py`  
+Sources: `src/stormhelm/core/orchestrator/fuzzy_eval/corpus.py`, `src/stormhelm/core/orchestrator/fuzzy_eval/runner.py`, `src/stormhelm/core/orchestrator/fuzzy_eval/models.py`
 Tests: `tests/test_fuzzy_language_evaluation.py`
 
 ## Examples
@@ -181,3 +186,5 @@ Tests: `tests/test_fuzzy_language_evaluation.py`
 | `send this to Baby` | `discord_relay` | Preview first, then approval/dispatch. |
 | `approve once` after pending software plan | `trust_approvals` + `software_control` | Scope bound to pending request. |
 | `what changed on screen` | `screen_awareness` | Needs current/prior evidence; may be uncertain. |
+| `start voice capture` | `voice_control` | Explicit capture action only; no wake word or background loop. |
+| `turn on always-listening` | `unsupported` or `voice_control` | Should truthfully explain the unavailable mode. |

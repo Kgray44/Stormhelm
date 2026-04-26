@@ -19,7 +19,7 @@ Expected flow:
 
 Expected result state: completed local tool response.
 
-Sources: `src/stormhelm/ui/ghost_input.py`, `src/stormhelm/ui/bridge.py`, `src/stormhelm/core/orchestrator/router.py`, `src/stormhelm/core/tools/builtins/clock.py`  
+Sources: `src/stormhelm/ui/ghost_input.py`, `src/stormhelm/ui/bridge.py`, `src/stormhelm/core/orchestrator/router.py`, `src/stormhelm/core/tools/builtins/clock.py`
 Tests: `tests/test_ghost_input.py`, `tests/test_assistant_orchestrator.py`, `tests/test_tool_registry.py`
 
 ## Command Deck Workspace
@@ -39,7 +39,7 @@ Expected flow:
 
 Expected result state: completed if durable state exists; truthful empty/uncertain state if not.
 
-Sources: `assets/qml/components/CommandDeckShell.qml`, `src/stormhelm/ui/bridge.py`, `src/stormhelm/core/tasks/service.py`, `src/stormhelm/core/workspace/service.py`  
+Sources: `assets/qml/components/CommandDeckShell.qml`, `src/stormhelm/ui/bridge.py`, `src/stormhelm/core/tasks/service.py`, `src/stormhelm/core/workspace/service.py`
 Tests: `tests/test_task_graph.py`, `tests/test_workspace_service.py`, `tests/test_ui_bridge.py`
 
 ## Software Install Dry-Run / Planning
@@ -61,7 +61,7 @@ Expected flow:
 
 Expected result state: prepared / needs approval / possibly recovery handoff. Not completed unless execution and verification actually happen.
 
-Sources: `src/stormhelm/core/software_control/service.py`, `src/stormhelm/core/software_control/catalog.py`, `src/stormhelm/core/trust/service.py`, `src/stormhelm/core/software_recovery/service.py`  
+Sources: `src/stormhelm/core/software_control/service.py`, `src/stormhelm/core/software_control/catalog.py`, `src/stormhelm/core/trust/service.py`, `src/stormhelm/core/software_recovery/service.py`
 Tests: `tests/test_software_control.py`, `tests/test_assistant_software_control.py`, `tests/test_software_recovery.py`
 
 ## Calculation
@@ -82,7 +82,7 @@ Expected flow:
 
 Expected result state: completed deterministic calculation.
 
-Sources: `src/stormhelm/core/calculations/planner.py`, `src/stormhelm/core/calculations/service.py`, `src/stormhelm/core/calculations/parser.py`, `src/stormhelm/core/calculations/evaluator.py`  
+Sources: `src/stormhelm/core/calculations/planner.py`, `src/stormhelm/core/calculations/service.py`, `src/stormhelm/core/calculations/parser.py`, `src/stormhelm/core/calculations/evaluator.py`
 Tests: `tests/test_calculations.py`
 
 ## Screen-Awareness Question
@@ -102,7 +102,7 @@ Expected flow:
 
 Expected result state: completed with evidence, or uncertain/limited if observation is unavailable.
 
-Sources: `src/stormhelm/core/screen_awareness/service.py`, `src/stormhelm/core/screen_awareness/observation.py`, `src/stormhelm/core/screen_awareness/interpretation.py`, `src/stormhelm/core/screen_awareness/response.py`  
+Sources: `src/stormhelm/core/screen_awareness/service.py`, `src/stormhelm/core/screen_awareness/observation.py`, `src/stormhelm/core/screen_awareness/interpretation.py`, `src/stormhelm/core/screen_awareness/response.py`
 Tests: `tests/test_screen_awareness_service.py`, `tests/test_screen_awareness_phase12.py`
 
 ## Screen-Aware Action Requiring Confirmation
@@ -123,7 +123,7 @@ Expected flow:
 
 Expected result state: needs approval/gated by default.
 
-Sources: `config/default.toml`, `src/stormhelm/core/screen_awareness/action.py`, `src/stormhelm/core/screen_awareness/service.py`, `src/stormhelm/core/screen_awareness/verification.py`  
+Sources: `config/default.toml`, `src/stormhelm/core/screen_awareness/action.py`, `src/stormhelm/core/screen_awareness/service.py`, `src/stormhelm/core/screen_awareness/verification.py`
 Tests: `tests/test_screen_awareness_action.py`, `tests/test_screen_awareness_verification.py`
 
 ## Discord Relay Preview
@@ -145,7 +145,7 @@ Expected flow:
 
 Expected result state: ready / needs approval. Not sent during preview.
 
-Sources: `config/default.toml`, `src/stormhelm/core/discord_relay/service.py`, `src/stormhelm/core/discord_relay/models.py`, `src/stormhelm/core/trust/service.py`  
+Sources: `config/default.toml`, `src/stormhelm/core/discord_relay/service.py`, `src/stormhelm/core/discord_relay/models.py`, `src/stormhelm/core/trust/service.py`
 Tests: `tests/test_discord_relay.py`, `tests/test_trust_service.py`
 
 ## Discord Relay Dispatch
@@ -167,8 +167,49 @@ Expected flow:
 
 Expected result state: completed only if adapter attempt does not fail; verification strength may still be limited.
 
-Sources: `src/stormhelm/core/discord_relay/service.py`, `src/stormhelm/core/discord_relay/adapters.py`, `src/stormhelm/core/adapters/contracts.py`, `src/stormhelm/core/trust/service.py`  
+Sources: `src/stormhelm/core/discord_relay/service.py`, `src/stormhelm/core/discord_relay/adapters.py`, `src/stormhelm/core/adapters/contracts.py`, `src/stormhelm/core/trust/service.py`
 Tests: `tests/test_discord_relay.py`, `tests/test_adapter_contracts.py`
+
+## Voice Push-To-Talk Status
+
+Request:
+
+```text
+start voice capture
+```
+
+Expected flow:
+
+1. UI or API sends an explicit voice capture action.
+2. Core checks voice availability and capture gates.
+3. `VoiceService` starts capture only when enabled and allowed.
+4. Voice status/action result reports active, blocked, unavailable, or provider failure state.
+
+Expected result state: blocked by default; active only when voice capture settings and provider dependencies allow it.
+
+Sources: `src/stormhelm/core/api/app.py`, `src/stormhelm/core/voice/service.py`, `src/stormhelm/core/voice/availability.py`, `src/stormhelm/ui/bridge.py`, `src/stormhelm/ui/client.py`
+Tests: `tests/test_voice_availability.py`, `tests/test_voice_capture_service.py`, `tests/test_voice_bridge_controls.py`
+
+## Voice Turn From Controlled Audio
+
+Request:
+
+```text
+submit captured voice
+```
+
+Expected flow:
+
+1. Explicit capture or controlled audio metadata is submitted.
+2. STT runs only when provider/config limits pass.
+3. The transcript becomes a voice-originated core request.
+4. The normal orchestrator/planner path handles the request.
+5. Optional TTS/playback stays separate and does not change command authority.
+
+Expected result state: completed only if transcription and core handling complete; otherwise blocked/failed/unavailable with provider or config reason.
+
+Sources: `src/stormhelm/core/voice/service.py`, `src/stormhelm/core/voice/bridge.py`, `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/orchestrator/assistant.py`
+Tests: `tests/test_voice_audio_turn.py`, `tests/test_voice_core_bridge_contracts.py`, `tests/test_voice_stt_provider.py`
 
 ## Recovery Flow
 
@@ -188,7 +229,7 @@ Expected flow:
 
 Expected result state: recovery prepared / unverified.
 
-Sources: `src/stormhelm/core/software_recovery/service.py`, `src/stormhelm/core/software_recovery/cloud.py`, `src/stormhelm/core/software_control/service.py`  
+Sources: `src/stormhelm/core/software_recovery/service.py`, `src/stormhelm/core/software_recovery/cloud.py`, `src/stormhelm/core/software_control/service.py`
 Tests: `tests/test_software_recovery.py`, `tests/test_software_control.py`
 
 ## Approval-Required Action
@@ -209,7 +250,7 @@ Expected flow:
 
 Expected result state: needs approval before execution.
 
-Sources: `src/stormhelm/core/safety/policy.py`, `src/stormhelm/core/trust/service.py`, `src/stormhelm/core/tools/builtins/workspace_memory.py`, `src/stormhelm/ui/command_surface_v2.py`  
+Sources: `src/stormhelm/core/safety/policy.py`, `src/stormhelm/core/trust/service.py`, `src/stormhelm/core/tools/builtins/workspace_memory.py`, `src/stormhelm/ui/command_surface_v2.py`
 Tests: `tests/test_safety.py`, `tests/test_trust_service.py`, `tests/test_workspace_service.py`
 
 ## Ambiguous Request Requiring Clarification
@@ -228,7 +269,7 @@ Expected behavior:
 - It lists choices when available.
 - It does not choose a payload just to avoid asking.
 
-Sources: `src/stormhelm/core/discord_relay/service.py`  
+Sources: `src/stormhelm/core/discord_relay/service.py`
 Tests: `tests/test_discord_relay.py`
 
 ## Unsupported Request Handled Truthfully
@@ -241,12 +282,13 @@ turn on always-listening voice mode
 
 Expected behavior:
 
-- Stormhelm should not claim a backend voice pipeline exists.
-- It can say voice is planned/scaffolded and point to roadmap/archive docs.
-- It should not start microphone capture through a nonexistent subsystem.
+- Stormhelm should say always-listening is not implemented.
+- It can point to the bounded voice user guide and explain that voice is disabled by default.
+- It should not start microphone capture unless an explicit capture action and capture gates allow it.
+- It should not imply wake word, Realtime, VAD, or continuous microphone behavior.
 
-Sources: `assets/qml/components/VoiceCore.qml`, `docs/archive/phase-documents.md`, `docs/roadmap.md`  
-Tests: No backend voice pipeline tests found
+Sources: `docs/voice.md`, `src/stormhelm/core/voice/availability.py`, `src/stormhelm/core/voice/service.py`, `docs/roadmap.md`
+Tests: `tests/test_voice_availability.py`, `tests/test_voice_capture_service.py`
 
 ## OpenAI Provider Fallback
 
@@ -269,5 +311,5 @@ $env:OPENAI_API_KEY = "<your key>"
 .\scripts\run_core.ps1
 ```
 
-Sources: `config/default.toml`, `src/stormhelm/config/loader.py`, `src/stormhelm/core/providers/openai_responses.py`  
+Sources: `config/default.toml`, `src/stormhelm/config/loader.py`, `src/stormhelm/core/providers/openai_responses.py`
 Tests: `tests/test_config_loader.py`, `tests/test_command_eval_provider_audit.py`

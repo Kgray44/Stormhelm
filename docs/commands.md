@@ -7,7 +7,7 @@ Stormhelm has two command surfaces:
 
 The assistant path tries deterministic/local behavior before optional OpenAI fallback.
 
-Sources: `src/stormhelm/core/orchestrator/router.py`, `src/stormhelm/core/orchestrator/planner.py`, `src/stormhelm/core/orchestrator/assistant.py`  
+Sources: `src/stormhelm/core/orchestrator/router.py`, `src/stormhelm/core/orchestrator/planner.py`, `src/stormhelm/core/orchestrator/assistant.py`
 Tests: `tests/test_assistant_orchestrator.py`, `tests/test_planner.py`, `tests/test_planner_command_routing_state.py`
 
 ## CLI / Process Commands
@@ -39,8 +39,14 @@ Tests: `tests/test_assistant_orchestrator.py`, `tests/test_planner.py`, `tests/t
 | `/settings` | GET | Effective config snapshot. | `src/stormhelm/core/api/app.py`, `src/stormhelm/config/models.py` |
 | `/tools` | GET | Registered tool descriptors. | `src/stormhelm/core/api/app.py`, `src/stormhelm/core/tools/registry.py` |
 | `/snapshot` | GET | Full UI-facing state snapshot. | `src/stormhelm/core/api/app.py`, `src/stormhelm/core/container.py` |
+| `/voice/capture/start` | POST | Start an explicit push-to-talk capture if voice capture gates allow it. | `src/stormhelm/core/api/app.py`, `src/stormhelm/core/voice/service.py` |
+| `/voice/capture/stop` | POST | Stop active capture and return capture result metadata. | `src/stormhelm/core/api/app.py`, `src/stormhelm/core/voice/service.py` |
+| `/voice/capture/cancel` | POST | Cancel active capture. | `src/stormhelm/core/api/app.py`, `src/stormhelm/core/voice/service.py` |
+| `/voice/capture/submit` | POST | Submit captured audio metadata through the controlled STT/Core/TTS path. | `src/stormhelm/core/api/app.py`, `src/stormhelm/core/voice/service.py` |
+| `/voice/capture/turn` | POST | Run a supervised capture-and-submit turn. | `src/stormhelm/core/api/app.py`, `src/stormhelm/core/voice/service.py` |
+| `/voice/playback/stop` | POST | Stop provider-owned playback state if supported. | `src/stormhelm/core/api/app.py`, `src/stormhelm/core/voice/service.py` |
 
-Tests: `tests/test_events.py`, `tests/test_ui_client_streaming.py`, `tests/test_snapshot_resilience.py`, `tests/test_storage.py`
+Tests: `tests/test_events.py`, `tests/test_ui_client_streaming.py`, `tests/test_snapshot_resilience.py`, `tests/test_storage.py`, `tests/test_voice_bridge_controls.py`, `tests/test_voice_capture_service.py`, `tests/test_voice_playback_service.py`
 
 ## Slash Commands
 
@@ -62,7 +68,7 @@ Tests: `tests/test_events.py`, `tests/test_ui_client_streaming.py`, `tests/test_
 | `/workspace save` | legacy_command | workspace tools | Save workspace state. | No | Tool result |
 | `/workspace clear` | legacy_command | `workspace_clear` | Clear workspace. | Trust-gated action | Safety/trust |
 
-Sources: `src/stormhelm/core/orchestrator/router.py`, `src/stormhelm/core/tools/builtins/__init__.py`, `src/stormhelm/core/safety/policy.py`  
+Sources: `src/stormhelm/core/orchestrator/router.py`, `src/stormhelm/core/tools/builtins/__init__.py`, `src/stormhelm/core/safety/policy.py`
 Tests: `tests/test_assistant_orchestrator.py`, `tests/test_safety.py`, `tests/test_tool_registry.py`
 
 ## Natural-Language Routes
@@ -82,6 +88,11 @@ Tests: `tests/test_assistant_orchestrator.py`, `tests/test_safety.py`, `tests/te
 | `click the submit button` | screen_awareness_action | Screen awareness action | Ground target and gate action under policy. | Default yes | Verification outcome |
 | `send this to Baby` | discord_relay | Discord relay | Resolve alias, choose current payload, preview and ask approval. | Yes before dispatch | Preview fingerprint, dispatch attempt |
 | `where did we leave off` | task_continuity/workspace | Durable task/workspace | Return persisted task/workspace resume summary. | No | Stored task/workspace state |
+| `start voice capture` | voice_control | Voice service | Start explicit push-to-talk capture only if voice and capture gates allow it. | Config/dev gate, not trust approval | Voice status/action result |
+| `stop voice capture` | voice_control | Voice service | Stop active capture and report captured-audio metadata. | No extra approval | Voice capture result |
+| `submit captured voice` | voice_control | Voice service | Send captured audio through controlled transcription and the existing core boundary. | Provider/key/config required | Voice turn result and core route metadata |
+| `stop voice playback` | voice_control | Voice service | Stop playback-provider state when enabled/supported. | No extra approval | Playback result |
+| `turn on always-listening voice` | unsupported/voice_control | Voice service | Refuse or explain unavailable wake/continuous mode. | No | Truthful unavailable state |
 | `what failed recently` | watch_runtime | Events/status | Surface recent events, jobs, lifecycle/system state. | No | Status/event snapshot |
 | `what's the weather` | weather | Weather tool | Use configured weather provider and location. | No | Tool/provider result |
 | `remember this workspace` | workspace_operations | Workspace service/tools | Save or assemble workspace state. | Maybe for archive/clear | Tool result |
@@ -89,8 +100,8 @@ Tests: `tests/test_assistant_orchestrator.py`, `tests/test_safety.py`, `tests/te
 | `use OpenAI to answer this` | generic_provider | OpenAI provider | Provider call only when enabled/key present. | No action approval, but external API required | Provider response/audit |
 | `do something unsupported` | unsupported | Planner/orchestrator | Refuse or clarify truthfully. | No | Unsupported reason |
 
-Sources: `src/stormhelm/core/orchestrator/planner.py`, `src/stormhelm/core/orchestrator/browser_destinations.py`, `src/stormhelm/core/calculations/service.py`, `src/stormhelm/core/software_control/service.py`, `src/stormhelm/core/screen_awareness/service.py`, `src/stormhelm/core/discord_relay/service.py`, `src/stormhelm/core/tasks/service.py`  
-Tests: `tests/test_planner.py`, `tests/test_browser_destination_resolution.py`, `tests/test_calculations.py`, `tests/test_software_control.py`, `tests/test_screen_awareness_service.py`, `tests/test_discord_relay.py`, `tests/test_task_graph.py`
+Sources: `src/stormhelm/core/orchestrator/planner.py`, `src/stormhelm/core/orchestrator/browser_destinations.py`, `src/stormhelm/core/calculations/service.py`, `src/stormhelm/core/software_control/service.py`, `src/stormhelm/core/screen_awareness/service.py`, `src/stormhelm/core/discord_relay/service.py`, `src/stormhelm/core/tasks/service.py`, `src/stormhelm/core/voice/service.py`, `src/stormhelm/ui/client.py`
+Tests: `tests/test_planner.py`, `tests/test_browser_destination_resolution.py`, `tests/test_calculations.py`, `tests/test_software_control.py`, `tests/test_screen_awareness_service.py`, `tests/test_discord_relay.py`, `tests/test_task_graph.py`, `tests/test_voice_bridge_controls.py`, `tests/test_voice_core_bridge_contracts.py`
 
 ## Route State And Result State
 

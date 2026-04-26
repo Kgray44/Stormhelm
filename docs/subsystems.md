@@ -87,6 +87,23 @@ Subsystems own bounded behavior behind planner routes. They should publish truth
 | Sources | `src/stormhelm/core/discord_relay/service.py`, `src/stormhelm/core/discord_relay/adapters.py`, `src/stormhelm/core/discord_relay/models.py` |
 | Tests | `tests/test_discord_relay.py` |
 
+## Voice
+
+| Area | Details |
+|---|---|
+| Purpose | Bounded voice input/output surface for manual turns, controlled audio STT, controlled TTS artifacts, explicit capture, playback boundaries, diagnostics, and events. |
+| Entry points | `VoiceService`, `/voice/capture/start`, `/voice/capture/stop`, `/voice/capture/cancel`, `/voice/capture/submit`, `/voice/capture/turn`, `/voice/playback/stop`, UI bridge voice actions. |
+| Inputs | Manual transcript text, controlled audio metadata, capture/playback control requests, provider configuration, OpenAI key/config when enabled. |
+| Outputs | `VoiceTurnResult`, transcription/synthesis/capture/playback results, voice status snapshot, events, UI voice state. |
+| Owned state | In-memory voice runtime state and recent diagnostics; captured/generated audio is transient by default. |
+| Planner integration | Voice-derived text re-enters the core bridge/orchestrator path. Capture/playback controls are action surfaces, not planner-owned command authority. |
+| UI integration | Ghost/Deck voice state and explicit controls through `UiBridge`, `CoreApiClient`, and `MainController`. |
+| Trust/safety | Disabled by default. No wake word, always-listening, Realtime, VAD, direct provider tool execution, or trust bypass. Capture/playback have separate gates. |
+| Verification | Availability and action results report blocked/unavailable/provider states; playback does not prove the user heard audio. |
+| Telemetry | Voice events, diagnostics, and `/status` voice snapshot. |
+| Sources | `src/stormhelm/core/voice/service.py`, `src/stormhelm/core/voice/models.py`, `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/voice/availability.py`, `src/stormhelm/core/voice/events.py`, `src/stormhelm/core/api/app.py`, `src/stormhelm/ui/bridge.py`, `src/stormhelm/ui/client.py` |
+| Tests | `tests/test_voice_config.py`, `tests/test_voice_availability.py`, `tests/test_voice_manual_turn.py`, `tests/test_voice_audio_turn.py`, `tests/test_voice_events.py`, `tests/test_voice_capture_service.py`, `tests/test_voice_playback_service.py`, `tests/test_voice_core_bridge_contracts.py` |
+
 ## Trust
 
 | Area | Details |

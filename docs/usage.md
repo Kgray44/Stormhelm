@@ -28,7 +28,7 @@ curl http://127.0.0.1:8765/health
 curl http://127.0.0.1:8765/settings
 ```
 
-Sources: `scripts/run_core.ps1`, `scripts/run_ui.ps1`, `src/stormhelm/core/api/app.py`, `src/stormhelm/config/loader.py`  
+Sources: `scripts/run_core.ps1`, `scripts/run_ui.ps1`, `src/stormhelm/core/api/app.py`, `src/stormhelm/config/loader.py`
 Tests: `tests/test_config_loader.py`, `tests/test_launcher.py`
 
 ## Launching Stormhelm
@@ -54,7 +54,7 @@ stormhelm-ui
 stormhelm-telemetry-helper
 ```
 
-Sources: `pyproject.toml`, `scripts/dev_launch.ps1`, `src/stormhelm/entrypoints/core.py`, `src/stormhelm/entrypoints/ui.py`, `src/stormhelm/entrypoints/telemetry_helper.py`  
+Sources: `pyproject.toml`, `scripts/dev_launch.ps1`, `src/stormhelm/entrypoints/core.py`, `src/stormhelm/entrypoints/ui.py`, `src/stormhelm/entrypoints/telemetry_helper.py`
 Tests: `tests/test_launcher.py`
 
 ## Using Ghost Mode
@@ -82,7 +82,7 @@ send this to Baby
 
 Ghost is a quick request and response surface. It renders backend state from `UiBridge`, command-surface models, stream events, and chat results. It does not own execution decisions.
 
-Sources: `src/stormhelm/ui/ghost_input.py`, `src/stormhelm/ui/bridge.py`, `src/stormhelm/ui/command_surface_v2.py`, `assets/qml/components/GhostShell.qml`, `assets/qml/components/SignalStrip.qml`  
+Sources: `src/stormhelm/ui/ghost_input.py`, `src/stormhelm/ui/bridge.py`, `src/stormhelm/ui/command_surface_v2.py`, `assets/qml/components/GhostShell.qml`, `assets/qml/components/SignalStrip.qml`
 Tests: `tests/test_ghost_input.py`, `tests/test_ghost_adaptive.py`, `tests/test_ui_bridge.py`, `tests/test_command_surface.py`
 
 ## Using Command Deck
@@ -113,7 +113,7 @@ It should not:
 - Execute destructive actions without core/trust approval.
 - Treat UI-only preview state as proof that a backend action happened.
 
-Sources: `src/stormhelm/ui/bridge.py`, `src/stormhelm/ui/controllers/main_controller.py`, `assets/qml/Main.qml`, `assets/qml/components/CommandDeckShell.qml`, `assets/qml/components/DeckPanelWorkspace.qml`, `assets/qml/components/RouteInspectorSurface.qml`  
+Sources: `src/stormhelm/ui/bridge.py`, `src/stormhelm/ui/controllers/main_controller.py`, `assets/qml/Main.qml`, `assets/qml/components/CommandDeckShell.qml`, `assets/qml/components/DeckPanelWorkspace.qml`, `assets/qml/components/RouteInspectorSurface.qml`
 Tests: `tests/test_main_controller.py`, `tests/test_ui_bridge_authority_contracts.py`, `tests/test_qml_shell.py`
 
 ## Running Commands Through The API
@@ -140,8 +140,58 @@ Read a snapshot:
 Invoke-RestMethod http://127.0.0.1:8765/snapshot
 ```
 
-Sources: `src/stormhelm/core/api/app.py`, `src/stormhelm/core/api/schemas.py`, `src/stormhelm/core/orchestrator/assistant.py`  
+Sources: `src/stormhelm/core/api/app.py`, `src/stormhelm/core/api/schemas.py`, `src/stormhelm/core/orchestrator/assistant.py`
 Tests: `tests/test_assistant_orchestrator.py`, `tests/test_events.py`, `tests/test_snapshot_resilience.py`
+
+## Voice Workflows
+
+Voice is off by default. The current worktree implements voice as a bounded input/output surface, not as always-listening assistant authority.
+
+Check current voice status:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8765/status | Select-Object -ExpandProperty voice
+```
+
+Enable the foundation for a development session:
+
+```powershell
+$env:STORMHELM_OPENAI_ENABLED = "true"
+$env:OPENAI_API_KEY = "<your key>"
+$env:STORMHELM_VOICE_ENABLED = "true"
+$env:STORMHELM_VOICE_MODE = "manual"
+$env:STORMHELM_VOICE_MANUAL_INPUT_ENABLED = "true"
+.\scripts\run_core.ps1
+```
+
+Explicit push-to-talk capture controls are API actions:
+
+```powershell
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8765/voice/capture/start -ContentType 'application/json' -Body '{}'
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8765/voice/capture/stop -ContentType 'application/json' -Body '{}'
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8765/voice/capture/cancel -ContentType 'application/json' -Body '{}'
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8765/voice/playback/stop -ContentType 'application/json' -Body '{}'
+```
+
+Local capture and playback are separately disabled by default. For development-only capture experiments, both the feature and dev gate must be enabled:
+
+```powershell
+$env:STORMHELM_VOICE_CAPTURE_ENABLED = "true"
+$env:STORMHELM_VOICE_CAPTURE_ALLOW_DEV_CAPTURE = "true"
+$env:STORMHELM_VOICE_PLAYBACK_ENABLED = "true"
+$env:STORMHELM_VOICE_PLAYBACK_ALLOW_DEV_PLAYBACK = "true"
+```
+
+Expected current behavior:
+
+- Manual transcript and controlled audio paths reuse the core assistant/orchestrator boundary.
+- TTS creates controlled speech artifacts; it does not prove playback happened.
+- Playback reports provider attempts; it does not prove the user heard audio.
+- Wake word, always-listening, VAD, Realtime, and full interruption are unavailable.
+- Voice providers must not execute tools or bypass trust.
+
+Sources: `src/stormhelm/core/voice/service.py`, `src/stormhelm/core/voice/availability.py`, `src/stormhelm/core/api/app.py`, `src/stormhelm/ui/bridge.py`, `src/stormhelm/ui/client.py`, `src/stormhelm/ui/controllers/main_controller.py`, `config/default.toml`
+Tests: `tests/test_voice_config.py`, `tests/test_voice_availability.py`, `tests/test_voice_manual_turn.py`, `tests/test_voice_audio_turn.py`, `tests/test_voice_capture_service.py`, `tests/test_voice_playback_service.py`
 
 ## Software-Control Flows
 
@@ -170,7 +220,7 @@ Expected current behavior:
 - Install/update/uninstall/repair builds a typed plan and asks for approval.
 - Package-manager execution is not fully wired in this pass; the subsystem can hand off to software recovery instead of pretending success.
 
-Sources: `src/stormhelm/core/software_control/service.py`, `src/stormhelm/core/software_control/catalog.py`, `src/stormhelm/core/software_control/planner.py`, `src/stormhelm/core/software_recovery/service.py`  
+Sources: `src/stormhelm/core/software_control/service.py`, `src/stormhelm/core/software_control/catalog.py`, `src/stormhelm/core/software_control/planner.py`, `src/stormhelm/core/software_recovery/service.py`
 Tests: `tests/test_software_control.py`, `tests/test_assistant_software_control.py`, `tests/test_software_recovery.py`
 
 ## Calculation Examples
@@ -184,7 +234,7 @@ what is the parallel resistance of 10k and 10k
 
 The calculation subsystem runs locally with deterministic parsing, helpers, explanations, traces, and verification metadata. Unsupported or ambiguous requests return structured failures.
 
-Sources: `src/stormhelm/core/calculations/service.py`, `src/stormhelm/core/calculations/helpers.py`, `src/stormhelm/core/calculations/parser.py`, `src/stormhelm/core/calculations/evaluator.py`  
+Sources: `src/stormhelm/core/calculations/service.py`, `src/stormhelm/core/calculations/helpers.py`, `src/stormhelm/core/calculations/parser.py`, `src/stormhelm/core/calculations/evaluator.py`
 Tests: `tests/test_calculations.py`
 
 ## Screen-Awareness Examples
@@ -205,7 +255,7 @@ Expected current behavior:
 - The default policy is `confirm_before_act`.
 - Verification is deterministic and evidence-limited; it will say when the basis is weak.
 
-Sources: `src/stormhelm/core/screen_awareness/service.py`, `src/stormhelm/core/screen_awareness/observation.py`, `src/stormhelm/core/screen_awareness/action.py`, `src/stormhelm/core/screen_awareness/verification.py`  
+Sources: `src/stormhelm/core/screen_awareness/service.py`, `src/stormhelm/core/screen_awareness/observation.py`, `src/stormhelm/core/screen_awareness/action.py`, `src/stormhelm/core/screen_awareness/verification.py`
 Tests: `tests/test_screen_awareness_service.py`, `tests/test_screen_awareness_action.py`, `tests/test_screen_awareness_verification.py`, `tests/test_screen_awareness_phase12.py`
 
 ## Discord Relay Preview
@@ -233,7 +283,7 @@ Expected current behavior:
 - It asks for trust approval before dispatch.
 - Dispatch uses the local Discord client route when enabled and available.
 
-Sources: `config/default.toml`, `src/stormhelm/core/discord_relay/service.py`, `src/stormhelm/core/discord_relay/adapters.py`, `src/stormhelm/core/trust/service.py`  
+Sources: `config/default.toml`, `src/stormhelm/core/discord_relay/service.py`, `src/stormhelm/core/discord_relay/adapters.py`, `src/stormhelm/core/trust/service.py`
 Tests: `tests/test_discord_relay.py`, `tests/test_trust_service.py`
 
 ## Safe / Dry-Run Behavior
@@ -248,9 +298,10 @@ Several paths prepare or preview before acting:
 | File operations / workspace clear/archive | Trust-gated action tools. |
 | Shell | Disabled stub by default. |
 | Screen action | Confirm-before-act by default. |
+| Voice capture/playback | Disabled by default; explicit API/UI actions only, with separate capture/playback gates. |
 
-Sources: `src/stormhelm/core/safety/policy.py`, `src/stormhelm/core/trust/service.py`, `src/stormhelm/core/software_control/service.py`, `src/stormhelm/core/discord_relay/service.py`, `src/stormhelm/core/screen_awareness/action.py`  
-Tests: `tests/test_safety.py`, `tests/test_trust_service.py`, `tests/test_software_control.py`, `tests/test_discord_relay.py`, `tests/test_screen_awareness_action.py`
+Sources: `src/stormhelm/core/safety/policy.py`, `src/stormhelm/core/trust/service.py`, `src/stormhelm/core/software_control/service.py`, `src/stormhelm/core/discord_relay/service.py`, `src/stormhelm/core/screen_awareness/action.py`, `src/stormhelm/core/voice/service.py`
+Tests: `tests/test_safety.py`, `tests/test_trust_service.py`, `tests/test_software_control.py`, `tests/test_discord_relay.py`, `tests/test_screen_awareness_action.py`, `tests/test_voice_capture_service.py`, `tests/test_voice_playback_service.py`
 
 ## Troubleshooting Flow
 
@@ -276,7 +327,8 @@ Run focused tests:
 .\.venv\Scripts\python.exe -m pytest tests/test_config_loader.py tests/test_safety.py -q
 .\.venv\Scripts\python.exe -m pytest tests/test_ui_bridge.py tests/test_ui_client_streaming.py -q
 .\.venv\Scripts\python.exe -m pytest tests/test_planner.py tests/test_assistant_orchestrator.py -q
+.\.venv\Scripts\python.exe -m pytest tests/test_voice_config.py tests/test_voice_availability.py tests/test_voice_state.py tests/test_voice_events.py -q
 ```
 
-Sources: `src/stormhelm/core/api/app.py`, `src/stormhelm/ui/client.py`, `tests/conftest.py`  
+Sources: `src/stormhelm/core/api/app.py`, `src/stormhelm/ui/client.py`, `tests/conftest.py`
 Tests: `tests/test_config_loader.py`, `tests/test_safety.py`, `tests/test_ui_bridge.py`, `tests/test_planner.py`

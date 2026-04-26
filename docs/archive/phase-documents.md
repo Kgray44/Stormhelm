@@ -9,6 +9,7 @@ The current reader-facing docs are:
 - [Usage](../usage.md)
 - [Commands](../commands.md)
 - [Architecture](../architecture.md)
+- [Voice user guide](../voice.md)
 - [Roadmap](../roadmap.md)
 
 ## What The Old Docs Were For
@@ -50,21 +51,21 @@ This rewrite treats them as source material only. Useful current behavior was re
 
 ## Voice Design Documents
 
-Untracked voice documents were present under `docs/stormhelm_voice_docs/` during this rewrite.
+Voice design documents were present under `docs/stormhelm_voice_docs/` before the practical rewrite. They are historical design material, not the primary user guide.
 
 | Historical path | What it was for | Current status | Replacement |
 |---|---|---|---|
-| `docs/stormhelm_voice_docs/README.md` | Voice docs folder index. | Planned/scaffolded reference only. | [roadmap.md](../roadmap.md) |
-| `docs/stormhelm_voice_docs/01_stormhelm_voice_master_book.md` | Voice master book. | Planned/scaffolded reference only. | [roadmap.md](../roadmap.md) |
-| `docs/stormhelm_voice_docs/02_openai_voice_research_and_provider_strategy.md` | OpenAI voice/provider research. | Planned/scaffolded reference only. | [integrations.md](../integrations.md) |
-| `docs/stormhelm_voice_docs/03_voice_architecture_and_data_contracts.md` | Voice architecture/data contracts. | Planned/scaffolded reference only. | [roadmap.md](../roadmap.md) |
-| `docs/stormhelm_voice_docs/04_voice_implementation_roadmap_and_codex_prompt.md` | Voice implementation roadmap/prompt material. | Planned/scaffolded reference only. | [roadmap.md](../roadmap.md) |
-| `docs/stormhelm_voice_docs/05_voice_acceptance_and_test_book.md` | Voice acceptance/test design. | Planned/scaffolded reference only. | [testing-evaluation.md](../testing-evaluation.md) |
+| `docs/stormhelm_voice_docs/README.md` | Voice docs folder index. | Historical reference. | [voice.md](../voice.md), [voice-0-foundation.md](../voice-0-foundation.md) |
+| `docs/stormhelm_voice_docs/01_stormhelm_voice_master_book.md` | Voice master book. | Historical reference. | [voice.md](../voice.md), [roadmap.md](../roadmap.md) |
+| `docs/stormhelm_voice_docs/02_openai_voice_research_and_provider_strategy.md` | OpenAI voice/provider research. | Historical reference. | [integrations.md](../integrations.md), [voice.md](../voice.md) |
+| `docs/stormhelm_voice_docs/03_voice_architecture_and_data_contracts.md` | Voice architecture/data contracts. | Historical reference. | [data-model.md](../data-model.md), [voice-0-foundation.md](../voice-0-foundation.md) |
+| `docs/stormhelm_voice_docs/04_voice_implementation_roadmap_and_codex_prompt.md` | Voice implementation roadmap/prompt material. | Historical reference. | [roadmap.md](../roadmap.md), [voice-0-foundation.md](../voice-0-foundation.md) |
+| `docs/stormhelm_voice_docs/05_voice_acceptance_and_test_book.md` | Voice acceptance/test design. | Historical reference. | [testing-evaluation.md](../testing-evaluation.md), [voice.md](../voice.md) |
 
-Current source truth: a QML `VoiceCore` component exists, but no backend voice subsystem package or voice settings section was found in the tracked source/config set during this rewrite.
+Current source truth in this worktree: voice has backend source, config, API actions, UI bridge wiring, tests, and a user-facing guide. It is still disabled by default and limited. Wake word, always-listening, Realtime, VAD, full interruption, and direct voice command authority remain unavailable.
 
-Sources: `assets/qml/components/VoiceCore.qml`, `config/default.toml`, `src/stormhelm/core`  
-Tests: `tests/test_qml_shell.py`; no backend voice pipeline tests found
+Sources: `docs/voice.md`, `docs/voice-0-foundation.md`, `src/stormhelm/core/voice/service.py`, `src/stormhelm/core/api/app.py`, `src/stormhelm/ui/bridge.py`, `config/default.toml`
+Tests: `tests/test_voice_config.py`, `tests/test_voice_availability.py`, `tests/test_voice_manual_turn.py`, `tests/test_voice_audio_turn.py`, `tests/test_voice_core_bridge_contracts.py`
 
 ## How To Use Historical Docs
 

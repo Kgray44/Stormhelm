@@ -274,6 +274,18 @@ Status values used here: `Implemented`, `Implemented but limited`, `Experimental
 - Tests: `tests/test_hardware_telemetry.py`, `tests/test_network_monitor.py`, `tests/test_operational_awareness.py`, `tests/test_ui_bridge_batch3_contracts.py`
 - Status: Implemented but limited
 
+### Voice Input / Output
+
+- What it does: Provides a disabled-by-default voice subsystem with typed manual voice turns, controlled audio STT, controlled TTS artifact generation, explicit push-to-talk capture state, playback-provider boundaries, diagnostics, events, and Ghost/Deck bridge actions. Speech-derived requests enter the existing core/orchestrator boundary; voice providers do not execute tools directly.
+- Use it with: `VoiceService`, `/voice/capture/start`, `/voice/capture/stop`, `/voice/capture/cancel`, `/voice/capture/submit`, `/voice/capture/turn`, `/voice/playback/stop`, Ghost/Deck voice actions, and `/status` voice diagnostics.
+- Inputs: Manual transcript text, controlled audio metadata, explicit capture start/stop/cancel/submit controls, configured provider state, and optional mock-provider test behavior.
+- Outputs: `VoiceTurnResult`, `VoiceTranscriptionResult`, `VoiceSpeechSynthesisResult`, `VoicePlaybackResult`, `VoiceCaptureResult`, voice events, status snapshot fields, and compact UI voice state.
+- Settings: `voice.*`, `voice.openai.*`, `voice.playback.*`, `voice.capture.*`, `openai.enabled`, `OPENAI_API_KEY` or `STORMHELM_OPENAI_API_KEY`.
+- Edge cases: Disabled by default. Availability requires voice enabled, non-disabled mode, OpenAI provider config, OpenAI enabled, an API key, and configured models. Wake word, always-listening, continuous listening, Realtime sessions, VAD, full interruption, production playback guarantees, and independent voice command authority are not implemented. The current worktree includes UI voice-state shaping in `src/stormhelm/ui/voice_surface.py`; verify that file is committed before relying on GitHub source browsing for that surface.
+- Sources: `src/stormhelm/core/voice/service.py`, `src/stormhelm/core/voice/models.py`, `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/voice/availability.py`, `src/stormhelm/core/voice/events.py`, `src/stormhelm/core/api/app.py`, `src/stormhelm/ui/bridge.py`, `src/stormhelm/ui/client.py`, `src/stormhelm/ui/controllers/main_controller.py`, `src/stormhelm/ui/voice_surface.py`, `config/default.toml`, `docs/voice-0-foundation.md`
+- Tests: `tests/test_voice_config.py`, `tests/test_voice_availability.py`, `tests/test_voice_manual_turn.py`, `tests/test_voice_audio_turn.py`, `tests/test_voice_stt_provider.py`, `tests/test_voice_tts_provider.py`, `tests/test_voice_playback_service.py`, `tests/test_voice_core_bridge_contracts.py`, `tests/test_voice_events.py`, `tests/test_voice_state.py`, `tests/test_voice_ui_state_payload.py`
+- Status: Implemented but limited
+
 ### Packaging / Build Tooling
 
 - What it does: Provides source launch scripts, PyInstaller portable packaging, optional Inno Setup installer packaging, and report rendering helpers.
@@ -287,18 +299,6 @@ Status values used here: `Implemented`, `Implemented but limited`, `Experimental
 - Status: Implemented but limited
 
 ## Planned Or Scaffolded
-
-### Voice Pipeline
-
-- What it does: Historical docs describe wake word, STT, TTS, and voice UX goals.
-- Use it with: Design reference only.
-- Inputs: Not implemented as a runtime voice pipeline in the current source tree.
-- Outputs: Not implemented.
-- Settings: No current voice config section in `config/default.toml`.
-- Edge cases: `assets/qml/components/VoiceCore.qml` is a UI component, not proof of a backend voice pipeline.
-- Sources: `assets/qml/components/VoiceCore.qml`, `docs/archive/phase-documents.md`
-- Tests: No current voice pipeline tests found.
-- Status: Planned
 
 ### Official Discord Bot / Webhook Routes
 

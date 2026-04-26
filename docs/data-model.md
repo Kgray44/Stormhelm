@@ -6,7 +6,7 @@ This page documents the model families that matter for users, developers, and UI
 
 | Family | Purpose | Fields | Producers | Consumers | Persistence behavior | Source files | Tests |
 |---|---|---|---|---|---|---|---|
-| `AppConfig` | Root runtime config. | App identity, network, storage, logging, concurrency, UI, lifecycle, event stream, location/weather, telemetry, screen awareness, calculations, software, recovery, trust, Discord, OpenAI, safety, tools, runtime paths. | `load_config()` | Core container, UI, tools, subsystems. | Built from TOML/env at startup; not stored in SQLite. | `src/stormhelm/config/models.py`, `src/stormhelm/config/loader.py` | `tests/test_config_loader.py` |
+| `AppConfig` | Root runtime config. | App identity, network, storage, logging, concurrency, UI, lifecycle, event stream, location/weather, telemetry, screen awareness, calculations, software, recovery, trust, Discord, OpenAI, voice, safety, tools, runtime paths. | `load_config()` | Core container, UI, tools, subsystems. | Built from TOML/env at startup; not stored in SQLite. | `src/stormhelm/config/models.py`, `src/stormhelm/config/loader.py` | `tests/test_config_loader.py`, `tests/test_voice_config.py` |
 | Section configs | Typed config for each subsystem. | Section-specific booleans, timeouts, TTLs, models, feature flags. | Config loader | Subsystem constructors. | Same as `AppConfig`. | `src/stormhelm/config/models.py`, `config/default.toml` | `tests/test_config_loader.py` |
 | `RuntimePathConfig` | Resolved source/install/resource/user/state paths. | mode, frozen status, roots, assets, config, state/db/log/session paths. | Config loader | Core, UI, lifecycle, storage. | Derived at startup. | `src/stormhelm/config/models.py`, `src/stormhelm/shared/paths.py` | `tests/test_config_loader.py`, `tests/test_runtime_state.py` |
 
@@ -17,6 +17,7 @@ This page documents the model families that matter for users, developers, and UI
 | `ChatRequest` | Submit assistant work. | message, session, surface, active module, workspace/input context, explicit requests. | UI/client/API callers. | `AssistantOrchestrator`. | User/assistant messages are persisted. | `src/stormhelm/core/api/schemas.py`, `src/stormhelm/core/api/app.py` | `tests/test_assistant_orchestrator.py` |
 | `NoteCreateRequest` | Create note. | title, content, session/workspace. | UI/API callers. | Notes repository. | Stored in SQLite `notes`. | `src/stormhelm/core/api/schemas.py`, `src/stormhelm/core/memory/repositories.py` | `tests/test_storage.py` |
 | Lifecycle request models | Mutate shell/startup/cleanup/lifecycle state. | Shell presence, startup policy, cleanup targets, confirmations. | UI/client/API callers. | Lifecycle controller. | Runtime JSON state and events. | `src/stormhelm/core/api/schemas.py`, `src/stormhelm/core/lifecycle/models.py` | `tests/test_lifecycle_service.py`, `tests/test_ui_lifecycle_bridge.py` |
+| Voice control request models | Mutate explicit voice capture/playback state. | Capture source/session/action metadata, playback stop request metadata. | UI/client/API callers. | `VoiceService`. | Status and events are runtime state; audio persistence is disabled by default. | `src/stormhelm/core/api/schemas.py`, `src/stormhelm/core/api/app.py`, `src/stormhelm/core/voice/models.py` | `tests/test_voice_bridge_controls.py`, `tests/test_voice_capture_service.py`, `tests/test_voice_playback_service.py` |
 | Response wrappers | Return jobs/events/notes. | Lists of model dictionaries. | FastAPI endpoints. | UI/client/API callers. | Source state lives in repositories or event buffer. | `src/stormhelm/core/api/schemas.py`, `src/stormhelm/core/api/app.py` | `tests/test_events.py`, `tests/test_storage.py` |
 
 ## Events
@@ -75,6 +76,16 @@ This page documents the model families that matter for users, developers, and UI
 |---|---|---|---|---|---|---|---|
 | Approval/trust models | Represent action requests, pending approvals, permission grants, audit records, decisions, posture summary. | request id, action key, subject, session/task, approval state, scope, expiry, details, operator messages. | Trust service/safety/subsystems. | UI command surface, safety policy, software/relay/tasks. | Stored in SQLite trust tables. | `src/stormhelm/core/trust/models.py`, `src/stormhelm/core/trust/service.py`, `src/stormhelm/core/trust/repository.py` | `tests/test_trust_service.py`, `tests/test_safety.py` |
 
+## Voice
+
+| Model family | Purpose | Fields | Producers | Consumers | Persistence behavior | Source files | Tests |
+|---|---|---|---|---|---|---|---|
+| Voice config models | Represent disabled-by-default voice, OpenAI voice, capture, and playback settings. | enable flags, provider/mode, manual/spoken/realtime truth flags, STT/TTS models, audio limits, persistence flags, capture/playback gates. | Config loader. | Core container, voice availability, voice service/providers, UI status. | Loaded at startup; not stored in SQLite. | `src/stormhelm/config/models.py`, `src/stormhelm/config/loader.py`, `config/default.toml` | `tests/test_voice_config.py`, `tests/test_voice_availability.py` |
+| Voice availability/state | Explain whether voice is available and expose current runtime voice status. | availability boolean/reasons, provider/mode, truth flags, active capture, last transcription/Core/TTS/playback results. | `compute_voice_availability()`, `VoiceStateController`, `VoiceService.status_snapshot()`. | `/status`, `/snapshot`, UI bridge, troubleshooting. | In-memory runtime state; status snapshots are derived. | `src/stormhelm/core/voice/availability.py`, `src/stormhelm/core/voice/state.py`, `src/stormhelm/core/voice/service.py` | `tests/test_voice_availability.py`, `tests/test_voice_state.py`, `tests/test_voice_diagnostics.py` |
+| Voice turn models | Represent speech-derived turns entering the core boundary. | audio/text source, transcript, request id, core request/result, spoken response, provider metadata, errors. | Voice service and providers. | Assistant orchestrator, response renderer, UI diagnostics. | Message history persists through normal chat persistence when a core turn is submitted. | `src/stormhelm/core/voice/models.py`, `src/stormhelm/core/voice/bridge.py`, `src/stormhelm/core/voice/service.py` | `tests/test_voice_manual_turn.py`, `tests/test_voice_audio_turn.py`, `tests/test_voice_core_bridge_contracts.py` |
+| Voice provider models | Represent STT/TTS/capture/playback requests and results. | audio metadata, transcript text, speech request, generated audio output, capture session/result, playback result, provider/model/latency/error fields. | Provider implementations and `VoiceService`. | Diagnostics, events, UI, tests. | Captured/generated audio is transient by default unless persistence flags are changed. | `src/stormhelm/core/voice/models.py`, `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/voice/service.py` | `tests/test_voice_stt_provider.py`, `tests/test_voice_tts_provider.py`, `tests/test_voice_capture_provider.py`, `tests/test_voice_playback_provider.py` |
+| Voice events | Publish voice lifecycle and diagnostics events. | event type, action/session ids, provider state, result/error payloads. | `publish_voice_event()` and voice service actions. | Event buffer, UI stream, troubleshooting. | In-memory bounded event buffer. | `src/stormhelm/core/voice/events.py`, `src/stormhelm/core/events.py` | `tests/test_voice_events.py`, `tests/test_voice_capture_diagnostics_events.py`, `tests/test_voice_playback_diagnostics_events.py` |
+
 ## Task Graph
 
 | Model family | Purpose | Fields | Producers | Consumers | Persistence behavior | Source files | Tests |
@@ -104,7 +115,7 @@ This page documents the model families that matter for users, developers, and UI
 
 | Model family | Purpose | Fields | Producers | Consumers | Persistence behavior | Source files | Tests |
 |---|---|---|---|---|---|---|---|
-| Bridge properties | QML-facing presentation state. | messages, ghost cards, deck modules/panels, route inspector, workspace canvas, opened items, status strips, adaptive Ghost state. | `UiBridge` from health/status/snapshot/chat/stream payloads. | QML components. | Deck layout may persist in runtime state; most UI state derives from core snapshots. | `src/stormhelm/ui/bridge.py`, `src/stormhelm/ui/command_surface_v2.py`, `assets/qml/Main.qml` | `tests/test_ui_bridge.py`, `tests/test_command_surface.py`, `tests/test_qml_shell.py` |
+| Bridge properties | QML-facing presentation state. | messages, ghost cards, deck modules/panels, route inspector, workspace canvas, opened items, status strips, adaptive Ghost state, voice state. | `UiBridge` from health/status/snapshot/chat/stream payloads. | QML components. | Deck layout may persist in runtime state; most UI state derives from core snapshots. | `src/stormhelm/ui/bridge.py`, `src/stormhelm/ui/command_surface_v2.py`, `src/stormhelm/ui/voice_surface.py`, `assets/qml/Main.qml` | `tests/test_ui_bridge.py`, `tests/test_command_surface.py`, `tests/test_voice_ui_state_payload.py`, `tests/test_qml_shell.py` |
 
 ## SQLite Schema
 
@@ -117,5 +128,5 @@ This page documents the model families that matter for users, developers, and UI
 | Trust | `trust_approval_requests`, `trust_permission_grants`, `trust_audit_records` |
 | Memory | `memory_records`, `memory_query_log` |
 
-Sources: `src/stormhelm/core/memory/database.py`  
+Sources: `src/stormhelm/core/memory/database.py`
 Tests: `tests/test_storage.py`, `tests/test_task_graph.py`, `tests/test_trust_service.py`, `tests/test_semantic_memory.py`, `tests/test_workspace_service.py`

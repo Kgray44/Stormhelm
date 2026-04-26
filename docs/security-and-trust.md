@@ -12,12 +12,13 @@ Stormhelm is local-first by default, but it can still affect local files, apps, 
 | Calculations | Yes | Deterministic local parser/evaluator/helpers. |
 | Routing | Yes | Deterministic planner and slash router. |
 | Tools | Yes | Built-in local tools unless provider/integration explicitly used. |
+| Voice state/control | Yes | Voice status, capture controls, and UI state are local. OpenAI STT/TTS is external only when enabled/invoked. |
 | OpenAI | No, external | Disabled by default; enabling sends prompt/context to configured API. |
 | Weather | External provider | Weather tool uses configured provider URL when used. |
 | Discord relay | External effect | Local client automation can send material outside Stormhelm after preview/trust. |
 
-Sources: `config/default.toml`, `src/stormhelm/core/api/app.py`, `src/stormhelm/core/container.py`, `src/stormhelm/core/calculations/service.py`, `src/stormhelm/core/providers/openai_responses.py`, `src/stormhelm/core/discord_relay/service.py`  
-Tests: `tests/test_config_loader.py`, `tests/test_calculations.py`, `tests/test_discord_relay.py`
+Sources: `config/default.toml`, `src/stormhelm/core/api/app.py`, `src/stormhelm/core/container.py`, `src/stormhelm/core/calculations/service.py`, `src/stormhelm/core/providers/openai_responses.py`, `src/stormhelm/core/voice/service.py`, `src/stormhelm/core/discord_relay/service.py`
+Tests: `tests/test_config_loader.py`, `tests/test_calculations.py`, `tests/test_voice_availability.py`, `tests/test_discord_relay.py`
 
 ## Secrets And API Keys
 
@@ -25,11 +26,12 @@ Tests: `tests/test_config_loader.py`, `tests/test_calculations.py`, `tests/test_
 |---|---|---|
 | `OPENAI_API_KEY` | `.env` or process environment. | Required only when OpenAI is enabled. Do not commit real keys. |
 | `STORMHELM_OPENAI_API_KEY` | `.env` or process environment. | Alternative OpenAI key env var. Do not commit real keys. |
+| Voice OpenAI key | Same OpenAI key variables. | Required for provider-backed STT/TTS only when OpenAI voice paths are enabled. |
 | Discord session | User's local Discord client/session. | Stormhelm does not document a token/self-bot flow; local automation depends on the user's client state. |
 
 OpenAI config can also include an `api_key` value in TOML, but environment variables are safer. Do not put real secrets in `config/default.toml`, `.env.example`, docs, or committed test fixtures.
 
-Sources: `src/stormhelm/config/loader.py`, `config/default.toml`, `src/stormhelm/core/providers/openai_responses.py`  
+Sources: `src/stormhelm/config/loader.py`, `config/default.toml`, `src/stormhelm/core/providers/openai_responses.py`
 Tests: `tests/test_config_loader.py`
 
 ## Approval Model
@@ -44,7 +46,7 @@ Trust state uses typed approval requests, grants, scopes, expirations, and audit
 
 Approval requests can be invalidated by expiry, runtime mismatch, task mismatch, or stale state. UI prompts reflect trust state but do not create grants by themselves.
 
-Sources: `src/stormhelm/core/trust/models.py`, `src/stormhelm/core/trust/service.py`, `src/stormhelm/core/trust/repository.py`, `src/stormhelm/core/safety/policy.py`  
+Sources: `src/stormhelm/core/trust/models.py`, `src/stormhelm/core/trust/service.py`, `src/stormhelm/core/trust/repository.py`, `src/stormhelm/core/safety/policy.py`
 Tests: `tests/test_trust_service.py`, `tests/test_safety.py`
 
 ## Trust-Gated Actions
@@ -61,7 +63,7 @@ Tests: `tests/test_trust_service.py`, `tests/test_safety.py`
 | `external_open_url`, `external_open_file` | Hands work to native external surfaces. |
 | `workspace_archive`, `workspace_clear` | Can hide/remove workspace state. |
 
-Sources: `src/stormhelm/core/safety/policy.py`, `src/stormhelm/core/tools/builtins/__init__.py`  
+Sources: `src/stormhelm/core/safety/policy.py`, `src/stormhelm/core/tools/builtins/__init__.py`
 Tests: `tests/test_safety.py`, `tests/test_tool_registry.py`
 
 ## Destructive Action Rules
@@ -76,9 +78,10 @@ Tests: `tests/test_safety.py`, `tests/test_tool_registry.py`
 | Lifecycle cleanup | Requires cleanup plan and confirmation payload. |
 | Screen action | Confirm-before-act by default. |
 | Discord dispatch | Preview, fingerprint, trust approval, and duplicate/stale checks. |
+| Voice capture/playback | Disabled by default; explicit controls only; capture/playback have separate gates and do not bypass trust/safety for commands. |
 
-Sources: `src/stormhelm/core/safety/policy.py`, `src/stormhelm/core/software_control/service.py`, `src/stormhelm/core/lifecycle/service.py`, `src/stormhelm/core/screen_awareness/action.py`, `src/stormhelm/core/discord_relay/service.py`  
-Tests: `tests/test_safety.py`, `tests/test_software_control.py`, `tests/test_lifecycle_service.py`, `tests/test_screen_awareness_action.py`, `tests/test_discord_relay.py`
+Sources: `src/stormhelm/core/safety/policy.py`, `src/stormhelm/core/software_control/service.py`, `src/stormhelm/core/lifecycle/service.py`, `src/stormhelm/core/screen_awareness/action.py`, `src/stormhelm/core/discord_relay/service.py`, `src/stormhelm/core/voice/service.py`
+Tests: `tests/test_safety.py`, `tests/test_software_control.py`, `tests/test_lifecycle_service.py`, `tests/test_screen_awareness_action.py`, `tests/test_discord_relay.py`, `tests/test_voice_capture_service.py`, `tests/test_voice_playback_service.py`
 
 ## Screen-Awareness Privacy
 
@@ -97,7 +100,7 @@ What should not happen:
 - Do not execute screen actions silently under default policy.
 - Do not send screen context to OpenAI unless provider-backed augmentation/fallback is explicitly enabled and used.
 
-Sources: `config/default.toml`, `src/stormhelm/core/screen_awareness/service.py`, `src/stormhelm/core/screen_awareness/observation.py`, `src/stormhelm/core/screen_awareness/action.py`, `src/stormhelm/core/screen_awareness/verification.py`  
+Sources: `config/default.toml`, `src/stormhelm/core/screen_awareness/service.py`, `src/stormhelm/core/screen_awareness/observation.py`, `src/stormhelm/core/screen_awareness/action.py`, `src/stormhelm/core/screen_awareness/verification.py`
 Tests: `tests/test_screen_awareness_phase12.py`, `tests/test_screen_awareness_action.py`, `tests/test_screen_awareness_verification.py`
 
 ## Discord Relay Boundaries
@@ -117,8 +120,29 @@ Self-bot/token boundary:
 
 - The code uses local client automation and an official scaffold adapter; docs should not direct users to self-bot token flows.
 
-Sources: `config/default.toml`, `src/stormhelm/core/discord_relay/service.py`, `src/stormhelm/core/discord_relay/adapters.py`, `src/stormhelm/core/discord_relay/models.py`  
+Sources: `config/default.toml`, `src/stormhelm/core/discord_relay/service.py`, `src/stormhelm/core/discord_relay/adapters.py`, `src/stormhelm/core/discord_relay/models.py`
 Tests: `tests/test_discord_relay.py`
+
+## Voice Privacy Boundaries
+
+Current posture:
+
+- Voice is disabled by default.
+- There is no wake word, always-listening mode, continuous microphone loop, VAD, or Realtime session.
+- Capture is explicit and has a separate `voice.capture.enabled` gate plus development capture gate.
+- Generated TTS artifacts and captured audio are transient by default.
+- OpenAI STT/TTS sends audio/text externally only when OpenAI and the relevant voice path are enabled and invoked.
+- Voice providers do not execute tools or lower approval requirements.
+- Playback completion is not proof that the user heard audio.
+
+What should not happen:
+
+- Do not treat microphone capture as active unless capture state says it is active.
+- Do not persist raw/generated audio unless the explicit persistence settings are changed.
+- Do not claim continuous listening, wake word, Realtime, or direct voice command execution.
+
+Sources: `config/default.toml`, `src/stormhelm/core/voice/availability.py`, `src/stormhelm/core/voice/service.py`, `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/voice/bridge.py`
+Tests: `tests/test_voice_config.py`, `tests/test_voice_availability.py`, `tests/test_voice_capture_service.py`, `tests/test_voice_playback_service.py`, `tests/test_voice_core_bridge_contracts.py`
 
 ## Software Installation Safety
 
@@ -132,7 +156,7 @@ Current posture:
 - Verification is explicit and can be `unverified` or `uncertain`.
 - Recovery can propose bounded route switches but marks results unverified until checked.
 
-Sources: `config/default.toml`, `src/stormhelm/core/software_control/service.py`, `src/stormhelm/core/software_recovery/service.py`, `src/stormhelm/core/safety/policy.py`  
+Sources: `config/default.toml`, `src/stormhelm/core/software_control/service.py`, `src/stormhelm/core/software_recovery/service.py`, `src/stormhelm/core/safety/policy.py`
 Tests: `tests/test_software_control.py`, `tests/test_software_recovery.py`, `tests/test_safety.py`
 
 ## Data Retention
@@ -148,15 +172,17 @@ Tests: `tests/test_software_control.py`, `tests/test_software_recovery.py`, `tes
 | Trust approvals/grants/audit | Stored in SQLite with TTL/invalidation logic. |
 | Semantic memory/query logs | Stored in SQLite with service-managed pruning/freshness. |
 | Lifecycle/core state | Runtime JSON state files. |
+| Voice captured/generated audio | Transient by default; persistence flags are false in default config. |
+| Voice status/events | Runtime status and bounded event stream; not a separate SQLite voice table in the current model. |
 
-Sources: `src/stormhelm/core/events.py`, `src/stormhelm/core/memory/database.py`, `src/stormhelm/core/memory/repositories.py`, `src/stormhelm/core/memory/service.py`, `src/stormhelm/core/runtime_state.py`, `src/stormhelm/core/lifecycle/service.py`  
-Tests: `tests/test_events.py`, `tests/test_storage.py`, `tests/test_semantic_memory.py`, `tests/test_runtime_state.py`
+Sources: `src/stormhelm/core/events.py`, `src/stormhelm/core/memory/database.py`, `src/stormhelm/core/memory/repositories.py`, `src/stormhelm/core/memory/service.py`, `src/stormhelm/core/runtime_state.py`, `src/stormhelm/core/lifecycle/service.py`, `src/stormhelm/core/voice/service.py`, `config/default.toml`
+Tests: `tests/test_events.py`, `tests/test_storage.py`, `tests/test_semantic_memory.py`, `tests/test_runtime_state.py`, `tests/test_voice_capture_service.py`, `tests/test_voice_tts_provider.py`
 
 ## Telemetry Boundaries
 
 Telemetry/watch/debug state is local unless an explicitly enabled external provider is used. Hardware telemetry may call helper/provider logic, but elevated helper use is disabled by default. Event stream is local to the core process.
 
-Sources: `src/stormhelm/core/system/hardware_telemetry.py`, `src/stormhelm/core/events.py`, `src/stormhelm/core/container.py`, `config/default.toml`  
+Sources: `src/stormhelm/core/system/hardware_telemetry.py`, `src/stormhelm/core/events.py`, `src/stormhelm/core/container.py`, `config/default.toml`
 Tests: `tests/test_hardware_telemetry.py`, `tests/test_events.py`
 
 ## Never Sent Externally Unless Enabled
@@ -165,6 +191,7 @@ Stormhelm should not send these externally by default:
 
 - Chat prompt/context to OpenAI.
 - Screen context for provider visual augmentation.
+- Audio/transcript/text for voice STT/TTS.
 - Software troubleshooting context to cloud fallback.
 - Local file contents from file reader.
 - Semantic memory records.
@@ -172,12 +199,12 @@ Stormhelm should not send these externally by default:
 
 Exceptions require explicit provider/integration enablement or user-initiated external action. Weather requests and Discord sends are external by their nature when used.
 
-Sources: `config/default.toml`, `src/stormhelm/core/providers/openai_responses.py`, `src/stormhelm/core/software_recovery/service.py`, `src/stormhelm/core/discord_relay/service.py`, `src/stormhelm/core/tools/builtins/file_reader.py`  
-Tests: `tests/test_config_loader.py`, `tests/test_software_recovery.py`, `tests/test_discord_relay.py`, `tests/test_safety.py`
+Sources: `config/default.toml`, `src/stormhelm/core/providers/openai_responses.py`, `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/software_recovery/service.py`, `src/stormhelm/core/discord_relay/service.py`, `src/stormhelm/core/tools/builtins/file_reader.py`
+Tests: `tests/test_config_loader.py`, `tests/test_voice_stt_provider.py`, `tests/test_voice_tts_provider.py`, `tests/test_software_recovery.py`, `tests/test_discord_relay.py`, `tests/test_safety.py`
 
 ## Unsafe Test Mode
 
 `STORMHELM_UNSAFE_TEST_MODE=true` enables test-only behavior that broadens read/action/software gates and should not be used as normal runtime posture.
 
-Sources: `src/stormhelm/config/loader.py`, `src/stormhelm/core/safety/policy.py`  
+Sources: `src/stormhelm/config/loader.py`, `src/stormhelm/core/safety/policy.py`
 Tests: `tests/test_config_loader.py`, `tests/test_safety.py`

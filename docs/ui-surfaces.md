@@ -2,7 +2,7 @@
 
 Stormhelm's UI is a PySide6/QML shell. It presents backend-owned state from `UiBridge` and sends actions back through `CoreApiClient` or local controller methods. UI presentation must not become backend authority.
 
-Sources: `src/stormhelm/ui/app.py`, `src/stormhelm/ui/bridge.py`, `src/stormhelm/ui/client.py`, `src/stormhelm/ui/controllers/main_controller.py`, `assets/qml/Main.qml`  
+Sources: `src/stormhelm/ui/app.py`, `src/stormhelm/ui/bridge.py`, `src/stormhelm/ui/client.py`, `src/stormhelm/ui/controllers/main_controller.py`, `assets/qml/Main.qml`
 Tests: `tests/test_ui_bridge.py`, `tests/test_main_controller.py`, `tests/test_qml_shell.py`
 
 ## Authority Rule
@@ -125,12 +125,12 @@ Tests: `tests/test_ui_bridge_authority_contracts.py`, `tests/test_ui_client_stre
 - Source files: `src/stormhelm/ui/tray.py`, `src/stormhelm/ui/main_window.py`, `src/stormhelm/ui/bridge.py`, `src/stormhelm/ui/controllers/main_controller.py`
 - Tests: `tests/test_ui_tray.py`, `tests/test_main_controller_lifecycle.py`
 
-## VoiceCore Component
+## Voice Surfaces
 
-- What it shows: A QML component named `VoiceCore`.
-- What state feeds it: UI/QML context only.
-- What actions it exposes: UI-level visual affordance.
-- What it must not own: Backend voice pipeline, wake word, STT, TTS, or microphone permissions.
-- Source files: `assets/qml/components/VoiceCore.qml`
-- Tests: `tests/test_qml_shell.py`
-- Status note: Backend voice pipeline is planned/scaffolded, not implemented as a core subsystem in the current tracked source tree.
+- What it shows: Compact voice availability, capture/listening/thinking/speaking/warning state, provider/capture truth flags, last transcription/Core/TTS/playback summaries, and a Command Deck voice capture station when the bridge has voice state.
+- What state feeds it: `/status` voice diagnostics, voice action responses from `/voice/*`, `UiBridge.voiceState`, `voiceCoreState`, `voiceAvailabilityLabel`, `voiceSummary`, and the command-station payload built from backend status.
+- What actions it exposes: Start push-to-talk capture, stop capture, cancel capture, submit captured audio, run capture-and-submit, and stop playback. These actions route through `UiBridge`, `CoreApiClient`, `MainController`, and the FastAPI voice endpoints.
+- What it must not own: Wake word, microphone permission policy, STT/TTS provider calls, playback truth, command execution, trust decisions, or claims that audio was heard. UI state is presentation only; `VoiceService` owns runtime truth.
+- Source files: `assets/qml/components/VoiceCore.qml`, `assets/qml/components/GhostShell.qml`, `assets/qml/components/CommandDeckShell.qml`, `src/stormhelm/ui/bridge.py`, `src/stormhelm/ui/client.py`, `src/stormhelm/ui/controllers/main_controller.py`, `src/stormhelm/ui/voice_surface.py`, `src/stormhelm/core/api/app.py`, `src/stormhelm/core/voice/service.py`
+- Tests: `tests/test_qml_shell.py`, `tests/test_ui_bridge.py`, `tests/test_voice_bridge_controls.py`, `tests/test_voice_ui_state_payload.py`, `tests/test_voice_capture_service.py`
+- Status note: Implemented but limited in the current worktree. Voice is disabled by default, and wake word, always-listening, VAD, Realtime, full interruption, and direct provider-owned command execution remain unavailable.

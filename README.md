@@ -1,6 +1,6 @@
 # Stormhelm
 
-Stormhelm is a local-first Windows desktop assistant. The current repository contains a FastAPI core service, a PySide6/QML shell, deterministic routing, local tools, SQLite persistence, event streaming, trust gates, and several bounded subsystems for calculations, screen-aware help, software planning, recovery, Discord relay previews, task continuity, and workspace state.
+Stormhelm is a local-first Windows desktop assistant. The current repository contains a FastAPI core service, a PySide6/QML shell, deterministic routing, local tools, SQLite persistence, event streaming, trust gates, and several bounded subsystems for calculations, screen-aware help, software planning, recovery, Discord relay previews, voice input/output, task continuity, and workspace state.
 
 Start with the documentation map in [docs/README.md](docs/README.md). It is the source-referenced entry point for what is implemented now, what is limited, and what is still planned.
 
@@ -25,6 +25,8 @@ curl http://127.0.0.1:8765/settings
 
 OpenAI is disabled by default. Set `OPENAI_API_KEY` and `STORMHELM_OPENAI_ENABLED=true` only if you want provider-backed fallback behavior.
 
+Voice is also disabled by default. See [docs/voice.md](docs/voice.md) for the current voice boundaries: manual/controlled voice paths exist, while wake word, always-listening, Realtime, VAD, and direct voice command authority do not.
+
 ## Documentation
 
 - [Docs home](docs/README.md)
@@ -33,6 +35,7 @@ OpenAI is disabled by default. Set `OPENAI_API_KEY` and `STORMHELM_OPENAI_ENABLE
 - [Commands and route families](docs/commands.md)
 - [Architecture](docs/architecture.md)
 - [Settings reference](docs/settings.md)
+- [Voice user guide](docs/voice.md)
 - [Security and trust](docs/security-and-trust.md)
 - [Development](docs/development.md)
 - [Archive of historical planning docs](docs/archive/phase-documents.md)

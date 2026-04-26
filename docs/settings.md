@@ -13,7 +13,7 @@ Stormhelm loads typed config from TOML, `.env`, environment variables, and runti
 | 5 | `.env` | Parsed as key/value pairs. |
 | 6 | Process environment | Overrides prior values. |
 
-Sources: `src/stormhelm/config/loader.py`, `config/default.toml`, `config/development.toml.example`  
+Sources: `src/stormhelm/config/loader.py`, `config/default.toml`, `config/development.toml.example`
 Tests: `tests/test_config_loader.py`
 
 ## Core Settings
@@ -29,7 +29,7 @@ Tests: `tests/test_config_loader.py`
 
 Env overrides: `STORMHELM_ENV`, `STORMHELM_DEBUG`, `STORMHELM_RELEASE_CHANNEL`, `STORMHELM_CORE_HOST`, `STORMHELM_CORE_PORT`.
 
-Sources: `config/default.toml`, `src/stormhelm/config/loader.py`, `src/stormhelm/config/models.py`  
+Sources: `config/default.toml`, `src/stormhelm/config/loader.py`, `src/stormhelm/config/models.py`
 Tests: `tests/test_config_loader.py`
 
 ## Storage And Logging
@@ -47,7 +47,7 @@ Tests: `tests/test_config_loader.py`
 
 Env override: `STORMHELM_DATA_DIR`.
 
-Sources: `config/default.toml`, `src/stormhelm/config/loader.py`, `src/stormhelm/app/logging.py`, `src/stormhelm/shared/paths.py`  
+Sources: `config/default.toml`, `src/stormhelm/config/loader.py`, `src/stormhelm/app/logging.py`, `src/stormhelm/shared/paths.py`
 Tests: `tests/test_config_loader.py`, `tests/test_storage.py`
 
 ## Concurrency And UI
@@ -64,7 +64,7 @@ Tests: `tests/test_config_loader.py`, `tests/test_storage.py`
 
 Env overrides: `STORMHELM_MAX_CONCURRENT_JOBS`, `STORMHELM_DEFAULT_JOB_TIMEOUT_SECONDS`.
 
-Sources: `config/default.toml`, `src/stormhelm/config/models.py`, `src/stormhelm/core/jobs/manager.py`, `src/stormhelm/ui/ghost_input.py`  
+Sources: `config/default.toml`, `src/stormhelm/config/models.py`, `src/stormhelm/core/jobs/manager.py`, `src/stormhelm/ui/ghost_input.py`
 Tests: `tests/test_job_manager.py`, `tests/test_ghost_input.py`, `tests/test_ui_tray.py`
 
 ## Lifecycle / Startup
@@ -86,7 +86,7 @@ Tests: `tests/test_job_manager.py`, `tests/test_ghost_input.py`, `tests/test_ui_
 
 Env overrides: `STORMHELM_STARTUP_ENABLED`, `STORMHELM_START_CORE_WITH_WINDOWS`, `STORMHELM_START_SHELL_WITH_WINDOWS`, `STORMHELM_TRAY_ONLY_STARTUP`, `STORMHELM_GHOST_READY_ON_STARTUP`, `STORMHELM_BACKGROUND_CORE_RESIDENT`, `STORMHELM_AUTO_RESTART_CORE`, `STORMHELM_MAX_CORE_RESTART_ATTEMPTS`, `STORMHELM_RESTART_FAILURE_WINDOW_SECONDS`, `STORMHELM_SHELL_HEARTBEAT_INTERVAL_SECONDS`, `STORMHELM_SHELL_STALE_AFTER_SECONDS`, `STORMHELM_CORE_RESTART_BACKOFF_MS`.
 
-Sources: `src/stormhelm/config/models.py`, `src/stormhelm/config/loader.py`, `src/stormhelm/core/lifecycle/service.py`  
+Sources: `src/stormhelm/config/models.py`, `src/stormhelm/config/loader.py`, `src/stormhelm/core/lifecycle/service.py`
 Tests: `tests/test_lifecycle_service.py`, `tests/test_main_controller_lifecycle.py`
 
 ## Event Stream
@@ -98,7 +98,7 @@ Tests: `tests/test_lifecycle_service.py`, `tests/test_main_controller_lifecycle.
 | `event_stream.replay_limit` | int | `128` | No | positive int | TOML | Replay window. |
 | `event_stream.heartbeat_seconds` | number | `15.0` | No | seconds | TOML | SSE heartbeat interval. |
 
-Sources: `config/default.toml`, `src/stormhelm/core/events.py`, `src/stormhelm/core/api/app.py`  
+Sources: `config/default.toml`, `src/stormhelm/core/events.py`, `src/stormhelm/core/api/app.py`
 Tests: `tests/test_events.py`, `tests/test_ui_client_streaming.py`
 
 ## Location And Weather
@@ -121,7 +121,7 @@ Tests: `tests/test_events.py`, `tests/test_ui_client_streaming.py`
 
 Env overrides: `STORMHELM_HOME_LABEL`, `STORMHELM_HOME_CITY`, `STORMHELM_HOME_REGION`, `STORMHELM_HOME_COUNTRY`, `STORMHELM_HOME_LATITUDE`, `STORMHELM_HOME_LONGITUDE`, `STORMHELM_HOME_TIMEZONE`, `STORMHELM_ALLOW_APPROXIMATE_LOCATION`, `STORMHELM_LOCATION_LOOKUP_TIMEOUT_SECONDS`, `STORMHELM_WEATHER_ENABLED`, `STORMHELM_WEATHER_UNITS`, `STORMHELM_WEATHER_BASE_URL`, `STORMHELM_WEATHER_TIMEOUT_SECONDS`.
 
-Sources: `config/default.toml`, `src/stormhelm/config/loader.py`, `src/stormhelm/core/tools/builtins/system_state.py`  
+Sources: `config/default.toml`, `src/stormhelm/config/loader.py`, `src/stormhelm/core/tools/builtins/system_state.py`
 Tests: `tests/test_long_tail_power.py`, `tests/test_tool_registry.py`
 
 ## Hardware Telemetry
@@ -142,7 +142,7 @@ Tests: `tests/test_long_tail_power.py`, `tests/test_tool_registry.py`
 
 Env overrides are the `STORMHELM_HARDWARE_TELEMETRY_*` keys shown in `loader.py`.
 
-Sources: `config/default.toml`, `src/stormhelm/config/loader.py`, `src/stormhelm/core/system/hardware_telemetry.py`  
+Sources: `config/default.toml`, `src/stormhelm/config/loader.py`, `src/stormhelm/core/system/hardware_telemetry.py`
 Tests: `tests/test_hardware_telemetry.py`
 
 ## Screen Awareness
@@ -167,7 +167,7 @@ Tests: `tests/test_hardware_telemetry.py`
 | `screen_awareness.brain_integration_enabled` | bool | `true` | No | bool | TOML/env | Brain integration flag. |
 | `screen_awareness.power_features_enabled` | bool | `true` | No | bool | TOML/env | Power features flag. |
 
-Sources: `config/default.toml`, `src/stormhelm/config/models.py`, `src/stormhelm/core/screen_awareness/service.py`  
+Sources: `config/default.toml`, `src/stormhelm/config/models.py`, `src/stormhelm/core/screen_awareness/service.py`
 Tests: `tests/test_screen_awareness_service.py`, `tests/test_screen_awareness_action.py`, `tests/test_screen_awareness_verification.py`
 
 ## Calculations
@@ -180,7 +180,7 @@ Tests: `tests/test_screen_awareness_service.py`, `tests/test_screen_awareness_ac
 
 Env overrides: `STORMHELM_CALCULATIONS_ENABLED`, `STORMHELM_CALCULATIONS_PLANNER_ROUTING_ENABLED`, `STORMHELM_CALCULATIONS_DEBUG_EVENTS_ENABLED`.
 
-Sources: `config/default.toml`, `src/stormhelm/core/calculations/service.py`  
+Sources: `config/default.toml`, `src/stormhelm/core/calculations/service.py`
 Tests: `tests/test_calculations.py`
 
 ## Software Control And Recovery
@@ -203,7 +203,7 @@ Tests: `tests/test_calculations.py`
 | `software_recovery.cloud_fallback_model` | string | `gpt-5.4-nano` | No | provider model | TOML/env | Used only if cloud fallback and OpenAI enabled. |
 | `software_recovery.redaction_enabled` | bool | `true` | No | bool | TOML/env | Redacts diagnostic context before cloud fallback. |
 
-Sources: `config/default.toml`, `src/stormhelm/core/software_control/service.py`, `src/stormhelm/core/software_recovery/service.py`, `src/stormhelm/core/safety/policy.py`  
+Sources: `config/default.toml`, `src/stormhelm/core/software_control/service.py`, `src/stormhelm/core/software_recovery/service.py`, `src/stormhelm/core/safety/policy.py`
 Tests: `tests/test_software_control.py`, `tests/test_software_recovery.py`, `tests/test_assistant_software_control.py`
 
 ## Trust
@@ -217,7 +217,7 @@ Tests: `tests/test_software_control.py`, `tests/test_software_recovery.py`, `tes
 | `trust.pending_request_ttl_seconds` | number | `3600.0` | No | seconds | TOML | Pending approval expiry. |
 | `trust.audit_recent_limit` | int | `24` | No | positive int | TOML | Recent audit snapshot limit. |
 
-Sources: `config/default.toml`, `src/stormhelm/core/trust/service.py`, `src/stormhelm/core/trust/models.py`  
+Sources: `config/default.toml`, `src/stormhelm/core/trust/service.py`, `src/stormhelm/core/trust/models.py`
 Tests: `tests/test_trust_service.py`
 
 ## Discord Relay
@@ -236,7 +236,7 @@ Tests: `tests/test_trust_service.py`
 | `discord_relay.trusted_aliases.<name>.route_mode` | string | `local_client_automation` | No | enum string | TOML | Route mode. |
 | `discord_relay.trusted_aliases.<name>.trusted` | bool | `true` | No | bool | TOML | Trusted alias flag. |
 
-Sources: `config/default.toml`, `src/stormhelm/config/models.py`, `src/stormhelm/core/discord_relay/service.py`  
+Sources: `config/default.toml`, `src/stormhelm/config/models.py`, `src/stormhelm/core/discord_relay/service.py`
 Tests: `tests/test_discord_relay.py`
 
 ## OpenAI
@@ -259,8 +259,84 @@ Tests: `tests/test_discord_relay.py`
 
 Env overrides are `STORMHELM_OPENAI_*` keys plus `OPENAI_API_KEY`. Do not commit real keys to `.env`, `.env.example`, or docs.
 
-Sources: `config/default.toml`, `src/stormhelm/config/loader.py`, `src/stormhelm/core/providers/openai_responses.py`, `src/stormhelm/core/providers/audit.py`  
+Sources: `config/default.toml`, `src/stormhelm/config/loader.py`, `src/stormhelm/core/providers/openai_responses.py`, `src/stormhelm/core/providers/audit.py`
 Tests: `tests/test_config_loader.py`, `tests/test_command_eval_provider_audit.py`
+
+## Voice
+
+Voice is disabled by default. Enabling voice does not enable wake word, always-listening, Realtime, or independent command execution. It only enables the bounded voice surfaces implemented by `VoiceService` when the provider and feature gates allow them.
+
+| Key | Type | Default | Required | Valid values | Read from | Behavior if missing/invalid |
+|---|---|---|---|---|---|---|
+| `voice.enabled` | bool | `false` | No | bool | TOML/env | Voice status remains unavailable if false. |
+| `voice.provider` | string | `openai` | No | `openai`, mock/test provider names in code | TOML/env | Availability fails if unsupported for the selected path. |
+| `voice.mode` | string | `disabled` | No | `disabled`, implemented mode labels | TOML/env | `disabled` blocks voice availability. |
+| `voice.wake_word_enabled` | bool | `false` | No | bool | TOML/env | Present as a truth flag; wake word detection is not implemented. |
+| `voice.spoken_responses_enabled` | bool | `false` | No | bool | TOML/env | Allows spoken-response/TTS posture when provider gates pass. |
+| `voice.manual_input_enabled` | bool | `true` | No | bool | TOML/env | Enables manual transcript voice-turn path. |
+| `voice.realtime_enabled` | bool | `false` | No | bool | TOML/env | Present as a truth flag; Realtime sessions are not implemented. |
+| `voice.debug_mock_provider` | bool | `true` | No | bool | TOML/env | Allows deterministic mock-provider behavior for tests/dev diagnostics. |
+
+Env overrides: `STORMHELM_VOICE_ENABLED`, `STORMHELM_VOICE_PROVIDER`, `STORMHELM_VOICE_MODE`, `STORMHELM_VOICE_WAKE_WORD_ENABLED`, `STORMHELM_VOICE_SPOKEN_RESPONSES_ENABLED`, `STORMHELM_VOICE_MANUAL_INPUT_ENABLED`, `STORMHELM_VOICE_REALTIME_ENABLED`, `STORMHELM_VOICE_DEBUG_MOCK_PROVIDER`.
+
+Sources: `config/default.toml`, `src/stormhelm/config/models.py`, `src/stormhelm/config/loader.py`, `src/stormhelm/core/voice/availability.py`
+Tests: `tests/test_voice_config.py`, `tests/test_voice_availability.py`
+
+## Voice OpenAI
+
+| Key | Type | Default | Required | Valid values | Read from | Behavior if missing/invalid |
+|---|---|---|---|---|---|---|
+| `voice.openai.stt_model` | string | `gpt-4o-mini-transcribe` | Required for OpenAI STT | model id | TOML/env | Availability/diagnostics can report missing model. |
+| `voice.openai.transcription_language` | string | empty | No | language hint | TOML/env | Empty sends no explicit language hint. |
+| `voice.openai.transcription_prompt` | string | empty | No | prompt text | TOML/env | Empty sends no transcription prompt. |
+| `voice.openai.timeout_seconds` | number | `60` | No | seconds | TOML/env | Bounds OpenAI voice calls. |
+| `voice.openai.max_audio_seconds` | number | `30` | No | seconds | TOML/env | Controlled audio above the limit is rejected. |
+| `voice.openai.max_audio_bytes` | int | `26214400` | No | positive bytes | TOML/env | Controlled audio above the limit is rejected. |
+| `voice.openai.tts_model` | string | `gpt-4o-mini-tts` | Required for OpenAI TTS | model id | TOML/env | TTS diagnostics can report missing model. |
+| `voice.openai.tts_voice` | string | `cedar` | No | provider-supported voice | TOML/env | Unsupported voices return provider errors. |
+| `voice.openai.tts_format` | string | `mp3` | No | provider-supported format | TOML/env | Used for generated speech artifacts. |
+| `voice.openai.tts_speed` | number | `1.0` | No | provider-supported range | TOML/env | Used for speech synthesis requests. |
+| `voice.openai.max_tts_chars` | int | `600` | No | positive int | TOML/env | Long spoken text is blocked. |
+| `voice.openai.output_audio_dir` | path/string | empty | No | path | TOML/env | Empty means transient/default output handling. |
+| `voice.openai.persist_tts_outputs` | bool | `false` | No | bool | TOML/env | Generated audio is not retained by default. |
+| `voice.openai.realtime_model` | string | `gpt-realtime` | No | model id | TOML/env | Stored for future Realtime; not a live Realtime claim. |
+| `voice.openai.vad_mode` | string | `server_vad` | No | provider mode label | TOML/env | Stored for future VAD; VAD is not implemented. |
+
+Env overrides use the `STORMHELM_VOICE_OPENAI_*` prefix shown in `src/stormhelm/config/loader.py`.
+
+Sources: `config/default.toml`, `src/stormhelm/config/loader.py`, `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/voice/service.py`
+Tests: `tests/test_voice_config.py`, `tests/test_voice_stt_provider.py`, `tests/test_voice_tts_provider.py`, `tests/test_voice_audio_turn.py`
+
+## Voice Capture And Playback
+
+| Key | Type | Default | Required | Valid values | Read from | Behavior if missing/invalid |
+|---|---|---|---|---|---|---|
+| `voice.capture.enabled` | bool | `false` | No | bool | TOML/env | Push-to-talk capture is blocked if false. |
+| `voice.capture.provider` | string | `local` | No | implemented provider label | TOML/env | Local capture still requires dev gate/dependencies. |
+| `voice.capture.mode` | string | `push_to_talk` | No | implemented mode label | TOML/env | Current surface is explicit capture, not continuous listening. |
+| `voice.capture.device` | string | `default` | No | device label | TOML/env | Passed to local capture backend when available. |
+| `voice.capture.sample_rate` | int | `16000` | No | positive int | TOML/env | Used by local capture backend. |
+| `voice.capture.channels` | int | `1` | No | positive int | TOML/env | Used by local capture backend. |
+| `voice.capture.format` | string | `wav` | No | supported format | TOML/env | Current local capture writes WAV metadata. |
+| `voice.capture.max_duration_ms` | int | `30000` | No | positive milliseconds | TOML/env | Bounds capture duration. |
+| `voice.capture.max_audio_bytes` | int | `10000000` | No | positive bytes | TOML/env | Bounds captured audio. |
+| `voice.capture.auto_stop_on_max_duration` | bool | `true` | No | bool | TOML/env | Enables duration guard. |
+| `voice.capture.persist_captured_audio` | bool | `false` | No | bool | TOML/env | Captured audio is not retained by default. |
+| `voice.capture.delete_transient_after_turn` | bool | `true` | No | bool | TOML/env | Transient captured audio may be deleted after a turn. |
+| `voice.capture.allow_dev_capture` | bool | `false` | No | bool | TOML/env | Local capture remains blocked unless explicitly allowed. |
+| `voice.playback.enabled` | bool | `false` | No | bool | TOML/env | Playback is blocked if false. |
+| `voice.playback.provider` | string | `local` | No | implemented provider label | TOML/env | Local playback is a provider boundary, not a heard-audio guarantee. |
+| `voice.playback.device` | string | `default` | No | device label | TOML/env | Passed to playback backend where supported. |
+| `voice.playback.volume` | number | `1.0` | No | provider-supported range | TOML/env | Used by playback requests. |
+| `voice.playback.allow_dev_playback` | bool | `false` | No | bool | TOML/env | Local playback remains blocked unless explicitly allowed. |
+| `voice.playback.max_audio_bytes` | int | `10000000` | No | positive bytes | TOML/env | Blocks oversized playback artifacts. |
+| `voice.playback.max_duration_ms` | int | `120000` | No | positive milliseconds | TOML/env | Bounds playback request duration. |
+| `voice.playback.delete_transient_after_playback` | bool | `true` | No | bool | TOML/env | Transient generated audio may be deleted after playback. |
+
+Env overrides use `STORMHELM_VOICE_CAPTURE_*` and `STORMHELM_VOICE_PLAYBACK_*`.
+
+Sources: `config/default.toml`, `src/stormhelm/config/models.py`, `src/stormhelm/config/loader.py`, `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/voice/service.py`
+Tests: `tests/test_voice_config.py`, `tests/test_voice_capture_service.py`, `tests/test_voice_playback_service.py`, `tests/test_voice_capture_provider.py`, `tests/test_voice_playback_provider.py`
 
 ## Safety
 
@@ -272,7 +348,7 @@ Tests: `tests/test_config_loader.py`, `tests/test_command_eval_provider_audit.py
 
 Env override: `STORMHELM_UNSAFE_TEST_MODE`.
 
-Sources: `config/default.toml`, `src/stormhelm/core/safety/policy.py`, `src/stormhelm/config/loader.py`  
+Sources: `config/default.toml`, `src/stormhelm/core/safety/policy.py`, `src/stormhelm/config/loader.py`
 Tests: `tests/test_safety.py`, `tests/test_config_loader.py`
 
 ## Tool Enablement
@@ -304,5 +380,5 @@ Tests: `tests/test_safety.py`, `tests/test_config_loader.py`
 | `tools.enabled.location_status`, `saved_locations`, `save_location`, `weather_current` | bool | `true` | No | bool | TOML/model | Location/weather tools. |
 | `tools.enabled.workspace_*` | bool | `true` | No | bool | TOML/model | Workspace restore/assemble/save/clear/archive/rename/tag/list/continuity. |
 
-Sources: `config/default.toml`, `src/stormhelm/config/models.py`, `src/stormhelm/core/tools/builtins/__init__.py`, `src/stormhelm/core/safety/policy.py`  
+Sources: `config/default.toml`, `src/stormhelm/config/models.py`, `src/stormhelm/core/tools/builtins/__init__.py`, `src/stormhelm/core/safety/policy.py`
 Tests: `tests/test_tool_registry.py`, `tests/test_safety.py`

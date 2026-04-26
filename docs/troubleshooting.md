@@ -9,7 +9,7 @@ curl http://127.0.0.1:8765/snapshot
 curl http://127.0.0.1:8765/events
 ```
 
-Sources: `src/stormhelm/core/api/app.py`, `src/stormhelm/core/container.py`, `src/stormhelm/core/events.py`  
+Sources: `src/stormhelm/core/api/app.py`, `src/stormhelm/core/container.py`, `src/stormhelm/core/events.py`
 Tests: `tests/test_core_container.py`, `tests/test_events.py`, `tests/test_snapshot_resilience.py`
 
 ## App Will Not Start
@@ -83,6 +83,18 @@ Tests: `tests/test_software_control.py`, `tests/test_assistant_software_control.
 | Source area | `src/stormhelm/config/loader.py`, `src/stormhelm/core/container.py`, `src/stormhelm/core/providers/openai_responses.py` |
 
 Tests: `tests/test_config_loader.py`, `tests/test_command_eval_provider_audit.py`
+
+## Voice Unavailable Or Blocked
+
+| Field | Details |
+|---|---|
+| Symptom | Voice controls report unavailable/blocked, capture does not start, STT/TTS does not run, or playback does nothing. |
+| Likely cause | `voice.enabled=false`, `voice.mode=disabled`, OpenAI disabled/missing key, capture/playback gates disabled, unsupported provider dependency, audio/text limit exceeded. |
+| Debug command/log | `curl http://127.0.0.1:8765/status`, inspect the `voice` object, then check `/events` for voice events. |
+| Fix | Enable only the needed voice/OpenAI/capture/playback settings, restart core, keep dev capture/playback gates explicit, and verify the provider model/limits. |
+| Source area | `config/default.toml`, `src/stormhelm/config/loader.py`, `src/stormhelm/core/voice/availability.py`, `src/stormhelm/core/voice/service.py`, `src/stormhelm/core/voice/providers.py` |
+
+Tests: `tests/test_voice_config.py`, `tests/test_voice_availability.py`, `tests/test_voice_capture_service.py`, `tests/test_voice_playback_service.py`, `tests/test_voice_stt_provider.py`, `tests/test_voice_tts_provider.py`
 
 ## QML Crash Or Load Failure
 

@@ -1,5 +1,7 @@
 # Stormhelm Voice Foundation
 
+This is the developer/foundation record for the voice subsystem. For user-facing setup, status, examples, and safety boundaries, use [voice.md](voice.md).
+
 Voice-0 added the typed foundation for Stormhelm voice without enabling real audio runtime.
 
 Voice-0 implemented:
@@ -59,24 +61,56 @@ Voice-4 adds:
 - playback diagnostics for provider/device/volume, last request/result, active playback, timestamps, blocked reasons, and the invariant that Stormhelm never claims the user heard audio;
 - playback events including `voice.playback_request_created`, `voice.playback_blocked`, `voice.playback_started`, `voice.playback_completed`, `voice.playback_failed`, and `voice.playback_stopped`.
 
+Voice-5 adds:
+
+- disabled-by-default `voice.capture` configuration for controlled push-to-talk/manual capture;
+- typed `VoiceCaptureRequest`, `VoiceCaptureSession`, `VoiceCaptureResult`, and `VoiceCaptureTurnResult` objects;
+- a `VoiceCaptureProvider` boundary plus deterministic `MockCaptureProvider` test implementation;
+- `VoiceService.start_push_to_talk_capture(...)`, `VoiceService.stop_push_to_talk_capture(...)`, `VoiceService.cancel_capture(...)`, and `VoiceService.submit_captured_audio_turn(...)`;
+- `VoiceService.capture_and_submit_turn(...)` as a supervised pipeline helper that reuses Voice-2 STT, Voice-1 Core bridge, Voice-3 TTS, and Voice-4 playback without creating new command authority;
+- capture diagnostics for provider/device/mode, active capture, last capture, bounded audio metadata, errors, and truth flags for no wake word, no VAD, no Realtime, no continuous loop, and `always_listening=false`;
+- capture events including `voice.capture_request_created`, `voice.capture_blocked`, `voice.capture_started`, `voice.capture_stopped`, `voice.capture_cancelled`, `voice.capture_timeout`, `voice.capture_failed`, and `voice.capture_audio_created`.
+
+Voice-6A adds:
+
+- a real `LocalCaptureProvider` boundary that remains disabled by default and requires `voice.capture.enabled=true` plus `voice.capture.allow_dev_capture=true`;
+- a lazy optional `sounddevice` WAV backend, reported unavailable with typed reasons such as `dependency_missing`, `unsupported_platform`, `device_unavailable`, or `permission_denied` when the platform cannot record;
+- explicit local capture start/stop/cancel lifecycle behavior, with one active capture at a time, max-duration timeout marking, max-byte checks, transient WAV output metadata, and cleanup hooks;
+- provider diagnostics for dependency, platform, configured device, device availability, permission state/error, local gate state, and cleanup warning without exposing raw audio bytes;
+- fake-backend tests for real-provider internals so normal pytest never touches microphone hardware or OS permissions.
+
+Voice-6B adds:
+
+- backend-owned voice control API actions for start, stop, cancel, submit captured audio, capture-and-submit, and stop playback;
+- UI client/controller wiring that routes Ghost/Deck requests to `VoiceService` rather than providers or tools;
+- a compact sanitized `voiceState` payload for Ghost and Deck, including capture provider kind, active capture, last transcription/Core/TTS/playback state, bounded previews, and truth flags;
+- Ghost action strip and context-card affordances for explicit push-to-talk capture without adding a detached recorder panel;
+- a compact Command Deck voice capture station generated from backend status for provider, capture, pipeline, and truth inspection;
+- voice-core state mapping where explicit active capture maps to `listening`, transcription/Core routing maps to `thinking`, playback maps to `speaking`, and disabled/unavailable states map to `warning`;
+- event/snapshot reconciliation through the existing stream and polling pattern, with no frontend-owned command router.
+
 Still not implemented:
 
-- real microphone capture;
 - real wake word detection;
-- live microphone speech-to-text;
+- automatic/background microphone capture;
+- live microphone speech-to-text outside the controlled push-to-talk boundary;
 - production local audio playback through a platform device;
 - OpenAI Realtime sessions;
 - WebRTC or WebSocket audio streaming;
 - VAD;
-- continuous listening;
+- continuous listening or always-listening behavior;
 - full interruption or barge-in command semantics;
 - direct voice command execution;
+- frontend command authority;
 - sensitive action confirmation execution;
 - raw audio persistence by default;
 - generated audio persistence by default;
 - a detached voice UI or large settings dashboard.
 
 Voice remains an input/output surface for Stormhelm. Speech-derived requests enter through the Core bridge or the existing planner/orchestrator boundary. Voice providers must not execute tools, lower trust requirements, or become a separate assistant path.
+
+Sources: `src/stormhelm/core/voice/service.py`, `src/stormhelm/core/voice/models.py`, `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/voice/bridge.py`, `src/stormhelm/core/voice/availability.py`, `src/stormhelm/core/voice/events.py`, `src/stormhelm/core/api/app.py`, `src/stormhelm/ui/bridge.py`, `src/stormhelm/ui/client.py`, `config/default.toml`
+Tests: `tests/test_voice_config.py`, `tests/test_voice_availability.py`, `tests/test_voice_manual_turn.py`, `tests/test_voice_audio_turn.py`, `tests/test_voice_core_bridge_contracts.py`, `tests/test_voice_events.py`, `tests/test_voice_capture_service.py`, `tests/test_voice_playback_service.py`
 
 Availability law:
 
@@ -89,6 +123,6 @@ voice available = voice.enabled
                && configured voice OpenAI models are present
 ```
 
-If a mock provider is active, diagnostics must say so. If a later feature is not implemented yet, diagnostics must report `not_implemented` or a truthful `no_*` runtime flag instead of implying listening, speaking, Realtime, or production audio playback support. Voice-2 supports controlled audio file/blob/fixture STT only; it must not imply live microphone capture or continuous listening. Voice-3 supports controlled TTS audio artifact generation only; it must not imply Stormhelm spoke aloud, that playback occurred, or that the user heard the response. Voice-4 can truthfully report controlled local playback through a provider boundary, but playback completion still does not mean the underlying task succeeded or that the user heard it.
+If a mock provider is active, diagnostics must say so. If a later feature is not implemented yet, diagnostics must report `not_implemented` or a truthful `no_*` runtime flag instead of implying listening, speaking, Realtime, or production audio playback support. Voice-2 supports controlled audio file/blob/fixture STT only; it must not imply live microphone capture or continuous listening. Voice-3 supports controlled TTS audio artifact generation only; it must not imply Stormhelm spoke aloud, that playback occurred, or that the user heard the response. Voice-4 can truthfully report controlled local playback through a provider boundary, but playback completion still does not mean the underlying task succeeded or that the user heard it. Voice-5 can truthfully report an explicit push-to-talk/manual capture boundary, but capture completion still does not mean transcription succeeded, Core understood intent, an action completed, TTS generated audio, playback occurred, or the user heard it. Voice-6A may record one explicitly started local capture when all gates and dependencies allow it; local capture availability still must not imply wake word, VAD, Realtime, always-listening, continuous conversation, or command authority. Voice-6B may expose push-to-talk controls in Ghost/Deck, but those controls still only call backend `VoiceService` actions and must not call providers, tools, or Core directly from the frontend.
 
-Recommended next phase: Voice-5 should add a narrow push-to-talk capture preparation layer or a real opt-in local playback provider, still disabled by default and still separate from wake word, VAD, Realtime, full interruption semantics, and continuous listening. It should preserve `source="voice"`, transcription/synthesis/playback provenance, trust gates, task graph behavior, verification posture, and the manual/mock paths as deterministic test seams.
+Recommended next phase: Voice-7 should add a small operator-facing configuration/check panel or refine the push-to-talk UX only if needed, while keeping wake word, VAD, Realtime, continuous listening, and full interruption semantics out of scope until their dedicated phases.
