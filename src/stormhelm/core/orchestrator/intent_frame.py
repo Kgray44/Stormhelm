@@ -215,7 +215,7 @@ class IntentFrameExtractor:
             return "explain"
         if "focus" in tokens:
             return "open"
-        if any(token in tokens for token in {"send", "share", "message", "post", "relay", "forward", "dm"}) or "pass this along" in normalized:
+        if self._relay_send_signal(normalized, tokens):
             return "send"
         if self._looks_like_routine_save(normalized):
             return "save"
@@ -526,6 +526,8 @@ class IntentFrameExtractor:
             return "discord_relay"
         if operation == "send" and any(term in normalized.split() for term in {"this", "that", "there", "it"}):
             return "discord_relay"
+        if self._browser_context_signal(normalized):
+            return "watch_runtime"
         if self._trust_approval_signal(normalized):
             return "trust_approvals"
         if operation == "save" and self._routine_signal(normalized):
@@ -747,6 +749,47 @@ class IntentFrameExtractor:
         return bool(
             re.search(r"\b(?:what|which)\b.{0,24}\b(?:browser\s+)?(?:page|tab)\b.{0,24}\bam i on\b", normalized)
             or re.search(r"\bcurrent\b.{0,16}\b(?:browser\s+)?(?:page|tab)\b", normalized)
+        )
+
+    def _browser_context_signal(self, normalized: str) -> bool:
+        if self._browser_context_status_signal(normalized):
+            return True
+        if any(
+            phrase in normalized
+            for phrase in {
+                "add this page to the workspace",
+                "add this article to the workspace",
+                "add this page as a reference",
+                "collect the references from these tabs",
+                "collect references from these tabs",
+                "pull in the browser references related to this project",
+                "summarize this article",
+                "summarize this page",
+                "summarize the current page",
+                "show me the source i was just reading",
+                "find the page i was just reading",
+                "find the page from earlier",
+            }
+        ):
+            return True
+        return bool(
+            any(phrase in normalized for phrase in {"find the tab", "find the page", "bring up the page", "bring that page forward"})
+            or (" tab " in f" {normalized} " and normalized.startswith(("find ", "show ", "bring ")))
+            or ("page about" in normalized and any(normalized.startswith(prefix) for prefix in {"find ", "show ", "bring "}))
+        )
+
+    def _relay_send_signal(self, normalized: str, tokens: list[str]) -> bool:
+        if any(token in tokens for token in {"send", "share", "message", "relay", "forward", "dm"}):
+            return True
+        if "pass this along" in normalized:
+            return True
+        if "post" not in tokens:
+            return False
+        if self._browser_context_signal(normalized) or "forum post" in normalized:
+            return False
+        return bool(
+            re.search(r"\bpost\b.{0,24}\b(?:to|in)\b.{0,24}\b(?:discord|channel|chat|server|dm|message)\b", normalized)
+            or re.search(r"\bpost\s+(?:this|that|it)\b", normalized)
         )
 
     def _selected_signal(self, normalized: str) -> bool:

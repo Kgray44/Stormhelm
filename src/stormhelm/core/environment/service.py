@@ -91,8 +91,14 @@ class EnvironmentIntelligenceService:
     ) -> dict[str, Any]:
         normalized_operation = str(operation or "find").strip().lower() or "find"
         capabilities = self._browser_capabilities()
-        context_items = self._browser_context_items(session_id=session_id)
-        continuity = self._environment_continuity(session_id=session_id, context_items=context_items, capabilities=capabilities)
+        workspace_summary = self.workspace_service.active_workspace_summary(session_id) if self.workspace_service is not None else {}
+        context_items = self._browser_context_items(session_id=session_id, workspace_summary=workspace_summary)
+        continuity = self._environment_continuity(
+            session_id=session_id,
+            context_items=context_items,
+            capabilities=capabilities,
+            workspace_summary=workspace_summary,
+        )
 
         if normalized_operation in {"find", "recent_page"}:
             return self._find_browser_item(
@@ -101,6 +107,7 @@ class EnvironmentIntelligenceService:
                 items=context_items,
                 capabilities=capabilities,
                 continuity=continuity,
+                workspace_summary=workspace_summary,
             )
         if normalized_operation == "summarize":
             return self._summarize_browser_item(
@@ -109,6 +116,7 @@ class EnvironmentIntelligenceService:
                 capabilities=capabilities,
                 continuity=continuity,
                 session_id=session_id,
+                workspace_summary=workspace_summary,
             )
         if normalized_operation == "add_to_workspace":
             return self._add_browser_item_to_workspace(
@@ -117,6 +125,7 @@ class EnvironmentIntelligenceService:
                 items=context_items,
                 capabilities=capabilities,
                 continuity=continuity,
+                workspace_summary=workspace_summary,
             )
         if normalized_operation == "collect_references":
             return self._collect_browser_references(
@@ -125,6 +134,7 @@ class EnvironmentIntelligenceService:
                 items=context_items,
                 capabilities=capabilities,
                 continuity=continuity,
+                workspace_summary=workspace_summary,
             )
 
         summary = self.persona.error("browser context action is not supported")
@@ -221,8 +231,14 @@ class EnvironmentIntelligenceService:
         items: list[BrowserContextItem],
         capabilities: dict[str, Any],
         continuity: EnvironmentContinuitySnapshot,
+        workspace_summary: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        candidate = self._resolve_browser_candidate(items=items, query=query, session_id=session_id)
+        candidate = self._resolve_browser_candidate(
+            items=items,
+            query=query,
+            session_id=session_id,
+            workspace_summary=workspace_summary,
+        )
         if candidate is None:
             summary = self.persona.report(
                 "I could not match that against the visible browser pages here. Full browser-history search is not available in this build."
@@ -294,8 +310,14 @@ class EnvironmentIntelligenceService:
         capabilities: dict[str, Any],
         continuity: EnvironmentContinuitySnapshot,
         session_id: str,
+        workspace_summary: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        candidate = self._resolve_browser_candidate(items=items, query=query, session_id=session_id)
+        candidate = self._resolve_browser_candidate(
+            items=items,
+            query=query,
+            session_id=session_id,
+            workspace_summary=workspace_summary,
+        )
         if candidate is None:
             summary = self.persona.report("There is no strong current browser page context to summarize here.")
             return {
@@ -342,8 +364,14 @@ class EnvironmentIntelligenceService:
         items: list[BrowserContextItem],
         capabilities: dict[str, Any],
         continuity: EnvironmentContinuitySnapshot,
+        workspace_summary: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        candidate = self._resolve_browser_candidate(items=items, query=query, session_id=session_id)
+        candidate = self._resolve_browser_candidate(
+            items=items,
+            query=query,
+            session_id=session_id,
+            workspace_summary=workspace_summary,
+        )
         if candidate is None:
             summary = self.persona.report("I could not identify a current browser page to add into the workspace.")
             return {
@@ -374,7 +402,7 @@ class EnvironmentIntelligenceService:
                 "error": "workspace_linking_unavailable",
             }
 
-        active_workspace = self.workspace_service.active_workspace_summary(session_id)
+        active_workspace = workspace_summary or self.workspace_service.active_workspace_summary(session_id)
         workspace_name = str(((active_workspace.get("workspace") or {}).get("name") if isinstance(active_workspace, dict) else "") or "").strip()
         if not workspace_name:
             summary = self.persona.report("No workspace is active right now, so there is nowhere to attach the browser page.")
@@ -389,7 +417,11 @@ class EnvironmentIntelligenceService:
                 "error": "workspace_unavailable",
             }
 
-        reasons = self._browser_workspace_reasons(candidate, session_id=session_id)
+        reasons = self._browser_workspace_reasons(
+            candidate,
+            session_id=session_id,
+            workspace_summary=active_workspace,
+        )
         link = self.workspace_service.link_material_into_active_workspace(
             session_id=session_id,
             item=candidate.item.to_workspace_item(),
@@ -397,6 +429,7 @@ class EnvironmentIntelligenceService:
             reasons=[WorkspaceInclusionReason(code=reason.code, label=reason.label, detail=reason.detail, score=reason.score) for reason in reasons],
             source_surface="browser",
             activity_description=f"Linked browser context '{candidate.item.title}' into workspace references.",
+            workspace_summary=active_workspace,
         )
         summary = self.persona.report(
             "Added the current page to workspace References because it supports the active topic."
@@ -432,6 +465,7 @@ class EnvironmentIntelligenceService:
         items: list[BrowserContextItem],
         capabilities: dict[str, Any],
         continuity: EnvironmentContinuitySnapshot,
+        workspace_summary: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if self.workspace_service is None:
             summary = self.persona.report("Workspace linking is not available in this build.")
@@ -446,7 +480,12 @@ class EnvironmentIntelligenceService:
                 "error": "workspace_linking_unavailable",
             }
 
-        ranked = self._rank_browser_candidates(items=items, query=query, session_id=session_id)
+        ranked = self._rank_browser_candidates(
+            items=items,
+            query=query,
+            session_id=session_id,
+            workspace_summary=workspace_summary,
+        )
         linked_count = 0
         latest_link: dict[str, Any] = {}
         for candidate in ranked[:3]:
@@ -457,6 +496,7 @@ class EnvironmentIntelligenceService:
                 reasons=[WorkspaceInclusionReason(code=reason.code, label=reason.label, detail=reason.detail, score=reason.score) for reason in candidate.reasons],
                 source_surface="browser",
                 activity_description=f"Collected browser context '{candidate.item.title}' into workspace references.",
+                workspace_summary=workspace_summary,
             )
             if not latest_link.get("already_linked"):
                 linked_count += 1
@@ -508,7 +548,12 @@ class EnvironmentIntelligenceService:
         capabilities = self.system_probe.control_capabilities()
         return capabilities if isinstance(capabilities, dict) else {}
 
-    def _browser_context_items(self, *, session_id: str) -> list[BrowserContextItem]:
+    def _browser_context_items(
+        self,
+        *,
+        session_id: str,
+        workspace_summary: dict[str, Any] | None = None,
+    ) -> list[BrowserContextItem]:
         items: list[BrowserContextItem] = []
         seen: set[str] = set()
 
@@ -517,7 +562,9 @@ class EnvironmentIntelligenceService:
                 seen.add(item.context_id)
                 items.append(item)
 
-        workspace_summary = self.workspace_service.active_workspace_summary(session_id) if self.workspace_service is not None else {}
+        workspace_summary = workspace_summary or (
+            self.workspace_service.active_workspace_summary(session_id) if self.workspace_service is not None else {}
+        )
         active_item = workspace_summary.get("active_item") if isinstance(workspace_summary.get("active_item"), dict) else {}
         opened_items = workspace_summary.get("opened_items") if isinstance(workspace_summary.get("opened_items"), list) else []
         references = workspace_summary.get("references") if isinstance(workspace_summary.get("references"), list) else []
@@ -655,8 +702,14 @@ class EnvironmentIntelligenceService:
         items: list[BrowserContextItem],
         query: str,
         session_id: str,
+        workspace_summary: dict[str, Any] | None = None,
     ) -> BrowserReferenceCandidate | None:
-        ranked = self._rank_browser_candidates(items=items, query=query, session_id=session_id)
+        ranked = self._rank_browser_candidates(
+            items=items,
+            query=query,
+            session_id=session_id,
+            workspace_summary=workspace_summary,
+        )
         return ranked[0] if ranked else None
 
     def _rank_browser_candidates(
@@ -665,8 +718,11 @@ class EnvironmentIntelligenceService:
         items: list[BrowserContextItem],
         query: str,
         session_id: str,
+        workspace_summary: dict[str, Any] | None = None,
     ) -> list[BrowserReferenceCandidate]:
-        workspace_summary = self.workspace_service.active_workspace_summary(session_id) if self.workspace_service is not None else {}
+        workspace_summary = workspace_summary or (
+            self.workspace_service.active_workspace_summary(session_id) if self.workspace_service is not None else {}
+        )
         workspace_topic = str(((workspace_summary.get("workspace") or {}).get("topic") if isinstance(workspace_summary, dict) else "") or "").strip()
         active_goal = str(workspace_summary.get("active_goal") or "").strip()
         normalized_query = normalize_phrase(query)
@@ -746,8 +802,16 @@ class EnvironmentIntelligenceService:
                 duplicates.append(item.to_dict())
         return duplicates[:3]
 
-    def _browser_workspace_reasons(self, candidate: BrowserReferenceCandidate, *, session_id: str) -> list[SurfaceLinkReason]:
-        workspace_summary = self.workspace_service.active_workspace_summary(session_id) if self.workspace_service is not None else {}
+    def _browser_workspace_reasons(
+        self,
+        candidate: BrowserReferenceCandidate,
+        *,
+        session_id: str,
+        workspace_summary: dict[str, Any] | None = None,
+    ) -> list[SurfaceLinkReason]:
+        workspace_summary = workspace_summary or (
+            self.workspace_service.active_workspace_summary(session_id) if self.workspace_service is not None else {}
+        )
         workspace_topic = str(((workspace_summary.get("workspace") or {}).get("topic") if isinstance(workspace_summary, dict) else "") or "").strip()
         reasons = [SurfaceLinkReason(code="active_browser_context", label="Current browser context", detail="Added from the active browser context.", score=1.0)]
         if workspace_topic:
@@ -869,8 +933,11 @@ class EnvironmentIntelligenceService:
         session_id: str,
         context_items: list[BrowserContextItem],
         capabilities: dict[str, Any],
+        workspace_summary: dict[str, Any] | None = None,
     ) -> EnvironmentContinuitySnapshot:
-        workspace_summary = self.workspace_service.active_workspace_summary(session_id) if self.workspace_service is not None else {}
+        workspace_summary = workspace_summary or (
+            self.workspace_service.active_workspace_summary(session_id) if self.workspace_service is not None else {}
+        )
         workspace = workspace_summary.get("workspace") if isinstance(workspace_summary.get("workspace"), dict) else {}
         signals = [
             signal.to_dict()

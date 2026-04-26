@@ -9,9 +9,14 @@ from stormhelm.shared.result import SafetyClassification, ToolResult
 
 
 def _environment_service(context: ToolContext) -> EnvironmentIntelligenceService:
+    session_state = (
+        context.workspace_service.session_state
+        if context.workspace_service is not None and hasattr(context.workspace_service, "session_state")
+        else ConversationStateStore(context.preferences)
+    )
     return EnvironmentIntelligenceService(
         config=context.config,
-        session_state=ConversationStateStore(context.preferences),
+        session_state=session_state,
         workspace_service=context.workspace_service,
         system_probe=context.system_probe,
         events=context.events,
