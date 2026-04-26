@@ -264,6 +264,51 @@ class OpenAIConfig:
 
 
 @dataclass(slots=True)
+class VoiceOpenAIConfig:
+    stt_model: str = "gpt-4o-mini-transcribe"
+    transcription_language: str | None = None
+    transcription_prompt: str | None = None
+    timeout_seconds: float = 60.0
+    max_audio_seconds: float = 30.0
+    max_audio_bytes: int = 25 * 1024 * 1024
+    tts_model: str = "gpt-4o-mini-tts"
+    tts_voice: str = "cedar"
+    tts_format: str = "mp3"
+    tts_speed: float = 1.0
+    max_tts_chars: int = 600
+    output_audio_dir: str | None = None
+    persist_tts_outputs: bool = False
+    realtime_model: str = "gpt-realtime"
+    vad_mode: str = "server_vad"
+
+
+@dataclass(slots=True)
+class VoicePlaybackConfig:
+    enabled: bool = False
+    provider: str = "local"
+    device: str = "default"
+    volume: float = 1.0
+    allow_dev_playback: bool = False
+    max_audio_bytes: int = 10_000_000
+    max_duration_ms: int = 120_000
+    delete_transient_after_playback: bool = True
+
+
+@dataclass(slots=True)
+class VoiceConfig:
+    enabled: bool = False
+    provider: str = "openai"
+    mode: str = "disabled"
+    wake_word_enabled: bool = False
+    spoken_responses_enabled: bool = False
+    manual_input_enabled: bool = True
+    realtime_enabled: bool = False
+    debug_mock_provider: bool = True
+    openai: VoiceOpenAIConfig = field(default_factory=VoiceOpenAIConfig)
+    playback: VoicePlaybackConfig = field(default_factory=VoicePlaybackConfig)
+
+
+@dataclass(slots=True)
 class SafetyConfig:
     allowed_read_dirs: list[Path]
     allow_shell_stub: bool
@@ -299,6 +344,7 @@ class ToolEnablementConfig:
     app_control: bool = True
     window_status: bool = True
     window_control: bool = True
+    system_control: bool = True
     control_capabilities: bool = True
     desktop_search: bool = True
     workflow_execute: bool = True
@@ -383,6 +429,7 @@ class AppConfig:
     trust: TrustConfig
     discord_relay: DiscordRelayConfig
     openai: OpenAIConfig
+    voice: VoiceConfig
     safety: SafetyConfig
     tools: ToolConfig
 

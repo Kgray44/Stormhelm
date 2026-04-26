@@ -47,6 +47,8 @@ from stormhelm.core.tools.builtins import register_builtin_tools
 from stormhelm.core.tools.executor import ToolExecutor
 from stormhelm.core.tools.registry import ToolRegistry
 from stormhelm.core.trust import TrustRepository, TrustService
+from stormhelm.core.voice import VoiceService
+from stormhelm.core.voice import build_voice_subsystem
 from stormhelm.core.workspace.indexer import WorkspaceIndexer
 from stormhelm.core.workspace.repository import WorkspaceRepository
 from stormhelm.core.workspace.service import WorkspaceService
@@ -74,6 +76,7 @@ class CoreContainer:
     software_recovery: SoftwareRecoverySubsystem
     screen_awareness: ScreenAwarenessSubsystem
     discord_relay: DiscordRelaySubsystem
+    voice: VoiceService
     task_service: DurableTaskService
     trust: TrustService
     lifecycle: LifecycleController
@@ -180,6 +183,7 @@ class CoreContainer:
         software_recovery_state = self.software_recovery.status_snapshot()
         screen_awareness_state = self.screen_awareness.status_snapshot()
         discord_relay_state = self.discord_relay.status_snapshot()
+        voice_state = self.voice.status_snapshot()
         trust_state = self.trust.status_snapshot(
             session_id="default",
             active_task_id=str(self.assistant.session_state.get_active_task_id("default") or ""),
@@ -237,6 +241,7 @@ class CoreContainer:
             "software_recovery": software_recovery_state,
             "screen_awareness": screen_awareness_state,
             "discord_relay": discord_relay_state,
+            "voice": voice_state,
             "trust": trust_state,
             "provider_state": provider_state,
             "tool_state": tool_state,
@@ -394,6 +399,11 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
         observation_source=screen_awareness.native_observer,
         trust_service=trust,
     )
+    voice = build_voice_subsystem(
+        app_config.voice,
+        app_config.openai,
+        events=events,
+    )
     planner = DeterministicPlanner(
         calculations_config=app_config.calculations,
         calculations_seam=calculations.planner_seam,
@@ -453,6 +463,7 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
         screen_awareness=screen_awareness,
         discord_relay=discord_relay,
     )
+    voice.attach_core_bridge(assistant)
     return CoreContainer(
         config=app_config,
         events=events,
@@ -473,6 +484,7 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
         software_recovery=software_recovery,
         screen_awareness=screen_awareness,
         discord_relay=discord_relay,
+        voice=voice,
         task_service=task_service,
         trust=trust,
         lifecycle=lifecycle,

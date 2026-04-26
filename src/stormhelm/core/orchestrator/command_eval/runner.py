@@ -101,6 +101,7 @@ ROUTE_SUBSYSTEM = {
     "browser_destination": "browser",
     "calculations": "calculations",
     "context_action": "context",
+    "context_clarification": "context",
     "desktop_search": "workflow",
     "development": "development",
     "discord_relay": "discord_relay",

@@ -20,6 +20,7 @@ PLANNER_V2_ROUTE_FAMILIES = {
     "app_control",
     "file",
     "context_action",
+    "context_clarification",
     "screen_awareness",
     "software_control",
     "watch_runtime",
@@ -29,6 +30,7 @@ PLANNER_V2_ROUTE_FAMILIES = {
     "workflow",
     "task_continuity",
     "discord_relay",
+    "trust_approvals",
 }
 
 PLANNER_V2_LEGACY_DEFER_FAMILIES = {
@@ -360,6 +362,39 @@ class ContextBinder:
         active_request_state: dict[str, Any],
         recent_tool_results: list[dict[str, Any]],
     ) -> ContextBinding:
+        if frame.native_owner_hint == "context_clarification":
+            selection = active_context.get("selection") if isinstance(active_context.get("selection"), dict) else {}
+            return ContextBinding(
+                context_reference=frame.context_reference,
+                context_type="ambiguous_context",
+                context_source="selection" if selection else "",
+                status=frame.context_status or "ambiguous",
+                value=selection.get("value") if selection else None,
+                label=str(selection.get("preview") or "ambiguous context"),
+                missing_preconditions=(frame.clarification_reason or "ambiguous_deictic_no_owner",),
+            )
+        if frame.native_owner_hint == "trust_approvals":
+            trust = active_request_state.get("trust") if isinstance(active_request_state.get("trust"), dict) else {}
+            if trust:
+                return ContextBinding(
+                    context_reference=frame.context_reference,
+                    context_type="approval_object",
+                    context_source="active_request_state",
+                    status="available",
+                    value={"active_request_state": dict(active_request_state), "trust": dict(trust)},
+                    label=str(trust.get("request_id") or active_request_state.get("subject") or "approval request"),
+                    candidate_bindings=({"type": "approval_object", "source": "active_request_state", "value": dict(trust), "confidence": 0.9},),
+                )
+            return self._missing(frame, "approval_object")
+        if frame.native_owner_hint == "app_control" and frame.operation == "status":
+            return ContextBinding(
+                context_reference=frame.context_reference,
+                context_type="app",
+                context_source="active_request_state" if active_request_state else "status_request",
+                status="available",
+                value=dict(active_request_state) if active_request_state else {"target": "active applications"},
+                label=frame.target_text or "active applications",
+            )
         selected = frame.extracted_entities.get("selected_context")
         if isinstance(selected, dict):
             return ContextBinding(
@@ -753,6 +788,16 @@ class CandidateGenerator:
         factors: dict[str, float] = {}
         positive: list[str] = []
         declines: list[str] = []
+        if spec.route_family == "context_clarification" and frame.native_owner_hint != "context_clarification":
+            return RouteCandidate(
+                route_family=spec.route_family,
+                subsystem=spec.subsystem,
+                score=0.0,
+                accepted=False,
+                score_factors={"context_clarification_gate": 0.0},
+                decline_reasons=("requires_ambiguous_deictic_no_owner",),
+                tool_candidates=spec.tool_candidates,
+            )
         if frame.native_owner_hint == spec.route_family:
             factors["native_owner_hint"] = 0.42
             score += 0.42
@@ -933,8 +978,13 @@ class RouteArbitrator:
 
     def _conceptual_near_miss(self, frame: IntentFrame) -> bool:
         text = frame.normalized_text
+        tokens = set(text.split())
+        has_conceptual_unknown = frame.operation in {"unknown", "explain"} and bool(
+            tokens.intersection({"architecture", "concept", "conceptual", "principle", "philosophy", "theory", "idea"})
+        )
         return (
-            any(
+            has_conceptual_unknown
+            or any(
                 phrase in text
                 for phrase in {
                     "neural network",
@@ -1025,6 +1075,8 @@ class PlanBuilder:
             return PlanDraft(family, "files", frame.operation, "file", subject=path, tool_name=tool, tool_arguments={"path": path}, request_type_hint="file_read" if tool == "file_reader" else "direct_action", execution_type="read_file" if tool == "file_reader" else "execute_control_command", requires_execution=tool != "file_reader")
         if family == "context_action":
             return PlanDraft(family, "context", frame.operation, "selected_text", subject="selection", tool_name="context_action", tool_arguments={"operation": "inspect", "source": "selection"}, request_type_hint="context_action", execution_type="execute_context_action")
+        if family == "context_clarification":
+            return PlanDraft(family, "context", "clarify", "unknown", subject="ambiguous context", request_type_hint="context_clarification", execution_type="clarify_route_context")
         if family == "screen_awareness":
             return PlanDraft(family, "screen_awareness", frame.operation, "visible_ui", subject="visible_screen", request_type_hint="screen_awareness_response", execution_type="screen_awareness_preflight")
         if family == "software_control":
@@ -1251,6 +1303,29 @@ class PlannerV2:
             frame.clarification_needed = False
             frame.clarification_reason = ""
             return frame
+        active_followup_owner = self._active_state_followup_owner(frame, active_request_state)
+        if active_followup_owner:
+            self._apply_active_state_followup(
+                frame,
+                family=active_followup_owner,
+                active_context=active_context,
+                active_request_state=active_request_state,
+                recent_tool_results=recent_tool_results,
+            )
+        if self._ambiguous_deictic_clarification_signal(frame, active_request_state):
+            frame.operation = "clarify"
+            frame.target_type = "unknown"
+            frame.target_text = "current context"
+            if frame.context_reference == "none":
+                frame.context_reference = "previous_result" if self._followup_signal(text) else "this"
+            frame.context_status = "ambiguous" if active_context else "missing"
+            frame.risk_class = "read_only"
+            frame.native_owner_hint = "context_clarification"
+            frame.candidate_route_families = ["context_clarification"]
+            frame.generic_provider_allowed = False
+            frame.generic_provider_reason = "ambiguous_deictic_requires_native_clarification"
+            frame.clarification_needed = True
+            frame.clarification_reason = "ambiguous_deictic_no_owner"
         if self._deictic_calculation_signal(text):
             has_context = bool(
                 active_context.get("recent_context_resolutions")
@@ -1383,6 +1458,226 @@ class PlannerV2:
             frame.clarification_needed = frame.context_status == "missing"
             frame.clarification_reason = "discord_relay_context" if frame.clarification_needed else ""
         return frame
+
+    def _active_state_followup_owner(self, frame: IntentFrame, active_request_state: dict[str, Any]) -> str:
+        family = str(active_request_state.get("family") or "").strip().lower()
+        trust = active_request_state.get("trust") if isinstance(active_request_state.get("trust"), dict) else {}
+        parameters = active_request_state.get("parameters") if isinstance(active_request_state.get("parameters"), dict) else {}
+        stage = str(parameters.get("request_stage") or "").strip().lower()
+        if trust and stage == "awaiting_confirmation" and self._followup_signal(frame.normalized_text):
+            return "trust_approvals"
+        if family not in PLANNER_V2_ROUTE_FAMILIES:
+            return ""
+        if family in {"generic_provider", "unsupported", "context_clarification"}:
+            return ""
+        if frame.native_owner_hint:
+            return ""
+        text = frame.normalized_text
+        if not self._followup_signal(text, frame=frame):
+            return ""
+        return family
+
+    def _ambiguous_deictic_clarification_signal(self, frame: IntentFrame, active_request_state: dict[str, Any]) -> bool:
+        if frame.native_owner_hint:
+            return False
+        if str(active_request_state.get("family") or "").strip():
+            return False
+        if frame.speech_act in {"question", "explanation_request", "comparison"}:
+            return False
+        if frame.operation != "unknown" or frame.target_type != "unknown":
+            return False
+        if self._expansion_conceptual_near_miss(frame.normalized_text):
+            return False
+        return self._followup_signal(frame.normalized_text, frame=frame)
+
+    def _followup_signal(self, text: str, *, frame: IntentFrame | None = None) -> bool:
+        if frame is not None and frame.context_reference in {"this", "that", "it", "previous_result", "previous_calculation", "current_page", "current_file"}:
+            return True
+        return bool(
+            re.search(
+                r"\b(?:this|that|it|these|those|same|previous|last|before|again|earlier|reuse|continue|current thing|what i just said)\b",
+                text,
+            )
+        )
+
+    def _apply_active_state_followup(
+        self,
+        frame: IntentFrame,
+        *,
+        family: str,
+        active_context: dict[str, Any],
+        active_request_state: dict[str, Any],
+        recent_tool_results: list[dict[str, Any]],
+    ) -> None:
+        parameters = active_request_state.get("parameters") if isinstance(active_request_state.get("parameters"), dict) else {}
+        subject = str(active_request_state.get("subject") or parameters.get("target_name") or family.replace("_", " ")).strip()
+        operation, target_type, target_text, context_reference, risk_class = self._active_followup_shape(
+            family,
+            subject=subject,
+            parameters=parameters,
+        )
+        frame.operation = operation
+        frame.target_type = target_type
+        frame.target_text = target_text
+        frame.context_reference = context_reference
+        frame.risk_class = risk_class
+        frame.native_owner_hint = family
+        frame.candidate_route_families = [family]
+        frame.generic_provider_allowed = False
+        frame.generic_provider_reason = "native_route_candidate_present"
+        bound = self._active_followup_context(
+            family=family,
+            target_type=target_type,
+            active_context=active_context,
+            active_request_state=active_request_state,
+            recent_tool_results=recent_tool_results,
+        )
+        if bound is not None:
+            frame.extracted_entities["selected_context"] = bound
+            frame.context_status = "available"
+            frame.clarification_needed = False
+            frame.clarification_reason = ""
+            if family == "browser_destination" and bound.get("value"):
+                frame.target_text = str(bound.get("label") or bound.get("value") or target_text)
+            return
+        missing_reason = self._active_followup_missing_reason(family)
+        frame.context_status = "missing" if missing_reason else "available"
+        frame.clarification_needed = bool(missing_reason)
+        frame.clarification_reason = missing_reason
+
+    def _active_followup_shape(
+        self,
+        family: str,
+        *,
+        subject: str,
+        parameters: dict[str, Any],
+    ) -> tuple[str, str, str, str, str]:
+        if family == "calculations":
+            return "calculate", "prior_calculation", "previous calculation", "previous_calculation", "read_only"
+        if family == "browser_destination":
+            return "open", "website", subject or "current page", "current_page", "external_browser_open"
+        if family == "app_control":
+            if str(parameters.get("source_case") or "").strip().lower() == "active_apps" or "active app" in subject.lower():
+                return "status", "app", "active applications", "previous_result", "read_only"
+            operation = str(parameters.get("operation") or parameters.get("action") or "open").strip().lower()
+            operation = operation if operation in {"open", "launch", "close", "quit", "status"} else "open"
+            return operation, "app", subject or "app", "previous_result", "external_app_open" if operation != "status" else "read_only"
+        if family == "file":
+            return "open", "file", subject or "current file", "current_file", "internal_surface_open"
+        if family == "context_action":
+            return "inspect", "selected_text", "selected text", "selected", "read_only"
+        if family == "screen_awareness":
+            return "inspect", "visible_ui", "visible screen", "visible_target", "read_only"
+        if family == "software_control":
+            operation = str(parameters.get("operation_type") or parameters.get("operation") or "verify").strip().lower()
+            operation = operation if operation in {"install", "uninstall", "update", "repair", "verify"} else "verify"
+            target = str(parameters.get("target_name") or subject or "software").strip()
+            return operation, "software_package", target, "previous_result", "software_lifecycle" if operation != "verify" else "read_only"
+        if family == "network":
+            return "status", "system_resource", "network", "previous_result", "read_only"
+        if family == "watch_runtime":
+            return "status", "system_resource", "runtime", "previous_result", "read_only"
+        if family == "workspace_operations":
+            return "assemble", "workspace", subject or "workspace", "previous_result", "dry_run_plan"
+        if family == "routine":
+            return "launch", "routine", subject or "routine", "previous_result", "dry_run_plan"
+        if family == "workflow":
+            return "launch", "workspace", subject or "workflow", "previous_result", "dry_run_plan"
+        if family == "task_continuity":
+            return "status", "workspace", subject or "task continuity", "previous_result", "read_only"
+        if family == "discord_relay":
+            return "send", "discord_recipient", subject or "discord", "previous_result", "external_send"
+        if family == "trust_approvals":
+            return "verify", "prior_result", subject or "approval request", "previous_result", "trust_sensitive_action"
+        return "inspect", "unknown", subject or family, "previous_result", "read_only"
+
+    def _active_followup_context(
+        self,
+        *,
+        family: str,
+        target_type: str,
+        active_context: dict[str, Any],
+        active_request_state: dict[str, Any],
+        recent_tool_results: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        if family == "browser_destination":
+            return self._recent_website_context(active_context, recent_tool_results)
+        if family == "context_action":
+            selection = active_context.get("selection") if isinstance(active_context.get("selection"), dict) else {}
+            if selection.get("value"):
+                return {
+                    "type": "selected_text",
+                    "source": "selection",
+                    "label": str(selection.get("preview") or "selected text"),
+                    "value": selection.get("value"),
+                    "confidence": 0.94,
+                }
+            return None
+        if family == "discord_relay":
+            destination = self._discord_destination_from_state(active_request_state)
+            selection = active_context.get("selection") if isinstance(active_context.get("selection"), dict) else {}
+            if destination and selection.get("value"):
+                return {
+                    "type": "discord_payload",
+                    "source": "active_request_state",
+                    "label": destination,
+                    "value": {"destination": destination, "payload": selection.get("value")},
+                    "confidence": 0.9,
+                }
+            return None
+        if target_type in {"prior_calculation", "prior_result"}:
+            bound = ContextBinder()._prior_calculation(active_context, active_request_state, recent_tool_results)
+            if bound is not None:
+                return bound
+        if family in {"app_control", "network", "watch_runtime", "software_control"}:
+            return {"type": target_type, "source": "active_request_state", "label": str(active_request_state.get("subject") or family), "value": dict(active_request_state), "confidence": 0.82}
+        if family == "trust_approvals":
+            trust = active_request_state.get("trust") if isinstance(active_request_state.get("trust"), dict) else {}
+            if trust:
+                return {"type": "approval_object", "source": "active_request_state", "label": str(trust.get("request_id") or "approval request"), "value": dict(active_request_state), "confidence": 0.9}
+        return None
+
+    def _recent_website_context(self, active_context: dict[str, Any], recent_tool_results: list[dict[str, Any]]) -> dict[str, Any] | None:
+        for entity in IntentFrameExtractor()._recent_entities(active_context, recent_tool_results):
+            if not isinstance(entity, dict):
+                continue
+            kind = str(entity.get("kind") or "").strip().lower()
+            url = entity.get("url") or entity.get("value")
+            if url and (kind in {"page", "url", "website", "link"} or str(url).startswith(("http://", "https://"))):
+                return {
+                    "type": "website",
+                    "source": "recent_entities",
+                    "label": str(entity.get("title") or url),
+                    "value": str(url),
+                    "confidence": 0.9,
+                }
+        return None
+
+    def _discord_destination_from_state(self, active_request_state: dict[str, Any]) -> str:
+        parameters = active_request_state.get("parameters") if isinstance(active_request_state.get("parameters"), dict) else {}
+        destination = str(parameters.get("destination_alias") or parameters.get("recipient") or active_request_state.get("subject") or "").strip()
+        if destination.lower() in {"", "discord", "discord relay", "relay", "message"}:
+            return ""
+        return destination
+
+    def _active_followup_missing_reason(self, family: str) -> str:
+        if family == "browser_destination":
+            return "destination_context"
+        if family == "context_action":
+            return "selected_text"
+        if family == "discord_relay":
+            return "discord_relay_context"
+        if family == "calculations":
+            return "prior_calculation"
+        if family == "screen_awareness":
+            return "visible_ui_grounding"
+        if family == "file":
+            return "file_context"
+        if family in {"workspace_operations", "workflow", "task_continuity"}:
+            return "workspace_context"
+        if family == "routine":
+            return "routine_context"
+        return ""
 
     def _deictic_calculation_signal(self, text: str) -> bool:
         has_deictic = bool(re.search(r"\b(?:this|that|it|previous|last)\b", text))

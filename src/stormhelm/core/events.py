@@ -22,6 +22,7 @@ class EventFamily(str, Enum):
     NETWORK = "network"
     SCREEN_AWARENESS = "screen_awareness"
     DISCORD_RELAY = "discord_relay"
+    VOICE = "voice"
     LIFECYCLE = "lifecycle"
 
 
@@ -487,7 +488,7 @@ class EventBuffer:
             return "direct_system_fact"
         if subsystem in {"assistant", "planner"}:
             return "operator_summary"
-        if subsystem in {"judgment", "screen_awareness", "discord_relay", "network"}:
+        if subsystem in {"judgment", "screen_awareness", "discord_relay", "network", "voice"}:
             return "subsystem_interpretation"
         return "heuristic_status"
 
@@ -519,6 +520,7 @@ class EventBuffer:
             EventFamily.VERIFICATION.value,
             EventFamily.SCREEN_AWARENESS.value,
             EventFamily.DISCORD_RELAY.value,
+            EventFamily.VOICE.value,
             EventFamily.WORKSPACE.value,
         }:
             return EventVisibilityScope.DECK_CONTEXT.value
@@ -569,6 +571,7 @@ class EventBuffer:
             "calculations": EventFamily.VERIFICATION,
             "screen_awareness": EventFamily.SCREEN_AWARENESS,
             "discord_relay": EventFamily.DISCORD_RELAY,
+            "voice": EventFamily.VOICE,
             "workspace": EventFamily.WORKSPACE,
             "api": EventFamily.WORKSPACE,
         }
@@ -640,6 +643,12 @@ class EventBuffer:
             if payload.get("preview"):
                 return "discord_relay.preview_ready"
             return "discord_relay.updated"
+
+        if event_family == EventFamily.VOICE.value:
+            state = str(payload.get("state") or "").strip().lower()
+            if state:
+                return f"voice.{state}"
+            return "voice.updated"
 
         if event_family == EventFamily.VERIFICATION.value:
             trace = payload.get("trace") if isinstance(payload.get("trace"), dict) else {}

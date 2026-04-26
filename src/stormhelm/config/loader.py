@@ -30,6 +30,9 @@ from stormhelm.config.models import (
     ToolConfig,
     ToolEnablementConfig,
     UIConfig,
+    VoiceConfig,
+    VoiceOpenAIConfig,
+    VoicePlaybackConfig,
 )
 from stormhelm.shared.paths import default_data_dir
 from stormhelm.shared.runtime import RuntimeDiscovery, discover_runtime
@@ -311,6 +314,50 @@ def _build_app_config(
         instructions=str(openai_data.get("instructions", "")).strip(),
     )
 
+    voice_data = data.get("voice", {})
+    voice_openai_data = voice_data.get("openai", {}) if isinstance(voice_data.get("openai"), dict) else {}
+    voice_playback_data = voice_data.get("playback", {}) if isinstance(voice_data.get("playback"), dict) else {}
+    voice_config = VoiceConfig(
+        enabled=bool(voice_data.get("enabled", False)),
+        provider=str(voice_data.get("provider", "openai")).strip().lower() or "openai",
+        mode=str(voice_data.get("mode", "disabled")).strip().lower() or "disabled",
+        wake_word_enabled=bool(voice_data.get("wake_word_enabled", False)),
+        spoken_responses_enabled=bool(voice_data.get("spoken_responses_enabled", False)),
+        manual_input_enabled=bool(voice_data.get("manual_input_enabled", True)),
+        realtime_enabled=bool(voice_data.get("realtime_enabled", False)),
+        debug_mock_provider=bool(voice_data.get("debug_mock_provider", True)),
+        openai=VoiceOpenAIConfig(
+            stt_model=str(voice_openai_data.get("stt_model", "gpt-4o-mini-transcribe")).strip()
+            or "gpt-4o-mini-transcribe",
+            transcription_language=str(voice_openai_data.get("transcription_language", "")).strip() or None,
+            transcription_prompt=str(voice_openai_data.get("transcription_prompt", "")).strip() or None,
+            timeout_seconds=float(voice_openai_data.get("timeout_seconds", 60)),
+            max_audio_seconds=float(voice_openai_data.get("max_audio_seconds", 30)),
+            max_audio_bytes=int(voice_openai_data.get("max_audio_bytes", 25 * 1024 * 1024)),
+            tts_model=str(voice_openai_data.get("tts_model", "gpt-4o-mini-tts")).strip()
+            or "gpt-4o-mini-tts",
+            tts_voice=str(voice_openai_data.get("tts_voice", "cedar")).strip() or "cedar",
+            tts_format=str(voice_openai_data.get("tts_format", "mp3")).strip().lower() or "mp3",
+            tts_speed=float(voice_openai_data.get("tts_speed", 1.0)),
+            max_tts_chars=int(voice_openai_data.get("max_tts_chars", 600)),
+            output_audio_dir=str(voice_openai_data.get("output_audio_dir", "")).strip() or None,
+            persist_tts_outputs=bool(voice_openai_data.get("persist_tts_outputs", False)),
+            realtime_model=str(voice_openai_data.get("realtime_model", "gpt-realtime")).strip()
+            or "gpt-realtime",
+            vad_mode=str(voice_openai_data.get("vad_mode", "server_vad")).strip() or "server_vad",
+        ),
+        playback=VoicePlaybackConfig(
+            enabled=bool(voice_playback_data.get("enabled", False)),
+            provider=str(voice_playback_data.get("provider", "local")).strip().lower() or "local",
+            device=str(voice_playback_data.get("device", "default")).strip() or "default",
+            volume=float(voice_playback_data.get("volume", 1.0)),
+            allow_dev_playback=bool(voice_playback_data.get("allow_dev_playback", False)),
+            max_audio_bytes=int(voice_playback_data.get("max_audio_bytes", 10_000_000)),
+            max_duration_ms=int(voice_playback_data.get("max_duration_ms", 120_000)),
+            delete_transient_after_playback=bool(voice_playback_data.get("delete_transient_after_playback", True)),
+        ),
+    )
+
     safety_data = data.get("safety", {})
     allowed_dirs = [
         _expand_path(value, root, data_dir) or root
@@ -350,6 +397,7 @@ def _build_app_config(
             app_control=bool(enabled_data.get("app_control", True)),
             window_status=bool(enabled_data.get("window_status", True)),
             window_control=bool(enabled_data.get("window_control", True)),
+            system_control=bool(enabled_data.get("system_control", True)),
             control_capabilities=bool(enabled_data.get("control_capabilities", True)),
             recent_files=bool(enabled_data.get("recent_files", True)),
             location_status=bool(enabled_data.get("location_status", True)),
@@ -420,6 +468,7 @@ def _build_app_config(
         trust=trust_config,
         discord_relay=discord_relay_config,
         openai=openai_config,
+        voice=voice_config,
         safety=safety_config,
         tools=tool_config,
     )
@@ -488,6 +537,40 @@ def _apply_env_overrides(data: ConfigDict, env: Mapping[str, str]) -> ConfigDict
         "STORMHELM_OPENAI_MAX_OUTPUT_TOKENS": ("openai.max_output_tokens", int),
         "STORMHELM_OPENAI_PLANNER_MAX_OUTPUT_TOKENS": ("openai.planner_max_output_tokens", int),
         "STORMHELM_OPENAI_REASONING_MAX_OUTPUT_TOKENS": ("openai.reasoning_max_output_tokens", int),
+        "STORMHELM_VOICE_ENABLED": ("voice.enabled", _parse_bool),
+        "STORMHELM_VOICE_PROVIDER": ("voice.provider", str),
+        "STORMHELM_VOICE_MODE": ("voice.mode", str),
+        "STORMHELM_VOICE_WAKE_WORD_ENABLED": ("voice.wake_word_enabled", _parse_bool),
+        "STORMHELM_VOICE_SPOKEN_RESPONSES_ENABLED": ("voice.spoken_responses_enabled", _parse_bool),
+        "STORMHELM_VOICE_MANUAL_INPUT_ENABLED": ("voice.manual_input_enabled", _parse_bool),
+        "STORMHELM_VOICE_REALTIME_ENABLED": ("voice.realtime_enabled", _parse_bool),
+        "STORMHELM_VOICE_DEBUG_MOCK_PROVIDER": ("voice.debug_mock_provider", _parse_bool),
+        "STORMHELM_VOICE_PLAYBACK_ENABLED": ("voice.playback.enabled", _parse_bool),
+        "STORMHELM_VOICE_PLAYBACK_PROVIDER": ("voice.playback.provider", str),
+        "STORMHELM_VOICE_PLAYBACK_DEVICE": ("voice.playback.device", str),
+        "STORMHELM_VOICE_PLAYBACK_VOLUME": ("voice.playback.volume", float),
+        "STORMHELM_VOICE_PLAYBACK_ALLOW_DEV_PLAYBACK": ("voice.playback.allow_dev_playback", _parse_bool),
+        "STORMHELM_VOICE_PLAYBACK_MAX_AUDIO_BYTES": ("voice.playback.max_audio_bytes", int),
+        "STORMHELM_VOICE_PLAYBACK_MAX_DURATION_MS": ("voice.playback.max_duration_ms", int),
+        "STORMHELM_VOICE_PLAYBACK_DELETE_TRANSIENT_AFTER_PLAYBACK": (
+            "voice.playback.delete_transient_after_playback",
+            _parse_bool,
+        ),
+        "STORMHELM_VOICE_OPENAI_STT_MODEL": ("voice.openai.stt_model", str),
+        "STORMHELM_VOICE_OPENAI_TRANSCRIPTION_LANGUAGE": ("voice.openai.transcription_language", str),
+        "STORMHELM_VOICE_OPENAI_TRANSCRIPTION_PROMPT": ("voice.openai.transcription_prompt", str),
+        "STORMHELM_VOICE_OPENAI_TIMEOUT_SECONDS": ("voice.openai.timeout_seconds", float),
+        "STORMHELM_VOICE_OPENAI_MAX_AUDIO_SECONDS": ("voice.openai.max_audio_seconds", float),
+        "STORMHELM_VOICE_OPENAI_MAX_AUDIO_BYTES": ("voice.openai.max_audio_bytes", int),
+        "STORMHELM_VOICE_OPENAI_TTS_MODEL": ("voice.openai.tts_model", str),
+        "STORMHELM_VOICE_OPENAI_TTS_VOICE": ("voice.openai.tts_voice", str),
+        "STORMHELM_VOICE_OPENAI_TTS_FORMAT": ("voice.openai.tts_format", str),
+        "STORMHELM_VOICE_OPENAI_TTS_SPEED": ("voice.openai.tts_speed", float),
+        "STORMHELM_VOICE_OPENAI_MAX_TTS_CHARS": ("voice.openai.max_tts_chars", int),
+        "STORMHELM_VOICE_OPENAI_OUTPUT_AUDIO_DIR": ("voice.openai.output_audio_dir", str),
+        "STORMHELM_VOICE_OPENAI_PERSIST_TTS_OUTPUTS": ("voice.openai.persist_tts_outputs", _parse_bool),
+        "STORMHELM_VOICE_OPENAI_REALTIME_MODEL": ("voice.openai.realtime_model", str),
+        "STORMHELM_VOICE_OPENAI_VAD_MODE": ("voice.openai.vad_mode", str),
         "STORMHELM_HOME_LABEL": ("location.home_label", str),
         "STORMHELM_HOME_CITY": ("location.home_city", str),
         "STORMHELM_HOME_REGION": ("location.home_region", str),

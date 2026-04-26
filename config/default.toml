@@ -161,6 +161,43 @@ Behavior rules:
 - When tools return actionable results, synthesize them into a short useful response.
 """
 
+[voice]
+enabled = false
+provider = "openai"
+mode = "disabled"
+wake_word_enabled = false
+spoken_responses_enabled = false
+manual_input_enabled = true
+realtime_enabled = false
+debug_mock_provider = true
+
+[voice.openai]
+stt_model = "gpt-4o-mini-transcribe"
+transcription_language = ""
+transcription_prompt = ""
+timeout_seconds = 60
+max_audio_seconds = 30
+max_audio_bytes = 26214400
+tts_model = "gpt-4o-mini-tts"
+tts_voice = "cedar"
+tts_format = "mp3"
+tts_speed = 1.0
+max_tts_chars = 600
+output_audio_dir = ""
+persist_tts_outputs = false
+realtime_model = "gpt-realtime"
+vad_mode = "server_vad"
+
+[voice.playback]
+enabled = false
+provider = "local"
+device = "default"
+volume = 1.0
+allow_dev_playback = false
+max_audio_bytes = 10000000
+max_duration_ms = 120000
+delete_transient_after_playback = true
+
 [safety]
 allowed_read_dirs = [
   "${PROJECT_ROOT}",

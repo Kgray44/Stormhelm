@@ -94,18 +94,33 @@ def build_command_usability_corpus(*, min_cases: int = 1000) -> list[CommandEval
         for style in _STYLE_ORDER:
             message = _message_for_style(blueprint, style)
             case_id = f"{blueprint.key}_{style}_00"
-            expected = ExpectedBehavior(
-                route_family=blueprint.route_family,
-                subsystem=blueprint.subsystem,
-                tools=blueprint.tools,
-                target_slots=dict(blueprint.target_slots or {}),
-                clarification=blueprint.clarification
+            expected_route_family = blueprint.route_family
+            expected_subsystem = blueprint.subsystem
+            expected_tools = blueprint.tools
+            expected_target_slots = dict(blueprint.target_slots or {})
+            expected_clarification = (
+                blueprint.clarification
                 if blueprint.clarification is not None and style not in {"deictic", "follow_up", "ambiguous"}
                 else "expected"
                 if style == "ambiguous"
                 else "allowed"
                 if style in {"deictic", "follow_up"}
-                else "none",
+                else "none"
+            )
+            if _is_ambiguous_deictic_no_owner(blueprint, style):
+                expected_route_family = "context_clarification"
+                expected_subsystem = "context"
+                expected_tools = ()
+                expected_target_slots = {}
+                expected_clarification = "expected"
+            elif style == "follow_up" and blueprint.route_family == "browser_destination":
+                expected_target_slots = {"destination_name": "Stormhelm docs"}
+            expected = ExpectedBehavior(
+                route_family=expected_route_family,
+                subsystem=expected_subsystem,
+                tools=expected_tools,
+                target_slots=expected_target_slots,
+                clarification=expected_clarification,
                 approval=_approval_expectation(blueprint, style),
                 result_state=blueprint.result_state,
                 verification=blueprint.verification,
@@ -159,6 +174,10 @@ def build_command_usability_corpus(*, min_cases: int = 1000) -> list[CommandEval
 def _approval_expectation(blueprint: _Blueprint, style: str) -> str:
     if blueprint.approval != "not_expected":
         return blueprint.approval
+    if blueprint.route_family == "discord_relay" and style in {"deictic", "follow_up", "ambiguous"}:
+        return "allowed"
+    if _is_ambiguous_deictic_no_owner(blueprint, style):
+        return "not_expected"
     if blueprint.route_family in {"discord_relay", "software_control", "trust_approvals"}:
         return "expected_or_preview"
     if "deck" in blueprint.tags:
@@ -172,6 +191,14 @@ def _approval_expectation(blueprint: _Blueprint, style: str) -> str:
     if style in {"confirm", "unsupported_probe"} and blueprint.tools:
         return "allowed"
     return "not_expected"
+
+
+def _is_ambiguous_deictic_no_owner(blueprint: _Blueprint, style: str) -> bool:
+    if style != "deictic":
+        return False
+    if blueprint.active_request_state:
+        return False
+    return not bool(blueprint.input_context)
 
 
 def _context_for_style(blueprint: _Blueprint, style: str) -> dict[str, Any]:

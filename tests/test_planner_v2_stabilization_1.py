@@ -9,7 +9,6 @@ from stormhelm.core.orchestrator.planner_v2 import PlannerV2
 @pytest.mark.parametrize(
     "prompt,legacy_family",
     [
-        ("why are you asking for approval", "trust_approvals"),
         ("what is my battery at", "power"),
         ("what windows are open", "window_control"),
         ("what is the weather here", "weather"),
