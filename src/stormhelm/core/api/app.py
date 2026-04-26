@@ -22,6 +22,8 @@ from stormhelm.core.api.schemas import (
     NotesResponse,
     ShellPresenceRequest,
     StartupPolicyMutationRequest,
+    VoiceCaptureControlRequest,
+    VoicePlaybackControlRequest,
 )
 from stormhelm.core.container import CoreContainer, build_container
 from stormhelm.core.lifecycle import ShellPresenceUpdate
@@ -96,28 +98,49 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         )
         endpoint_dispatch_ms = round((perf_counter() - endpoint_started) * 1000, 3)
         return_started = perf_counter()
-        assistant_message = result.get("assistant_message") if isinstance(result, dict) else {}
-        metadata = assistant_message.get("metadata") if isinstance(assistant_message, dict) else {}
+        assistant_message = (
+            result.get("assistant_message") if isinstance(result, dict) else {}
+        )
+        metadata = (
+            assistant_message.get("metadata")
+            if isinstance(assistant_message, dict)
+            else {}
+        )
         if isinstance(metadata, dict):
-            stage_timings = metadata.get("stage_timings_ms") if isinstance(metadata.get("stage_timings_ms"), dict) else {}
+            stage_timings = (
+                metadata.get("stage_timings_ms")
+                if isinstance(metadata.get("stage_timings_ms"), dict)
+                else {}
+            )
             stage_timings = dict(stage_timings)
             stage_timings["endpoint_dispatch_ms"] = endpoint_dispatch_ms
             stage_timings["asgi_request_receive_ms"] = 0.0
             stage_timings["server_response_write_ms"] = 0.0
-            stage_timings["endpoint_return_to_asgi_ms"] = round((perf_counter() - return_started) * 1000, 3)
+            stage_timings["endpoint_return_to_asgi_ms"] = round(
+                (perf_counter() - return_started) * 1000, 3
+            )
             metadata["stage_timings_ms"] = stage_timings
             metadata["api_timings_ms"] = {
                 "asgi_request_receive_ms": 0.0,
                 "endpoint_dispatch_ms": endpoint_dispatch_ms,
-                "endpoint_return_to_asgi_ms": stage_timings["endpoint_return_to_asgi_ms"],
+                "endpoint_return_to_asgi_ms": stage_timings[
+                    "endpoint_return_to_asgi_ms"
+                ],
                 "server_response_write_ms": 0.0,
             }
         return result
 
     @app.get("/chat/history")
-    def chat_history(request: Request, session_id: str = "default", limit: int = 100) -> dict[str, object]:
+    def chat_history(
+        request: Request, session_id: str = "default", limit: int = 100
+    ) -> dict[str, object]:
         current = _current_container(request)
-        items = [message.to_dict() for message in current.conversations.list_messages(session_id=session_id, limit=limit)]
+        items = [
+            message.to_dict()
+            for message in current.conversations.list_messages(
+                session_id=session_id, limit=limit
+            )
+        ]
         return {"messages": items}
 
     @app.get("/jobs", response_model=JobsResponse)
@@ -167,8 +190,13 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         heartbeat_seconds: float | None = None,
     ) -> StreamingResponse:
         current = _current_container(request)
-        effective_replay_limit = max(1, int(replay_limit or current.config.event_stream.replay_limit))
-        effective_heartbeat_seconds = max(1.0, float(heartbeat_seconds or current.config.event_stream.heartbeat_seconds))
+        effective_replay_limit = max(
+            1, int(replay_limit or current.config.event_stream.replay_limit)
+        )
+        effective_heartbeat_seconds = max(
+            1.0,
+            float(heartbeat_seconds or current.config.event_stream.heartbeat_seconds),
+        )
 
         async def event_stream():
             current_cursor = max(0, int(cursor))
@@ -261,7 +289,9 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     @app.get("/notes", response_model=NotesResponse)
     def list_notes(request: Request, limit: int = 50) -> dict[str, object]:
         current = _current_container(request)
-        return {"notes": [note.to_dict() for note in current.notes.list_notes(limit=limit)]}
+        return {
+            "notes": [note.to_dict() for note in current.notes.list_notes(limit=limit)]
+        }
 
     @app.post("/notes")
     def create_note(payload: NoteCreateRequest, request: Request) -> dict[str, object]:
@@ -273,7 +303,9 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 note_id=note.note_id,
                 workspace_id=payload.workspace_id,
             )
-        current.events.publish(level="INFO", source="api", message=f"Saved note '{note.title}'.")
+        current.events.publish(
+            level="INFO", source="api", message=f"Saved note '{note.title}'."
+        )
         return note.to_dict()
 
     @app.get("/settings")
@@ -287,7 +319,9 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         return {"tools": current.tool_registry.metadata()}
 
     @app.post("/lifecycle/shell")
-    def report_shell_presence(payload: ShellPresenceRequest, request: Request) -> dict[str, object]:
+    def report_shell_presence(
+        payload: ShellPresenceRequest, request: Request
+    ) -> dict[str, object]:
         current = _current_container(request)
         update = ShellPresenceUpdate.from_dict(payload.model_dump())
         if update.event == "detach":
@@ -297,7 +331,9 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         return {"runtime": current.lifecycle.status_snapshot().get("runtime", {})}
 
     @app.post("/lifecycle/startup")
-    def update_startup_registration(payload: StartupPolicyMutationRequest, request: Request) -> dict[str, object]:
+    def update_startup_registration(
+        payload: StartupPolicyMutationRequest, request: Request
+    ) -> dict[str, object]:
         current = _current_container(request)
         policy = current.lifecycle.configure_startup_policy(
             startup_enabled=payload.startup_enabled,
@@ -321,7 +357,9 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         }
 
     @app.post("/lifecycle/resolution")
-    def execute_lifecycle_resolution(payload: LifecycleResolutionRequest, request: Request) -> dict[str, object]:
+    def execute_lifecycle_resolution(
+        payload: LifecycleResolutionRequest, request: Request
+    ) -> dict[str, object]:
         current = _current_container(request)
         resolution = current.lifecycle.resolve_lifecycle_hold(
             plan_id=payload.plan_id,
@@ -336,7 +374,9 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         }
 
     @app.post("/lifecycle/cleanup/plan")
-    def prepare_lifecycle_cleanup_plan(payload: CleanupExecutionRequest, request: Request) -> dict[str, object]:
+    def prepare_lifecycle_cleanup_plan(
+        payload: CleanupExecutionRequest, request: Request
+    ) -> dict[str, object]:
         current = _current_container(request)
         plan = current.lifecycle.prepare_cleanup_plan(
             remove_startup_registration=payload.remove_startup_registration,
@@ -346,11 +386,15 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         )
         return {
             "destructive_cleanup_plan": plan.to_dict(),
-            "uninstall_plan": current.lifecycle.status_snapshot().get("uninstall_plan", {}),
+            "uninstall_plan": current.lifecycle.status_snapshot().get(
+                "uninstall_plan", {}
+            ),
         }
 
     @app.post("/lifecycle/cleanup")
-    def execute_lifecycle_cleanup(payload: CleanupExecutionRequest, request: Request) -> dict[str, object]:
+    def execute_lifecycle_cleanup(
+        payload: CleanupExecutionRequest, request: Request
+    ) -> dict[str, object]:
         current = _current_container(request)
         cleanup = current.lifecycle.execute_cleanup(
             remove_startup_registration=payload.remove_startup_registration,
@@ -359,12 +403,16 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             remove_durable_state=payload.remove_durable_state,
             destructive_confirmation_received=payload.destructive_confirmation_received,
             destructive_confirmation=(
-                payload.destructive_confirmation.model_dump() if payload.destructive_confirmation is not None else None
+                payload.destructive_confirmation.model_dump()
+                if payload.destructive_confirmation is not None
+                else None
             ),
         )
         return {
             "cleanup_execution": cleanup.to_dict(),
-            "uninstall_plan": current.lifecycle.status_snapshot().get("uninstall_plan", {}),
+            "uninstall_plan": current.lifecycle.status_snapshot().get(
+                "uninstall_plan", {}
+            ),
         }
 
     @app.post("/lifecycle/core/shutdown")
@@ -376,7 +424,125 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             message="Operator requested a backend shutdown from the shell tray.",
         )
         _schedule_process_shutdown()
-        return {"status": "shutting_down", "pid": os.getpid(), "runtime": current.lifecycle.status_snapshot().get("runtime", {})}
+        return {
+            "status": "shutting_down",
+            "pid": os.getpid(),
+            "runtime": current.lifecycle.status_snapshot().get("runtime", {}),
+        }
+
+    def _voice_action_response(
+        action: str, result: object, current: CoreContainer
+    ) -> dict[str, object]:
+        result_payload = result.to_dict() if hasattr(result, "to_dict") else result
+        return {
+            "action": action,
+            "result": result_payload
+            if isinstance(result_payload, dict)
+            else {"ok": False, "status": "failed"},
+            "voice": current.voice.status_snapshot(),
+        }
+
+    @app.get("/voice/readiness")
+    async def voice_readiness(request: Request) -> dict[str, object]:
+        current = _current_container(request)
+        status = current.voice.status_snapshot()
+        return {
+            "action": "voice.getReadinessReport",
+            "readiness": current.voice.readiness_report().to_dict(),
+            "pipeline_summary": current.voice.pipeline_stage_summary().to_dict(),
+            "voice": status,
+        }
+
+    @app.get("/voice/pipeline")
+    async def voice_pipeline(request: Request) -> dict[str, object]:
+        current = _current_container(request)
+        return {
+            "action": "voice.getLastPipelineSummary",
+            "pipeline_summary": current.voice.pipeline_stage_summary().to_dict(),
+            "voice": current.voice.status_snapshot(),
+        }
+
+    @app.post("/voice/capture/start")
+    async def start_voice_capture(
+        payload: VoiceCaptureControlRequest, request: Request
+    ) -> dict[str, object]:
+        current = _current_container(request)
+        result = await current.voice.start_push_to_talk_capture(
+            session_id=payload.session_id,
+            metadata=payload.metadata,
+        )
+        return _voice_action_response("voice.startPushToTalkCapture", result, current)
+
+    @app.post("/voice/capture/stop")
+    async def stop_voice_capture(
+        payload: VoiceCaptureControlRequest, request: Request
+    ) -> dict[str, object]:
+        current = _current_container(request)
+        result = await current.voice.stop_push_to_talk_capture(
+            payload.capture_id,
+            reason=payload.reason or "user_released",
+        )
+        return _voice_action_response("voice.stopPushToTalkCapture", result, current)
+
+    @app.post("/voice/capture/cancel")
+    async def cancel_voice_capture(
+        payload: VoiceCaptureControlRequest, request: Request
+    ) -> dict[str, object]:
+        current = _current_container(request)
+        result = await current.voice.cancel_capture(
+            payload.capture_id,
+            reason=payload.reason or "user_cancelled",
+        )
+        return _voice_action_response("voice.cancelCapture", result, current)
+
+    @app.post("/voice/capture/submit")
+    async def submit_captured_audio_turn(
+        payload: VoiceCaptureControlRequest, request: Request
+    ) -> dict[str, object]:
+        current = _current_container(request)
+        capture_result = current.voice.last_capture_result
+        if capture_result is None:
+            return _voice_action_response(
+                "voice.submitCapturedAudioTurn",
+                {
+                    "ok": False,
+                    "status": "blocked",
+                    "error_code": "no_completed_capture",
+                    "error_message": "No completed capture is available to submit.",
+                },
+                current,
+            )
+        result = await current.voice.submit_captured_audio_turn(
+            capture_result,
+            mode=payload.mode or "ghost",
+            session_id=payload.session_id,
+            metadata=payload.metadata,
+        )
+        return _voice_action_response("voice.submitCapturedAudioTurn", result, current)
+
+    @app.post("/voice/capture/turn")
+    async def capture_and_submit_voice_turn(
+        payload: VoiceCaptureControlRequest, request: Request
+    ) -> dict[str, object]:
+        current = _current_container(request)
+        result = await current.voice.capture_and_submit_turn(
+            payload.capture_id,
+            mode=payload.mode or "ghost",
+            synthesize_response=payload.synthesize_response,
+            play_response=payload.play_response,
+        )
+        return _voice_action_response("voice.captureAndSubmitTurn", result, current)
+
+    @app.post("/voice/playback/stop")
+    async def stop_voice_playback(
+        payload: VoicePlaybackControlRequest, request: Request
+    ) -> dict[str, object]:
+        current = _current_container(request)
+        result = await current.voice.stop_playback(
+            payload.playback_id,
+            reason=payload.reason or "user_requested",
+        )
+        return _voice_action_response("voice.stopPlayback", result, current)
 
     @app.get("/snapshot")
     def snapshot(
@@ -394,16 +560,26 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "status": current.status_snapshot(),
             "jobs": current.jobs.list_jobs(limit=job_limit),
             "events": current.events.recent(since_id=event_since_id, limit=event_limit),
-            "notes": [note.to_dict() for note in current.notes.list_notes(limit=note_limit)],
+            "notes": [
+                note.to_dict() for note in current.notes.list_notes(limit=note_limit)
+            ],
             "settings": current.config.to_dict(),
             "history": [
                 message.to_dict()
-                for message in current.conversations.list_messages(session_id=session_id, limit=history_limit)
+                for message in current.conversations.list_messages(
+                    session_id=session_id, limit=history_limit
+                )
             ],
             "tools": current.tool_registry.metadata(),
-            "active_workspace": current.assistant.workspace_service.active_workspace_summary(session_id),
-            "active_request_state": current.assistant.session_state.get_active_request_state(session_id),
-            "recent_context_resolutions": current.assistant.session_state.get_recent_context_resolutions(session_id),
+            "active_workspace": current.assistant.workspace_service.active_workspace_summary(
+                session_id
+            ),
+            "active_request_state": current.assistant.session_state.get_active_request_state(
+                session_id
+            ),
+            "recent_context_resolutions": current.assistant.session_state.get_recent_context_resolutions(
+                session_id
+            ),
             "active_task": current.task_service.active_task_summary(session_id),
         }
 

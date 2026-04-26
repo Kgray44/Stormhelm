@@ -51,17 +51,21 @@ Item {
         Column {
             anchors.fill: parent
             spacing: 6
+            clip: root.presentation === "ghost"
 
             Text {
+                width: parent.width
                 text: root.safeCard.subtitle
                 color: presentation === "ghost" ? root.contrastColor("#ae8558", root.adaptiveSecondaryTextContrast * 0.16) : "#ae8558"
                 font.family: "Bahnschrift SemiCondensed"
                 font.pixelSize: root.presentation === "ghost" ? 10 : 12
                 font.letterSpacing: 1.7
+                elide: Text.ElideRight
                 visible: text.length > 0
             }
 
             Text {
+                width: parent.width
                 text: root.safeCard.title
                 color: presentation === "ghost" ? root.contrastColor("#eef7fb", root.adaptiveTextContrast * 0.3) : "#eef7fb"
                 font.family: "Bahnschrift SemiCondensed"
@@ -70,9 +74,12 @@ Item {
             }
 
             Text {
+                width: parent.width
                 text: root.safeCard.body
                 color: presentation === "ghost" ? root.contrastColor("#bed1da", root.adaptiveSecondaryTextContrast * 0.28) : "#bed1da"
-                wrapMode: Text.Wrap
+                wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+                maximumLineCount: root.presentation === "ghost" ? 3 : 0
+                elide: root.presentation === "ghost" ? Text.ElideRight : Text.ElideNone
                 font.family: "Segoe UI"
                 font.pixelSize: root.presentation === "ghost" ? 12 : 13
                 lineHeight: 1.22

@@ -157,6 +157,7 @@ ApplicationWindow {
         primaryCard: bridge ? bridge.ghostPrimaryCard : ({})
         actionStrip: bridge ? bridge.ghostActionStrip : []
         cornerReadouts: bridge ? bridge.ghostCornerReadouts : []
+        voiceState: bridge ? bridge.voiceState : ({})
         statusLine: bridge ? bridge.statusLine : ""
         connectionLabel: bridge ? bridge.connectionLabel : ""
         timeLabel: bridge ? bridge.localTimeLabel : ""
@@ -207,6 +208,7 @@ ApplicationWindow {
         requestComposer: bridge ? bridge.requestComposer : ({})
         railItems: bridge ? bridge.commandRailItems : []
         statusItems: bridge ? bridge.statusStripItems : []
+        voiceState: bridge ? bridge.voiceState : ({})
         statusLine: bridge ? bridge.statusLine : ""
         modeTitle: bridge ? bridge.modeTitle : "Command Deck"
         modeSubtitle: bridge ? bridge.modeSubtitle : ""

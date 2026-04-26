@@ -363,6 +363,7 @@ class DeterministicPlanner:
                 active_posture=active_posture or {},
                 calculation_evaluation=calculation_evaluation,
                 software_control_evaluation=software_control_evaluation,
+                screen_awareness_evaluation=screen_awareness_evaluation,
             )
             debug["semantic_parse_proposal"] = semantic.to_dict()
             return self._decision_from_semantic(
@@ -451,6 +452,7 @@ class DeterministicPlanner:
                 active_posture=active_posture or {},
                 calculation_evaluation=calculation_evaluation,
                 software_control_evaluation=software_control_evaluation,
+                screen_awareness_evaluation=screen_awareness_evaluation,
             )
             debug["semantic_parse_proposal"] = semantic.to_dict()
             return self._decision_from_semantic(
@@ -902,9 +904,17 @@ class DeterministicPlanner:
         sorted_candidates = sorted(candidates, key=lambda item: item.score, reverse=True)
         runner_up = next((candidate for candidate in sorted_candidates if candidate.route_family != winner_family), None)
         margin_to_runner_up = None if runner_up is None else round(max(0.0, winner_candidate.score - runner_up.score), 3)
+        recent_entity_browser_near_tie = bool(
+            winner_family == "browser_destination"
+            and deictic_binding.selected_source == "recent_session_entity"
+            and runner_up is not None
+            and runner_up.route_family == "screen_awareness"
+            and margin_to_runner_up is not None
+            and margin_to_runner_up < 0.1
+        )
         ambiguity_live = bool(
             runner_up is not None
-            and runner_up.score >= 0.65
+            and (runner_up.score >= 0.65 or recent_entity_browser_near_tie)
             and margin_to_runner_up is not None
             and margin_to_runner_up < 0.1
         )
@@ -1035,6 +1045,9 @@ class DeterministicPlanner:
             required_targets = self._required_targets_for_semantic(semantic)
             targets = self._target_candidates_for_semantic(semantic)
             score = round(float(semantic.confidence or 0.0), 3)
+            if family == "browser_destination" and deictic_binding.selected_source == "recent_session_entity":
+                # Bound recent-entity deictic opens below "clear winner" so routing telemetry still reflects live runner-up pressure.
+                score = min(score, 0.44)
             if family == "discord_relay" and deictic_binding.resolved:
                 score = min(0.99, score + 0.02)
             upsert(
@@ -1056,6 +1069,19 @@ class DeterministicPlanner:
                     support_augmentation=list(semantic.slots.get("support_augmentation") or []),
                 )
             )
+            if family == "browser_destination" and deictic_binding.selected_source == "recent_session_entity":
+                upsert(
+                    RouteCandidate(
+                        route_family="screen_awareness",
+                        query_shape=QueryShape.SCREEN_AWARENESS_REQUEST.value,
+                        score=0.36,
+                        posture_seed="runner_up_candidate",
+                        semantic_reasons=["recent-entity open still competes with live visible-UI grounding"],
+                        score_factors={"context_overlap": 0.36},
+                        required_targets=["visible_screen"],
+                        support_augmentation=["active screen context"],
+                    )
+                )
 
         if decomposition.action_intent in {"send", "share", "message"} and "discord_relay" not in candidates_by_family:
             upsert(
@@ -1109,6 +1135,55 @@ class DeterministicPlanner:
             disqualifiers=provider_disqualifiers,
             provider_fallback_reason=provider_reason,
         )
+        return list(candidates_by_family.values())
+
+    def _augment_route_candidates_from_route_spine_trace(
+        self,
+        candidates: list[RouteCandidate],
+        routing_debug: dict[str, Any] | None,
+    ) -> list[RouteCandidate]:
+        if not isinstance(routing_debug, dict):
+            return candidates
+        route_spine_trace = routing_debug.get("route_spine") if isinstance(routing_debug.get("route_spine"), dict) else {}
+        candidate_payloads = route_spine_trace.get("candidates")
+        if not isinstance(candidate_payloads, list) or not candidate_payloads:
+            planner_v2_trace = routing_debug.get("planner_v2") if isinstance(routing_debug.get("planner_v2"), dict) else {}
+            route_decision = planner_v2_trace.get("route_decision") if isinstance(planner_v2_trace.get("route_decision"), dict) else {}
+            candidate_payloads = route_decision.get("route_candidates")
+        if not isinstance(candidate_payloads, list):
+            return candidates
+        candidates_by_family = {candidate.route_family: candidate for candidate in candidates}
+        for payload in candidate_payloads:
+            if not isinstance(payload, dict):
+                continue
+            family = self._canonical_route_family(str(payload.get("route_family") or "").strip())
+            if not family or family == "generic_provider":
+                continue
+            score = round(float(payload.get("score") or 0.0), 3)
+            existing = candidates_by_family.get(family)
+            if existing is not None and existing.score >= score:
+                continue
+            reasons = [
+                str(reason).strip()
+                for reason in (
+                    list(payload.get("positive_reasons") or [])
+                    + list(payload.get("decline_reasons") or [])
+                )
+                if str(reason).strip()
+            ]
+            candidates_by_family[family] = RouteCandidate(
+                route_family=family,
+                query_shape=existing.query_shape if existing is not None else None,
+                score=score,
+                posture_seed="route_spine_candidate",
+                semantic_reasons=reasons or ["route-spine candidate preserved for routing telemetry"],
+                score_factors={
+                    key: float(value)
+                    for key, value in dict(payload.get("score_factors") or {}).items()
+                    if isinstance(value, (int, float))
+                },
+                required_targets=list(payload.get("missing_preconditions") or []),
+            )
         return list(candidates_by_family.values())
 
     def _decompose_request(
@@ -1596,6 +1671,122 @@ class DeterministicPlanner:
             fallback_path=fallback_path,
         )
 
+    def _merge_route_spine_proposal(
+        self,
+        proposal: SemanticParseProposal,
+        *,
+        slots: dict[str, Any],
+        evidence_note: str | None = None,
+    ) -> SemanticParseProposal:
+        merged_slots = {**slots, **dict(proposal.slots or {})}
+        merged_evidence = list(proposal.evidence or [])
+        if evidence_note and evidence_note not in merged_evidence:
+            merged_evidence.append(evidence_note)
+        return SemanticParseProposal(
+            query_shape=proposal.query_shape,
+            domain=proposal.domain,
+            requested_metric=proposal.requested_metric,
+            requested_action=proposal.requested_action,
+            slots=merged_slots,
+            confidence=proposal.confidence,
+            evidence=merged_evidence,
+            follow_up=proposal.follow_up,
+            fallback_path=proposal.fallback_path,
+        )
+
+    def _screen_awareness_semantic_proposal(
+        self,
+        screen_awareness_evaluation: ScreenPlannerEvaluation | None,
+    ) -> SemanticParseProposal | None:
+        if screen_awareness_evaluation is None:
+            return None
+        if screen_awareness_evaluation.disposition in {
+            ScreenRouteDisposition.PHASE1_ANALYZE,
+            ScreenRouteDisposition.PHASE2_GROUND,
+            ScreenRouteDisposition.PHASE3_GUIDE,
+            ScreenRouteDisposition.PHASE4_VERIFY,
+            ScreenRouteDisposition.PHASE5_ACT,
+            ScreenRouteDisposition.PHASE6_CONTINUE,
+            ScreenRouteDisposition.PHASE8_PROBLEM_SOLVE,
+            ScreenRouteDisposition.PHASE9_WORKFLOW_REUSE,
+            ScreenRouteDisposition.PHASE10_BRAIN_INTEGRATION,
+            ScreenRouteDisposition.PHASE11_POWER,
+        }:
+            execution_type = (
+                "screen_awareness_act"
+                if screen_awareness_evaluation.disposition == ScreenRouteDisposition.PHASE5_ACT
+                else "screen_awareness_continue"
+                if screen_awareness_evaluation.disposition == ScreenRouteDisposition.PHASE6_CONTINUE
+                else "screen_awareness_workflow"
+                if screen_awareness_evaluation.disposition == ScreenRouteDisposition.PHASE9_WORKFLOW_REUSE
+                else "screen_awareness_brain"
+                if screen_awareness_evaluation.disposition == ScreenRouteDisposition.PHASE10_BRAIN_INTEGRATION
+                else "screen_awareness_power"
+                if screen_awareness_evaluation.disposition == ScreenRouteDisposition.PHASE11_POWER
+                else "screen_awareness_analyze"
+            )
+            output_mode = (
+                ResponseMode.ACTION_RESULT.value
+                if screen_awareness_evaluation.disposition == ScreenRouteDisposition.PHASE5_ACT
+                else ResponseMode.SUMMARY_RESULT.value
+            )
+            output_type = "screen_action" if screen_awareness_evaluation.disposition == ScreenRouteDisposition.PHASE5_ACT else "screen_analysis"
+            return self._tool_proposal(
+                query_shape=QueryShape.SCREEN_AWARENESS_REQUEST,
+                domain="screen_awareness",
+                request_type_hint="screen_awareness_response",
+                family="screen_awareness",
+                subject=str(screen_awareness_evaluation.intent.value if screen_awareness_evaluation.intent else "screen"),
+                requested_action=str(
+                    screen_awareness_evaluation.intent.value if screen_awareness_evaluation.intent is not None else ""
+                )
+                or None,
+                confidence=screen_awareness_evaluation.route_confidence,
+                evidence=list(screen_awareness_evaluation.reasons),
+                execution_type=execution_type,
+                output_mode=output_mode,
+                output_type=output_type,
+                slots={
+                    "target_scope": "screen",
+                    "screen_awareness": screen_awareness_evaluation.to_dict(),
+                    "response_contract": dict(screen_awareness_evaluation.response_contract),
+                },
+            )
+        if screen_awareness_evaluation.disposition == ScreenRouteDisposition.PHASE0_SCAFFOLD:
+            response_contract = dict(screen_awareness_evaluation.response_contract)
+            analysis_result = (
+                screen_awareness_evaluation.analysis_result.to_dict()
+                if screen_awareness_evaluation.analysis_result is not None
+                else {}
+            )
+            return self._tool_proposal(
+                query_shape=QueryShape.SCREEN_AWARENESS_REQUEST,
+                domain="screen_awareness",
+                request_type_hint="screen_awareness_scaffold",
+                family="screen_awareness",
+                subject=str(screen_awareness_evaluation.intent.value if screen_awareness_evaluation.intent else "screen"),
+                requested_action=str(
+                    screen_awareness_evaluation.intent.value if screen_awareness_evaluation.intent is not None else ""
+                )
+                or None,
+                confidence=screen_awareness_evaluation.route_confidence,
+                evidence=list(screen_awareness_evaluation.reasons),
+                assistant_message=str(response_contract.get("full_response") or "").strip() or None,
+                execution_type="screen_awareness_scaffold",
+                output_mode=ResponseMode.UNSUPPORTED.value,
+                output_type="screen_analysis",
+                slots={
+                    "target_scope": "screen",
+                    "screen_awareness": screen_awareness_evaluation.to_dict(),
+                    "screen_analysis_result": analysis_result,
+                    "truthfulness_contract": analysis_result.get("truthfulness_contract", {}),
+                    "unsupported_reason_code": "screen_awareness_observation_unavailable",
+                    "unsupported_response_contract": response_contract,
+                    "response_contract": response_contract,
+                },
+            )
+        return None
+
     def _normalize_command(
         self,
         message: str,
@@ -1804,6 +1995,7 @@ class DeterministicPlanner:
         active_posture: dict[str, Any],
         calculation_evaluation: Any | None,
         software_control_evaluation: Any | None,
+        screen_awareness_evaluation: ScreenPlannerEvaluation | None,
     ) -> SemanticParseProposal:
         family = decision.winner.route_family
         slots = self._route_spine_slots(decision)
@@ -1816,6 +2008,136 @@ class DeterministicPlanner:
                 slots=slots,
             )
         lower = decision.intent_frame.normalized_text
+        if family == "screen_awareness":
+            screen_proposal = self._screen_awareness_semantic_proposal(screen_awareness_evaluation)
+            if screen_proposal is not None:
+                return self._merge_route_spine_proposal(
+                    screen_proposal,
+                    slots=slots,
+                    evidence_note="route_spine preserved screen_awareness authority while restoring planner contract details",
+                )
+        if family == "discord_relay":
+            relay_proposal = self._discord_relay_request(
+                message,
+                lower,
+                active_request_state=active_request_state,
+                active_context=active_context,
+            )
+            if relay_proposal is not None:
+                return self._merge_route_spine_proposal(
+                    relay_proposal,
+                    slots=slots,
+                    evidence_note="route_spine preserved discord relay ownership while restoring relay binding contract",
+                )
+        if family in {"browser_destination", "context_clarification"}:
+            deictic_open = self._deictic_open_request(
+                message,
+                lower,
+                surface_mode=surface_mode,
+                active_context=active_context,
+            )
+            if deictic_open is not None:
+                return self._merge_route_spine_proposal(
+                    deictic_open,
+                    slots=slots,
+                    evidence_note="route_spine preserved native open ownership while restoring deictic binding contract",
+                )
+            browser_destination = self._browser_destination_request(
+                message,
+                lower,
+                surface_mode=surface_mode,
+            )
+            if browser_destination is not None:
+                return self._merge_route_spine_proposal(
+                    browser_destination,
+                    slots=slots,
+                    evidence_note="route_spine preserved browser ownership while restoring destination resolution contract",
+                )
+        if family in {"app_control", "context_clarification"}:
+            window_request = self._window_control_request(message, lower)
+            if window_request is not None:
+                return self._merge_route_spine_proposal(
+                    self._tool_proposal(
+                        query_shape=QueryShape.CONTROL_COMMAND,
+                        domain="system",
+                        tool_name="window_control",
+                        tool_arguments=window_request,
+                        request_type_hint="direct_action",
+                        family="window_control",
+                        subject=str(window_request.get("action") or "window_control"),
+                        requested_action=str(window_request.get("action") or "window_control"),
+                        confidence=decision.winner.score or 0.92,
+                        evidence=["window-control phrasing matched a deterministic control request"],
+                        execution_type="execute_control_command",
+                        output_mode=ResponseMode.ACTION_RESULT.value,
+                        output_type="action",
+                    ),
+                    slots=slots,
+                    evidence_note="route_spine restored deictic window-control ownership from the deterministic control contract",
+                )
+            app_request = self._app_control_request(message, lower)
+            if app_request is not None:
+                return self._merge_route_spine_proposal(
+                    self._tool_proposal(
+                        query_shape=QueryShape.CONTROL_COMMAND,
+                        domain="system",
+                        tool_name="app_control",
+                        tool_arguments=app_request,
+                        request_type_hint="direct_action",
+                        family="app_control",
+                        subject=str(app_request.get("app_name") or "app"),
+                        requested_action=str(app_request.get("action") or "launch"),
+                        confidence=decision.winner.score or 0.92,
+                        evidence=["app-control phrasing matched a deterministic control request"],
+                        execution_type="execute_control_command",
+                        output_mode=ResponseMode.ACTION_RESULT.value,
+                        output_type="action",
+                    ),
+                    slots=slots,
+                    evidence_note="route_spine preserved app-control ownership while restoring action normalization",
+                )
+            system_request = self._system_control_request(message, lower)
+            if system_request is not None:
+                return self._merge_route_spine_proposal(
+                    self._tool_proposal(
+                        query_shape=QueryShape.CONTROL_COMMAND,
+                        domain="system",
+                        tool_name="system_control",
+                        tool_arguments=system_request,
+                        request_type_hint="direct_action",
+                        family="system_control",
+                        subject=str(system_request.get("action") or "system_control"),
+                        requested_action=str(system_request.get("action") or "system_control"),
+                        confidence=decision.winner.score or 0.92,
+                        evidence=["system-control phrasing matched a deterministic control request"],
+                        execution_type="execute_control_command",
+                        output_mode=ResponseMode.ACTION_RESULT.value,
+                        output_type="action",
+                    ),
+                    slots=slots,
+                    evidence_note="route_spine restored deterministic system-control shaping",
+                )
+        if family in {"desktop_search", "context_clarification"}:
+            search_request = self._desktop_search_request(message, lower, surface_mode=surface_mode)
+            if search_request is not None:
+                return self._merge_route_spine_proposal(
+                    self._tool_proposal(
+                        query_shape=QueryShape.SEARCH_AND_OPEN,
+                        domain="workflow",
+                        tool_name="desktop_search",
+                        tool_arguments=search_request,
+                        request_type_hint="search_and_act",
+                        family="desktop_search",
+                        subject=str(search_request.get("query") or "desktop_search"),
+                        requested_action=str(search_request.get("action") or "search"),
+                        confidence=decision.winner.score or 0.92,
+                        evidence=["desktop-search phrasing matched a deterministic search-and-open request"],
+                        execution_type="search_then_open",
+                        output_mode=ResponseMode.SEARCH_RESULT.value,
+                    ),
+                    slots=slots,
+                    evidence_note="route_spine preserved desktop-search ownership while restoring search-and-open contract",
+                )
         if family == "unsupported":
             return self._tool_proposal(
                 query_shape=QueryShape.SUMMARY_REQUEST,
@@ -1914,7 +2236,7 @@ class DeterministicPlanner:
                 output_type="action",
                 slots=slots,
             )
-        if decision.clarification_needed:
+        if decision.clarification_needed and family != "task_continuity":
             return self._route_spine_clarification_proposal(decision, slots=slots)
         if family == "discord_relay":
             destination_alias = str(decision.intent_frame.target_text or "").strip() or "discord"
@@ -2062,14 +2384,20 @@ class DeterministicPlanner:
                 slots=slots,
             )
         if family == "task_continuity":
-            tool_name = "workspace_where_left_off" if "left off" in lower else "workspace_next_steps"
-            requested_action = "where_left_off" if tool_name == "workspace_where_left_off" else "next_steps"
+            if self._looks_like_where_left_off(lower):
+                tool_name = "workspace_where_left_off"
+                requested_action = "where_left_off"
+                request_type_hint = "workspace_restore"
+            else:
+                tool_name = "workspace_next_steps"
+                requested_action = "next_steps"
+                request_type_hint = "direct_deterministic_fact"
             return self._tool_proposal(
                 query_shape=QueryShape.WORKSPACE_REQUEST,
                 domain="workspace",
                 tool_name=tool_name,
                 tool_arguments={},
-                request_type_hint="workspace_restore" if tool_name == "workspace_where_left_off" else "direct_deterministic_fact",
+                request_type_hint=request_type_hint,
                 family="task_continuity",
                 subject=requested_action,
                 requested_action=requested_action,
@@ -2198,27 +2526,33 @@ class DeterministicPlanner:
             if "restore" in lower:
                 tool_name = "workspace_restore"
                 requested_action = "restore"
+                request_type_hint = "workspace_restore"
             elif "archive" in lower:
                 tool_name = "workspace_archive"
                 requested_action = "archive"
+                request_type_hint = "direct_action"
             elif "save" in lower:
                 tool_name = "workspace_save"
                 requested_action = "save"
+                request_type_hint = "direct_action"
             elif "clear" in lower:
                 tool_name = "workspace_clear"
                 requested_action = "clear"
+                request_type_hint = "direct_action"
             elif "list" in lower or "show" in lower:
                 tool_name = "workspace_list"
                 requested_action = "list"
+                request_type_hint = "direct_deterministic_fact"
             else:
                 tool_name = "workspace_assemble"
                 requested_action = "assemble"
+                request_type_hint = "workspace_assembly"
             return self._tool_proposal(
                 query_shape=QueryShape.WORKSPACE_REQUEST,
                 domain="workspace",
                 tool_name=tool_name,
                 tool_arguments={"query": message} if tool_name in {"workspace_restore", "workspace_assemble", "workspace_archive"} else {},
-                request_type_hint="workspace_restore" if tool_name == "workspace_restore" else "workspace_operation",
+                request_type_hint=request_type_hint,
                 family="workspace_operations",
                 subject=requested_action,
                 requested_action=requested_action,
@@ -2287,7 +2621,7 @@ class DeterministicPlanner:
                 domain="workflow",
                 tool_name="desktop_search",
                 tool_arguments=search_request,
-                request_type_hint="desktop_search",
+                request_type_hint="search_and_act",
                 family="desktop_search",
                 subject=str(search_request.get("query") or "desktop_search"),
                 requested_action=str(search_request.get("action") or "search"),
@@ -2436,16 +2770,76 @@ class DeterministicPlanner:
 
     def _route_spine_status_proposal(self, decision: RouteSpineDecision, *, slots: dict[str, Any]) -> SemanticParseProposal:
         family = decision.winner.route_family
+        lower = decision.intent_frame.normalized_text
         if family == "network":
+            if self._looks_like_network_throughput(lower):
+                metric = self._network_throughput_metric(lower)
+                return self._tool_proposal(
+                    query_shape=QueryShape.CURRENT_METRIC,
+                    domain="network",
+                    tool_name="network_throughput",
+                    tool_arguments={"metric": metric, "present_in": "none"},
+                    request_type_hint="direct_deterministic_fact",
+                    family="network",
+                    subject="throughput",
+                    requested_metric=metric,
+                    timescale="now",
+                    output_type="numeric",
+                    confidence=decision.winner.score or 0.95,
+                    evidence=["network throughput phrasing detected"],
+                    execution_type="run_measurement",
+                    output_mode=ResponseMode.NUMERIC_METRIC.value,
+                    slots=slots,
+                )
+            if any(token in lower for token in {"unstable today", "earlier", "lately", "recently"}) and any(
+                token in lower for token in {"wi-fi", "wifi", "internet", "network", "connection"}
+            ) and any(token in lower for token in {"unstable", "drop", "dropped", "skipping", "choppy", "disconnect"}):
+                return self._tool_proposal(
+                    query_shape=QueryShape.HISTORY_TREND,
+                    domain="network",
+                    tool_name="network_diagnosis",
+                    tool_arguments={"focus": "history", "diagnostic_burst": False},
+                    request_type_hint="deterministic_diagnostic_request",
+                    family="network_diagnosis",
+                    subject="network_history",
+                    requested_metric="stability",
+                    timescale="today" if "today" in lower else "recent",
+                    output_type="summary",
+                    diagnostic_mode=True,
+                    confidence=decision.winner.score or 0.94,
+                    evidence=["network history phrasing detected"],
+                    execution_type="analyze_history",
+                    output_mode=ResponseMode.HISTORY_SUMMARY.value,
+                    slots=slots,
+                )
+            if self._looks_like_network_diagnosis(lower):
+                return self._tool_proposal(
+                    query_shape=QueryShape.DIAGNOSTIC_CAUSAL,
+                    domain="network",
+                    tool_name="network_diagnosis",
+                    tool_arguments={"focus": self._network_focus(lower, previous="overview"), "diagnostic_burst": True},
+                    request_type_hint="deterministic_diagnostic_request",
+                    family="network_diagnosis",
+                    subject="network_diagnosis",
+                    requested_metric="stability",
+                    output_type="summary",
+                    diagnostic_mode=True,
+                    confidence=decision.winner.score or 0.95,
+                    evidence=["network diagnosis phrasing detected"],
+                    execution_type="diagnose_from_telemetry",
+                    output_mode=ResponseMode.DIAGNOSTIC_SUMMARY.value,
+                    slots=slots,
+                )
+            focus = self._network_status_focus(lower)
             return self._tool_proposal(
                 query_shape=QueryShape.CURRENT_STATUS,
                 domain="network",
                 tool_name="network_status",
-                tool_arguments={"focus": "overview"},
+                tool_arguments={"focus": focus},
                 request_type_hint="direct_deterministic_fact",
                 family="network",
                 subject="network",
-                requested_metric="overview",
+                requested_metric=focus,
                 confidence=decision.winner.score or 0.9,
                 evidence=["route_spine selected network status from system-status contract"],
                 execution_type="retrieve_current_status",
@@ -2472,6 +2866,24 @@ class DeterministicPlanner:
                 slots=slots,
             )
         if family == "window_control":
+            window_request = self._window_control_request(decision.intent_frame.raw_text, lower)
+            if window_request is not None:
+                return self._tool_proposal(
+                    query_shape=QueryShape.CONTROL_COMMAND,
+                    domain="system",
+                    tool_name="window_control",
+                    tool_arguments=window_request,
+                    request_type_hint="direct_action",
+                    family="window_control",
+                    subject=str(window_request.get("action") or "window_control"),
+                    requested_action=str(window_request.get("action") or "window_control"),
+                    confidence=decision.winner.score or 0.92,
+                    evidence=["window-control phrasing matched a deterministic control request"],
+                    execution_type="execute_control_command",
+                    output_mode=ResponseMode.ACTION_RESULT.value,
+                    output_type="action",
+                    slots=slots,
+                )
             return self._tool_proposal(
                 query_shape=QueryShape.CURRENT_STATUS,
                 domain="system",
@@ -2505,6 +2917,61 @@ class DeterministicPlanner:
                 slots=slots,
             )
         if family == "resources":
+            if self._looks_like_resource_diagnosis(lower):
+                return self._tool_proposal(
+                    query_shape=QueryShape.DIAGNOSTIC_CAUSAL,
+                    domain="system",
+                    tool_name="resource_diagnosis",
+                    tool_arguments={},
+                    request_type_hint="deterministic_diagnostic_request",
+                    family="resource_diagnosis",
+                    subject="resource_diagnosis",
+                    requested_metric="bottleneck",
+                    diagnostic_mode=True,
+                    confidence=decision.winner.score or 0.95,
+                    evidence=["machine slowdown diagnosis phrasing detected"],
+                    execution_type="diagnose_from_telemetry",
+                    output_mode=ResponseMode.DIAGNOSTIC_SUMMARY.value,
+                    slots=slots,
+                )
+            resource_query_kind = self._resource_query_kind(lower, recent_family="resources")
+            if resource_query_kind is not None:
+                focus = self._resource_focus(lower)
+                metric = self._resource_metric(lower, focus=focus, query_kind=resource_query_kind)
+                query_shape = QueryShape.CURRENT_METRIC
+                output_mode = ResponseMode.NUMERIC_METRIC.value
+                output_type = "numeric"
+                request_type_hint = "direct_deterministic_fact"
+                diagnostic_mode = False
+                if resource_query_kind == "identity":
+                    query_shape = QueryShape.IDENTITY_LOOKUP
+                    output_mode = ResponseMode.IDENTITY_SUMMARY.value
+                    output_type = "identity"
+                elif resource_query_kind == "diagnostic":
+                    query_shape = QueryShape.DIAGNOSTIC_CAUSAL
+                    output_mode = ResponseMode.DIAGNOSTIC_SUMMARY.value
+                    output_type = "interpreted"
+                    request_type_hint = "deterministic_diagnostic_request"
+                    diagnostic_mode = True
+                domain = focus if focus in {"gpu", "cpu", "ram"} else "system"
+                return self._tool_proposal(
+                    query_shape=query_shape,
+                    domain=domain,
+                    tool_name="resource_status",
+                    tool_arguments={"focus": focus, "query_kind": resource_query_kind, "metric": metric},
+                    request_type_hint=request_type_hint,
+                    family="resource",
+                    subject=focus,
+                    requested_metric=metric,
+                    timescale="now" if query_shape == QueryShape.CURRENT_METRIC else None,
+                    output_type=output_type,
+                    diagnostic_mode=diagnostic_mode,
+                    confidence=decision.winner.score or 0.95,
+                    evidence=["resource query phrasing detected"],
+                    execution_type="retrieve_identity" if query_shape == QueryShape.IDENTITY_LOOKUP else "diagnose_from_telemetry" if diagnostic_mode else "retrieve_live_metric",
+                    output_mode=output_mode,
+                    slots=slots,
+                )
             return self._tool_proposal(
                 query_shape=QueryShape.CURRENT_STATUS,
                 domain="system",
@@ -2520,16 +2987,55 @@ class DeterministicPlanner:
                 output_mode=ResponseMode.STATUS_SUMMARY.value,
                 slots=slots,
             )
-        tool_name = "power_projection" if "power_projection" in decision.tool_candidates else "power_status"
+        if self._looks_like_power_diagnosis(lower):
+            return self._tool_proposal(
+                query_shape=QueryShape.DIAGNOSTIC_CAUSAL,
+                domain="power",
+                tool_name="power_diagnosis",
+                tool_arguments={},
+                request_type_hint="deterministic_diagnostic_request",
+                family="power_diagnosis",
+                subject="power_diagnosis",
+                requested_metric="drain_rate",
+                diagnostic_mode=True,
+                confidence=decision.winner.score or 0.95,
+                evidence=["battery-drain diagnosis phrasing detected"],
+                execution_type="diagnose_from_telemetry",
+                output_mode=ResponseMode.DIAGNOSTIC_SUMMARY.value,
+                slots=slots,
+            )
+        if self._looks_like_power_projection(lower, recent_family="power"):
+            metric, target_percent = self._power_projection_shape(lower, previous_parameters={})
+            return self._tool_proposal(
+                query_shape=QueryShape.FORECAST_REQUEST,
+                domain="power",
+                tool_name="power_projection",
+                tool_arguments={
+                    "metric": metric,
+                    "target_percent": target_percent,
+                    "assume_unplugged": self._assume_unplugged(lower, previous=False),
+                },
+                request_type_hint="deterministic_projection_request",
+                family="power",
+                subject="power_projection",
+                requested_metric=metric,
+                output_type="summary",
+                confidence=decision.winner.score or 0.95,
+                evidence=["power projection phrasing detected"],
+                execution_type="project_power_state",
+                output_mode=ResponseMode.FORECAST_SUMMARY.value,
+                slots=slots,
+            )
+        focus = self._power_focus(lower)
         return self._tool_proposal(
             query_shape=QueryShape.CURRENT_STATUS,
             domain="power",
-            tool_name=tool_name,
-            tool_arguments={"focus": "overview"},
+            tool_name="power_status",
+            tool_arguments={"focus": focus},
             request_type_hint="direct_deterministic_fact",
             family="power",
             subject="power",
-            requested_metric="projection" if tool_name == "power_projection" else "overview",
+            requested_metric=focus,
             confidence=decision.winner.score or 0.9,
             evidence=["route_spine selected power status"],
             execution_type="retrieve_current_status",
@@ -3041,92 +3547,9 @@ class DeterministicPlanner:
         if route_context is not None:
             return route_context
 
-        if screen_awareness_evaluation.disposition in {
-            ScreenRouteDisposition.PHASE1_ANALYZE,
-            ScreenRouteDisposition.PHASE2_GROUND,
-            ScreenRouteDisposition.PHASE3_GUIDE,
-            ScreenRouteDisposition.PHASE4_VERIFY,
-            ScreenRouteDisposition.PHASE5_ACT,
-            ScreenRouteDisposition.PHASE6_CONTINUE,
-            ScreenRouteDisposition.PHASE8_PROBLEM_SOLVE,
-            ScreenRouteDisposition.PHASE9_WORKFLOW_REUSE,
-            ScreenRouteDisposition.PHASE10_BRAIN_INTEGRATION,
-            ScreenRouteDisposition.PHASE11_POWER,
-        }:
-            execution_type = (
-                "screen_awareness_act"
-                if screen_awareness_evaluation.disposition == ScreenRouteDisposition.PHASE5_ACT
-                else "screen_awareness_continue"
-                if screen_awareness_evaluation.disposition == ScreenRouteDisposition.PHASE6_CONTINUE
-                else "screen_awareness_workflow"
-                if screen_awareness_evaluation.disposition == ScreenRouteDisposition.PHASE9_WORKFLOW_REUSE
-                else "screen_awareness_brain"
-                if screen_awareness_evaluation.disposition == ScreenRouteDisposition.PHASE10_BRAIN_INTEGRATION
-                else "screen_awareness_power"
-                if screen_awareness_evaluation.disposition == ScreenRouteDisposition.PHASE11_POWER
-                else "screen_awareness_analyze"
-            )
-            output_mode = (
-                ResponseMode.ACTION_RESULT.value
-                if screen_awareness_evaluation.disposition == ScreenRouteDisposition.PHASE5_ACT
-                else ResponseMode.SUMMARY_RESULT.value
-            )
-            output_type = "screen_action" if screen_awareness_evaluation.disposition == ScreenRouteDisposition.PHASE5_ACT else "screen_analysis"
-            return self._tool_proposal(
-                query_shape=QueryShape.SCREEN_AWARENESS_REQUEST,
-                domain="screen_awareness",
-                request_type_hint="screen_awareness_response",
-                family="screen_awareness",
-                subject=str(screen_awareness_evaluation.intent.value if screen_awareness_evaluation.intent else "screen"),
-                requested_action=str(
-                    screen_awareness_evaluation.intent.value if screen_awareness_evaluation.intent is not None else ""
-                )
-                or None,
-                confidence=screen_awareness_evaluation.route_confidence,
-                evidence=list(screen_awareness_evaluation.reasons),
-                execution_type=execution_type,
-                output_mode=output_mode,
-                output_type=output_type,
-                slots={
-                    "target_scope": "screen",
-                    "screen_awareness": screen_awareness_evaluation.to_dict(),
-                    "response_contract": dict(screen_awareness_evaluation.response_contract),
-                },
-            )
-
-        if screen_awareness_evaluation.disposition == ScreenRouteDisposition.PHASE0_SCAFFOLD:
-            response_contract = dict(screen_awareness_evaluation.response_contract)
-            analysis_result = (
-                screen_awareness_evaluation.analysis_result.to_dict()
-                if screen_awareness_evaluation.analysis_result is not None
-                else {}
-            )
-            return self._tool_proposal(
-                query_shape=QueryShape.SCREEN_AWARENESS_REQUEST,
-                domain="screen_awareness",
-                request_type_hint="screen_awareness_scaffold",
-                family="screen_awareness",
-                subject=str(screen_awareness_evaluation.intent.value if screen_awareness_evaluation.intent else "screen"),
-                requested_action=str(
-                    screen_awareness_evaluation.intent.value if screen_awareness_evaluation.intent is not None else ""
-                )
-                or None,
-                confidence=screen_awareness_evaluation.route_confidence,
-                evidence=list(screen_awareness_evaluation.reasons),
-                assistant_message=str(response_contract.get("full_response") or "").strip() or None,
-                execution_type="screen_awareness_scaffold",
-                output_mode=ResponseMode.UNSUPPORTED.value,
-                output_type="screen_analysis",
-                slots={
-                    "target_scope": "screen",
-                    "screen_awareness": screen_awareness_evaluation.to_dict(),
-                    "screen_analysis_result": analysis_result,
-                    "truthfulness_contract": analysis_result.get("truthfulness_contract", {}),
-                    "unsupported_reason_code": "screen_awareness_observation_unavailable",
-                    "unsupported_response_contract": response_contract,
-                    "response_contract": response_contract,
-                },
-            )
+        screen_awareness_proposal = self._screen_awareness_semantic_proposal(screen_awareness_evaluation)
+        if screen_awareness_proposal is not None:
+            return screen_awareness_proposal
 
         discord_relay = self._discord_relay_request(
             message,

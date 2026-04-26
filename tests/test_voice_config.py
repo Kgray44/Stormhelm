@@ -22,6 +22,19 @@ def test_load_config_defaults_voice_to_disabled_foundation(temp_project_root) ->
     assert config.voice.playback.max_audio_bytes == 10_000_000
     assert config.voice.playback.max_duration_ms == 120_000
     assert config.voice.playback.delete_transient_after_playback is True
+    assert config.voice.capture.enabled is False
+    assert config.voice.capture.provider == "local"
+    assert config.voice.capture.mode == "push_to_talk"
+    assert config.voice.capture.device == "default"
+    assert config.voice.capture.sample_rate == 16000
+    assert config.voice.capture.channels == 1
+    assert config.voice.capture.format == "wav"
+    assert config.voice.capture.max_duration_ms == 30_000
+    assert config.voice.capture.max_audio_bytes == 10_000_000
+    assert config.voice.capture.auto_stop_on_max_duration is True
+    assert config.voice.capture.persist_captured_audio is False
+    assert config.voice.capture.delete_transient_after_turn is True
+    assert config.voice.capture.allow_dev_capture is False
     assert config.voice.openai.stt_model == "gpt-4o-mini-transcribe"
     assert config.voice.openai.transcription_language is None
     assert config.voice.openai.transcription_prompt is None
@@ -59,6 +72,19 @@ def test_load_config_applies_voice_environment_overrides(temp_project_root) -> N
             "STORMHELM_VOICE_PLAYBACK_MAX_AUDIO_BYTES": "456789",
             "STORMHELM_VOICE_PLAYBACK_MAX_DURATION_MS": "6543",
             "STORMHELM_VOICE_PLAYBACK_DELETE_TRANSIENT_AFTER_PLAYBACK": "false",
+            "STORMHELM_VOICE_CAPTURE_ENABLED": "true",
+            "STORMHELM_VOICE_CAPTURE_PROVIDER": "mock",
+            "STORMHELM_VOICE_CAPTURE_MODE": "push_to_talk",
+            "STORMHELM_VOICE_CAPTURE_DEVICE": "desk-mic",
+            "STORMHELM_VOICE_CAPTURE_SAMPLE_RATE": "24000",
+            "STORMHELM_VOICE_CAPTURE_CHANNELS": "2",
+            "STORMHELM_VOICE_CAPTURE_FORMAT": "webm",
+            "STORMHELM_VOICE_CAPTURE_MAX_DURATION_MS": "12345",
+            "STORMHELM_VOICE_CAPTURE_MAX_AUDIO_BYTES": "987654",
+            "STORMHELM_VOICE_CAPTURE_AUTO_STOP_ON_MAX_DURATION": "false",
+            "STORMHELM_VOICE_CAPTURE_PERSIST_CAPTURED_AUDIO": "true",
+            "STORMHELM_VOICE_CAPTURE_DELETE_TRANSIENT_AFTER_TURN": "false",
+            "STORMHELM_VOICE_CAPTURE_ALLOW_DEV_CAPTURE": "true",
             "STORMHELM_VOICE_OPENAI_STT_MODEL": "gpt-4o-transcribe",
             "STORMHELM_VOICE_OPENAI_TRANSCRIPTION_LANGUAGE": "en",
             "STORMHELM_VOICE_OPENAI_TRANSCRIPTION_PROMPT": "Stormhelm command terms",
@@ -93,6 +119,19 @@ def test_load_config_applies_voice_environment_overrides(temp_project_root) -> N
     assert config.voice.playback.max_audio_bytes == 456789
     assert config.voice.playback.max_duration_ms == 6543
     assert config.voice.playback.delete_transient_after_playback is False
+    assert config.voice.capture.enabled is True
+    assert config.voice.capture.provider == "mock"
+    assert config.voice.capture.mode == "push_to_talk"
+    assert config.voice.capture.device == "desk-mic"
+    assert config.voice.capture.sample_rate == 24000
+    assert config.voice.capture.channels == 2
+    assert config.voice.capture.format == "webm"
+    assert config.voice.capture.max_duration_ms == 12345
+    assert config.voice.capture.max_audio_bytes == 987654
+    assert config.voice.capture.auto_stop_on_max_duration is False
+    assert config.voice.capture.persist_captured_audio is True
+    assert config.voice.capture.delete_transient_after_turn is False
+    assert config.voice.capture.allow_dev_capture is True
     assert config.voice.openai.stt_model == "gpt-4o-transcribe"
     assert config.voice.openai.transcription_language == "en"
     assert config.voice.openai.transcription_prompt == "Stormhelm command terms"

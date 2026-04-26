@@ -68,7 +68,7 @@ def test_stt_status_snapshot_reports_last_transcription_without_raw_audio() -> N
     snapshot = service.status_snapshot()
 
     assert result.ok is True
-    assert snapshot["current_phase"] == "voice4"
+    assert snapshot["current_phase"] == "voice5"
     assert snapshot["stt"]["enabled"] is True
     assert snapshot["stt"]["provider"] == "mock"
     assert snapshot["stt"]["model"] == "mock-stt"

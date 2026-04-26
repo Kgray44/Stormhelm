@@ -18,6 +18,7 @@ class CoreApiClient(QtCore.QObject):
     notes_received = QtCore.Signal(list)
     settings_received = QtCore.Signal(dict)
     note_saved = QtCore.Signal(dict)
+    voice_action_received = QtCore.Signal(dict)
     stream_event_received = QtCore.Signal(dict)
     stream_state_received = QtCore.Signal(dict)
     stream_gap_received = QtCore.Signal(dict)
@@ -55,7 +56,12 @@ class CoreApiClient(QtCore.QObject):
         )
 
     def fetch_jobs(self, limit: int = 50) -> None:
-        self._send_json("GET", f"/jobs?limit={limit}", None, lambda payload: self.jobs_received.emit(payload.get("jobs", [])))
+        self._send_json(
+            "GET",
+            f"/jobs?limit={limit}",
+            None,
+            lambda payload: self.jobs_received.emit(payload.get("jobs", [])),
+        )
 
     def fetch_events(self, since_id: int = 0, limit: int = 100) -> None:
         self._send_json(
@@ -65,8 +71,12 @@ class CoreApiClient(QtCore.QObject):
             lambda payload: self.events_received.emit(payload.get("events", [])),
         )
 
-    def start_event_stream(self, *, session_id: str = "default", cursor: int | None = None) -> None:
-        self._stream_requested_session_id = str(session_id or "default").strip() or "default"
+    def start_event_stream(
+        self, *, session_id: str = "default", cursor: int | None = None
+    ) -> None:
+        self._stream_requested_session_id = (
+            str(session_id or "default").strip() or "default"
+        )
         self._stream_manual_stop = False
         self._stream_reconnect_timer.stop()
         if cursor is not None:
@@ -82,7 +92,12 @@ class CoreApiClient(QtCore.QObject):
         self._emit_client_stream_state("stopped", cursor=self._stream_last_cursor)
 
     def fetch_notes(self, limit: int = 50) -> None:
-        self._send_json("GET", f"/notes?limit={limit}", None, lambda payload: self.notes_received.emit(payload.get("notes", [])))
+        self._send_json(
+            "GET",
+            f"/notes?limit={limit}",
+            None,
+            lambda payload: self.notes_received.emit(payload.get("notes", [])),
+        )
 
     def fetch_settings(self) -> None:
         self._send_json("GET", "/settings", None, self.settings_received.emit)
@@ -90,7 +105,9 @@ class CoreApiClient(QtCore.QObject):
     def report_shell_presence(self, payload: dict[str, object]) -> None:
         self._send_json("POST", "/lifecycle/shell", payload, lambda _payload: None)
 
-    def report_shell_detached(self, pid: int | None = None, *, sync: bool = False) -> None:
+    def report_shell_detached(
+        self, pid: int | None = None, *, sync: bool = False
+    ) -> None:
         payload = {
             "pid": int(pid or 0),
             "mode": "ghost",
@@ -115,7 +132,9 @@ class CoreApiClient(QtCore.QObject):
         self._send_json("POST", "/lifecycle/resolution", payload, lambda _payload: None)
 
     def prepare_cleanup_plan(self, payload: dict[str, object]) -> None:
-        self._send_json("POST", "/lifecycle/cleanup/plan", payload, lambda _payload: None)
+        self._send_json(
+            "POST", "/lifecycle/cleanup/plan", payload, lambda _payload: None
+        )
 
     def execute_cleanup(self, payload: dict[str, object]) -> None:
         self._send_json("POST", "/lifecycle/cleanup", payload, lambda _payload: None)
@@ -172,7 +191,14 @@ class CoreApiClient(QtCore.QObject):
             self.chat_received.emit,
         )
 
-    def save_note(self, title: str, content: str, *, session_id: str = "default", workspace_id: str = "") -> None:
+    def save_note(
+        self,
+        title: str,
+        content: str,
+        *,
+        session_id: str = "default",
+        workspace_id: str = "",
+    ) -> None:
         self._send_json(
             "POST",
             "/notes",
@@ -185,6 +211,66 @@ class CoreApiClient(QtCore.QObject):
             self.note_saved.emit,
         )
 
+    def start_voice_capture(self, payload: dict[str, object] | None = None) -> None:
+        self._send_json(
+            "POST",
+            "/voice/capture/start",
+            payload or {},
+            self.voice_action_received.emit,
+        )
+
+    def stop_voice_capture(self, payload: dict[str, object] | None = None) -> None:
+        self._send_json(
+            "POST",
+            "/voice/capture/stop",
+            payload or {},
+            self.voice_action_received.emit,
+        )
+
+    def cancel_voice_capture(self, payload: dict[str, object] | None = None) -> None:
+        self._send_json(
+            "POST",
+            "/voice/capture/cancel",
+            payload or {},
+            self.voice_action_received.emit,
+        )
+
+    def fetch_voice_readiness(self) -> None:
+        self._send_json(
+            "GET", "/voice/readiness", None, self.voice_action_received.emit
+        )
+
+    def fetch_voice_pipeline(self) -> None:
+        self._send_json("GET", "/voice/pipeline", None, self.voice_action_received.emit)
+
+    def submit_captured_audio_turn(
+        self, payload: dict[str, object] | None = None
+    ) -> None:
+        self._send_json(
+            "POST",
+            "/voice/capture/submit",
+            payload or {},
+            self.voice_action_received.emit,
+        )
+
+    def capture_and_submit_voice_turn(
+        self, payload: dict[str, object] | None = None
+    ) -> None:
+        self._send_json(
+            "POST",
+            "/voice/capture/turn",
+            payload or {},
+            self.voice_action_received.emit,
+        )
+
+    def stop_voice_playback(self, payload: dict[str, object] | None = None) -> None:
+        self._send_json(
+            "POST",
+            "/voice/playback/stop",
+            payload or {},
+            self.voice_action_received.emit,
+        )
+
     def _send_json(
         self,
         method: str,
@@ -193,7 +279,9 @@ class CoreApiClient(QtCore.QObject):
         callback: Callable[[dict], None],
     ) -> None:
         request = QtNetwork.QNetworkRequest(QtCore.QUrl(f"{self.base_url}{path}"))
-        request.setHeader(QtNetwork.QNetworkRequest.ContentTypeHeader, "application/json")
+        request.setHeader(
+            QtNetwork.QNetworkRequest.ContentTypeHeader, "application/json"
+        )
 
         if method == "GET":
             reply = self.manager.get(request)
@@ -201,13 +289,25 @@ class CoreApiClient(QtCore.QObject):
             data = json.dumps(payload or {}).encode("utf-8")
             reply = self.manager.post(request, QtCore.QByteArray(data))
 
-        reply.finished.connect(lambda reply=reply, cb=callback, purpose=path: self._handle_reply(reply, cb, purpose))
+        reply.finished.connect(
+            lambda reply=reply, cb=callback, purpose=path: self._handle_reply(
+                reply, cb, purpose
+            )
+        )
 
-    def _send_json_and_wait(self, method: str, path: str, payload: dict[str, object] | None) -> None:
+    def _send_json_and_wait(
+        self, method: str, path: str, payload: dict[str, object] | None
+    ) -> None:
         request = QtNetwork.QNetworkRequest(QtCore.QUrl(f"{self.base_url}{path}"))
-        request.setHeader(QtNetwork.QNetworkRequest.ContentTypeHeader, "application/json")
+        request.setHeader(
+            QtNetwork.QNetworkRequest.ContentTypeHeader, "application/json"
+        )
         data = json.dumps(payload or {}).encode("utf-8")
-        reply = self.manager.post(request, QtCore.QByteArray(data)) if method == "POST" else self.manager.get(request)
+        reply = (
+            self.manager.post(request, QtCore.QByteArray(data))
+            if method == "POST"
+            else self.manager.get(request)
+        )
         loop = QtCore.QEventLoop()
         timer = QtCore.QTimer()
         timer.setSingleShot(True)
@@ -223,12 +323,16 @@ class CoreApiClient(QtCore.QObject):
         query = f"?session_id={self._stream_requested_session_id}"
         if cursor is not None:
             query += f"&cursor={max(0, int(cursor))}"
-        request = QtNetwork.QNetworkRequest(QtCore.QUrl(f"{self.base_url}/events/stream{query}"))
+        request = QtNetwork.QNetworkRequest(
+            QtCore.QUrl(f"{self.base_url}/events/stream{query}")
+        )
         request.setRawHeader(b"Accept", b"text/event-stream")
         request.setRawHeader(b"Cache-Control", b"no-cache")
         reply = self.manager.get(request)
         self._stream_reply = reply
-        reply.readyRead.connect(lambda reply=reply: self._handle_stream_ready_read(reply))
+        reply.readyRead.connect(
+            lambda reply=reply: self._handle_stream_ready_read(reply)
+        )
         reply.finished.connect(lambda reply=reply: self._handle_stream_finished(reply))
 
     def _handle_stream_ready_read(self, reply: QtNetwork.QNetworkReply) -> None:
@@ -240,7 +344,6 @@ class CoreApiClient(QtCore.QObject):
         if reply is not self._stream_reply:
             return
         self._consume_stream_chunk(bytes(reply.readAll()))
-        error = reply.error()
         error_text = reply.errorString()
         self._stream_reply = None
         reply.deleteLater()
@@ -281,7 +384,11 @@ class CoreApiClient(QtCore.QObject):
     def _consume_stream_chunk(self, raw: bytes) -> None:
         if not raw:
             return
-        self._stream_buffer += raw.decode("utf-8", errors="ignore").replace("\r\n", "\n").replace("\r", "\n")
+        self._stream_buffer += (
+            raw.decode("utf-8", errors="ignore")
+            .replace("\r\n", "\n")
+            .replace("\r", "\n")
+        )
         while "\n\n" in self._stream_buffer:
             block, self._stream_buffer = self._stream_buffer.split("\n\n", 1)
             self._process_stream_block(block)
@@ -308,7 +415,9 @@ class CoreApiClient(QtCore.QObject):
         try:
             payload = json.loads("\n".join(data_lines))
         except Exception as error:
-            self.error_occurred.emit("/events/stream", f"Malformed stream frame: {error}")
+            self.error_occurred.emit(
+                "/events/stream", f"Malformed stream frame: {error}"
+            )
             return
 
         if event_name == "stormhelm.event":
@@ -344,7 +453,9 @@ class CoreApiClient(QtCore.QObject):
                 "session_id": self._stream_requested_session_id,
                 "cursor": cursor,
                 "reason": reason,
-                "reconnect_attempt": reconnect_attempt if reconnect_attempt is not None else self._stream_reconnect_attempt,
+                "reconnect_attempt": reconnect_attempt
+                if reconnect_attempt is not None
+                else self._stream_reconnect_attempt,
             }
         )
 
@@ -357,7 +468,9 @@ class CoreApiClient(QtCore.QObject):
         try:
             if reply.error() != QtNetwork.QNetworkReply.NetworkError.NoError:
                 raw = bytes(reply.readAll()).decode("utf-8")
-                self.error_occurred.emit(purpose, self._error_message_from_body(raw) or reply.errorString())
+                self.error_occurred.emit(
+                    purpose, self._error_message_from_body(raw) or reply.errorString()
+                )
                 return
 
             raw = bytes(reply.readAll()).decode("utf-8")
@@ -380,7 +493,9 @@ class CoreApiClient(QtCore.QObject):
             if isinstance(detail, str):
                 return detail.strip()
             if isinstance(detail, list):
-                messages = [self._error_message_from_detail_item(item) for item in detail]
+                messages = [
+                    self._error_message_from_detail_item(item) for item in detail
+                ]
                 return "; ".join(message for message in messages if message)
         return ""
 
