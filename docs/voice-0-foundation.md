@@ -59,6 +59,15 @@ Voice-4 adds:
 - playback diagnostics for provider/device/volume, last request/result, active playback, timestamps, blocked reasons, and the invariant that Stormhelm never claims the user heard audio;
 - playback events including `voice.playback_request_created`, `voice.playback_blocked`, `voice.playback_started`, `voice.playback_completed`, `voice.playback_failed`, and `voice.playback_stopped`.
 
+Voice-8 adds:
+
+- `VoicePipelineScenario`, `VoicePipelineExpectedResult`, and `VoicePipelineEvaluationResult` for deterministic supervised-loop evaluation;
+- `run_voice_pipeline_scenario(...)` and `run_voice_pipeline_suite(...)` for mocked end-to-end checks that exercise capture-stage outcomes, Voice-2 STT, the Voice-1 Core bridge, Voice-3 TTS, Voice-4 playback, and stop-playback behavior;
+- stage-specific pipeline summaries that keep capture, transcription, Core routing, spoken response preparation, synthesis, and playback truth separate;
+- correlated synthetic voice pipeline events for evaluation, including capture start/stop/cancel/timeout, STT, Core, TTS, audio-output, and playback events;
+- compact Ghost-facing payloads for evaluation assertions that avoid wake/VAD/Realtime/always-listening claims and avoid saying the user heard audio;
+- failure-path tests for capture cancellation, capture timeout, STT failure, empty transcript, Core clarification, Core confirmation, Core blocked, TTS disabled/failure, playback unavailable/failure, and stop playback.
+
 Still not implemented:
 
 - real microphone capture;
@@ -89,6 +98,6 @@ voice available = voice.enabled
                && configured voice OpenAI models are present
 ```
 
-If a mock provider is active, diagnostics must say so. If a later feature is not implemented yet, diagnostics must report `not_implemented` or a truthful `no_*` runtime flag instead of implying listening, speaking, Realtime, or production audio playback support. Voice-2 supports controlled audio file/blob/fixture STT only; it must not imply live microphone capture or continuous listening. Voice-3 supports controlled TTS audio artifact generation only; it must not imply Stormhelm spoke aloud, that playback occurred, or that the user heard the response. Voice-4 can truthfully report controlled local playback through a provider boundary, but playback completion still does not mean the underlying task succeeded or that the user heard it.
+If a mock provider is active, diagnostics must say so. If a later feature is not implemented yet, diagnostics must report `not_implemented` or a truthful `no_*` runtime flag instead of implying listening, speaking, Realtime, or production audio playback support. Voice-2 supports controlled audio file/blob/fixture STT only; it must not imply live microphone capture or continuous listening. Voice-3 supports controlled TTS audio artifact generation only; it must not imply Stormhelm spoke aloud, that playback occurred, or that the user heard the response. Voice-4 can truthfully report controlled local playback through a provider boundary, but playback completion still does not mean the underlying task succeeded or that the user heard it. Voice-8 evaluates a supervised pipeline with mocked capture-stage inputs in this checkout; it does not add production microphone capture, wake word, VAD, Realtime, or continuous listening.
 
-Recommended next phase: Voice-5 should add a narrow push-to-talk capture preparation layer or a real opt-in local playback provider, still disabled by default and still separate from wake word, VAD, Realtime, full interruption semantics, and continuous listening. It should preserve `source="voice"`, transcription/synthesis/playback provenance, trust gates, task graph behavior, verification posture, and the manual/mock paths as deterministic test seams.
+Recommended next phase: add the missing guarded push-to-talk capture/readiness/UI layers on top of this foundation, still disabled by default and still separate from wake word, VAD, Realtime, full interruption semantics, and continuous listening. It should preserve `source="voice"`, transcription/synthesis/playback provenance, trust gates, task graph behavior, verification posture, and the manual/mock paths as deterministic test seams.

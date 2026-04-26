@@ -5,6 +5,12 @@ from stormhelm.core.voice.bridge import VoiceCoreResult
 from stormhelm.core.voice.events import VoiceEventType
 from stormhelm.core.voice.events import build_voice_event_payload
 from stormhelm.core.voice.events import publish_voice_event
+from stormhelm.core.voice.evaluation import VoicePipelineEvaluationResult
+from stormhelm.core.voice.evaluation import VoicePipelineExpectedResult
+from stormhelm.core.voice.evaluation import VoicePipelineScenario
+from stormhelm.core.voice.evaluation import VoicePipelineStageSummary
+from stormhelm.core.voice.evaluation import run_voice_pipeline_scenario
+from stormhelm.core.voice.evaluation import run_voice_pipeline_suite
 from stormhelm.core.voice.providers import MockVoiceProvider
 from stormhelm.core.voice.providers import MockPlaybackProvider
 from stormhelm.core.voice.providers import OpenAIVoiceProvider
@@ -42,6 +48,10 @@ __all__ = [
     "VoiceCoreRequest",
     "VoiceCoreResult",
     "VoiceEventType",
+    "VoicePipelineEvaluationResult",
+    "VoicePipelineExpectedResult",
+    "VoicePipelineScenario",
+    "VoicePipelineStageSummary",
     "VoiceService",
     "VoiceState",
     "VoiceStateController",
@@ -60,4 +70,6 @@ __all__ = [
     "build_voice_subsystem",
     "compute_voice_availability",
     "publish_voice_event",
+    "run_voice_pipeline_scenario",
+    "run_voice_pipeline_suite",
 ]
