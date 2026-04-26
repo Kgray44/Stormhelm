@@ -39,6 +39,10 @@ CONCEPTUAL_GUARDS = {
 }
 
 
+def _placeholder_routine_request(text: str) -> bool:
+    return bool(re.fullmatch(r"(?:run|execute|do)\s+(?:(?:the)\s+)?(?:thing|this|that|it)", text))
+
+
 @dataclass(slots=True)
 class IntentFrame:
     raw_text: str
@@ -320,6 +324,11 @@ class IntentFrameExtractor:
             return "highlighted"
         if "current page" in normalized:
             return "current_page"
+        if target_type == "file" and any(
+            phrase in normalized
+            for phrase in {"from before", "previous file", "previous document", "earlier file", "earlier document"}
+        ):
+            return "current_file"
         if any(phrase in normalized for phrase in {"we just used", "from before", "moment ago", "previous website", "previous page", "earlier page"}):
             return "current_page"
         if "current file" in normalized:
@@ -523,7 +532,7 @@ class IntentFrameExtractor:
             return "routine"
         if self._routine_signal(normalized):
             return "routine"
-        if operation == "launch" and any(phrase in normalized for phrase in {"run the thing", "run it", "run that"}):
+        if operation == "launch" and _placeholder_routine_request(normalized):
             return "routine"
         if self._task_continuity_signal(normalized):
             return "task_continuity"
@@ -567,7 +576,7 @@ class IntentFrameExtractor:
             return "payload"
         if owner == "routine" and self._looks_like_routine_save(normalized):
             return "steps_or_recent_action"
-        if owner == "routine" and any(phrase in normalized for phrase in {"run the thing", "run it", "run that"}):
+        if owner == "routine" and _placeholder_routine_request(normalized):
             return "routine_context"
         if owner == "trust_approvals" and context_status != "available":
             return "approval_object"
@@ -630,6 +639,8 @@ class IntentFrameExtractor:
             return True
         if self._generic_deictic_followup_signal(normalized):
             return True
+        if re.search(r"\bcontinue\b.{0,24}\b(?:this|that|the)\b.{0,16}\bcalculation\b", normalized):
+            return True
         return bool(
             any(
                 phrase in normalized
@@ -638,7 +649,6 @@ class IntentFrameExtractor:
                     "same thing as before",
                     "same thing again",
                     "use that result",
-                    "continue that calculation",
                     "go ahead with that preview",
                     "use the other one",
                     "show the steps",
@@ -865,6 +875,8 @@ class IntentFrameExtractor:
         )
 
     def _software_recovery_signal(self, normalized: str) -> bool:
+        if "status" in normalized and not re.search(r"\b(?:fix|repair|flush|restart)\b", normalized):
+            return False
         if re.search(r"\b(?:fix|repair|diagnose|flush|restart)\b.{0,32}\b(?:wifi|wi-fi|wi fi|network|connection|dns|explorer)\b", normalized):
             return True
         return bool(re.search(r"\b(?:run)\b.{0,24}\b(?:connectivity checks?|network checks?)\b", normalized))

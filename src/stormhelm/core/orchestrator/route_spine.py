@@ -40,6 +40,12 @@ MIGRATED_ROUTE_FAMILIES = {
 }
 
 
+def _workspace_conceptual_text(text: str) -> bool:
+    if re.search(r"\bworkspace\b.{0,28}\b(?:philosoph|theory|ideas?)\b", text):
+        return True
+    return "workspace" in text and bool(re.search(r"\binspiration\b.{0,16}\bboard\b", text))
+
+
 @dataclass(frozen=True, slots=True)
 class RouteSpecCandidate:
     route_family: str
@@ -478,7 +484,7 @@ class RouteSpine:
             return True
         if spec.route_family == "context_action" and any(phrase in text for phrase in {"selected text in html", "selection bias"}):
             return True
-        if spec.route_family == "workspace_operations" and any(phrase in text for phrase in {"clean workspace", "workspace ideas", "workspace design", "inspiration board ideas"}):
+        if spec.route_family == "workspace_operations" and ("clean workspace" in text or _workspace_conceptual_text(text) or "workspace design" in text):
             return True
         if spec.route_family == "maintenance" and any(phrase in text for phrase in {"clean workspace", "workspace ideas", "clean writing style"}):
             return True
@@ -625,7 +631,7 @@ class RouteSpine:
         return any(phrase in text for phrase in {"where left off", "where i left off", "continue where i left off", "resume where i left off", "next steps", "do next", "what should i do next"})
 
     def _workspace_signal(self, text: str) -> bool:
-        if any(phrase in text for phrase in {"workspace design theory", "workspace philosophy", "clean workspace", "workspace ideas", "inspiration board ideas"}):
+        if "workspace design theory" in text or "clean workspace" in text or _workspace_conceptual_text(text):
             return False
         return "workspace" in text and not self._workflow_signal(text)
 
@@ -660,6 +666,8 @@ class RouteSpine:
         )
 
     def _software_recovery_signal(self, text: str) -> bool:
+        if "status" in text and not re.search(r"\b(?:fix|repair|flush|restart)\b", text):
+            return False
         return bool(
             re.search(r"\b(?:fix|repair|diagnose|flush|restart)\b.{0,32}\b(?:wifi|wi-fi|wi fi|network|connection|dns|explorer)\b", text)
             or re.search(r"\b(?:run)\b.{0,24}\b(?:connectivity checks?|network checks?)\b", text)

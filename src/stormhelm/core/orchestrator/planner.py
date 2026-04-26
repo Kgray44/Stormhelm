@@ -1894,6 +1894,8 @@ class DeterministicPlanner:
                     output_mode=ResponseMode.ACTION_RESULT.value,
                     slots=slots,
                 )
+            if decision.clarification_needed:
+                return self._route_spine_clarification_proposal(decision, slots=slots)
             routine_name = str(decision.intent_frame.target_text or decision.intent_frame.extracted_entities.get("routine") or "routine").strip()
             slots.update({"routine_name": routine_name, "request_stage": "dry_run"})
             return self._tool_proposal(

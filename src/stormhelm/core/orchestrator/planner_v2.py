@@ -95,6 +95,16 @@ def _discord_conceptual_text(text: str) -> bool:
     )
 
 
+def _workspace_conceptual_text(text: str) -> bool:
+    if re.search(r"\bwhat\s+is\s+a\s+workspace\b", text):
+        return True
+    if re.search(r"\bworkspace\b.{0,28}\b(?:philosoph|theory|ui\s+design|organization)\b", text):
+        return True
+    if re.search(r"\bworkspace\b.{0,28}\bideas?\b", text):
+        return True
+    return "workspace" in text and bool(re.search(r"\binspiration\b.{0,16}\bboard\b", text))
+
+
 def _json_ready(value: Any) -> Any:
     if hasattr(value, "__dataclass_fields__"):
         return {str(key): _json_ready(item) for key, item in asdict(value).items()}
@@ -417,7 +427,7 @@ class ContextBinder:
                     value=selection.get("value"),
                     label=str(selection.get("preview") or "selected text"),
                 )
-            return self._missing(frame, "selected_text")
+            return self._missing(frame, "context")
         if frame.target_type == "visible_ui":
             visible = active_context.get("visible_ui") if isinstance(active_context.get("visible_ui"), dict) else {}
             if visible:
@@ -429,7 +439,7 @@ class ContextBinder:
                     value=visible,
                     label=str(visible.get("label") or "visible UI"),
                 )
-            return self._missing(frame, "visible_ui_grounding")
+            return self._missing(frame, "visible_screen")
         if frame.target_type in {"prior_calculation", "prior_result"}:
             bound = self._prior_calculation(active_context, active_request_state, recent_tool_results)
             if bound is not None:
@@ -442,7 +452,7 @@ class ContextBinder:
                     label=str(bound.get("label") or "previous calculation"),
                     candidate_bindings=(bound,),
                 )
-            return self._missing(frame, "prior_calculation")
+            return self._missing(frame, "calculation_context")
         if frame.native_owner_hint == "workspace_operations":
             return self._workspace_binding(frame, active_context, active_request_state, recent_tool_results)
         if frame.native_owner_hint == "routine":
@@ -488,6 +498,8 @@ class ContextBinder:
         active_request_state: dict[str, Any],
         recent_tool_results: list[dict[str, Any]],
     ) -> ContextBinding:
+        if frame.clarification_reason == "routine_context":
+            return self._missing(frame, "routine_context")
         if frame.operation == "save" or self._routine_save_contextual(frame):
             bound = self._saveable_context(active_context, active_request_state, recent_tool_results)
             if bound is None:
@@ -608,14 +620,9 @@ class ContextBinder:
                     "value": result,
                     "confidence": 0.92,
                 }
-        if str(active_request_state.get("family") or "").lower() == "calculations":
-            return {
-                "type": "prior_calculation",
-                "source": "active_request_state",
-                "label": str(active_request_state.get("subject") or "previous calculation"),
-                "value": dict(active_request_state),
-                "confidence": 0.82,
-            }
+        state_bound = self._active_state_calculation(active_request_state)
+        if state_bound is not None:
+            return state_bound
         for result in recent_tool_results:
             if isinstance(result, dict) and str(result.get("family") or result.get("kind") or "").lower() == "calculations":
                 return {
@@ -626,6 +633,29 @@ class ContextBinder:
                     "confidence": 0.78,
                 }
         return None
+
+    def _active_state_calculation(self, active_request_state: dict[str, Any]) -> dict[str, Any] | None:
+        if str(active_request_state.get("family") or "").lower() != "calculations":
+            return None
+        parameters = active_request_state.get("parameters") if isinstance(active_request_state.get("parameters"), dict) else {}
+        calculation_request = (
+            parameters.get("calculation_request") if isinstance(parameters.get("calculation_request"), dict) else {}
+        )
+        extracted_expression = str(calculation_request.get("extracted_expression") or parameters.get("expression") or "").strip()
+        helper_name = str(calculation_request.get("helper_name") or parameters.get("helper_name") or "").strip()
+        verification_claim = str(calculation_request.get("verification_claim") or "").strip()
+        helper_arguments = calculation_request.get("arguments") if isinstance(calculation_request.get("arguments"), dict) else {}
+        if not (extracted_expression or helper_name or verification_claim or helper_arguments):
+            return None
+        label = extracted_expression or helper_name or str(active_request_state.get("subject") or "previous calculation")
+        payload = dict(calculation_request) if calculation_request else dict(parameters)
+        return {
+            "type": "prior_calculation",
+            "source": "active_request_state",
+            "label": label,
+            "value": payload,
+            "confidence": 0.84,
+        }
 
     def _workspace_needs_seed(self, frame: IntentFrame) -> bool:
         text = frame.normalized_text
@@ -798,6 +828,16 @@ class CandidateGenerator:
                 decline_reasons=("requires_ambiguous_deictic_no_owner",),
                 tool_candidates=spec.tool_candidates,
             )
+        if spec.route_family == "calculations" and frame.native_owner_hint != "calculations":
+            return RouteCandidate(
+                route_family=spec.route_family,
+                subsystem=spec.subsystem,
+                score=0.0,
+                accepted=False,
+                score_factors={"calculation_owner_gate": 0.0},
+                decline_reasons=("requires_calculation_owner_hint",),
+                tool_candidates=spec.tool_candidates,
+            )
         if frame.native_owner_hint == spec.route_family:
             factors["native_owner_hint"] = 0.42
             score += 0.42
@@ -877,9 +917,7 @@ class CandidateGenerator:
             phrase in text for phrase in {"calculator app", "math teaching ideas", "neural network"}
         ):
             return True
-        if spec.route_family == "workspace_operations" and any(
-            phrase in text for phrase in {"what is a workspace", "workspace philosophy", "workspace theory", "workspace ui design", "workspace organization philosophy", "clean workspace ideas"}
-        ):
+        if spec.route_family == "workspace_operations" and _workspace_conceptual_text(text):
             return True
         if spec.route_family == "routine" and _routine_conceptual_text(text):
             return True
@@ -993,14 +1031,11 @@ class RouteArbitrator:
                     "what is a website",
                     "what is selected text",
                     "app design",
-                    "what is a workspace",
-                    "workspace philosophy",
-                    "workspace theory",
-                    "workspace organization philosophy",
                     "workflow theory",
                     "workflow diagram",
                 }
             )
+            or _workspace_conceptual_text(text)
             or _routine_conceptual_text(text)
             or _task_conceptual_text(text)
             or _discord_conceptual_text(text)
@@ -1128,8 +1163,8 @@ class PolicyEvaluator:
             reasons.extend(binding.missing_preconditions)
         if plan.route_family == "screen_awareness" and frame.operation in {"open", "verify"}:
             execution_blocked = True
-            if "visible_ui_grounding" not in reasons:
-                reasons.append("visible_ui_grounding")
+            if "visible_screen" not in reasons:
+                reasons.append("visible_screen")
         approval_live = risk in {"external_app_open", "external_browser_open", "local_mutation", "destructive", "external_send", "software_lifecycle"}
         preview_live = risk in {"external_send", "software_lifecycle", "destructive", "external_browser_open", "external_app_open"}
         return PolicyDecision(
@@ -1329,7 +1364,7 @@ class PlannerV2:
         if self._deictic_calculation_signal(text):
             has_context = bool(
                 active_context.get("recent_context_resolutions")
-                or str(active_request_state.get("family") or "").lower() == "calculations"
+                or ContextBinder()._active_state_calculation(active_request_state) is not None
                 or any(isinstance(item, dict) and str(item.get("family") or item.get("kind") or "").lower() == "calculations" for item in recent_tool_results)
             )
             frame.operation = "calculate"
@@ -1342,7 +1377,7 @@ class PlannerV2:
             frame.generic_provider_allowed = False
             frame.generic_provider_reason = "native_route_candidate_present"
             frame.clarification_needed = not has_context
-            frame.clarification_reason = "" if has_context else "prior_calculation"
+            frame.clarification_reason = "" if has_context else "calculation_context"
         if self._software_verify_signal(text):
             frame.operation = "verify"
             frame.target_type = "software_package"
@@ -1426,7 +1461,7 @@ class PlannerV2:
             frame.generic_provider_reason = "native_route_candidate_present"
             frame.clarification_needed = frame.context_status == "missing"
             frame.clarification_reason = "workflow_context" if frame.clarification_needed else ""
-        if self._task_continuity_signal(text):
+        if frame.native_owner_hint in {None, "", "workspace_operations", "context_clarification"} and self._task_continuity_signal(text):
             frame.operation = "status" if re.search(r"\b(?:where|what)\b", text) else "assemble"
             frame.target_type = "workspace"
             frame.target_text = "task continuity"
@@ -1488,7 +1523,15 @@ class PlannerV2:
             return False
         if self._expansion_conceptual_near_miss(frame.normalized_text):
             return False
+        if self._bare_action_deictic_generic_provider_preferred(frame.normalized_text):
+            return False
         return self._followup_signal(frame.normalized_text, frame=frame)
+
+    def _bare_action_deictic_generic_provider_preferred(self, text: str) -> bool:
+        return bool(
+            re.match(r"^(?:click|press|tap|scroll|hover)\s+(?:this|that|it|there)\b", text)
+            or re.match(r"^pay\s+(?:for\s+)?(?:this|that|it)\b", text)
+        )
 
     def _followup_signal(self, text: str, *, frame: IntentFrame | None = None) -> bool:
         if frame is not None and frame.context_reference in {"this", "that", "it", "previous_result", "previous_calculation", "current_page", "current_file"}:
@@ -1664,13 +1707,13 @@ class PlannerV2:
         if family == "browser_destination":
             return "destination_context"
         if family == "context_action":
-            return "selected_text"
+            return "context"
         if family == "discord_relay":
             return "discord_relay_context"
         if family == "calculations":
-            return "prior_calculation"
+            return "calculation_context"
         if family == "screen_awareness":
-            return "visible_ui_grounding"
+            return "visible_screen"
         if family == "file":
             return "file_context"
         if family in {"workspace_operations", "workflow", "task_continuity"}:
@@ -1681,7 +1724,10 @@ class PlannerV2:
 
     def _deictic_calculation_signal(self, text: str) -> bool:
         has_deictic = bool(re.search(r"\b(?:this|that|it|previous|last)\b", text))
-        has_math_action = bool(re.search(r"\b(?:divide|multiply|add|subtract|double|halve|compare|show the steps|steps)\b", text))
+        has_math_action = bool(
+            re.search(r"\b(?:divide|multiply|add|subtract|double|halve|show the steps|steps)\b", text)
+            or re.search(r"\bcompare\b.{0,24}\b(?:answer|result|number|calculation|math)\b", text)
+        )
         return has_deictic and has_math_action
 
     def _software_verify_signal(self, text: str) -> bool:
@@ -1710,7 +1756,7 @@ class PlannerV2:
         return has_question and has_visual_target
 
     def _workspace_signal(self, text: str) -> bool:
-        if any(phrase in text for phrase in {"what is a workspace", "workspace philosophy", "workspace theory", "workspace ui design", "clean workspace ideas"}):
+        if _workspace_conceptual_text(text):
             return False
         return bool(
             "workspace" in text
@@ -1776,15 +1822,10 @@ class PlannerV2:
 
     def _expansion_conceptual_near_miss(self, text: str) -> bool:
         return (
-            any(
+            _workspace_conceptual_text(text)
+            or any(
                 phrase in text
                 for phrase in {
-                    "what is a workspace",
-                    "workspace organization philosophy",
-                    "workspace philosophy",
-                    "workspace theory",
-                    "workspace ui design",
-                    "clean workspace ideas",
                     "workflow theory",
                     "workflow philosophy",
                     "workflow diagram",

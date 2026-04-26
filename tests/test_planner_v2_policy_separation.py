@@ -40,6 +40,7 @@ def test_screen_action_preflight_blocks_execution_without_changing_native_owner(
 
     assert trace.route_decision.selected_route_family == "screen_awareness"
     assert trace.policy_decision.execution_blocked is True
-    assert "visible_ui_grounding" in trace.policy_decision.reasons
+    # Planner v2 now uses the shared visible_screen contract for screen-missing policy reasons.
+    assert "visible_screen" in trace.policy_decision.reasons
     assert trace.route_decision.generic_provider_allowed is False
 

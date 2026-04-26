@@ -25,6 +25,10 @@ UI_TARGET_TERMS = {
 }
 
 
+def _looks_like_placeholder_routine_request(lower: str) -> bool:
+    return bool(re.fullmatch(r"(?:run|execute|do)\s+(?:(?:the)\s+)?(?:thing|this|that|it)", lower))
+
+
 @dataclass(frozen=True, slots=True)
 class RouteContextBinding:
     context_type: str
@@ -543,6 +547,4 @@ class RouteContextArbitrator:
         return bool(re.match(r"^(?:rename|move|copy|archive|tag)\s+(?:it|this|that|those|these)\b", lower))
 
     def _looks_like_routine_missing_context(self, lower: str) -> bool:
-        return lower in {"run the thing", "do the thing", "execute the thing", "run it", "do it"} or bool(
-            re.match(r"^(?:run|execute|do)\s+(?:that|this|it)\b", lower)
-        )
+        return _looks_like_placeholder_routine_request(lower)
