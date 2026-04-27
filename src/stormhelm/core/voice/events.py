@@ -15,6 +15,14 @@ from stormhelm.shared.time import utc_now_iso
 class VoiceEventType(str, Enum):
     AVAILABILITY_CHANGED = "voice.availability_changed"
     STATE_CHANGED = "voice.state_changed"
+    CAPTURE_REQUEST_CREATED = "voice.capture_request_created"
+    CAPTURE_BLOCKED = "voice.capture_blocked"
+    CAPTURE_STARTED = "voice.capture_started"
+    CAPTURE_STOPPED = "voice.capture_stopped"
+    CAPTURE_CANCELLED = "voice.capture_cancelled"
+    CAPTURE_TIMEOUT = "voice.capture_timeout"
+    CAPTURE_FAILED = "voice.capture_failed"
+    CAPTURE_AUDIO_CREATED = "voice.capture_audio_created"
     AUDIO_INPUT_RECEIVED = "voice.audio_input_received"
     AUDIO_VALIDATION_FAILED = "voice.audio_validation_failed"
     MANUAL_TURN_RECEIVED = "voice.manual_turn_received"
@@ -60,8 +68,11 @@ class VoiceEventType(str, Enum):
 def build_voice_event_payload(
     *,
     event_type: VoiceEventType | str,
+    correlation_id: str | None = None,
     session_id: str | None = None,
     turn_id: str | None = None,
+    capture_request_id: str | None = None,
+    capture_id: str | None = None,
     provider: str | None = None,
     mode: str | None = None,
     state: str | None = None,
@@ -91,7 +102,9 @@ def build_voice_event_payload(
     privacy: dict[str, Any] | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    resolved_type = event_type.value if isinstance(event_type, VoiceEventType) else str(event_type)
+    resolved_type = (
+        event_type.value if isinstance(event_type, VoiceEventType) else str(event_type)
+    )
     payload: dict[str, Any] = {
         "event_type": resolved_type,
         "timestamp": utc_now_iso(),
@@ -100,8 +113,11 @@ def build_voice_event_payload(
         "metadata": dict(metadata or {}),
     }
     for key, value in {
+        "correlation_id": correlation_id,
         "session_id": session_id,
         "turn_id": turn_id,
+        "capture_request_id": capture_request_id,
+        "capture_id": capture_id,
         "provider": provider,
         "mode": mode,
         "state": state,
@@ -138,8 +154,11 @@ def publish_voice_event(
     event_type: VoiceEventType,
     *,
     message: str,
+    correlation_id: str | None = None,
     session_id: str | None = None,
     turn_id: str | None = None,
+    capture_request_id: str | None = None,
+    capture_id: str | None = None,
     provider: str | None = None,
     mode: str | None = None,
     state: str | None = None,
@@ -181,8 +200,11 @@ def publish_voice_event(
         message=message,
         payload=build_voice_event_payload(
             event_type=event_type,
+            correlation_id=correlation_id,
             session_id=session_id,
             turn_id=turn_id,
+            capture_request_id=capture_request_id,
+            capture_id=capture_id,
             provider=provider,
             mode=mode,
             state=state,
