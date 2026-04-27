@@ -464,6 +464,7 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
         discord_relay=discord_relay,
     )
     voice.attach_core_bridge(assistant)
+    voice.attach_trust_service(trust)
     return CoreContainer(
         config=app_config,
         events=events,

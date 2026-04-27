@@ -87,6 +87,7 @@ Tests: `tests/test_launcher.py`, `tests/test_config_loader.py`
 | Config, environment variables, and feature flags | [settings.md](settings.md) |
 | Ghost, Command Deck, bridge, QML surfaces | [ui-surfaces.md](ui-surfaces.md) |
 | Voice user guide | [voice.md](voice.md) |
+| Voice C1 release readiness, smoke plan, and commit hygiene | [voice-c1-release-readiness.md](voice-c1-release-readiness.md) |
 | Planner, routing, route state, fuzzy evaluation | [planner-routing.md](planner-routing.md) |
 | Subsystem responsibilities | [subsystems.md](subsystems.md) |
 | OpenAI, Discord, Qt, Windows, storage, package manager integrations | [integrations.md](integrations.md) |

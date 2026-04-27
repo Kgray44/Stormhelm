@@ -1511,6 +1511,8 @@ def _clarification_observed(route_state: dict[str, Any], planner_debug: dict[str
     if str(planner_debug.get("response_mode") or "") == "clarification":
         return True
     content = str(assistant_message.get("content") or "").lower()
+    if "reliable screen bearing" in content or "can't safely describe the visible state" in content:
+        return True
     return any(phrase in content for phrase in ("which one", "i still need", "clarify", "do you mean"))
 
 

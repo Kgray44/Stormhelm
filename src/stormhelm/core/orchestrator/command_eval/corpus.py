@@ -94,6 +94,8 @@ def build_command_usability_corpus(*, min_cases: int = 1000) -> list[CommandEval
         for style in _STYLE_ORDER:
             message = _message_for_style(blueprint, style)
             case_id = f"{blueprint.key}_{style}_00"
+            input_context = _context_for_style(blueprint, style)
+            active_request_state = _request_state_for_style(blueprint, style)
             expected_route_family = blueprint.route_family
             expected_subsystem = blueprint.subsystem
             expected_tools = blueprint.tools
@@ -107,7 +109,7 @@ def build_command_usability_corpus(*, min_cases: int = 1000) -> list[CommandEval
                 if style in {"deictic", "follow_up"}
                 else "none"
             )
-            if _is_ambiguous_deictic_no_owner(blueprint, style):
+            if _expects_context_clarification(blueprint, style, active_request_state=active_request_state):
                 expected_route_family = "context_clarification"
                 expected_subsystem = "context"
                 expected_tools = ()
@@ -115,6 +117,15 @@ def build_command_usability_corpus(*, min_cases: int = 1000) -> list[CommandEval
                 expected_clarification = "expected"
             elif style == "follow_up" and blueprint.route_family == "browser_destination":
                 expected_target_slots = {"destination_name": "Stormhelm docs"}
+            elif _expects_native_clarification(blueprint, style):
+                expected_tools = ()
+                expected_target_slots = {}
+                expected_clarification = "expected"
+            expected_response_terms = (
+                ()
+                if expected_clarification == "expected"
+                else blueprint.response_terms
+            )
             expected = ExpectedBehavior(
                 route_family=expected_route_family,
                 subsystem=expected_subsystem,
@@ -124,21 +135,30 @@ def build_command_usability_corpus(*, min_cases: int = 1000) -> list[CommandEval
                 approval=_approval_expectation(blueprint, style),
                 result_state=blueprint.result_state,
                 verification=blueprint.verification,
-                response_terms=blueprint.response_terms,
+                response_terms=expected_response_terms,
             )
             style_tags = _STYLE_TAGS.get(style, (style,))
             sequence_id = f"{blueprint.key}_{style}" if style in {"deictic", "follow_up", "confirm", "correction"} else ""
+            context_metadata = _context_metadata_for_style(
+                blueprint=blueprint,
+                style=style,
+                expected_route_family=expected_route_family,
+                expected_tools=expected_tools,
+                input_context=input_context,
+                active_request_state=active_request_state,
+            )
             cases.append(
                 CommandEvalCase(
                     case_id=case_id,
                     message=message,
                     expected=expected,
-                    input_context=_context_for_style(blueprint, style),
-                    active_request_state=_request_state_for_style(blueprint, style),
+                    input_context=input_context,
+                    active_request_state=active_request_state,
                     workspace_context=dict(blueprint.workspace_context or {}),
                     sequence_id=sequence_id,
                     turn_index=1 if sequence_id else 0,
                     tags=tuple(dict.fromkeys((*blueprint.tags, *style_tags))),
+                    **context_metadata,
                 )
             )
     if len(cases) >= min_cases:
@@ -165,6 +185,15 @@ def build_command_usability_corpus(*, min_cases: int = 1000) -> list[CommandEval
                     turn_index=case.turn_index,
                     tags=case.tags,
                     notes=case.notes,
+                    context_lane=case.context_lane,
+                    seeded_context_required=case.seeded_context_required,
+                    expected_context_source=case.expected_context_source,
+                    expected_prior_family=case.expected_prior_family,
+                    expected_prior_tool=case.expected_prior_tool,
+                    expected_target_binding=case.expected_target_binding,
+                    expected_alternate_target=case.expected_alternate_target,
+                    expected_confirmation_state=case.expected_confirmation_state,
+                    expected_behavior_without_context=case.expected_behavior_without_context,
                 )
             )
         index += 1
@@ -176,7 +205,7 @@ def _approval_expectation(blueprint: _Blueprint, style: str) -> str:
         return blueprint.approval
     if blueprint.route_family == "discord_relay" and style in {"deictic", "follow_up", "ambiguous"}:
         return "allowed"
-    if _is_ambiguous_deictic_no_owner(blueprint, style):
+    if _expects_context_clarification(blueprint, style, active_request_state=_request_state_for_style(blueprint, style)):
         return "not_expected"
     if blueprint.route_family in {"discord_relay", "software_control", "trust_approvals"}:
         return "expected_or_preview"
@@ -196,9 +225,46 @@ def _approval_expectation(blueprint: _Blueprint, style: str) -> str:
 def _is_ambiguous_deictic_no_owner(blueprint: _Blueprint, style: str) -> bool:
     if style != "deictic":
         return False
-    if blueprint.active_request_state:
+    active = blueprint.active_request_state or {}
+    active_family = str(active.get("family") or "").strip()
+    if blueprint.route_family == "trust_approvals" or active_family == "trust_approvals" or isinstance(active.get("trust"), dict):
         return False
-    return not bool(blueprint.input_context)
+    return True
+
+
+def _expects_context_clarification(
+    blueprint: _Blueprint,
+    style: str,
+    *,
+    active_request_state: dict[str, Any] | None = None,
+) -> bool:
+    if _is_ambiguous_deictic_no_owner(blueprint, style):
+        return True
+    if style == "ambiguous" and not _active_state_has_native_owner(active_request_state or blueprint.active_request_state or {}):
+        return True
+    if (
+        style == "ambiguous"
+        and blueprint.route_family == "calculations"
+        and not blueprint.active_request_state
+        and not blueprint.input_context
+    ):
+        return True
+    if style == "near_miss" and blueprint.route_family == "browser_destination":
+        return True
+    if style in {"follow_up", "confirm", "correction"} and blueprint.route_family in {"unsupported", "generic_provider"}:
+        return True
+    return False
+
+
+def _expects_native_clarification(blueprint: _Blueprint, style: str) -> bool:
+    return style == "near_miss" and blueprint.route_family == "development"
+
+
+def _active_state_has_native_owner(active_request_state: dict[str, Any]) -> bool:
+    family = str(active_request_state.get("family") or "").strip().lower()
+    if family in {"", "generic_provider", "unsupported", "context_clarification"}:
+        return False
+    return True
 
 
 def _context_for_style(blueprint: _Blueprint, style: str) -> dict[str, Any]:
@@ -221,7 +287,7 @@ def _context_for_style(blueprint: _Blueprint, style: str) -> dict[str, Any]:
                 }
             ],
         )
-    if blueprint.route_family == "calculations" and style in {"deictic", "follow_up", "confirm", "correction"}:
+    if blueprint.route_family == "calculations" and style in {"follow_up", "confirm", "correction"}:
         context.setdefault(
             "recent_context_resolutions",
             [
@@ -239,12 +305,171 @@ def _request_state_for_style(blueprint: _Blueprint, style: str) -> dict[str, Any
     if blueprint.active_request_state:
         return dict(blueprint.active_request_state)
     if style in {"follow_up", "confirm", "correction"}:
+        parameters: dict[str, Any] = {
+            "source_case": blueprint.key,
+            "request_stage": "awaiting_confirmation" if style == "confirm" else "preview",
+            "context_freshness": "current",
+        }
+        if blueprint.tools:
+            parameters["tool_name"] = blueprint.tools[0]
+        if blueprint.key.startswith("software_control_"):
+            parameters["operation_type"] = blueprint.key.removeprefix("software_control_")
+            parameters["target_name"] = _software_target_for_blueprint(blueprint.canonical)
+        if blueprint.key == "echo":
+            parameters["echo_text"] = _echo_payload_for_blueprint(blueprint.canonical)
+        if style == "confirm":
+            parameters["pending_preview"] = {"preview_id": f"{blueprint.key}-preview", "source_case": blueprint.key}
+        if style == "correction":
+            parameters["previous_choice"] = _previous_choice_for_blueprint(blueprint)
+            parameters["alternate_target"] = _alternate_target_for_blueprint(blueprint)
         return {
             "family": blueprint.route_family,
-            "subject": blueprint.key.replace("_", " "),
-            "parameters": {"source_case": blueprint.key, "request_stage": "preview"},
+            "subject": parameters.get("target_name") or parameters.get("echo_text") or blueprint.key.replace("_", " "),
+            "parameters": parameters,
         }
     return {}
+
+
+def _previous_choice_for_blueprint(blueprint: _Blueprint) -> str:
+    if blueprint.target_slots:
+        for value in blueprint.target_slots.values():
+            if value:
+                return str(value)
+    return blueprint.key.replace("_", " ")
+
+
+def _alternate_target_for_blueprint(blueprint: _Blueprint) -> str:
+    if blueprint.route_family == "browser_destination":
+        return "Stormhelm docs"
+    if blueprint.route_family == "file":
+        return str(Path.cwd() / "docs" / "commands.md")
+    if blueprint.route_family == "software_control":
+        return "VLC" if "firefox" in blueprint.canonical.lower() else "Firefox"
+    if blueprint.route_family == "discord_relay":
+        return "alternate Discord recipient"
+    if blueprint.route_family == "workspace_operations":
+        return "Packaging Notes workspace"
+    return f"alternate {blueprint.route_family.replace('_', ' ')} target"
+
+
+def _context_metadata_for_style(
+    *,
+    blueprint: _Blueprint,
+    style: str,
+    expected_route_family: str,
+    expected_tools: tuple[str, ...],
+    input_context: dict[str, Any],
+    active_request_state: dict[str, Any],
+) -> dict[str, Any]:
+    lane = "not_context_dependent"
+    if style == "ambiguous":
+        lane = "seeded_context_binding" if _active_state_has_native_owner(active_request_state) else "no_context_ambiguity"
+    elif style == "deictic":
+        lane = "seeded_context_binding" if _active_state_has_native_owner(active_request_state) else "ambiguous_context_clarification"
+    elif style == "follow_up":
+        lane = "seeded_context_binding" if _active_state_has_native_owner(active_request_state) else "no_context_ambiguity"
+    elif style == "confirm":
+        lane = (
+            "seeded_context_binding"
+            if _active_state_has_native_owner(active_request_state) and _has_pending_confirmation(active_request_state)
+            else "no_context_ambiguity"
+        )
+    elif style == "correction":
+        lane = "correction_with_prior_owner" if _active_state_has_native_owner(active_request_state) else "correction_without_prior_owner"
+
+    expected_context_source = _expected_context_source(input_context, active_request_state, blueprint.workspace_context or {})
+    parameters = active_request_state.get("parameters") if isinstance(active_request_state.get("parameters"), dict) else {}
+    expected_prior_family = str(active_request_state.get("family") or "") if _active_state_has_native_owner(active_request_state) else ""
+    expected_prior_tool = str(parameters.get("tool_name") or (expected_tools[0] if expected_tools else ""))
+    expected_alternate_target = str(parameters.get("alternate_target") or "")
+    expected_confirmation_state = _confirmation_state(active_request_state)
+    seeded_required = lane in {
+        "seeded_context_binding",
+        "real_multiturn_followup",
+        "stale_context_rejection",
+        "ambiguous_context_clarification",
+        "correction_with_prior_owner",
+    }
+    return {
+        "context_lane": lane,
+        "seeded_context_required": seeded_required,
+        "expected_context_source": expected_context_source,
+        "expected_prior_family": expected_prior_family,
+        "expected_prior_tool": expected_prior_tool,
+        "expected_target_binding": _expected_target_binding(input_context, active_request_state, blueprint.workspace_context or {}),
+        "expected_alternate_target": expected_alternate_target,
+        "expected_confirmation_state": expected_confirmation_state,
+        "expected_behavior_without_context": "context_clarification" if lane != "not_context_dependent" else "",
+    }
+
+
+def _expected_context_source(
+    input_context: dict[str, Any],
+    active_request_state: dict[str, Any],
+    workspace_context: dict[str, Any],
+) -> str:
+    if _active_state_has_native_owner(active_request_state):
+        return "active_request_state"
+    if input_context.get("selection"):
+        return "input_context.selection"
+    if input_context.get("recent_entities"):
+        return "input_context.recent_entities"
+    if input_context.get("recent_context_resolutions"):
+        return "input_context.recent_context_resolutions"
+    if workspace_context:
+        return "workspace_context"
+    return "none"
+
+
+def _expected_target_binding(
+    input_context: dict[str, Any],
+    active_request_state: dict[str, Any],
+    workspace_context: dict[str, Any],
+) -> str:
+    parameters = active_request_state.get("parameters") if isinstance(active_request_state.get("parameters"), dict) else {}
+    if parameters.get("target_name"):
+        return "active_request_state.parameters.target_name"
+    if parameters.get("path"):
+        return "active_request_state.parameters.path"
+    if active_request_state.get("subject"):
+        return "active_request_state.subject"
+    if input_context.get("selection"):
+        return "input_context.selection"
+    if input_context.get("recent_entities"):
+        return "input_context.recent_entities"
+    if workspace_context:
+        return "workspace_context"
+    return "none"
+
+
+def _has_pending_confirmation(active_request_state: dict[str, Any]) -> bool:
+    parameters = active_request_state.get("parameters") if isinstance(active_request_state.get("parameters"), dict) else {}
+    if parameters.get("pending_preview"):
+        return True
+    if str(parameters.get("request_stage") or "").strip().lower() in {"awaiting_confirmation", "preview"}:
+        return True
+    return bool(active_request_state.get("trust"))
+
+
+def _confirmation_state(active_request_state: dict[str, Any]) -> str:
+    parameters = active_request_state.get("parameters") if isinstance(active_request_state.get("parameters"), dict) else {}
+    if active_request_state.get("trust"):
+        return "pending_approval"
+    if parameters.get("pending_preview"):
+        return "pending_preview"
+    stage = str(parameters.get("request_stage") or "").strip()
+    return stage
+
+
+def _software_target_for_blueprint(command: str) -> str:
+    text = command.strip()
+    text = text.replace("/", " ")
+    text = " ".join(word for word in text.split() if word.lower() not in {"install", "update", "uninstall", "repair"})
+    return text.strip() or "software"
+
+
+def _echo_payload_for_blueprint(command: str) -> str:
+    return command.replace("/echo", "", 1).strip() or "echo"
 
 
 def _message_for_style(blueprint: _Blueprint, style: str) -> str:

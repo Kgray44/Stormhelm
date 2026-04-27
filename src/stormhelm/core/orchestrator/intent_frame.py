@@ -643,13 +643,15 @@ class IntentFrameExtractor:
             return True
         if re.search(r"\bcontinue\b.{0,24}\b(?:this|that|the)\b.{0,16}\bcalculation\b", normalized):
             return True
+        if re.search(r"\bsame\b.{0,18}\b(?:thing|calculation|equation|math|setup|result|answer|number)\b", normalized):
+            return True
+        if re.search(r"\b(?:yes|no)\b.{0,24}\b(?:other|preview|result|answer)\b", normalized):
+            return True
         return bool(
             any(
                 phrase in normalized
                 for phrase in {
                     "same calculation",
-                    "same thing as before",
-                    "same thing again",
                     "use that result",
                     "go ahead with that preview",
                     "use the other one",

@@ -64,6 +64,15 @@ class CommandEvalCase:
     turn_index: int = 0
     tags: tuple[str, ...] = ()
     notes: str = ""
+    context_lane: str = "not_context_dependent"
+    seeded_context_required: bool = False
+    expected_context_source: str = "none"
+    expected_prior_family: str = ""
+    expected_prior_tool: str = ""
+    expected_target_binding: str = ""
+    expected_alternate_target: str = ""
+    expected_confirmation_state: str = ""
+    expected_behavior_without_context: str = ""
 
     def payload(self) -> dict[str, Any]:
         return {
@@ -361,6 +370,15 @@ class CommandEvalResult:
             "durable_row_written": True,
             "score_in_pass_fail": self.score_in_pass_fail,
             "scoring_note": self.scoring_note,
+            "context_lane": self.case.context_lane,
+            "seeded_context_required": self.case.seeded_context_required,
+            "expected_context_source": self.case.expected_context_source,
+            "expected_prior_family": self.case.expected_prior_family,
+            "expected_prior_tool": self.case.expected_prior_tool,
+            "expected_target_binding": self.case.expected_target_binding,
+            "expected_alternate_target": self.case.expected_alternate_target,
+            "expected_confirmation_state": self.case.expected_confirmation_state,
+            "expected_behavior_without_context": self.case.expected_behavior_without_context,
             "case": self.case.to_dict(),
             "observation": self.observation.to_dict(),
             "assertions": {name: outcome.to_dict() for name, outcome in self.assertions.items()},
@@ -400,6 +418,19 @@ def command_eval_result_from_dict(payload: dict[str, Any]) -> CommandEvalResult:
         turn_index=int(case_payload.get("turn_index") or 0),
         tags=tuple(str(item) for item in case_payload.get("tags") or ()),
         notes=str(case_payload.get("notes") or ""),
+        context_lane=str(case_payload.get("context_lane") or payload.get("context_lane") or "not_context_dependent"),
+        seeded_context_required=bool(case_payload.get("seeded_context_required", payload.get("seeded_context_required", False))),
+        expected_context_source=str(case_payload.get("expected_context_source") or payload.get("expected_context_source") or "none"),
+        expected_prior_family=str(case_payload.get("expected_prior_family") or payload.get("expected_prior_family") or ""),
+        expected_prior_tool=str(case_payload.get("expected_prior_tool") or payload.get("expected_prior_tool") or ""),
+        expected_target_binding=str(case_payload.get("expected_target_binding") or payload.get("expected_target_binding") or ""),
+        expected_alternate_target=str(case_payload.get("expected_alternate_target") or payload.get("expected_alternate_target") or ""),
+        expected_confirmation_state=str(case_payload.get("expected_confirmation_state") or payload.get("expected_confirmation_state") or ""),
+        expected_behavior_without_context=str(
+            case_payload.get("expected_behavior_without_context")
+            or payload.get("expected_behavior_without_context")
+            or ""
+        ),
     )
     observation_payload = dict(payload.get("observation") or {})
     observation = CoreObservation(

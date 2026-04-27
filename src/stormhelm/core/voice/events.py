@@ -23,10 +23,42 @@ class VoiceEventType(str, Enum):
     CAPTURE_TIMEOUT = "voice.capture_timeout"
     CAPTURE_FAILED = "voice.capture_failed"
     CAPTURE_AUDIO_CREATED = "voice.capture_audio_created"
+    WAKE_READINESS_CHANGED = "voice.wake_readiness_changed"
+    WAKE_MONITORING_STARTED = "voice.wake_monitoring_started"
+    WAKE_MONITORING_STOPPED = "voice.wake_monitoring_stopped"
     AUDIO_INPUT_RECEIVED = "voice.audio_input_received"
     AUDIO_VALIDATION_FAILED = "voice.audio_validation_failed"
     MANUAL_TURN_RECEIVED = "voice.manual_turn_received"
     WAKE_DETECTED = "voice.wake_detected"
+    WAKE_REJECTED = "voice.wake_rejected"
+    WAKE_SESSION_STARTED = "voice.wake_session_started"
+    WAKE_SESSION_EXPIRED = "voice.wake_session_expired"
+    WAKE_SESSION_CANCELLED = "voice.wake_session_cancelled"
+    WAKE_ERROR = "voice.wake_error"
+    WAKE_GHOST_REQUESTED = "voice.wake_ghost_requested"
+    WAKE_GHOST_SHOWN = "voice.wake_ghost_shown"
+    WAKE_GHOST_EXPIRED = "voice.wake_ghost_expired"
+    WAKE_GHOST_CANCELLED = "voice.wake_ghost_cancelled"
+    WAKE_GHOST_FAILED = "voice.wake_ghost_failed"
+    WAKE_SUPERVISED_LOOP_STARTED = "voice.wake_supervised_loop_started"
+    WAKE_SUPERVISED_LOOP_COMPLETED = "voice.wake_supervised_loop_completed"
+    WAKE_SUPERVISED_LOOP_FAILED = "voice.wake_supervised_loop_failed"
+    WAKE_SUPERVISED_LOOP_BLOCKED = "voice.wake_supervised_loop_blocked"
+    POST_WAKE_LISTEN_OPENED = "voice.post_wake_listen_opened"
+    POST_WAKE_LISTEN_STARTED = "voice.post_wake_listen_started"
+    POST_WAKE_LISTEN_CAPTURE_STARTED = "voice.post_wake_listen_capture_started"
+    POST_WAKE_LISTEN_CAPTURED = "voice.post_wake_listen_captured"
+    POST_WAKE_LISTEN_SUBMITTED = "voice.post_wake_listen_submitted"
+    POST_WAKE_LISTEN_EXPIRED = "voice.post_wake_listen_expired"
+    POST_WAKE_LISTEN_CANCELLED = "voice.post_wake_listen_cancelled"
+    POST_WAKE_LISTEN_FAILED = "voice.post_wake_listen_failed"
+    VAD_READINESS_CHANGED = "voice.vad_readiness_changed"
+    VAD_DETECTION_STARTED = "voice.vad_detection_started"
+    VAD_DETECTION_STOPPED = "voice.vad_detection_stopped"
+    SPEECH_ACTIVITY_STARTED = "voice.speech_activity_started"
+    SPEECH_ACTIVITY_STOPPED = "voice.speech_activity_stopped"
+    SILENCE_TIMEOUT = "voice.silence_timeout"
+    VAD_ERROR = "voice.vad_error"
     LISTENING_STARTED = "voice.listening_started"
     LISTENING_STOPPED = "voice.listening_stopped"
     SPEECH_STARTED = "voice.speech_started"
@@ -49,6 +81,61 @@ class VoiceEventType(str, Enum):
     PLAYBACK_COMPLETED = "voice.playback_completed"
     PLAYBACK_FAILED = "voice.playback_failed"
     PLAYBACK_STOPPED = "voice.playback_stopped"
+    INTERRUPTION_RECEIVED = "voice.interruption_received"
+    INTERRUPTION_CLASSIFIED = "voice.interruption_classified"
+    INTERRUPTION_RESOLVED = "voice.interruption_resolved"
+    INTERRUPTION_REQUESTED = "voice.interruption_requested"
+    INTERRUPTION_COMPLETED = "voice.interruption_completed"
+    INTERRUPTION_BLOCKED = "voice.interruption_blocked"
+    INTERRUPTION_FAILED = "voice.interruption_failed"
+    BARGE_IN_DETECTED = "voice.barge_in_detected"
+    OUTPUT_INTERRUPTED = "voice.output_interrupted"
+    CAPTURE_INTERRUPTED = "voice.capture_interrupted"
+    LISTEN_WINDOW_INTERRUPTED = "voice.listen_window_interrupted"
+    CONFIRMATION_INTERRUPTED = "voice.confirmation_interrupted"
+    CORE_CANCELLATION_REQUESTED = "voice.core_cancellation_requested"
+    CORRECTION_ROUTED = "voice.correction_routed"
+    SPEECH_SUPPRESSED = "voice.speech_suppressed"
+    SPOKEN_OUTPUT_MUTED = "voice.spoken_output_muted"
+    SPOKEN_OUTPUT_UNMUTED = "voice.spoken_output_unmuted"
+    SPOKEN_CONFIRMATION_RECEIVED = "voice.spoken_confirmation_received"
+    SPOKEN_CONFIRMATION_CLASSIFIED = "voice.spoken_confirmation_classified"
+    SPOKEN_CONFIRMATION_BOUND = "voice.spoken_confirmation_bound"
+    SPOKEN_CONFIRMATION_ACCEPTED = "voice.spoken_confirmation_accepted"
+    SPOKEN_CONFIRMATION_REJECTED = "voice.spoken_confirmation_rejected"
+    SPOKEN_CONFIRMATION_EXPIRED = "voice.spoken_confirmation_expired"
+    SPOKEN_CONFIRMATION_AMBIGUOUS = "voice.spoken_confirmation_ambiguous"
+    SPOKEN_CONFIRMATION_CONSUMED = "voice.spoken_confirmation_consumed"
+    SPOKEN_CONFIRMATION_FAILED = "voice.spoken_confirmation_failed"
+    REALTIME_READINESS_CHANGED = "voice.realtime_readiness_changed"
+    REALTIME_SESSION_CREATED = "voice.realtime_session_created"
+    REALTIME_SESSION_STARTED = "voice.realtime_session_started"
+    REALTIME_SESSION_ACTIVE = "voice.realtime_session_active"
+    REALTIME_SESSION_CLOSED = "voice.realtime_session_closed"
+    REALTIME_SESSION_EXPIRED = "voice.realtime_session_expired"
+    REALTIME_SESSION_CANCELLED = "voice.realtime_session_cancelled"
+    REALTIME_SESSION_FAILED = "voice.realtime_session_failed"
+    REALTIME_PARTIAL_TRANSCRIPT = "voice.realtime_partial_transcript"
+    REALTIME_FINAL_TRANSCRIPT = "voice.realtime_final_transcript"
+    REALTIME_TURN_CREATED = "voice.realtime_turn_created"
+    REALTIME_TURN_SUBMITTED_TO_CORE = "voice.realtime_turn_submitted_to_core"
+    REALTIME_TURN_COMPLETED = "voice.realtime_turn_completed"
+    REALTIME_TURN_FAILED = "voice.realtime_turn_failed"
+    REALTIME_SPEECH_SESSION_CREATED = "voice.realtime_speech_session_created"
+    REALTIME_SPEECH_SESSION_STARTED = "voice.realtime_speech_session_started"
+    REALTIME_SPEECH_SESSION_ACTIVE = "voice.realtime_speech_session_active"
+    REALTIME_SPEECH_SESSION_CLOSED = "voice.realtime_speech_session_closed"
+    REALTIME_SPEECH_SESSION_FAILED = "voice.realtime_speech_session_failed"
+    REALTIME_CORE_BRIDGE_CALL_STARTED = "voice.realtime_core_bridge_call_started"
+    REALTIME_CORE_BRIDGE_CALL_COMPLETED = "voice.realtime_core_bridge_call_completed"
+    REALTIME_CORE_BRIDGE_CALL_FAILED = "voice.realtime_core_bridge_call_failed"
+    REALTIME_RESPONSE_GATED = "voice.realtime_response_gated"
+    REALTIME_SPOKEN_RESPONSE_ALLOWED = "voice.realtime_spoken_response_allowed"
+    REALTIME_SPOKEN_RESPONSE_BLOCKED = "voice.realtime_spoken_response_blocked"
+    REALTIME_AUDIO_OUTPUT_STARTED = "voice.realtime_audio_output_started"
+    REALTIME_AUDIO_OUTPUT_STOPPED = "voice.realtime_audio_output_stopped"
+    REALTIME_AUDIO_OUTPUT_COMPLETED = "voice.realtime_audio_output_completed"
+    REALTIME_DIRECT_TOOL_BLOCKED = "voice.realtime_direct_tool_blocked"
     SPEAKING_STARTED = "voice.speaking_started"
     SPEAKING_COMPLETED = "voice.speaking_completed"
     INTERRUPTED = "voice.interrupted"
@@ -76,7 +163,51 @@ def build_voice_event_payload(
     audio_output_id: str | None = None,
     playback_request_id: str | None = None,
     playback_id: str | None = None,
+    interruption_id: str | None = None,
+    wake_event_id: str | None = None,
+    wake_session_id: str | None = None,
+    wake_ghost_request_id: str | None = None,
+    vad_session_id: str | None = None,
+    activity_event_id: str | None = None,
+    spoken_confirmation_intent_id: str | None = None,
+    spoken_confirmation_request_id: str | None = None,
+    spoken_confirmation_result_id: str | None = None,
+    pending_confirmation_id: str | None = None,
+    listen_window_id: str | None = None,
+    realtime_session_id: str | None = None,
+    realtime_turn_id: str | None = None,
+    realtime_event_id: str | None = None,
+    wake_phrase: str | None = None,
+    intent: str | None = None,
+    muted_scope: str | None = None,
+    action_id: str | None = None,
+    required_strength: str | None = None,
+    provided_strength: str | None = None,
+    binding_valid: bool | None = None,
+    invalid_reason: str | None = None,
+    consumed: bool | None = None,
+    action_executed: bool | None = None,
+    provider_kind: str | None = None,
+    backend: str | None = None,
+    core_task_cancelled: bool | None = None,
+    core_result_mutated: bool | None = None,
+    spoken_output_suppressed: bool | None = None,
+    confidence: float | None = None,
+    accepted: bool | None = None,
+    rejected_reason: str | None = None,
+    cooldown_active: bool | None = None,
+    false_positive_candidate: bool | None = None,
+    openai_used: bool | None = None,
+    cloud_used: bool | None = None,
+    raw_audio_present: bool | None = None,
+    is_partial: bool | None = None,
+    is_final: bool | None = None,
+    direct_tools_allowed: bool | None = None,
+    core_bridge_required: bool | None = None,
+    speech_to_speech_enabled: bool | None = None,
+    audio_output_from_realtime: bool | None = None,
     duration_ms: int | None = None,
+    silence_ms: int | None = None,
     size_bytes: int | None = None,
     model: str | None = None,
     voice: str | None = None,
@@ -119,7 +250,51 @@ def build_voice_event_payload(
         "audio_output_id": audio_output_id,
         "playback_request_id": playback_request_id,
         "playback_id": playback_id,
+        "interruption_id": interruption_id,
+        "wake_event_id": wake_event_id,
+        "wake_session_id": wake_session_id,
+        "wake_ghost_request_id": wake_ghost_request_id,
+        "vad_session_id": vad_session_id,
+        "activity_event_id": activity_event_id,
+        "spoken_confirmation_intent_id": spoken_confirmation_intent_id,
+        "spoken_confirmation_request_id": spoken_confirmation_request_id,
+        "spoken_confirmation_result_id": spoken_confirmation_result_id,
+        "pending_confirmation_id": pending_confirmation_id,
+        "listen_window_id": listen_window_id,
+        "realtime_session_id": realtime_session_id,
+        "realtime_turn_id": realtime_turn_id,
+        "realtime_event_id": realtime_event_id,
+        "wake_phrase": wake_phrase,
+        "intent": intent,
+        "muted_scope": muted_scope,
+        "action_id": action_id,
+        "required_strength": required_strength,
+        "provided_strength": provided_strength,
+        "binding_valid": binding_valid,
+        "invalid_reason": invalid_reason,
+        "consumed": consumed,
+        "action_executed": action_executed,
+        "provider_kind": provider_kind,
+        "backend": backend,
+        "core_task_cancelled": core_task_cancelled,
+        "core_result_mutated": core_result_mutated,
+        "spoken_output_suppressed": spoken_output_suppressed,
+        "confidence": confidence,
+        "accepted": accepted,
+        "rejected_reason": rejected_reason,
+        "cooldown_active": cooldown_active,
+        "false_positive_candidate": false_positive_candidate,
+        "openai_used": openai_used,
+        "cloud_used": cloud_used,
+        "raw_audio_present": raw_audio_present,
+        "is_partial": is_partial,
+        "is_final": is_final,
+        "direct_tools_allowed": direct_tools_allowed,
+        "core_bridge_required": core_bridge_required,
+        "speech_to_speech_enabled": speech_to_speech_enabled,
+        "audio_output_from_realtime": audio_output_from_realtime,
         "duration_ms": duration_ms,
+        "silence_ms": silence_ms,
         "size_bytes": size_bytes,
         "model": model,
         "voice": voice,
@@ -158,7 +333,51 @@ def publish_voice_event(
     audio_output_id: str | None = None,
     playback_request_id: str | None = None,
     playback_id: str | None = None,
+    interruption_id: str | None = None,
+    wake_event_id: str | None = None,
+    wake_session_id: str | None = None,
+    wake_ghost_request_id: str | None = None,
+    vad_session_id: str | None = None,
+    activity_event_id: str | None = None,
+    spoken_confirmation_intent_id: str | None = None,
+    spoken_confirmation_request_id: str | None = None,
+    spoken_confirmation_result_id: str | None = None,
+    pending_confirmation_id: str | None = None,
+    listen_window_id: str | None = None,
+    realtime_session_id: str | None = None,
+    realtime_turn_id: str | None = None,
+    realtime_event_id: str | None = None,
+    wake_phrase: str | None = None,
+    intent: str | None = None,
+    muted_scope: str | None = None,
+    action_id: str | None = None,
+    required_strength: str | None = None,
+    provided_strength: str | None = None,
+    binding_valid: bool | None = None,
+    invalid_reason: str | None = None,
+    consumed: bool | None = None,
+    action_executed: bool | None = None,
+    provider_kind: str | None = None,
+    backend: str | None = None,
+    core_task_cancelled: bool | None = None,
+    core_result_mutated: bool | None = None,
+    spoken_output_suppressed: bool | None = None,
+    confidence: float | None = None,
+    accepted: bool | None = None,
+    rejected_reason: str | None = None,
+    cooldown_active: bool | None = None,
+    false_positive_candidate: bool | None = None,
+    openai_used: bool | None = None,
+    cloud_used: bool | None = None,
+    raw_audio_present: bool | None = None,
+    is_partial: bool | None = None,
+    is_final: bool | None = None,
+    direct_tools_allowed: bool | None = None,
+    core_bridge_required: bool | None = None,
+    speech_to_speech_enabled: bool | None = None,
+    audio_output_from_realtime: bool | None = None,
     duration_ms: int | None = None,
+    silence_ms: int | None = None,
     size_bytes: int | None = None,
     model: str | None = None,
     voice: str | None = None,
@@ -202,7 +421,51 @@ def publish_voice_event(
             audio_output_id=audio_output_id,
             playback_request_id=playback_request_id,
             playback_id=playback_id,
+            interruption_id=interruption_id,
+            wake_event_id=wake_event_id,
+            wake_session_id=wake_session_id,
+            wake_ghost_request_id=wake_ghost_request_id,
+            vad_session_id=vad_session_id,
+            activity_event_id=activity_event_id,
+            spoken_confirmation_intent_id=spoken_confirmation_intent_id,
+            spoken_confirmation_request_id=spoken_confirmation_request_id,
+            spoken_confirmation_result_id=spoken_confirmation_result_id,
+            pending_confirmation_id=pending_confirmation_id,
+            listen_window_id=listen_window_id,
+            realtime_session_id=realtime_session_id,
+            realtime_turn_id=realtime_turn_id,
+            realtime_event_id=realtime_event_id,
+            wake_phrase=wake_phrase,
+            intent=intent,
+            muted_scope=muted_scope,
+            action_id=action_id,
+            required_strength=required_strength,
+            provided_strength=provided_strength,
+            binding_valid=binding_valid,
+            invalid_reason=invalid_reason,
+            consumed=consumed,
+            action_executed=action_executed,
+            provider_kind=provider_kind,
+            backend=backend,
+            core_task_cancelled=core_task_cancelled,
+            core_result_mutated=core_result_mutated,
+            spoken_output_suppressed=spoken_output_suppressed,
+            confidence=confidence,
+            accepted=accepted,
+            rejected_reason=rejected_reason,
+            cooldown_active=cooldown_active,
+            false_positive_candidate=false_positive_candidate,
+            openai_used=openai_used,
+            cloud_used=cloud_used,
+            raw_audio_present=raw_audio_present,
+            is_partial=is_partial,
+            is_final=is_final,
+            direct_tools_allowed=direct_tools_allowed,
+            core_bridge_required=core_bridge_required,
+            speech_to_speech_enabled=speech_to_speech_enabled,
+            audio_output_from_realtime=audio_output_from_realtime,
             duration_ms=duration_ms,
+            silence_ms=silence_ms,
             size_bytes=size_bytes,
             model=model,
             voice=voice,

@@ -31,22 +31,28 @@ PLANNER_V2_ROUTE_FAMILIES = {
     "task_continuity",
     "discord_relay",
     "trust_approvals",
+    "machine",
+    "system_control",
+    "terminal",
+    "desktop_search",
+    "development",
+    "time",
+    "storage",
+    "location",
+    "weather",
+    "power",
+    "resources",
+    "window_control",
+    "file_operation",
+    "maintenance",
+    "notes",
+    "software_recovery",
 }
 
 PLANNER_V2_LEGACY_DEFER_FAMILIES = {
     "comparison",
-    "desktop_search",
-    "file_operation",
-    "machine",
-    "maintenance",
-    "power",
     "power_projection",
-    "resources",
-    "software_recovery",
-    "terminal",
     "trust_approvals",
-    "weather",
-    "window_control",
 }
 
 
@@ -56,7 +62,6 @@ LEGACY_MIGRATION_SCHEDULE: dict[str, tuple[str, str]] = {
     "workflow": ("migrated", "migrated_in_planner_v2_expansion_1"),
     "task_continuity": ("migrated", "migrated_in_planner_v2_expansion_1"),
     "discord_relay": ("migrated", "migrated_in_planner_v2_expansion_1"),
-    "terminal": ("scheduled", "medium"),
     "maintenance": ("scheduled", "medium"),
     "trust_approvals": ("scheduled", "medium"),
     "power": ("scheduled", "low"),
@@ -64,8 +69,38 @@ LEGACY_MIGRATION_SCHEDULE: dict[str, tuple[str, str]] = {
     "window_control": ("scheduled", "low"),
     "resources": ("scheduled", "low"),
     "software_recovery": ("scheduled", "medium"),
-    "machine": ("scheduled", "low"),
-    "desktop_search": ("scheduled", "medium"),
+    "desktop_search": ("migrated", "migrated_in_boundary_alignment"),
+    "system_control": ("migrated", "migrated_in_boundary_alignment"),
+    "terminal": ("migrated", "migrated_in_boundary_alignment"),
+    "machine": ("migrated", "migrated_in_boundary_alignment"),
+    "development": ("migrated", "restored_from_legacy_retirement_baseline"),
+    "time": ("migrated", "restored_from_legacy_retirement_baseline"),
+    "storage": ("migrated", "restored_from_legacy_retirement_baseline"),
+    "location": ("migrated", "restored_from_legacy_retirement_baseline"),
+    "weather": ("migrated", "restored_from_legacy_retirement_baseline"),
+    "power": ("migrated", "restored_from_legacy_retirement_baseline"),
+    "resources": ("migrated", "restored_from_legacy_retirement_baseline"),
+    "window_control": ("migrated", "restored_from_legacy_retirement_baseline"),
+    "file_operation": ("migrated", "restored_from_legacy_retirement_baseline"),
+    "maintenance": ("migrated", "restored_from_legacy_retirement_baseline"),
+    "notes": ("migrated", "restored_from_legacy_retirement_baseline"),
+    "software_recovery": ("migrated", "restored_from_legacy_retirement_baseline"),
+}
+
+
+DIRECT_STATUS_FAMILY_TOOLS: dict[str, tuple[str, str, str, str, bool]] = {
+    "development": ("development", "echo", "direct_echo", "echo", False),
+    "time": ("system", "clock", "direct_deterministic_fact", "retrieve_current_status", False),
+    "storage": ("system", "storage_status", "direct_deterministic_fact", "retrieve_current_status", False),
+    "location": ("location", "location_status", "direct_deterministic_fact", "retrieve_current_status", False),
+    "weather": ("weather", "weather_current", "direct_deterministic_fact", "retrieve_current_status", False),
+    "power": ("system", "power_status", "direct_deterministic_fact", "retrieve_current_status", False),
+    "resources": ("system", "resource_status", "direct_deterministic_fact", "retrieve_current_status", False),
+    "window_control": ("system", "window_status", "direct_deterministic_fact", "retrieve_current_status", False),
+    "file_operation": ("files", "file_operation", "file_operation", "execute_control_command", True),
+    "maintenance": ("maintenance", "maintenance_action", "maintenance_action", "execute_control_command", True),
+    "notes": ("workspace", "notes_write", "notes_write", "execute_control_command", True),
+    "software_recovery": ("software_recovery", "repair_action", "repair_action", "execute_control_command", True),
 }
 
 
@@ -428,6 +463,8 @@ class ContextBinder:
                     label=str(selection.get("preview") or "selected text"),
                 )
             return self._missing(frame, "context")
+        if frame.native_owner_hint == "development" and frame.clarification_needed:
+            return self._missing(frame, "echo_command_intent")
         if frame.target_type == "visible_ui":
             visible = active_context.get("visible_ui") if isinstance(active_context.get("visible_ui"), dict) else {}
             if visible:
@@ -1068,6 +1105,8 @@ class RouteArbitrator:
             if "destination" in missing:
                 return "Who should I send it to?"
             return "What should I send?"
+        if family == "development":
+            return "Should I run that echo exactly, or did you want a different development command?"
         if missing:
             return f"Which {missing[0].replace('_', ' ')} should I use?"
         return f"Which context should I use for {frame.target_text or family}?"
@@ -1119,7 +1158,47 @@ class PlanBuilder:
         if family == "network":
             return PlanDraft(family, "system", "status", "system_resource", subject="network", tool_name="network_status", tool_arguments={"focus": "overview"}, request_type_hint="direct_deterministic_fact", execution_type="retrieve_current_status")
         if family == "watch_runtime":
+            source_case = str(frame.extracted_entities.get("source_case") or "").strip().lower()
+            if source_case == "browser_context" or str(frame.extracted_entities.get("tool_name") or "").strip().lower() == "browser_context":
+                return PlanDraft(family, "context", "inspect", "current_page", subject=subject or "browser page", tool_name="browser_context", tool_arguments={"operation": "current_page"}, request_type_hint="browser_context", execution_type="retrieve_browser_context")
             return PlanDraft(family, "operations", "status", "system_resource", subject="runtime", tool_name="activity_summary", tool_arguments={}, request_type_hint="activity_summary", execution_type="summarize_activity")
+        if family == "machine":
+            source_case = str(frame.extracted_entities.get("source_case") or "").strip().lower()
+            tool_name = "system_info" if source_case == "system_info" or str(frame.raw_text).strip().lower().startswith("/system") else "machine_status"
+            return PlanDraft(family, "system", "status", "system_resource", subject=subject or "machine", tool_name=tool_name, tool_arguments={"focus": "identity"}, request_type_hint="direct_deterministic_fact", execution_type="retrieve_identity")
+        if family == "system_control":
+            return PlanDraft(family, "system", frame.operation, "system_resource", subject=subject or "settings", tool_name="system_control", tool_arguments={"action": "open_settings", "target": subject or "settings", "dry_run": True}, request_type_hint="direct_action", execution_type="execute_control_command", requires_execution=True)
+        if family == "terminal":
+            command = str(frame.extracted_entities.get("shell_command") or frame.target_text or "open_terminal").strip()
+            return PlanDraft(family, "terminal", frame.operation, "workspace", subject=command or "terminal", tool_name="shell_command", tool_arguments={"command": command, "dry_run": True}, request_type_hint="terminal_preflight", execution_type="execute_control_command", requires_execution=True)
+        if family == "desktop_search":
+            return PlanDraft(family, "workflow", frame.operation, frame.target_type, subject=subject or "desktop_search", tool_name="desktop_search", tool_arguments={"query": subject or frame.raw_text, "action": "search"}, request_type_hint="search_and_act", execution_type="search_then_open")
+        if family == "development" and frame.clarification_needed:
+            return PlanDraft(family, "development", "clarify", "unknown", subject=subject or "echo command", request_type_hint="development_echo_clarification", execution_type="clarify_route_context")
+        if family in DIRECT_STATUS_FAMILY_TOOLS:
+            subsystem, default_tool, request_type_hint, execution_type, requires_execution = DIRECT_STATUS_FAMILY_TOOLS[family]
+            tool_name = str(frame.extracted_entities.get("tool_name") or default_tool).strip() or default_tool
+            if family == "development":
+                payload = str(frame.extracted_entities.get("echo_text") or subject or frame.raw_text).strip()
+                args = {"text": payload}
+            elif family == "notes":
+                args = {"text": subject or frame.raw_text, "dry_run": True}
+            elif family in {"file_operation", "maintenance", "software_recovery"}:
+                args = {"query": frame.raw_text, "target": subject, "dry_run": True}
+            else:
+                args = {"focus": family}
+            return PlanDraft(
+                family,
+                subsystem,
+                frame.operation,
+                frame.target_type,
+                subject=subject,
+                tool_name=tool_name,
+                tool_arguments=args,
+                request_type_hint=request_type_hint,
+                execution_type=execution_type,
+                requires_execution=requires_execution,
+            )
         if family == "workspace_operations":
             tool_name = self._workspace_tool(frame)
             action = tool_name.replace("workspace_", "")
@@ -1132,7 +1211,8 @@ class PlanBuilder:
         if family == "workflow":
             return PlanDraft(family, "workflow", frame.operation, "workspace", subject=subject or "workflow", tool_name="workflow_execute", tool_arguments={"query": frame.raw_text, "workflow_kind": subject or "workflow"}, request_type_hint="workflow_execution", execution_type="execute_workflow", requires_execution=True)
         if family == "task_continuity":
-            tool_name = "workspace_where_left_off" if "left off" in frame.normalized_text or "where were we" in frame.normalized_text else "workspace_next_steps"
+            source_case = str(frame.extracted_entities.get("source_case") or "").strip().lower()
+            tool_name = "workspace_where_left_off" if "left off" in frame.normalized_text or "where were we" in frame.normalized_text or source_case == "workspace_where_left_off" else "workspace_next_steps"
             action = "where_left_off" if tool_name == "workspace_where_left_off" else "next_steps"
             return PlanDraft(family, "workspace", frame.operation, "workspace", subject=action, tool_name=tool_name, tool_arguments={}, request_type_hint="task_continuity", execution_type="summarize_workspace")
         if family == "discord_relay":
@@ -1142,6 +1222,12 @@ class PlanBuilder:
 
     def _workspace_tool(self, frame: IntentFrame) -> str:
         text = frame.normalized_text
+        source_case = str(frame.extracted_entities.get("source_case") or "").strip().lower()
+        tool_name = str(frame.extracted_entities.get("tool_name") or "").strip()
+        if tool_name.startswith("workspace_"):
+            return tool_name
+        if source_case in {"workspace_restore", "workspace_assemble", "workspace_save", "workspace_list", "workspace_archive", "workspace_clear"}:
+            return source_case
         if "restore" in text or "open" in text:
             return "workspace_restore"
         if "save" in text or "snapshot" in text:
@@ -1327,6 +1413,7 @@ class PlannerV2:
         recent_tool_results: list[dict[str, Any]],
     ) -> IntentFrame:
         text = frame.normalized_text
+        raw_lower = str(frame.raw_text or "").strip().lower()
         if self._expansion_conceptual_near_miss(text):
             frame.operation = "unknown"
             frame.target_type = "unknown"
@@ -1338,6 +1425,89 @@ class PlannerV2:
             frame.clarification_needed = False
             frame.clarification_reason = ""
             return frame
+        if self._browser_correction_near_miss(text):
+            self._set_context_clarification(frame, reason="browser_near_miss_requires_clarification")
+            return frame
+        if self._echo_command_near_miss(text, raw_lower):
+            frame.operation = "inspect"
+            frame.target_type = "unknown"
+            frame.target_text = self._echo_payload(frame.raw_text)
+            frame.context_reference = "none"
+            frame.context_status = "ambiguous"
+            frame.risk_class = "read_only"
+            frame.native_owner_hint = "development"
+            frame.candidate_route_families = ["development"]
+            frame.extracted_entities["echo_text"] = self._echo_payload(frame.raw_text)
+            frame.extracted_entities["source_case"] = "echo"
+            frame.generic_provider_allowed = False
+            frame.generic_provider_reason = "native_route_candidate_present"
+            frame.clarification_needed = True
+            frame.clarification_reason = "echo_command_intent"
+            return frame
+        if raw_lower.startswith("/system"):
+            frame.operation = "status"
+            frame.target_type = "system_resource"
+            frame.target_text = "system information"
+            frame.context_reference = "none"
+            frame.context_status = "available"
+            frame.risk_class = "read_only"
+            frame.native_owner_hint = "machine"
+            frame.candidate_route_families = ["machine"]
+            frame.extracted_entities["source_case"] = "system_info"
+            frame.extracted_entities["tool_name"] = "system_info"
+            frame.generic_provider_allowed = False
+            frame.generic_provider_reason = "native_route_candidate_present"
+            frame.clarification_needed = False
+            frame.clarification_reason = ""
+            return frame
+        if raw_lower.startswith("/shell"):
+            command = frame.raw_text.split(maxsplit=1)[1] if len(frame.raw_text.split(maxsplit=1)) > 1 else ""
+            frame.operation = "launch"
+            frame.target_type = "workspace"
+            frame.target_text = command or "shell"
+            frame.context_reference = "none"
+            frame.context_status = "available"
+            frame.risk_class = "dry_run_plan"
+            frame.native_owner_hint = "terminal"
+            frame.candidate_route_families = ["terminal"]
+            frame.extracted_entities["shell_command"] = command or "open_terminal"
+            frame.extracted_entities["tool_name"] = "shell_command"
+            frame.generic_provider_allowed = False
+            frame.generic_provider_reason = "native_route_candidate_present"
+            frame.clarification_needed = False
+            frame.clarification_reason = ""
+            return frame
+        if self._system_control_signal(text):
+            frame.operation = "open" if re.search(r"\b(?:open|show|launch|start|opne)\b", text) else "status"
+            frame.target_type = "system_resource"
+            frame.target_text = self._settings_target(frame.raw_text)
+            frame.context_reference = "none"
+            frame.context_status = "available"
+            frame.risk_class = "internal_surface_open"
+            frame.native_owner_hint = "system_control"
+            frame.candidate_route_families = ["system_control"]
+            frame.generic_provider_allowed = False
+            frame.generic_provider_reason = "native_route_candidate_present"
+            frame.clarification_needed = False
+            frame.clarification_reason = ""
+        if self._browser_context_signal(text):
+            frame.operation = "inspect"
+            frame.target_type = "current_page"
+            frame.target_text = "browser page"
+            frame.context_reference = "current_page"
+            frame.context_status = "available"
+            frame.risk_class = "read_only"
+            frame.native_owner_hint = "watch_runtime"
+            frame.candidate_route_families = ["watch_runtime"]
+            frame.extracted_entities["source_case"] = "browser_context"
+            frame.extracted_entities["tool_name"] = "browser_context"
+            frame.generic_provider_allowed = False
+            frame.generic_provider_reason = "native_route_candidate_present"
+            frame.clarification_needed = False
+            frame.clarification_reason = ""
+        direct_family = self._direct_status_family(text, raw_lower)
+        if direct_family and not frame.native_owner_hint:
+            self._apply_direct_status_frame(frame, direct_family)
         active_followup_owner = self._active_state_followup_owner(frame, active_request_state)
         if active_followup_owner:
             self._apply_active_state_followup(
@@ -1348,19 +1518,11 @@ class PlannerV2:
                 recent_tool_results=recent_tool_results,
             )
         if self._ambiguous_deictic_clarification_signal(frame, active_request_state):
-            frame.operation = "clarify"
-            frame.target_type = "unknown"
-            frame.target_text = "current context"
-            if frame.context_reference == "none":
-                frame.context_reference = "previous_result" if self._followup_signal(text) else "this"
-            frame.context_status = "ambiguous" if active_context else "missing"
-            frame.risk_class = "read_only"
-            frame.native_owner_hint = "context_clarification"
-            frame.candidate_route_families = ["context_clarification"]
-            frame.generic_provider_allowed = False
-            frame.generic_provider_reason = "ambiguous_deictic_requires_native_clarification"
-            frame.clarification_needed = True
-            frame.clarification_reason = "ambiguous_deictic_no_owner"
+            self._set_context_clarification(
+                frame,
+                reason="ambiguous_deictic_no_owner",
+                context_status="ambiguous" if active_context else "missing",
+            )
         if self._deictic_calculation_signal(text):
             has_context = bool(
                 active_context.get("recent_context_resolutions")
@@ -1515,7 +1677,8 @@ class PlannerV2:
     def _ambiguous_deictic_clarification_signal(self, frame: IntentFrame, active_request_state: dict[str, Any]) -> bool:
         if frame.native_owner_hint:
             return False
-        if str(active_request_state.get("family") or "").strip():
+        active_family = str(active_request_state.get("family") or "").strip().lower()
+        if active_family and active_family not in {"generic_provider", "unsupported", "context_clarification"}:
             return False
         if frame.speech_act in {"question", "explanation_request", "comparison"}:
             return False
@@ -1526,6 +1689,124 @@ class PlannerV2:
         if self._bare_action_deictic_generic_provider_preferred(frame.normalized_text):
             return False
         return self._followup_signal(frame.normalized_text, frame=frame)
+
+    def _set_context_clarification(
+        self,
+        frame: IntentFrame,
+        *,
+        reason: str,
+        context_status: str = "missing",
+    ) -> None:
+        frame.operation = "clarify"
+        frame.target_type = "unknown"
+        frame.target_text = "current context"
+        if frame.context_reference == "none":
+            frame.context_reference = "previous_result" if self._followup_signal(frame.normalized_text) else "this"
+        frame.context_status = context_status
+        frame.risk_class = "read_only"
+        frame.native_owner_hint = "context_clarification"
+        frame.candidate_route_families = ["context_clarification"]
+        frame.generic_provider_allowed = False
+        frame.generic_provider_reason = "ambiguous_deictic_requires_native_clarification"
+        frame.clarification_needed = True
+        frame.clarification_reason = reason
+
+    def _browser_correction_near_miss(self, text: str) -> bool:
+        return bool(
+            re.search(r"\b(?:almost|nearly|sort of|kind of)\b.{0,32}\b(?:open|launch|navigate|go to)\b.{0,32}\bbrowser\b", text)
+            and re.search(r"\b(?:not exactly|not quite|but not|instead)\b", text)
+        )
+
+    def _system_control_signal(self, text: str) -> bool:
+        if re.search(r"\b(?:file|note|notes|document|readme)\b", text):
+            return False
+        return bool(
+            re.search(r"\b(?:open|show|launch|start|opne)\b.{0,36}\b(?:settings?|bluetooth|wi-?fi|wifi|display|sound|privacy|network)\b", text)
+            or re.search(r"\b(?:settings?|bluetooth|wi-?fi|wifi|display|sound|privacy|network)\b.{0,24}\bsettings?\b", text)
+        )
+
+    def _direct_status_family(self, text: str, raw_lower: str) -> str:
+        if raw_lower.startswith("/echo"):
+            return "development"
+        if self._clear_echo_command(text, raw_lower):
+            return "development"
+        if raw_lower.startswith("/note"):
+            return "notes"
+        if re.search(r"\b(?:what time is it|current time|time right now)\b", text):
+            return "time"
+        if re.search(r"\b(?:disk space|storage space|free space)\b", text):
+            return "storage"
+        if re.search(r"\b(?:where am i|current location|my location)\b", text):
+            return "location"
+        if re.search(r"\bweather\b", text) and not re.search(r"\b(?:weathering|whether)\b", text):
+            return "weather"
+        if re.search(r"\b(?:battery|charging|power)\b", text):
+            return "power"
+        if re.search(r"\b(?:cpu|memory|ram|resource usage|computer sluggish)\b", text):
+            return "resources"
+        if re.search(r"\b(?:windows are open|active windows|focused window)\b", text):
+            return "window_control"
+        if re.search(r"\b(?:rename|move|delete|tag|archive)\b.{0,40}\b(?:file|files|screenshots|folder|folders)\b", text):
+            return "file_operation"
+        if re.search(r"\b(?:clean up|cleanup|archive stale)\b.{0,40}\b(?:downloads|files|folder|folders)\b", text):
+            return "maintenance"
+        if re.search(r"\b(?:fix|repair|diagnose)\b.{0,40}\b(?:wifi|wi-fi|network|dns|explorer)\b", text):
+            return "software_recovery"
+        return ""
+
+    def _apply_direct_status_frame(self, frame: IntentFrame, family: str) -> None:
+        frame.native_owner_hint = family
+        frame.candidate_route_families = [family]
+        frame.context_reference = "none"
+        frame.context_status = "available"
+        frame.generic_provider_allowed = False
+        frame.generic_provider_reason = "native_route_candidate_present"
+        frame.clarification_needed = False
+        frame.clarification_reason = ""
+        if family in {"file_operation", "maintenance", "notes", "software_recovery"}:
+            frame.operation = "save" if family == "notes" else "repair" if family in {"maintenance", "software_recovery"} else "update"
+            frame.risk_class = "dry_run_plan"
+        else:
+            frame.operation = "status" if family != "development" else "inspect"
+            frame.risk_class = "read_only"
+        frame.target_type = "current_app" if family == "window_control" else "file" if family == "file_operation" else "system_resource"
+        if family == "development":
+            frame.target_type = "unknown"
+            frame.extracted_entities["echo_text"] = self._echo_payload(frame.raw_text)
+        if family == "notes":
+            frame.target_type = "selected_text"
+        if family in DIRECT_STATUS_FAMILY_TOOLS:
+            frame.extracted_entities["tool_name"] = DIRECT_STATUS_FAMILY_TOOLS[family][1]
+        frame.extracted_entities["source_case"] = family if family not in {"time", "development"} else "clock" if family == "time" else "echo"
+        frame.target_text = self._strip_known_verbs(frame.raw_text) or family.replace("_", " ")
+
+    def _echo_payload(self, raw_text: str) -> str:
+        text = str(raw_text or "").strip()
+        text = re.sub(r"\b(?:almost|nearly|sort of|kind of)\b\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*,?\s*\b(?:but\s+)?not\s+(?:exactly|quite)\b.*$", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"^/echo\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"^echo\s+", "", text, flags=re.IGNORECASE)
+        return " ".join(text.split()).strip() or "echo"
+
+    def _clear_echo_command(self, text: str, raw_lower: str) -> bool:
+        if self._echo_command_near_miss(text, raw_lower):
+            return False
+        if re.search(r"\becho\s+(?:chamber|location|effect|concept|idea|theory)\b", text):
+            return False
+        return bool(re.match(r"^(?:echo|repeat back|say back)\b\s+\S", text))
+
+    def _echo_command_near_miss(self, text: str, raw_lower: str) -> bool:
+        if not re.search(r"(?:^|\s)/?echo\b", raw_lower):
+            return False
+        return bool(
+            re.search(r"\b(?:almost|nearly|sort of|kind of)\b", text)
+            and re.search(r"\b(?:not exactly|not quite|but not|instead)\b", text)
+        )
+
+    def _settings_target(self, raw_text: str) -> str:
+        target = re.sub(r"\b(?:open|show|launch|start|opne)\b", "", raw_text, flags=re.IGNORECASE)
+        target = " ".join(target.split()).strip(" .,:;!?")
+        return target or "system settings"
 
     def _bare_action_deictic_generic_provider_preferred(self, text: str) -> bool:
         return bool(
@@ -1538,7 +1819,11 @@ class PlannerV2:
             return True
         return bool(
             re.search(
-                r"\b(?:this|that|it|these|those|same|previous|last|before|again|earlier|reuse|continue|current thing|what i just said)\b",
+                (
+                    r"\b(?:this|that|it|these|those|same|previous|last|before|again|earlier|reuse|continue|"
+                    r"current thing|what i just said|other one|the other|go ahead|confirm)\b"
+                    r"|^\s*yes\b"
+                ),
                 text,
             )
         )
@@ -1568,6 +1853,9 @@ class PlannerV2:
         frame.candidate_route_families = [family]
         frame.generic_provider_allowed = False
         frame.generic_provider_reason = "native_route_candidate_present"
+        for key in ("source_case", "tool_name", "path", "operation", "operation_type", "target_name", "shell_command"):
+            if key in parameters and parameters.get(key) not in {None, ""}:
+                frame.extracted_entities[key] = parameters.get(key)
         bound = self._active_followup_context(
             family=family,
             target_type=target_type,
@@ -1612,18 +1900,45 @@ class PlannerV2:
         if family == "screen_awareness":
             return "inspect", "visible_ui", "visible screen", "visible_target", "read_only"
         if family == "software_control":
-            operation = str(parameters.get("operation_type") or parameters.get("operation") or "verify").strip().lower()
+            source_case = str(parameters.get("source_case") or "").strip().lower()
+            operation = str(parameters.get("operation_type") or parameters.get("operation") or "").strip().lower()
+            if not operation:
+                if "install" in source_case:
+                    operation = "install"
+                elif "uninstall" in source_case:
+                    operation = "uninstall"
+                elif "update" in source_case:
+                    operation = "update"
+                elif "repair" in source_case:
+                    operation = "repair"
+                else:
+                    operation = "verify"
             operation = operation if operation in {"install", "uninstall", "update", "repair", "verify"} else "verify"
             target = str(parameters.get("target_name") or subject or "software").strip()
             return operation, "software_package", target, "previous_result", "software_lifecycle" if operation != "verify" else "read_only"
         if family == "network":
             return "status", "system_resource", "network", "previous_result", "read_only"
         if family == "watch_runtime":
+            source_case = str(parameters.get("source_case") or "").strip().lower()
+            if source_case == "browser_context":
+                return "inspect", "current_page", subject or "browser page", "previous_result", "read_only"
             return "status", "system_resource", "runtime", "previous_result", "read_only"
+        if family == "machine":
+            return "status", "system_resource", subject or "machine", "previous_result", "read_only"
+        if family == "system_control":
+            return "open", "system_resource", subject or "settings", "previous_result", "internal_surface_open"
+        if family == "terminal":
+            return "launch", "workspace", subject or "terminal", "previous_result", "dry_run_plan"
+        if family == "desktop_search":
+            return "search", "file", subject or "desktop search", "previous_result", "read_only"
         if family == "workspace_operations":
-            return "assemble", "workspace", subject or "workspace", "previous_result", "dry_run_plan"
+            source_case = str(parameters.get("source_case") or "").strip().lower()
+            operation = "open" if "restore" in source_case else "assemble"
+            return operation, "workspace", subject or "workspace", "previous_result", "dry_run_plan"
         if family == "routine":
-            return "launch", "routine", subject or "routine", "previous_result", "dry_run_plan"
+            source_case = str(parameters.get("source_case") or "").strip().lower()
+            operation = "save" if "save" in source_case else "launch"
+            return operation, "routine", subject or "routine", "previous_result", "dry_run_plan"
         if family == "workflow":
             return "launch", "workspace", subject or "workflow", "previous_result", "dry_run_plan"
         if family == "task_continuity":
@@ -1632,6 +1947,19 @@ class PlannerV2:
             return "send", "discord_recipient", subject or "discord", "previous_result", "external_send"
         if family == "trust_approvals":
             return "verify", "prior_result", subject or "approval request", "previous_result", "trust_sensitive_action"
+        if family in DIRECT_STATUS_FAMILY_TOOLS:
+            if family in {"file_operation", "maintenance", "notes", "software_recovery"}:
+                operation = "save" if family == "notes" else "repair" if family in {"maintenance", "software_recovery"} else "update"
+                risk = "dry_run_plan"
+            else:
+                operation = "status" if family != "development" else "inspect"
+                risk = "read_only"
+            target_type = "current_app" if family == "window_control" else "file" if family == "file_operation" else "system_resource"
+            if family == "development":
+                target_type = "prior_result"
+            if family == "notes":
+                target_type = "selected_text"
+            return operation, target_type, subject or family.replace("_", " "), "previous_result", risk
         return "inspect", "unknown", subject or family, "previous_result", "read_only"
 
     def _active_followup_context(
@@ -1672,7 +2000,33 @@ class PlannerV2:
             bound = ContextBinder()._prior_calculation(active_context, active_request_state, recent_tool_results)
             if bound is not None:
                 return bound
-        if family in {"app_control", "network", "watch_runtime", "software_control"}:
+        if family in {
+            "app_control",
+            "network",
+            "watch_runtime",
+            "software_control",
+            "file",
+            "routine",
+            "workspace_operations",
+            "workflow",
+            "task_continuity",
+            "machine",
+            "system_control",
+            "terminal",
+            "desktop_search",
+            "development",
+            "time",
+            "storage",
+            "location",
+            "weather",
+            "power",
+            "resources",
+            "window_control",
+            "file_operation",
+            "maintenance",
+            "notes",
+            "software_recovery",
+        }:
             return {"type": target_type, "source": "active_request_state", "label": str(active_request_state.get("subject") or family), "value": dict(active_request_state), "confidence": 0.82}
         if family == "trust_approvals":
             trust = active_request_state.get("trust") if isinstance(active_request_state.get("trust"), dict) else {}
@@ -1852,6 +2206,7 @@ class PlannerV2:
             or (" tab " in f" {text} " and text.startswith(("find ", "show ", "bring ")))
             or ("page about" in text and any(text.startswith(prefix) for prefix in {"find ", "show ", "bring "}))
             or re.search(r"\b(?:what|which)\b.{0,24}\b(?:browser\s+)?(?:page|tab)\b.{0,24}\bam i on\b", text)
+            or re.search(r"\b(?:what|which)\b.{0,24}\b(?:page|tab)\b.{0,24}\b(?:open|active|current)\b.{0,24}\b(?:browser|tab)\b", text)
             or re.search(r"\bcurrent\b.{0,16}\b(?:browser\s+)?(?:page|tab)\b", text)
         )
 

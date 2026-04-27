@@ -78,7 +78,7 @@ Tests: `tests/test_safety.py`, `tests/test_tool_registry.py`
 | Lifecycle cleanup | Requires cleanup plan and confirmation payload. |
 | Screen action | Confirm-before-act by default. |
 | Discord dispatch | Preview, fingerprint, trust approval, and duplicate/stale checks. |
-| Voice capture/playback | Disabled by default; explicit controls only; capture/playback have separate gates and do not bypass trust/safety for commands. |
+| Voice capture/playback/wake | Disabled by default; explicit controls only; capture/playback/wake have separate gates and do not bypass trust/safety for commands. |
 
 Sources: `src/stormhelm/core/safety/policy.py`, `src/stormhelm/core/software_control/service.py`, `src/stormhelm/core/lifecycle/service.py`, `src/stormhelm/core/screen_awareness/action.py`, `src/stormhelm/core/discord_relay/service.py`, `src/stormhelm/core/voice/service.py`
 Tests: `tests/test_safety.py`, `tests/test_software_control.py`, `tests/test_lifecycle_service.py`, `tests/test_screen_awareness_action.py`, `tests/test_discord_relay.py`, `tests/test_voice_capture_service.py`, `tests/test_voice_playback_service.py`
@@ -128,7 +128,10 @@ Tests: `tests/test_discord_relay.py`
 Current posture:
 
 - Voice is disabled by default.
-- There is no wake word, always-listening mode, continuous microphone loop, VAD, or Realtime session.
+- Local wake provider support is disabled by default and requires explicit wake and dev gates plus an available local backend.
+- Wake-to-Ghost is presentation only. There is no post-wake capture window, always-listening command mode, semantic VAD, or Realtime session.
+- VAD is disabled by default, mock/dev gated, and detects audio activity only during an explicit capture/listen window. Speech stopped does not mean the request was understood.
+- Dormant wake audio is not sent to OpenAI or cloud services.
 - Capture is explicit and has a separate `voice.capture.enabled` gate plus development capture gate.
 - Generated TTS artifacts and captured audio are transient by default.
 - OpenAI STT/TTS sends audio/text externally only when OpenAI and the relevant voice path are enabled and invoked.
@@ -139,10 +142,10 @@ What should not happen:
 
 - Do not treat microphone capture as active unless capture state says it is active.
 - Do not persist raw/generated audio unless the explicit persistence settings are changed.
-- Do not claim continuous listening, wake word, Realtime, or direct voice command execution.
+- Do not claim continuous command listening, Realtime, post-wake capture, command understanding, or direct voice command execution from wake-to-Ghost presentation or VAD activity.
 
 Sources: `config/default.toml`, `src/stormhelm/core/voice/availability.py`, `src/stormhelm/core/voice/service.py`, `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/voice/bridge.py`
-Tests: `tests/test_voice_config.py`, `tests/test_voice_availability.py`, `tests/test_voice_capture_service.py`, `tests/test_voice_playback_service.py`, `tests/test_voice_core_bridge_contracts.py`
+Tests: `tests/test_voice_config.py`, `tests/test_voice_availability.py`, `tests/test_voice_capture_service.py`, `tests/test_voice_playback_service.py`, `tests/test_voice_core_bridge_contracts.py`, `tests/test_voice_wake_service.py`, `tests/test_voice_local_wake_provider.py`, `tests/test_voice_wake_ghost_service.py`, `tests/test_voice_wake_ghost_payload.py`, `tests/test_voice_vad_service.py`
 
 ## Software Installation Safety
 

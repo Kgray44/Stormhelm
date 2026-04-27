@@ -145,18 +145,24 @@ class ScreenAwarenessConfig:
     def capability_flags(self) -> dict[str, bool]:
         return {
             "observation_enabled": self.observation_enabled and self._phase_at_least(1),
-            "interpretation_enabled": self.interpretation_enabled and self._phase_at_least(1),
+            "interpretation_enabled": self.interpretation_enabled
+            and self._phase_at_least(1),
             "grounding_enabled": self.grounding_enabled and self._phase_at_least(2),
             "guidance_enabled": self.guidance_enabled and self._phase_at_least(3),
             "action_enabled": self.action_enabled and self._phase_at_least(5),
-            "verification_enabled": self.verification_enabled and self._phase_at_least(4),
+            "verification_enabled": self.verification_enabled
+            and self._phase_at_least(4),
             "memory_enabled": self.memory_enabled,
             "continuity_enabled": self.memory_enabled and self._phase_at_least(6),
             "adapters_enabled": self.adapters_enabled and self._phase_at_least(7),
-            "problem_solving_enabled": self.problem_solving_enabled and self._phase_at_least(8),
-            "workflow_learning_enabled": self.workflow_learning_enabled and self._phase_at_least(9),
-            "brain_integration_enabled": self.brain_integration_enabled and self._phase_at_least(10),
-            "power_features_enabled": self.power_features_enabled and self._phase_at_least(11),
+            "problem_solving_enabled": self.problem_solving_enabled
+            and self._phase_at_least(8),
+            "workflow_learning_enabled": self.workflow_learning_enabled
+            and self._phase_at_least(9),
+            "brain_integration_enabled": self.brain_integration_enabled
+            and self._phase_at_least(10),
+            "power_features_enabled": self.power_features_enabled
+            and self._phase_at_least(11),
             "hardening_enabled": self._phase_at_least(12),
         }
 
@@ -244,7 +250,9 @@ class DiscordRelayConfig:
     verification_enabled: bool = True
     local_dm_route_enabled: bool = True
     bot_webhook_routes_enabled: bool = False
-    trusted_aliases: dict[str, DiscordTrustedAliasConfig] = field(default_factory=default_discord_trusted_aliases)
+    trusted_aliases: dict[str, DiscordTrustedAliasConfig] = field(
+        default_factory=default_discord_trusted_aliases
+    )
 
 
 @dataclass(slots=True)
@@ -312,6 +320,170 @@ class VoiceCaptureConfig:
 
 
 @dataclass(slots=True)
+class VoiceWakeConfig:
+    enabled: bool = False
+    provider: str = "mock"
+    wake_phrase: str = "Stormhelm"
+    device: str = "default"
+    sample_rate: int = 16000
+    backend: str = "unavailable"
+    model_path: str | None = None
+    sensitivity: float = 0.5
+    confidence_threshold: float = 0.75
+    cooldown_ms: int = 2500
+    max_wake_session_ms: int = 15000
+    false_positive_window_ms: int = 3000
+    allow_dev_wake: bool = False
+
+    def __post_init__(self) -> None:
+        self.provider = str(self.provider or "mock").strip().lower() or "mock"
+        self.wake_phrase = str(self.wake_phrase or "Stormhelm").strip() or "Stormhelm"
+        self.device = str(self.device or "default").strip() or "default"
+        self.backend = (
+            str(self.backend or "unavailable").strip().lower() or "unavailable"
+        )
+        self.model_path = (
+            str(self.model_path).strip() if self.model_path is not None else None
+        ) or None
+        self.sample_rate = max(1, int(self.sample_rate or 16000))
+        try:
+            sensitivity = float(self.sensitivity)
+        except (TypeError, ValueError):
+            sensitivity = 0.5
+        self.sensitivity = min(1.0, max(0.0, sensitivity))
+        try:
+            threshold = float(self.confidence_threshold)
+        except (TypeError, ValueError):
+            threshold = 0.75
+        self.confidence_threshold = min(1.0, max(0.0, threshold))
+        self.cooldown_ms = max(0, int(self.cooldown_ms or 0))
+        self.max_wake_session_ms = max(1, int(self.max_wake_session_ms or 1))
+        self.false_positive_window_ms = max(0, int(self.false_positive_window_ms or 0))
+
+
+@dataclass(slots=True)
+class VoicePostWakeConfig:
+    enabled: bool = False
+    listen_window_ms: int = 8000
+    max_utterance_ms: int = 30_000
+    auto_start_capture: bool = True
+    auto_submit_on_capture_complete: bool = True
+    allow_dev_post_wake: bool = False
+
+    def __post_init__(self) -> None:
+        self.listen_window_ms = max(1, int(self.listen_window_ms or 8000))
+        self.max_utterance_ms = max(1, int(self.max_utterance_ms or 30_000))
+        self.auto_start_capture = bool(self.auto_start_capture)
+        self.auto_submit_on_capture_complete = bool(
+            self.auto_submit_on_capture_complete
+        )
+        self.allow_dev_post_wake = bool(self.allow_dev_post_wake)
+
+
+@dataclass(slots=True)
+class VoiceVADConfig:
+    enabled: bool = False
+    provider: str = "mock"
+    silence_ms: int = 900
+    speech_start_threshold: float = 0.5
+    speech_stop_threshold: float = 0.35
+    min_speech_ms: int = 250
+    max_utterance_ms: int = 30_000
+    pre_roll_ms: int = 250
+    post_roll_ms: int = 250
+    allow_dev_vad: bool = False
+    auto_finalize_capture: bool = True
+
+    def __post_init__(self) -> None:
+        self.provider = str(self.provider or "mock").strip().lower() or "mock"
+        self.silence_ms = max(0, int(self.silence_ms or 0))
+        self.min_speech_ms = max(0, int(self.min_speech_ms or 0))
+        self.max_utterance_ms = max(1, int(self.max_utterance_ms or 1))
+        self.pre_roll_ms = max(0, int(self.pre_roll_ms or 0))
+        self.post_roll_ms = max(0, int(self.post_roll_ms or 0))
+        try:
+            start_threshold = float(self.speech_start_threshold)
+        except (TypeError, ValueError):
+            start_threshold = 0.5
+        try:
+            stop_threshold = float(self.speech_stop_threshold)
+        except (TypeError, ValueError):
+            stop_threshold = 0.35
+        self.speech_start_threshold = min(1.0, max(0.0, start_threshold))
+        self.speech_stop_threshold = min(1.0, max(0.0, stop_threshold))
+
+
+@dataclass(slots=True)
+class VoiceRealtimeConfig:
+    enabled: bool = False
+    provider: str = "openai"
+    mode: str = "transcription_bridge"
+    model: str = "gpt-realtime"
+    voice: str = "stormhelm_default"
+    turn_detection: str = "server_vad"
+    semantic_vad_enabled: bool = False
+    max_session_ms: int = 60_000
+    max_turn_ms: int = 30_000
+    allow_dev_realtime: bool = False
+    direct_tools_allowed: bool = False
+    core_bridge_required: bool = True
+    audio_output_enabled: bool = False
+    speech_to_speech_enabled: bool = False
+    audio_output_from_realtime: bool = False
+    require_core_for_commands: bool = True
+    allow_smalltalk_without_core: bool = False
+
+    def __post_init__(self) -> None:
+        self.provider = str(self.provider or "openai").strip().lower() or "openai"
+        mode = str(self.mode or "transcription_bridge").strip().lower()
+        self.mode = (
+            mode
+            if mode in {"transcription_bridge", "speech_to_speech_core_bridge"}
+            else "unsupported"
+        )
+        self.model = str(self.model or "gpt-realtime").strip() or "gpt-realtime"
+        self.voice = str(self.voice or "stormhelm_default").strip() or "stormhelm_default"
+        self.turn_detection = (
+            str(self.turn_detection or "server_vad").strip().lower() or "server_vad"
+        )
+        self.semantic_vad_enabled = bool(self.semantic_vad_enabled)
+        self.max_session_ms = max(1, int(self.max_session_ms or 60_000))
+        self.max_turn_ms = max(1, int(self.max_turn_ms or 30_000))
+        self.allow_dev_realtime = bool(self.allow_dev_realtime)
+        self.direct_tools_allowed = False
+        self.core_bridge_required = True
+        self.require_core_for_commands = True
+        self.allow_smalltalk_without_core = bool(self.allow_smalltalk_without_core)
+        if self.mode == "speech_to_speech_core_bridge":
+            self.speech_to_speech_enabled = bool(self.speech_to_speech_enabled)
+            self.audio_output_from_realtime = bool(
+                self.audio_output_from_realtime or self.audio_output_enabled
+            )
+            self.audio_output_enabled = self.audio_output_from_realtime
+        else:
+            self.speech_to_speech_enabled = False
+            self.audio_output_from_realtime = False
+            self.audio_output_enabled = False
+
+
+@dataclass(slots=True)
+class VoiceConfirmationConfig:
+    enabled: bool = True
+    max_confirmation_age_ms: int = 30_000
+    allow_soft_yes_for_low_risk: bool = True
+    require_strong_phrase_for_destructive: bool = True
+    consume_once: bool = True
+    reject_on_task_switch: bool = True
+    reject_on_payload_change: bool = True
+    reject_on_session_restart: bool = True
+
+    def __post_init__(self) -> None:
+        self.max_confirmation_age_ms = max(
+            1, int(self.max_confirmation_age_ms or 30_000)
+        )
+
+
+@dataclass(slots=True)
 class VoiceConfig:
     enabled: bool = False
     provider: str = "openai"
@@ -324,6 +496,11 @@ class VoiceConfig:
     openai: VoiceOpenAIConfig = field(default_factory=VoiceOpenAIConfig)
     playback: VoicePlaybackConfig = field(default_factory=VoicePlaybackConfig)
     capture: VoiceCaptureConfig = field(default_factory=VoiceCaptureConfig)
+    wake: VoiceWakeConfig = field(default_factory=VoiceWakeConfig)
+    post_wake: VoicePostWakeConfig = field(default_factory=VoicePostWakeConfig)
+    vad: VoiceVADConfig = field(default_factory=VoiceVADConfig)
+    realtime: VoiceRealtimeConfig = field(default_factory=VoiceRealtimeConfig)
+    confirmation: VoiceConfirmationConfig = field(default_factory=VoiceConfirmationConfig)
 
 
 @dataclass(slots=True)
@@ -461,11 +638,15 @@ class AppConfig:
 
     @property
     def core_log_file_path(self) -> Path:
-        return self.storage.logs_dir / _build_log_file_name(self.logging.file_name, "core")
+        return self.storage.logs_dir / _build_log_file_name(
+            self.logging.file_name, "core"
+        )
 
     @property
     def ui_log_file_path(self) -> Path:
-        return self.storage.logs_dir / _build_log_file_name(self.logging.file_name, "ui")
+        return self.storage.logs_dir / _build_log_file_name(
+            self.logging.file_name, "ui"
+        )
 
     @property
     def version_label(self) -> str:

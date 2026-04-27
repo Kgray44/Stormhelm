@@ -81,6 +81,61 @@ class VoicePlaybackControlRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class VoiceInterruptionControlRequest(BaseModel):
+    intent: str | None = None
+    transcript: str = Field("", max_length=500)
+    normalized_phrase: str = ""
+    session_id: str = "default"
+    turn_id: str | None = None
+    playback_id: str | None = None
+    capture_id: str | None = None
+    listen_window_id: str | None = None
+    realtime_session_id: str | None = None
+    pending_confirmation_id: str | None = None
+    active_loop_id: str | None = None
+    reason: str = "user_requested"
+    scope: str = "session"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class VoiceRealtimeControlRequest(BaseModel):
+    session_id: str = "default"
+    realtime_session_id: str | None = None
+    listen_window_id: str | None = None
+    capture_id: str | None = None
+    transcript: str = Field("", max_length=2000)
+    source: str = "test"
+    mode: str = "ghost"
+    reason: str = "user_requested"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class VoiceWakeControlRequest(BaseModel):
+    session_id: str = "default"
+    wake_event_id: str | None = None
+    wake_session_id: str | None = None
+    confidence: float | None = None
+    mode: str = "ghost"
+    synthesize_response: bool = False
+    play_response: bool = False
+    finalize_with_vad: bool = False
+    reason: str = "user_requested"
+    source: str = "mock"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class VoiceSpokenConfirmationControlRequest(BaseModel):
+    transcript: str = Field("", max_length=500)
+    normalized_phrase: str = ""
+    session_id: str = "default"
+    turn_id: str | None = None
+    source: str = "api"
+    pending_confirmation_id: str | None = None
+    task_id: str | None = None
+    route_family: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class EventsResponse(BaseModel):
     events: list[dict[str, Any]]
     cursor: int | None = None

@@ -243,6 +243,24 @@ class CoreApiClient(QtCore.QObject):
     def fetch_voice_pipeline(self) -> None:
         self._send_json("GET", "/voice/pipeline", None, self.voice_action_received.emit)
 
+    def fetch_spoken_confirmation_status(self) -> None:
+        self._send_json(
+            "GET",
+            "/voice/confirmation/status",
+            None,
+            self.voice_action_received.emit,
+        )
+
+    def submit_spoken_confirmation(
+        self, payload: dict[str, object] | None = None
+    ) -> None:
+        self._send_json(
+            "POST",
+            "/voice/confirmation/submit",
+            payload or {},
+            self.voice_action_received.emit,
+        )
+
     def submit_captured_audio_turn(
         self, payload: dict[str, object] | None = None
     ) -> None:
@@ -267,6 +285,44 @@ class CoreApiClient(QtCore.QObject):
         self._send_json(
             "POST",
             "/voice/playback/stop",
+            payload or {},
+            self.voice_action_received.emit,
+        )
+
+    def stop_voice_speaking(self, payload: dict[str, object] | None = None) -> None:
+        self._send_json(
+            "POST",
+            "/voice/output/stop-speaking",
+            payload or {},
+            self.voice_action_received.emit,
+        )
+
+    def suppress_current_voice_response(
+        self, payload: dict[str, object] | None = None
+    ) -> None:
+        self._send_json(
+            "POST",
+            "/voice/output/suppress-current-response",
+            payload or {},
+            self.voice_action_received.emit,
+        )
+
+    def mute_spoken_responses(
+        self, payload: dict[str, object] | None = None
+    ) -> None:
+        self._send_json(
+            "POST",
+            "/voice/output/mute",
+            payload or {},
+            self.voice_action_received.emit,
+        )
+
+    def unmute_spoken_responses(
+        self, payload: dict[str, object] | None = None
+    ) -> None:
+        self._send_json(
+            "POST",
+            "/voice/output/unmute",
             payload or {},
             self.voice_action_received.emit,
         )

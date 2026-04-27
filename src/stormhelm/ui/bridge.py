@@ -39,6 +39,11 @@ class UiBridge(QtCore.QObject):
     voiceSubmitCapturedAudioTurnRequested = QtCore.Signal(dict)
     voiceCaptureAndSubmitTurnRequested = QtCore.Signal(dict)
     voiceStopPlaybackRequested = QtCore.Signal(dict)
+    voiceStopSpeakingRequested = QtCore.Signal(dict)
+    voiceSuppressCurrentResponseRequested = QtCore.Signal(dict)
+    voiceMuteSpokenResponsesRequested = QtCore.Signal(dict)
+    voiceUnmuteSpokenResponsesRequested = QtCore.Signal(dict)
+    voiceSpokenConfirmationRequested = QtCore.Signal(dict)
     voiceReadinessRequested = QtCore.Signal()
 
     modeChanged = QtCore.Signal()
@@ -628,6 +633,65 @@ class UiBridge(QtCore.QObject):
         )
 
     @QtCore.Slot(str)
+    def stopSpeaking(self, playback_id: str = "") -> None:
+        self._status_line = "Stopping speech."
+        self.statusChanged.emit()
+        self.voiceStopSpeakingRequested.emit(
+            {
+                "playback_id": str(
+                    playback_id or self._voice_state.get("active_playback_id") or ""
+                ),
+                "reason": "user_requested",
+            }
+        )
+
+    @QtCore.Slot(str)
+    def suppressCurrentResponse(self, turn_id: str = "") -> None:
+        self._status_line = "Suppressing spoken output."
+        self.statusChanged.emit()
+        self.voiceSuppressCurrentResponseRequested.emit(
+            {
+                "turn_id": str(turn_id or self._voice_state.get("turn_id") or ""),
+                "reason": "user_requested",
+            }
+        )
+
+    @QtCore.Slot()
+    def muteSpokenResponses(self) -> None:
+        self._status_line = "Muting speech."
+        self.statusChanged.emit()
+        self.voiceMuteSpokenResponsesRequested.emit(
+            {"scope": "session", "reason": "user_requested"}
+        )
+
+    @QtCore.Slot()
+    def unmuteSpokenResponses(self) -> None:
+        self._status_line = "Unmuting speech."
+        self.statusChanged.emit()
+        self.voiceUnmuteSpokenResponsesRequested.emit(
+            {"scope": "session", "reason": "user_requested"}
+        )
+
+    @QtCore.Slot(str, str, str)
+    def submitSpokenConfirmation(
+        self, transcript: str, pending_confirmation_id: str = "", task_id: str = ""
+    ) -> None:
+        phrase = str(transcript or "").strip()
+        if not phrase:
+            return
+        self._status_line = "Checking confirmation."
+        self.statusChanged.emit()
+        self.voiceSpokenConfirmationRequested.emit(
+            {
+                "transcript": phrase,
+                "session_id": "default",
+                "source": "deck",
+                "pending_confirmation_id": str(pending_confirmation_id or ""),
+                "task_id": str(task_id or ""),
+            }
+        )
+
+    @QtCore.Slot(str)
     def activateWorkspaceSection(self, key: str) -> None:
         normalized = (key or "").strip().lower()
         if not normalized or normalized == self._active_workspace_section_key:
@@ -812,6 +876,18 @@ class UiBridge(QtCore.QObject):
             self.stopVoicePlayback(
                 str(self._voice_state.get("active_playback_id") or "")
             )
+            return
+        if normalized == "voice.stopspeaking":
+            self.stopSpeaking(str(self._voice_state.get("active_playback_id") or ""))
+            return
+        if normalized == "voice.suppresscurrentresponse":
+            self.suppressCurrentResponse(str(self._voice_state.get("turn_id") or ""))
+            return
+        if normalized == "voice.mutespokenresponses":
+            self.muteSpokenResponses()
+            return
+        if normalized == "voice.unmutespokenresponses":
+            self.unmuteSpokenResponses()
             return
         if normalized in {"voice.refreshreadiness", "voice.getreadinessreport"}:
             self._status_line = "Refreshing voice readiness."
@@ -1761,6 +1837,14 @@ class UiBridge(QtCore.QObject):
             return "Routing captured audio through Core."
         if "stopplayback" in normalized:
             return "Playback stop requested."
+        if "stopspeaking" in normalized:
+            return "Stopped."
+        if "suppresscurrentresponse" in normalized:
+            return "Response remains available visually."
+        if "mutespokenresponses" in normalized:
+            return "Speech muted."
+        if "unmutespokenresponses" in normalized:
+            return "Speech unmuted."
         return f"Voice action {status or 'completed'}."
 
     def _voice_failure_status_line(
@@ -1772,6 +1856,12 @@ class UiBridge(QtCore.QObject):
             return f"Capture {reason}."
         if "playback" in normalized:
             return f"Playback {reason}."
+        if (
+            "speaking" in normalized
+            or "spokenresponses" in normalized
+            or "suppresscurrentresponse" in normalized
+        ):
+            return f"Speech {reason}."
         return f"Voice action {reason}."
 
     def _voice_actions_first(

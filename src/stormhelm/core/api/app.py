@@ -23,9 +23,15 @@ from stormhelm.core.api.schemas import (
     ShellPresenceRequest,
     StartupPolicyMutationRequest,
     VoiceCaptureControlRequest,
+    VoiceInterruptionControlRequest,
     VoicePlaybackControlRequest,
+    VoiceRealtimeControlRequest,
+    VoiceSpokenConfirmationControlRequest,
+    VoiceWakeControlRequest,
 )
 from stormhelm.core.container import CoreContainer, build_container
+from stormhelm.core.voice import VoiceInterruptionRequest
+from stormhelm.core.voice import VoiceSpokenConfirmationRequest
 from stormhelm.core.lifecycle import ShellPresenceUpdate
 from stormhelm.version import __version__
 
@@ -462,6 +468,292 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "voice": current.voice.status_snapshot(),
         }
 
+    @app.get("/voice/confirmation/status")
+    async def voice_spoken_confirmation_status(request: Request) -> dict[str, object]:
+        current = _current_container(request)
+        status = current.voice.status_snapshot()
+        return {
+            "action": "voice.getSpokenConfirmationStatus",
+            "spoken_confirmation": status.get("spoken_confirmation", {}),
+            "voice": status,
+        }
+
+    @app.post("/voice/confirmation/submit")
+    async def submit_voice_spoken_confirmation(
+        payload: VoiceSpokenConfirmationControlRequest, request: Request
+    ) -> dict[str, object]:
+        current = _current_container(request)
+        result = await current.voice.handle_spoken_confirmation(
+            VoiceSpokenConfirmationRequest(
+                transcript=payload.transcript,
+                normalized_phrase=payload.normalized_phrase,
+                session_id=payload.session_id,
+                turn_id=payload.turn_id,
+                source=payload.source or "api",
+                pending_confirmation_id=payload.pending_confirmation_id,
+                task_id=payload.task_id,
+                route_family=payload.route_family,
+                metadata=payload.metadata,
+            )
+        )
+        return _voice_action_response("voice.handleSpokenConfirmation", result, current)
+
+    @app.get("/voice/wake/readiness")
+    async def voice_wake_readiness(request: Request) -> dict[str, object]:
+        current = _current_container(request)
+        return {
+            "action": "voice.getWakeReadiness",
+            "wake_readiness": current.voice.wake_readiness_report().to_dict(),
+            "voice": current.voice.status_snapshot(),
+        }
+
+    @app.get("/voice/vad/readiness")
+    async def voice_vad_readiness(request: Request) -> dict[str, object]:
+        current = _current_container(request)
+        return {
+            "action": "voice.getVADReadiness",
+            "vad_readiness": current.voice.vad_readiness_report().to_dict(),
+            "voice": current.voice.status_snapshot(),
+        }
+
+    @app.get("/voice/realtime/readiness")
+    async def voice_realtime_readiness(request: Request) -> dict[str, object]:
+        current = _current_container(request)
+        return {
+            "action": "voice.getRealtimeReadiness",
+            "realtime_readiness": current.voice.realtime_readiness_report().to_dict(),
+            "voice": current.voice.status_snapshot(),
+        }
+
+    @app.post("/voice/realtime/start")
+    async def start_voice_realtime_session(
+        payload: VoiceRealtimeControlRequest, request: Request
+    ) -> dict[str, object]:
+        current = _current_container(request)
+        result = await current.voice.start_realtime_session(
+            session_id=payload.session_id,
+            source=payload.source,
+            listen_window_id=payload.listen_window_id,
+            capture_id=payload.capture_id,
+        )
+        return {
+            "action": "voice.startRealtimeSession",
+            "realtime_session": result.to_dict(),
+            "voice": current.voice.status_snapshot(),
+        }
+
+    @app.post("/voice/realtime/stop")
+    async def stop_voice_realtime_session(
+        payload: VoiceRealtimeControlRequest, request: Request
+    ) -> dict[str, object]:
+        current = _current_container(request)
+        result = await current.voice.close_realtime_session(
+            payload.realtime_session_id,
+            reason=payload.reason or "closed",
+        )
+        return {
+            "action": "voice.stopRealtimeSession",
+            "realtime_session": result.to_dict(),
+            "voice": current.voice.status_snapshot(),
+        }
+
+    @app.post("/voice/realtime/partial")
+    async def simulate_voice_realtime_partial(
+        payload: VoiceRealtimeControlRequest, request: Request
+    ) -> dict[str, object]:
+        current = _current_container(request)
+        result = await current.voice.simulate_realtime_partial_transcript(
+            payload.transcript,
+            realtime_session_id=payload.realtime_session_id,
+            listen_window_id=payload.listen_window_id,
+            capture_id=payload.capture_id,
+        )
+        return {
+            "action": "voice.simulateRealtimePartialTranscript",
+            "realtime_transcript_event": result.to_dict(),
+            "voice": current.voice.status_snapshot(),
+        }
+
+    @app.post("/voice/realtime/final")
+    async def simulate_voice_realtime_final(
+        payload: VoiceRealtimeControlRequest, request: Request
+    ) -> dict[str, object]:
+        current = _current_container(request)
+        result = await current.voice.simulate_realtime_final_transcript(
+            payload.transcript,
+            realtime_session_id=payload.realtime_session_id,
+            listen_window_id=payload.listen_window_id,
+            capture_id=payload.capture_id,
+            mode=payload.mode or "ghost",
+            metadata=payload.metadata,
+        )
+        return {
+            "action": "voice.simulateRealtimeFinalTranscript",
+            "realtime_turn_result": result.to_dict(),
+            "voice": current.voice.status_snapshot(),
+        }
+
+    @app.post("/voice/vad/speech-started")
+    async def simulate_voice_speech_started(
+        payload: VoiceCaptureControlRequest, request: Request
+    ) -> dict[str, object]:
+        current = _current_container(request)
+        result = await current.voice.simulate_speech_started(
+            capture_id=payload.capture_id
+        )
+        return {
+            "action": "voice.simulateSpeechStarted",
+            "activity_event": result.to_dict(),
+            "voice": current.voice.status_snapshot(),
+        }
+
+    @app.post("/voice/vad/speech-stopped")
+    async def simulate_voice_speech_stopped(
+        payload: VoiceCaptureControlRequest, request: Request
+    ) -> dict[str, object]:
+        current = _current_container(request)
+        result = await current.voice.simulate_speech_stopped(
+            capture_id=payload.capture_id
+        )
+        return {
+            "action": "voice.simulateSpeechStopped",
+            "activity_event": result.to_dict(),
+            "voice": current.voice.status_snapshot(),
+        }
+
+    @app.get("/voice/wake/ghost")
+    async def voice_wake_ghost(request: Request) -> dict[str, object]:
+        current = _current_container(request)
+        return {
+            "action": "voice.getWakeGhost",
+            "wake_ghost": current.voice.status_snapshot()["wake_ghost"],
+            "voice": current.voice.status_snapshot(),
+        }
+
+    @app.post("/voice/wake/ghost/cancel")
+    async def cancel_voice_wake_ghost(
+        payload: VoiceWakeControlRequest, request: Request
+    ) -> dict[str, object]:
+        current = _current_container(request)
+        result = await current.voice.cancel_wake_ghost(
+            payload.wake_session_id,
+            reason=payload.reason or "operator_dismissed",
+        )
+        return {
+            "action": "voice.cancelWakeGhost",
+            "wake_ghost": result.to_dict(),
+            "voice": current.voice.status_snapshot(),
+        }
+
+    @app.post("/voice/wake/loop")
+    async def run_voice_wake_supervised_loop(
+        payload: VoiceWakeControlRequest, request: Request
+    ) -> dict[str, object]:
+        current = _current_container(request)
+        result = await current.voice.run_wake_supervised_voice_loop(
+            payload.wake_session_id,
+            mode=payload.mode or "ghost",
+            synthesize_response=payload.synthesize_response,
+            play_response=payload.play_response,
+            finalize_with_vad=payload.finalize_with_vad,
+        )
+        return {
+            "action": "voice.runWakeSupervisedLoop",
+            "wake_supervised_loop": result.to_dict(),
+            "voice": current.voice.status_snapshot(),
+        }
+
+    @app.post("/voice/wake/start")
+    async def start_voice_wake_monitoring(
+        payload: VoiceWakeControlRequest, request: Request
+    ) -> dict[str, object]:
+        current = _current_container(request)
+        result = await current.voice.start_wake_monitoring(
+            session_id=payload.session_id
+        )
+        return _voice_action_response("voice.startWakeMonitoring", result, current)
+
+    @app.post("/voice/wake/stop")
+    async def stop_voice_wake_monitoring(
+        payload: VoiceWakeControlRequest, request: Request
+    ) -> dict[str, object]:
+        current = _current_container(request)
+        result = await current.voice.stop_wake_monitoring(session_id=payload.session_id)
+        return _voice_action_response("voice.stopWakeMonitoring", result, current)
+
+    @app.post("/voice/wake/simulate")
+    async def simulate_voice_wake(
+        payload: VoiceWakeControlRequest, request: Request
+    ) -> dict[str, object]:
+        current = _current_container(request)
+        result = await current.voice.simulate_wake_event(
+            session_id=payload.session_id,
+            confidence=payload.confidence,
+            source=payload.source or "mock",
+        )
+        return {
+            "action": "voice.simulateWake",
+            "wake_event": result.to_dict(),
+            "voice": current.voice.status_snapshot(),
+        }
+
+    @app.post("/voice/wake/accept")
+    async def accept_voice_wake(
+        payload: VoiceWakeControlRequest, request: Request
+    ) -> dict[str, object]:
+        current = _current_container(request)
+        result = await current.voice.accept_wake_event(
+            payload.wake_event_id,
+            session_id=payload.session_id,
+        )
+        return {
+            "action": "voice.acceptWake",
+            "wake_session": result.to_dict(),
+            "voice": current.voice.status_snapshot(),
+        }
+
+    @app.post("/voice/wake/reject")
+    async def reject_voice_wake(
+        payload: VoiceWakeControlRequest, request: Request
+    ) -> dict[str, object]:
+        current = _current_container(request)
+        result = await current.voice.reject_wake_event(
+            payload.wake_event_id,
+            reason=payload.reason or "false_positive",
+        )
+        return {
+            "action": "voice.rejectWake",
+            "wake_event": result.to_dict(),
+            "voice": current.voice.status_snapshot(),
+        }
+
+    @app.post("/voice/wake/cancel")
+    async def cancel_voice_wake_session(
+        payload: VoiceWakeControlRequest, request: Request
+    ) -> dict[str, object]:
+        current = _current_container(request)
+        result = await current.voice.cancel_wake_session(
+            payload.wake_session_id,
+            reason=payload.reason or "user_cancelled",
+        )
+        return {
+            "action": "voice.cancelWakeSession",
+            "wake_session": result.to_dict(),
+            "voice": current.voice.status_snapshot(),
+        }
+
+    @app.post("/voice/wake/expire")
+    async def expire_voice_wake_session(
+        payload: VoiceWakeControlRequest, request: Request
+    ) -> dict[str, object]:
+        current = _current_container(request)
+        result = await current.voice.expire_wake_session(payload.wake_session_id)
+        return {
+            "action": "voice.expireWakeSession",
+            "wake_session": result.to_dict(),
+            "voice": current.voice.status_snapshot(),
+        }
+
     @app.post("/voice/capture/start")
     async def start_voice_capture(
         payload: VoiceCaptureControlRequest, request: Request
@@ -543,6 +835,82 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             reason=payload.reason or "user_requested",
         )
         return _voice_action_response("voice.stopPlayback", result, current)
+
+    @app.post("/voice/output/stop-speaking")
+    async def stop_voice_speaking(
+        payload: VoiceInterruptionControlRequest, request: Request
+    ) -> dict[str, object]:
+        current = _current_container(request)
+        result = await current.voice.stop_speaking(
+            session_id=payload.session_id,
+            playback_id=payload.playback_id,
+            reason=payload.reason or "user_requested",
+        )
+        return _voice_action_response("voice.stopSpeaking", result, current)
+
+    @app.post("/voice/output/suppress-current-response")
+    async def suppress_current_voice_response(
+        payload: VoiceInterruptionControlRequest, request: Request
+    ) -> dict[str, object]:
+        current = _current_container(request)
+        result = await current.voice.suppress_current_response(
+            session_id=payload.session_id,
+            turn_id=payload.turn_id,
+            reason=payload.reason or "user_requested",
+        )
+        return _voice_action_response("voice.suppressCurrentResponse", result, current)
+
+    @app.post("/voice/output/mute")
+    async def mute_spoken_voice_output(
+        payload: VoiceInterruptionControlRequest, request: Request
+    ) -> dict[str, object]:
+        current = _current_container(request)
+        result = await current.voice.set_spoken_output_muted(
+            True,
+            session_id=payload.session_id,
+            scope=payload.scope or "session",
+            reason=payload.reason or "user_requested",
+        )
+        return _voice_action_response("voice.muteSpokenResponses", result, current)
+
+    @app.post("/voice/output/unmute")
+    async def unmute_spoken_voice_output(
+        payload: VoiceInterruptionControlRequest, request: Request
+    ) -> dict[str, object]:
+        current = _current_container(request)
+        result = await current.voice.set_spoken_output_muted(
+            False,
+            session_id=payload.session_id,
+            scope=payload.scope or "session",
+            reason=payload.reason or "user_requested",
+        )
+        return _voice_action_response("voice.unmuteSpokenResponses", result, current)
+
+    @app.post("/voice/interruption/handle")
+    async def handle_voice_interruption(
+        payload: VoiceInterruptionControlRequest, request: Request
+    ) -> dict[str, object]:
+        current = _current_container(request)
+        result = await current.voice.handle_voice_interruption(
+            VoiceInterruptionRequest(
+                intent=payload.intent or "unknown",
+                transcript=payload.transcript,
+                normalized_phrase=payload.normalized_phrase,
+                source="api",
+                session_id=payload.session_id,
+                turn_id=payload.turn_id,
+                playback_id=payload.playback_id,
+                capture_id=payload.capture_id,
+                listen_window_id=payload.listen_window_id,
+                realtime_session_id=payload.realtime_session_id,
+                pending_confirmation_id=payload.pending_confirmation_id,
+                active_loop_id=payload.active_loop_id,
+                reason=payload.reason or "user_requested",
+                muted_scope=payload.scope or "session",
+                metadata=payload.metadata,
+            )
+        )
+        return _voice_action_response("voice.handleInterruption", result, current)
 
     @app.get("/snapshot")
     def snapshot(

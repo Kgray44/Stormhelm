@@ -171,6 +171,16 @@ manual_input_enabled = true
 realtime_enabled = false
 debug_mock_provider = true
 
+[voice.confirmation]
+enabled = true
+max_confirmation_age_ms = 30000
+allow_soft_yes_for_low_risk = true
+require_strong_phrase_for_destructive = true
+consume_once = true
+reject_on_task_switch = true
+reject_on_payload_change = true
+reject_on_session_restart = true
+
 [voice.openai]
 stt_model = "gpt-4o-mini-transcribe"
 transcription_language = ""
@@ -212,6 +222,61 @@ auto_stop_on_max_duration = true
 persist_captured_audio = false
 delete_transient_after_turn = true
 allow_dev_capture = false
+
+[voice.wake]
+enabled = false
+provider = "mock"
+wake_phrase = "Stormhelm"
+device = "default"
+sample_rate = 16000
+backend = "unavailable"
+model_path = ""
+sensitivity = 0.5
+confidence_threshold = 0.75
+cooldown_ms = 2500
+max_wake_session_ms = 15000
+false_positive_window_ms = 3000
+allow_dev_wake = false
+
+[voice.post_wake]
+enabled = false
+listen_window_ms = 8000
+max_utterance_ms = 30000
+auto_start_capture = true
+auto_submit_on_capture_complete = true
+allow_dev_post_wake = false
+
+[voice.vad]
+enabled = false
+provider = "mock"
+silence_ms = 900
+speech_start_threshold = 0.5
+speech_stop_threshold = 0.35
+min_speech_ms = 250
+max_utterance_ms = 30000
+pre_roll_ms = 250
+post_roll_ms = 250
+allow_dev_vad = false
+auto_finalize_capture = true
+
+[voice.realtime]
+enabled = false
+provider = "openai"
+mode = "transcription_bridge"
+model = "gpt-realtime"
+voice = "stormhelm_default"
+turn_detection = "server_vad"
+semantic_vad_enabled = false
+max_session_ms = 60000
+max_turn_ms = 30000
+allow_dev_realtime = false
+direct_tools_allowed = false
+core_bridge_required = true
+audio_output_enabled = false
+speech_to_speech_enabled = false
+audio_output_from_realtime = false
+require_core_for_commands = true
+allow_smalltalk_without_core = false
 
 [safety]
 allowed_read_dirs = [

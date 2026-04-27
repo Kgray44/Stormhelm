@@ -271,7 +271,7 @@ Voice is disabled by default. Enabling voice does not enable wake word, always-l
 | `voice.enabled` | bool | `false` | No | bool | TOML/env | Voice status remains unavailable if false. |
 | `voice.provider` | string | `openai` | No | `openai`, mock/test provider names in code | TOML/env | Availability fails if unsupported for the selected path. |
 | `voice.mode` | string | `disabled` | No | `disabled`, implemented mode labels | TOML/env | `disabled` blocks voice availability. |
-| `voice.wake_word_enabled` | bool | `false` | No | bool | TOML/env | Present as a truth flag; wake word detection is not implemented. |
+| `voice.wake_word_enabled` | bool | `false` | No | bool | TOML/env | Legacy truth flag; Voice-11 uses `[voice.wake]` for the provider boundary. |
 | `voice.spoken_responses_enabled` | bool | `false` | No | bool | TOML/env | Allows spoken-response/TTS posture when provider gates pass. |
 | `voice.manual_input_enabled` | bool | `true` | No | bool | TOML/env | Enables manual transcript voice-turn path. |
 | `voice.realtime_enabled` | bool | `false` | No | bool | TOML/env | Present as a truth flag; Realtime sessions are not implemented. |
@@ -306,6 +306,31 @@ Env overrides use the `STORMHELM_VOICE_OPENAI_*` prefix shown in `src/stormhelm/
 
 Sources: `config/default.toml`, `src/stormhelm/config/loader.py`, `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/voice/service.py`
 Tests: `tests/test_voice_config.py`, `tests/test_voice_stt_provider.py`, `tests/test_voice_tts_provider.py`, `tests/test_voice_audio_turn.py`
+
+## Voice Wake Foundation
+
+Voice wake settings define the disabled-by-default wake foundation and Voice-11 local provider boundary. Local wake must be explicitly enabled, dev-gated, and backed by an available local backend. Dormant wake audio is not sent to OpenAI or cloud services.
+
+| Key | Type | Default | Required | Valid values | Read from | Behavior if missing/invalid |
+|---|---|---|---|---|---|---|
+| `voice.wake.enabled` | bool | `false` | No | bool | TOML/env | Wake readiness reports disabled if false. |
+| `voice.wake.provider` | string | `mock` | No | `mock`, `local`, unavailable/stub labels | TOML/env | Local provider remains unavailable unless the explicit gates and backend pass. |
+| `voice.wake.wake_phrase` | string | `Stormhelm` | No | non-empty phrase | TOML/env | Empty values normalize to `Stormhelm`. |
+| `voice.wake.device` | string | `default` | No | device label | TOML/env | Passed to local wake backend when available. |
+| `voice.wake.sample_rate` | int | `16000` | No | positive int | TOML/env | Passed to local wake backend. |
+| `voice.wake.backend` | string | `unavailable` | No | backend label | TOML/env | Names the optional local backend; missing dependencies report unavailable. |
+| `voice.wake.model_path` | string | empty | No | local path or empty | TOML/env | Optional local wake model path for future/optional backends. |
+| `voice.wake.sensitivity` | number | `0.5` | No | `0.0` to `1.0` | TOML/env | Backend hint only; values outside range are clamped. |
+| `voice.wake.confidence_threshold` | number | `0.75` | No | `0.0` to `1.0` | TOML/env | Values outside range are clamped. |
+| `voice.wake.cooldown_ms` | int | `2500` | No | non-negative milliseconds | TOML/env | Repeated mock wake events inside cooldown are rejected. |
+| `voice.wake.max_wake_session_ms` | int | `15000` | No | positive milliseconds | TOML/env | Bounds the temporary wake session. |
+| `voice.wake.false_positive_window_ms` | int | `3000` | No | non-negative milliseconds | TOML/env | Stored for false-positive diagnostics and future phases. |
+| `voice.wake.allow_dev_wake` | bool | `false` | No | bool | TOML/env | Mock wake simulation is blocked unless explicitly allowed. |
+
+Env overrides use `STORMHELM_VOICE_WAKE_*`.
+
+Sources: `config/default.toml`, `src/stormhelm/config/models.py`, `src/stormhelm/config/loader.py`, `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/voice/service.py`
+Tests: `tests/test_voice_wake_config.py`, `tests/test_voice_wake_service.py`, `tests/test_voice_local_wake_provider.py`
 
 ## Voice Capture And Playback
 

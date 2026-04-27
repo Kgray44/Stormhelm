@@ -14,15 +14,15 @@ from stormhelm.core.orchestrator.planner_v2 import PlannerV2
         ("what is the weather here", "weather"),
     ],
 )
-def test_planner_v2_defers_unmigrated_native_owners_instead_of_overcapturing(prompt: str, legacy_family: str) -> None:
+def test_planner_v2_owns_restored_direct_status_families(prompt: str, legacy_family: str) -> None:
     trace = PlannerV2().plan(prompt)
 
-    assert trace.authoritative is False
-    assert trace.route_decision.routing_engine == "legacy_planner"
-    assert trace.route_decision.legacy_fallback_allowed is True
-    assert trace.route_decision.legacy_family == legacy_family
+    assert trace.authoritative is True
+    assert trace.route_decision.routing_engine == "planner_v2"
+    assert trace.route_decision.legacy_fallback_allowed is False
+    assert trace.route_decision.selected_route_family == legacy_family
     assert trace.route_decision.generic_provider_allowed is False
-    assert "native_owner_not_migrated" in trace.route_decision.planner_v2_decline_reason
+    assert trace.route_decision.generic_provider_gate_reason == "native_route_candidate_present"
 
 
 def test_deterministic_planner_reports_browser_context_under_context_subsystem() -> None:

@@ -54,6 +54,19 @@ class MainController(QtCore.QObject):
             self._capture_and_submit_voice_turn
         )
         self.bridge.voiceStopPlaybackRequested.connect(self._stop_voice_playback)
+        self.bridge.voiceStopSpeakingRequested.connect(self._stop_voice_speaking)
+        self.bridge.voiceSuppressCurrentResponseRequested.connect(
+            self._suppress_current_voice_response
+        )
+        self.bridge.voiceMuteSpokenResponsesRequested.connect(
+            self._mute_spoken_responses
+        )
+        self.bridge.voiceUnmuteSpokenResponsesRequested.connect(
+            self._unmute_spoken_responses
+        )
+        self.bridge.voiceSpokenConfirmationRequested.connect(
+            self._submit_spoken_confirmation
+        )
         self.bridge.voiceReadinessRequested.connect(self._fetch_voice_readiness)
         self.bridge.modeChanged.connect(self._report_shell_presence)
         self.bridge.visibilityChanged.connect(self._report_shell_presence)
@@ -160,6 +173,26 @@ class MainController(QtCore.QObject):
     def _stop_voice_playback(self, payload: dict[str, object]) -> None:
         if hasattr(self.client, "stop_voice_playback"):
             self.client.stop_voice_playback(dict(payload or {}))
+
+    def _stop_voice_speaking(self, payload: dict[str, object]) -> None:
+        if hasattr(self.client, "stop_voice_speaking"):
+            self.client.stop_voice_speaking(dict(payload or {}))
+
+    def _suppress_current_voice_response(self, payload: dict[str, object]) -> None:
+        if hasattr(self.client, "suppress_current_voice_response"):
+            self.client.suppress_current_voice_response(dict(payload or {}))
+
+    def _mute_spoken_responses(self, payload: dict[str, object]) -> None:
+        if hasattr(self.client, "mute_spoken_responses"):
+            self.client.mute_spoken_responses(dict(payload or {}))
+
+    def _unmute_spoken_responses(self, payload: dict[str, object]) -> None:
+        if hasattr(self.client, "unmute_spoken_responses"):
+            self.client.unmute_spoken_responses(dict(payload or {}))
+
+    def _submit_spoken_confirmation(self, payload: dict[str, object]) -> None:
+        if hasattr(self.client, "submit_spoken_confirmation"):
+            self.client.submit_spoken_confirmation(dict(payload or {}))
 
     def _fetch_voice_readiness(self) -> None:
         if hasattr(self.client, "fetch_voice_readiness"):

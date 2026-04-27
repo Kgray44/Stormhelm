@@ -29,6 +29,23 @@ _TRUTH_KEYS = {
     "no_continuous_loop": True,
     "always_listening": False,
 }
+_WAKE_LOOP_CARD_STATUSES = {
+    "listen_timeout",
+    "capture_cancelled",
+    "capture_failed",
+    "transcription_failed",
+    "empty_transcript",
+    "core_clarification_required",
+    "core_confirmation_required",
+    "core_blocked",
+    "core_failed",
+    "tts_disabled",
+    "tts_failed",
+    "playback_unavailable",
+    "playback_failed",
+    "playback_stopped",
+    "suppressed_or_muted",
+}
 
 
 def build_voice_ui_state(status: dict[str, Any] | None) -> dict[str, Any]:
@@ -37,14 +54,23 @@ def build_voice_ui_state(status: dict[str, Any] | None) -> dict[str, Any]:
     voice = _voice_status(status)
     availability = _dict(voice.get("availability"))
     provider = _dict(voice.get("provider"))
+    if not availability:
+        availability = _dict(provider.get("availability"))
     openai = _dict(voice.get("openai"))
     capture = _dict(voice.get("capture"))
+    wake = _dict(voice.get("wake"))
+    post_wake = _dict(voice.get("post_wake_listen"))
+    vad = _dict(voice.get("vad"))
+    realtime = _dict(voice.get("realtime"))
     stt = _dict(voice.get("stt"))
     manual = _dict(voice.get("manual_turns"))
     tts = _dict(voice.get("tts"))
     playback = _dict(voice.get("playback"))
+    interruption = _dict(voice.get("interruption"))
+    confirmation = _dict(voice.get("spoken_confirmation"))
     runtime_truth = _dict(voice.get("runtime_truth"))
     readiness = _readiness_payload(_dict(voice.get("readiness")))
+    wake_supervised_loop = _dict(voice.get("wake_supervised_loop"))
 
     voice_available = bool(availability.get("available", voice.get("available", False)))
     unavailable_reason = _text(
@@ -65,6 +91,10 @@ def build_voice_ui_state(status: dict[str, Any] | None) -> dict[str, Any]:
         or availability.get("provider_name")
     )
     provider_kind = _provider_kind(capture_provider, capture)
+    active_playback_id = _text(playback.get("active_playback_id")) or None
+    active_playback_status = _text(playback.get("active_playback_status")) or None
+    wake_ghost = _dict(voice.get("wake_ghost") or wake.get("ghost"))
+    wake_ghost_active = bool(wake_ghost.get("active", False))
     current_phase = _current_phase(
         voice_available=voice_available,
         unavailable_reason=unavailable_reason,
@@ -72,12 +102,17 @@ def build_voice_ui_state(status: dict[str, Any] | None) -> dict[str, Any]:
         capture_enabled=capture_enabled,
         capture_available=capture_available,
         active_capture_status=active_capture_status or "",
+        active_listen_window_status=_text(
+            post_wake.get("active_listen_window_status")
+        ),
+        wake_ghost_active=wake_ghost_active,
+        wake_ghost_status=_text(wake_ghost.get("status")),
+        wake_loop_stage=_text(wake_supervised_loop.get("active_loop_stage")),
         stt_state=_text(stt.get("last_transcription_state")),
         core_state=_text(manual.get("last_core_result_state")),
         tts_state=_text(tts.get("last_synthesis_state")),
         playback_state=_text(
-            playback.get("active_playback_status")
-            or playback.get("last_playback_status")
+            active_playback_status or playback.get("last_playback_status")
         ),
     )
     core_state = _voice_core_state(current_phase)
@@ -100,12 +135,98 @@ def build_voice_ui_state(status: dict[str, Any] | None) -> dict[str, Any]:
         manual=manual,
         tts=tts,
         playback=playback,
+        interruption=interruption,
+        confirmation=confirmation,
         current_phase=current_phase,
         transcript_preview=transcript_preview,
         spoken_preview=spoken_preview,
     )
     audio_metadata = _sanitize(capture.get("last_capture_audio_input_metadata"))
     truth_flags = _truth_flags(capture, runtime_truth)
+    truth_flags["no_cloud_wake_audio"] = bool(
+        wake.get("no_cloud_wake_audio")
+        if "no_cloud_wake_audio" in wake
+        else runtime_truth.get("no_cloud_wake_audio", True)
+    )
+    truth_flags["openai_wake_detection"] = bool(
+        wake.get("openai_wake_detection")
+        if "openai_wake_detection" in wake
+        else runtime_truth.get("openai_wake_detection", False)
+    )
+    truth_flags["cloud_wake_detection"] = bool(
+        wake.get("cloud_wake_detection")
+        if "cloud_wake_detection" in wake
+        else runtime_truth.get("cloud_wake_detection", False)
+    )
+    truth_flags["wake_detection_is_not_command_authority"] = bool(
+        runtime_truth.get("wake_detection_is_not_command_authority", True)
+    )
+    truth_flags["no_post_wake_capture"] = bool(
+        wake_ghost.get("no_post_wake_capture", True)
+    )
+    truth_flags["no_command_from_wake"] = bool(
+        wake_ghost.get("no_command_from_wake", True)
+    )
+    truth_flags["vad_semantic_completion_claimed"] = bool(
+        vad.get("semantic_completion_claimed", False)
+    )
+    truth_flags["vad_command_authority"] = bool(vad.get("command_authority", False))
+    truth_flags["realtime_vad"] = bool(vad.get("realtime_vad", False))
+    truth_flags["speech_activity_is_not_intent"] = True
+    truth_flags["wake_supervised_loop_one_bounded_request"] = bool(
+        wake_supervised_loop.get("enabled", False)
+    )
+    truth_flags["listen_window_does_not_route_core"] = bool(
+        post_wake.get(
+            "listen_window_does_not_route_core",
+            runtime_truth.get("listen_window_does_not_route_core", True),
+        )
+    )
+    truth_flags["continuous_listening"] = bool(
+        wake_supervised_loop.get(
+            "continuous_listening",
+            runtime_truth.get("continuous_listening", False),
+        )
+    )
+    truth_flags["cloud_wake_detection"] = bool(
+        wake_supervised_loop.get(
+            "cloud_wake_detection", truth_flags.get("cloud_wake_detection", False)
+        )
+    )
+    truth_flags["realtime_used"] = bool(
+        wake_supervised_loop.get("realtime_used", False)
+    )
+    truth_flags["realtime_transcription_bridge_only"] = bool(
+        realtime.get("mode") == "transcription_bridge"
+        or runtime_truth.get("realtime_transcription_bridge_only", False)
+    )
+    truth_flags["speech_to_speech_enabled"] = bool(
+        realtime.get("speech_to_speech_enabled", False)
+    )
+    truth_flags["realtime_speech_to_speech_core_bridge"] = bool(
+        realtime.get("speech_to_speech_core_bridge", False)
+        or runtime_truth.get("realtime_speech_to_speech_core_bridge", False)
+    )
+    truth_flags["direct_realtime_tools_allowed"] = bool(
+        realtime.get("direct_tools_allowed", False)
+    )
+    truth_flags["command_authority"] = _text(
+        wake_supervised_loop.get("command_authority")
+        or realtime.get("command_authority")
+        or runtime_truth.get("command_authority")
+        or "stormhelm_core"
+    )
+    truth_flags["spoken_yes_is_not_global_permission"] = bool(
+        runtime_truth.get("spoken_yes_is_not_global_permission", True)
+    )
+    truth_flags["spoken_confirmation_is_not_command_authority"] = bool(
+        runtime_truth.get("spoken_confirmation_is_not_command_authority", True)
+    )
+    truth_flags["confirmation_accepted_does_not_mean_action_completed"] = bool(
+        runtime_truth.get(
+            "confirmation_accepted_does_not_mean_action_completed", True
+        )
+    )
     ghost = _ghost_payload(
         voice_available=voice_available,
         unavailable_reason=unavailable_reason,
@@ -113,10 +234,17 @@ def build_voice_ui_state(status: dict[str, Any] | None) -> dict[str, Any]:
         capture_available=capture_available,
         active_capture_id=active_capture_id,
         active_capture_status=active_capture_status,
+        active_playback_id=active_playback_id,
+        spoken_output_muted=bool(interruption.get("spoken_output_muted")),
         last_capture_status=_text(capture.get("last_capture_status")),
         current_phase=current_phase,
         transcript_preview=transcript_preview,
         spoken_preview=spoken_preview,
+        wake_ghost=wake_ghost,
+        post_wake=post_wake,
+        wake_supervised_loop=wake_supervised_loop,
+        confirmation=confirmation,
+        realtime=realtime,
     )
     deck = _deck_payload(
         capture=capture,
@@ -131,6 +259,12 @@ def build_voice_ui_state(status: dict[str, Any] | None) -> dict[str, Any]:
         capture_available=capture_available,
         audio_metadata=audio_metadata,
         truth_flags=truth_flags,
+        interruption=interruption,
+        wake=wake,
+        post_wake=post_wake,
+        wake_supervised_loop=wake_supervised_loop,
+        confirmation=confirmation,
+        realtime=realtime,
     )
 
     return {
@@ -173,6 +307,43 @@ def build_voice_ui_state(status: dict[str, Any] | None) -> dict[str, Any]:
         )
         or None,
         "last_capture_audio_metadata": audio_metadata,
+        "vad_enabled": bool(vad.get("enabled", False)),
+        "vad_available": bool(vad.get("available", False)),
+        "vad_provider": _text(vad.get("provider")) or None,
+        "vad_provider_kind": _text(vad.get("provider_kind")) or None,
+        "vad_active": bool(vad.get("active", False)),
+        "active_vad_session_id": _text(vad.get("active_vad_session_id")) or None,
+        "vad_active_capture_id": _text(vad.get("active_capture_id")) or None,
+        "vad_active_listen_window_id": _text(vad.get("active_listen_window_id"))
+        or None,
+        "vad_last_activity_status": _text(
+            vad.get("last_speech_activity_status")
+            or _dict(vad.get("last_activity_event")).get("status")
+        )
+        or None,
+        "vad_silence_ms": vad.get("silence_ms"),
+        "vad_semantic_completion_claimed": bool(
+            vad.get("semantic_completion_claimed", False)
+        ),
+        "vad_command_authority": bool(vad.get("command_authority", False)),
+        "realtime_vad": bool(vad.get("realtime_vad", False)),
+        "realtime_enabled": bool(realtime.get("enabled", False)),
+        "realtime_available": bool(realtime.get("available", False)),
+        "realtime_provider": _text(realtime.get("provider")) or None,
+        "realtime_provider_kind": _text(realtime.get("provider_kind")) or None,
+        "realtime_mode": _text(realtime.get("mode")) or None,
+        "active_realtime_session_id": _text(
+            realtime.get("active_realtime_session_id")
+        )
+        or None,
+        "active_realtime_turn_id": _text(realtime.get("active_realtime_turn_id"))
+        or None,
+        "realtime_partial_transcript_preview": _preview(
+            realtime.get("partial_transcript_preview"), limit=96
+        ),
+        "realtime_final_transcript_preview": _preview(
+            realtime.get("final_transcript_preview"), limit=96
+        ),
         "last_transcription_id": _text(stt.get("last_transcription_id")) or None,
         "last_transcription_status": _text(stt.get("last_transcription_state")) or None,
         "last_transcript_preview": transcript_preview,
@@ -185,6 +356,108 @@ def build_voice_ui_state(status: dict[str, Any] | None) -> dict[str, Any]:
         "last_spoken_response_preview": spoken_preview,
         "last_synthesis_status": _text(tts.get("last_synthesis_state")) or None,
         "last_playback_status": _text(playback.get("last_playback_status")) or None,
+        "spoken_confirmation_enabled": bool(confirmation.get("enabled", False)),
+        "pending_confirmation_count": int(
+            confirmation.get("pending_confirmation_count") or 0
+        ),
+        "last_spoken_confirmation_status": _text(confirmation.get("last_status"))
+        or None,
+        "last_spoken_confirmation_intent": _text(
+            _dict(confirmation.get("last_intent")).get("intent")
+        )
+        or None,
+        "last_pending_confirmation_id": _text(
+            confirmation.get("last_pending_confirmation_id")
+        )
+        or None,
+        "spoken_confirmation_requires_pending_binding": bool(
+            confirmation.get("confirmation_requires_pending_binding", True)
+        ),
+        "confirmation_accepted_does_not_execute_action": bool(
+            confirmation.get("confirmation_accepted_does_not_execute_action", True)
+        ),
+        "wake_enabled": bool(wake.get("enabled", False)),
+        "wake_available": bool(wake.get("available", False)),
+        "wake_provider": _text(wake.get("provider")) or None,
+        "wake_provider_kind": _text(wake.get("provider_kind")) or None,
+        "wake_backend": _text(wake.get("wake_backend")) or None,
+        "wake_device": _text(wake.get("device")) or None,
+        "wake_dependency_available": wake.get("dependency_available"),
+        "wake_device_available": wake.get("device_available"),
+        "wake_permission_state": _text(wake.get("permission_state")) or None,
+        "wake_monitoring_active": bool(wake.get("monitoring_active", False)),
+        "last_wake_event": _sanitize(wake.get("last_wake_event")),
+        "active_wake_session": _sanitize(wake.get("active_wake_session")),
+        "wake_ghost_requested": bool(wake_ghost.get("requested", False)),
+        "wake_ghost_active": wake_ghost_active,
+        "wake_ghost_status": _text(wake_ghost.get("status")) or None,
+        "wake_ghost_request_id": _text(wake_ghost.get("wake_ghost_request_id")) or None,
+        "wake_event_id": _text(wake_ghost.get("wake_event_id")) or None,
+        "wake_session_id": _text(wake_ghost.get("wake_session_id")) or None,
+        "wake_phrase": _text(wake_ghost.get("wake_phrase")) or None,
+        "wake_confidence": wake_ghost.get("wake_confidence"),
+        "wake_status_label": _text(wake_ghost.get("wake_status_label")) or None,
+        "wake_prompt_text": _text(wake_ghost.get("wake_prompt_text")) or None,
+        "wake_expires_at": _text(wake_ghost.get("expires_at")) or None,
+        "wake_timeout_ms": wake_ghost.get("wake_timeout_ms"),
+        "capture_started": bool(wake_ghost.get("capture_started", False)),
+        "stt_started": bool(wake_ghost.get("stt_started", False)),
+        "core_routed": bool(wake_ghost.get("core_routed", False)),
+        "no_post_wake_capture": bool(wake_ghost.get("no_post_wake_capture", True)),
+        "no_vad": bool(wake_ghost.get("no_vad", True)),
+        "no_realtime": bool(wake_ghost.get("no_realtime", True)),
+        "no_command_from_wake": bool(wake_ghost.get("no_command_from_wake", True)),
+        "post_wake_listen_enabled": bool(post_wake.get("enabled", False)),
+        "post_wake_listen_ready": bool(post_wake.get("ready", False)),
+        "active_listen_window_id": _text(post_wake.get("active_listen_window_id"))
+        or None,
+        "active_listen_window_status": _text(
+            post_wake.get("active_listen_window_status")
+        )
+        or None,
+        "active_listen_window_expires_at": _text(
+            post_wake.get("active_listen_window_expires_at")
+        )
+        or None,
+        "last_listen_window_id": _text(post_wake.get("last_listen_window_id")) or None,
+        "last_listen_window_status": _text(post_wake.get("last_listen_window_status"))
+        or None,
+        "last_listen_window_stop_reason": _text(
+            post_wake.get("last_listen_window_stop_reason")
+        )
+        or None,
+        "listen_window_capture_id": _text(post_wake.get("listen_window_capture_id"))
+        or None,
+        "listen_window_audio_input_id": _text(
+            post_wake.get("listen_window_audio_input_id")
+        )
+        or None,
+        "wake_supervised_loop_enabled": bool(wake_supervised_loop.get("enabled")),
+        "wake_supervised_loop_ready": bool(
+            wake_supervised_loop.get("wake_supervised_loop_ready")
+        ),
+        "active_wake_loop_id": _text(wake_supervised_loop.get("active_loop_id"))
+        or None,
+        "active_wake_loop_stage": _text(wake_supervised_loop.get("active_loop_stage"))
+        or None,
+        "last_wake_loop_final_status": _text(wake_supervised_loop.get("final_status"))
+        or None,
+        "last_wake_loop_failed_stage": _text(wake_supervised_loop.get("failed_stage"))
+        or None,
+        "last_wake_loop_stopped_stage": _text(wake_supervised_loop.get("stopped_stage"))
+        or None,
+        "active_playback_id": active_playback_id,
+        "active_playback_status": active_playback_status,
+        "active_playback_interruptible": bool(
+            playback.get("active_playback_interruptible")
+            or active_playback_status in {"started", "playing"}
+        ),
+        "spoken_output_muted": bool(interruption.get("spoken_output_muted")),
+        "muted_scope": _text(interruption.get("muted_scope")) or None,
+        "current_response_suppressed": bool(
+            interruption.get("current_response_suppressed")
+        ),
+        "interruption": _interruption_payload(interruption),
         "truth_flags": truth_flags,
         "readiness": readiness,
         "pipeline_summary": pipeline_summary,
@@ -211,6 +484,15 @@ def build_voice_command_station(voice_state: dict[str, Any] | None) -> dict[str,
     ]
     if state.get("active_capture_id"):
         chips.insert(0, _chip("State", "Recording", "attention"))
+    elif state.get("last_spoken_confirmation_status"):
+        chips.insert(
+            0,
+            _chip(
+                "Confirmation",
+                _title(_text(state.get("last_spoken_confirmation_status"))),
+                "steady",
+            ),
+        )
     elif state.get("last_core_result_state"):
         chips.insert(
             0,
@@ -274,6 +556,28 @@ def _readiness_payload(readiness: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _interruption_payload(interruption: dict[str, Any]) -> dict[str, Any]:
+    payload = _sanitize(interruption)
+    if not isinstance(payload, dict):
+        payload = {}
+    payload.setdefault("spoken_output_muted", False)
+    payload.setdefault("current_response_suppressed", False)
+    payload.setdefault("last_interruption_id", None)
+    payload.setdefault("last_interruption_intent", None)
+    payload.setdefault("last_interruption_status", None)
+    payload.setdefault("output_interrupted", False)
+    payload.setdefault("capture_interrupted", False)
+    payload.setdefault("listen_window_interrupted", False)
+    payload.setdefault("confirmation_interrupted", False)
+    payload.setdefault("core_cancellation_requested", False)
+    payload.setdefault("correction_routed", False)
+    payload.setdefault("ambiguity_reason", None)
+    payload.setdefault("core_task_cancelled_by_voice", False)
+    payload.setdefault("core_result_mutated_by_voice", False)
+    payload.setdefault("user_heard_claimed", False)
+    return payload
+
+
 def _text(value: Any) -> str:
     return str(value).strip() if value is not None else ""
 
@@ -293,6 +597,8 @@ def _sanitize(value: Any, *, depth: int = 0) -> Any:
         for key, item in value.items():
             normalized = str(key).strip().lower()
             if normalized in _RAW_AUDIO_KEYS or normalized in _SECRET_KEYS:
+                continue
+            if any(token in normalized for token in {"raw_audio", "raw_bytes"}):
                 continue
             if any(token in normalized for token in _SECRET_KEYS):
                 continue
@@ -328,6 +634,8 @@ def _pipeline_summary(
     manual: dict[str, Any],
     tts: dict[str, Any],
     playback: dict[str, Any],
+    interruption: dict[str, Any],
+    confirmation: dict[str, Any],
     current_phase: str,
     transcript_preview: str,
     spoken_preview: str,
@@ -336,6 +644,15 @@ def _pipeline_summary(
     if isinstance(supplied, dict) and supplied:
         supplied.setdefault("transcript_preview", transcript_preview)
         supplied.setdefault("spoken_preview", spoken_preview)
+        supplied.setdefault(
+            "output_suppressed",
+            bool(
+                interruption.get("current_response_suppressed")
+                or interruption.get("spoken_output_muted")
+            ),
+        )
+        supplied.setdefault("muted", bool(interruption.get("spoken_output_muted")))
+        supplied.setdefault("spoken_confirmation_status", confirmation.get("last_status"))
         return supplied
     capture_status = (
         _text(
@@ -390,6 +707,25 @@ def _pipeline_summary(
         "subsystem": _text(manual.get("last_subsystem")) or None,
         "trust_posture": _text(manual.get("last_trust_posture")) or None,
         "verification_posture": _text(manual.get("last_verification_posture")) or None,
+        "final_status": _text(interruption.get("last_interruption_status")) or stage,
+        "output_stopped": _text(interruption.get("last_interruption_intent"))
+        in {"stop_playback", "stop_speaking", "stop_output_only"},
+        "output_suppressed": bool(
+            interruption.get("current_response_suppressed")
+            or interruption.get("spoken_output_muted")
+        ),
+        "playback_stopped": playback_status == "stopped",
+        "muted": bool(interruption.get("spoken_output_muted")),
+        "no_active_playback": _text(interruption.get("last_interruption_status"))
+        in {"no_active_playback", "no_active_output"},
+        "spoken_confirmation_status": _text(confirmation.get("last_status")) or None,
+        "spoken_confirmation_intent": _text(
+            _dict(confirmation.get("last_intent")).get("intent")
+        )
+        or None,
+        "confirmation_accepted_does_not_mean_action_completed": bool(
+            confirmation.get("confirmation_accepted_does_not_execute_action", True)
+        ),
         "timestamps": {},
     }
 
@@ -442,7 +778,7 @@ def _stage_from_status(
         )
     ):
         return "blocked"
-    if playback_status == "completed":
+    if playback_status in {"completed", "stopped"}:
         return "completed"
     if synthesis_status in {"succeeded", "completed"}:
         return "audio_prepared"
@@ -461,7 +797,7 @@ def _last_successful_stage(
     synthesis_status: str | None,
     playback_status: str | None,
 ) -> str | None:
-    if playback_status == "completed":
+    if playback_status in {"completed", "stopped"}:
         return "playback"
     if synthesis_status in {"succeeded", "completed"}:
         return "tts"
@@ -520,6 +856,10 @@ def _current_phase(
     capture_enabled: bool,
     capture_available: bool,
     active_capture_status: str,
+    active_listen_window_status: str,
+    wake_ghost_active: bool,
+    wake_ghost_status: str,
+    wake_loop_stage: str,
     stt_state: str,
     core_state: str,
     tts_state: str,
@@ -527,12 +867,32 @@ def _current_phase(
 ) -> str:
     if not voice_available or unavailable_reason:
         return "unavailable"
+    if active_capture_status in {"started", "recording", "capturing"}:
+        return "capturing"
+    if active_listen_window_status in {"active", "pending"}:
+        return "post_wake_listening"
+    if active_listen_window_status == "capturing":
+        return "capturing"
+    if wake_loop_stage in {"listening", "capturing"}:
+        return "capturing"
+    if wake_loop_stage == "transcribing":
+        return "transcribing"
+    if wake_loop_stage in {"core", "routing"}:
+        return "core_routing"
+    if wake_loop_stage in {"synthesizing", "response"}:
+        return "response_prepared"
+    if wake_loop_stage == "playing":
+        return "playback_active"
+    if wake_loop_stage in {"wake", "ghost"}:
+        return "wake_ghost_active"
+    if wake_ghost_active or wake_ghost_status == "shown":
+        return "wake_ghost_active"
+    if wake_ghost_status in {"expired", "cancelled"}:
+        return "ready"
     if not capture_enabled:
         return "capture_disabled"
     if not capture_available:
         return "provider_unavailable"
-    if active_capture_status in {"started", "recording", "capturing"}:
-        return "capturing"
     if voice_state in {"transcribing"} or stt_state in {
         "started",
         "transcribing",
@@ -544,18 +904,20 @@ def _current_phase(
         "thinking",
     }:
         return "core_routing"
-    if tts_state in {"succeeded", "completed", "prepared"}:
-        return "response_prepared"
     if playback_state in {"started", "playing"}:
         return "playback_active"
     if playback_state == "completed":
         return "playback_completed"
+    if tts_state in {"succeeded", "completed", "prepared"}:
+        return "response_prepared"
     return "ready"
 
 
 def _voice_core_state(phase: str) -> str:
-    if phase == "capturing":
+    if phase in {"capturing", "post_wake_listening"}:
         return "listening"
+    if phase == "wake_ghost_active":
+        return "wake_ready"
     if phase in {"transcribing", "core_routing"}:
         return "thinking"
     if phase == "playback_active":
@@ -588,15 +950,30 @@ def _ghost_payload(
     capture_available: bool,
     active_capture_id: str | None,
     active_capture_status: str | None,
+    active_playback_id: str | None,
+    spoken_output_muted: bool,
     last_capture_status: str,
     current_phase: str,
     transcript_preview: str,
     spoken_preview: str,
+    wake_ghost: dict[str, Any],
+    post_wake: dict[str, Any],
+    wake_supervised_loop: dict[str, Any],
+    confirmation: dict[str, Any],
+    realtime: dict[str, Any],
 ) -> dict[str, Any]:
     if not voice_available or unavailable_reason:
         label = "Voice unavailable."
         detail = unavailable_reason or "Voice is not available."
         actions: list[dict[str, Any]] = []
+    elif current_phase == "wake_ghost_active":
+        label = _text(wake_ghost.get("wake_status_label")) or "Bearing acquired."
+        detail = _text(wake_ghost.get("wake_prompt_text")) or "Ghost ready."
+        actions = [_action("Dismiss", "voice.cancelWakeGhost")]
+    elif current_phase == "post_wake_listening":
+        label = "Waiting for your request."
+        detail = "One bounded post-wake request window is open."
+        actions = [_action("Cancel", "voice.cancelPostWakeListen")]
     elif not capture_enabled:
         label = "Capture disabled."
         detail = "Push-to-talk capture is disabled."
@@ -634,32 +1011,53 @@ def _ghost_payload(
     elif current_phase == "playback_active":
         label = "Playing response."
         detail = "Playback is active; this does not claim the user heard it."
-        actions = [_action("Stop playback", "voice.stopPlayback")]
-    elif last_capture_status == "cancelled":
-        label = "Capture cancelled."
-        detail = "Capture stopped without routing audio."
-        actions = [_action("Start capture", "voice.startPushToTalkCapture")]
-    elif last_capture_status in {"failed", "timeout"}:
-        label = "Capture failed."
-        detail = "Captured audio was not routed."
-        actions = [_action("Start capture", "voice.startPushToTalkCapture")]
-    elif last_capture_status in {"completed", "stopped"}:
-        label = "Capture stopped."
-        detail = (
-            transcript_preview or "Captured audio is ready for the backend pipeline."
-        )
-        actions = [
-            _action("Submit through Core", "voice.submitCapturedAudioTurn"),
-            _action("Start capture", "voice.startPushToTalkCapture"),
-        ]
+        actions = [_action("Stop speaking", "voice.stopSpeaking")]
+        if active_playback_id:
+            actions.append(_action("Stop playback", "voice.stopPlayback"))
     else:
-        label = "Start capture"
-        detail = "Explicit push-to-talk capture only."
-        actions = [_action("Start capture", "voice.startPushToTalkCapture")]
+        confirmation_label, confirmation_detail = _confirmation_label_detail(
+            confirmation
+        )
+        if confirmation_label:
+            label = confirmation_label
+            detail = confirmation_detail
+            actions = []
+        elif _text(wake_supervised_loop.get("final_status")) in _WAKE_LOOP_CARD_STATUSES:
+            label = _wake_loop_label(wake_supervised_loop)
+            detail = _wake_loop_detail(wake_supervised_loop)
+            actions = [_action("Start capture", "voice.startPushToTalkCapture")]
+        elif last_capture_status == "cancelled":
+            label = "Capture cancelled."
+            detail = "Capture stopped without routing audio."
+            actions = [_action("Start capture", "voice.startPushToTalkCapture")]
+        elif last_capture_status in {"failed", "timeout"}:
+            label = "Capture failed."
+            detail = "Captured audio was not routed."
+            actions = [_action("Start capture", "voice.startPushToTalkCapture")]
+        elif last_capture_status in {"completed", "stopped"}:
+            label = "Capture stopped."
+            detail = (
+                transcript_preview
+                or "Captured audio is ready for the backend pipeline."
+            )
+            actions = [
+                _action("Submit through Core", "voice.submitCapturedAudioTurn"),
+                _action("Start capture", "voice.startPushToTalkCapture"),
+            ]
+        else:
+            label = "Start capture"
+            detail = "Explicit push-to-talk capture only."
+            actions = [_action("Start capture", "voice.startPushToTalkCapture")]
+    if spoken_output_muted:
+        actions.append(_action("Unmute voice", "voice.unmuteSpokenResponses"))
+    elif current_phase not in {"unavailable", "capture_disabled"}:
+        actions.append(_action("Mute voice", "voice.muteSpokenResponses"))
     primary_action = actions[0]["localAction"] if actions else None
     return {
         "primary_label": label,
-        "secondary_label": "Push-to-talk capture only",
+        "secondary_label": detail
+        if current_phase == "wake_ghost_active" or confirmation.get("last_status")
+        else "Push-to-talk capture only",
         "detail": _preview(detail, limit=140),
         "primary_action": primary_action,
         "actions": actions,
@@ -680,6 +1078,12 @@ def _deck_payload(
     capture_available: bool,
     audio_metadata: Any,
     truth_flags: dict[str, Any],
+    interruption: dict[str, Any],
+    wake: dict[str, Any],
+    post_wake: dict[str, Any],
+    wake_supervised_loop: dict[str, Any],
+    confirmation: dict[str, Any],
+    realtime: dict[str, Any],
 ) -> dict[str, Any]:
     sections = [
         {
@@ -794,6 +1198,277 @@ def _deck_payload(
             ],
         },
         {
+            "title": "Confirmation",
+            "entries": [
+                _entry(
+                    "Enabled",
+                    "True" if confirmation.get("enabled") else "False",
+                    "Voice confirmation must bind to a pending trust prompt.",
+                ),
+                _entry(
+                    "Pending",
+                    str(int(confirmation.get("pending_confirmation_count") or 0)),
+                    _text(confirmation.get("last_pending_confirmation_id")),
+                ),
+                _entry(
+                    "Last Intent",
+                    _title(
+                        _text(_dict(confirmation.get("last_intent")).get("intent"))
+                        or "None"
+                    ),
+                    _text(_dict(confirmation.get("last_intent")).get("matched_phrase_family")),
+                ),
+                _entry(
+                    "Last Status",
+                    _title(_text(confirmation.get("last_status")) or "None"),
+                    _text(_dict(confirmation.get("last_result")).get("reason")),
+                ),
+                _entry(
+                    "Binding",
+                    "Valid"
+                    if _dict(confirmation.get("last_binding")).get("valid")
+                    else "Not valid",
+                    _text(_dict(confirmation.get("last_binding")).get("invalid_reason")),
+                ),
+                _entry(
+                    "Strength",
+                    _text(
+                        _dict(confirmation.get("last_binding")).get(
+                            "provided_confirmation_strength"
+                        )
+                    )
+                    or "None",
+                    _text(
+                        _dict(confirmation.get("last_binding")).get(
+                            "required_confirmation_strength"
+                        )
+                    ),
+                ),
+                _entry(
+                    "Authority",
+                    "Stormhelm Core",
+                    "Confirmation accepted is not action completed.",
+                ),
+            ],
+        },
+        {
+            "title": "Interruption",
+            "entries": [
+                _entry(
+                    "Speech Output",
+                    "Muted" if interruption.get("spoken_output_muted") else "Unmuted",
+                    _text(interruption.get("muted_scope")),
+                ),
+                _entry(
+                    "Last Intent",
+                    _text(interruption.get("last_interruption_intent")) or "None",
+                    _text(interruption.get("last_interruption_status")),
+                ),
+                _entry(
+                    "Affected Surface",
+                    ", ".join(
+                        label
+                        for label, active in [
+                            ("output", interruption.get("output_interrupted")),
+                            ("capture", interruption.get("capture_interrupted")),
+                            ("listen", interruption.get("listen_window_interrupted")),
+                            (
+                                "confirmation",
+                                interruption.get("confirmation_interrupted"),
+                            ),
+                            ("correction", interruption.get("correction_routed")),
+                        ]
+                        if active
+                    )
+                    or "None",
+                    "Task state unchanged"
+                    if not interruption.get("core_task_cancelled_by_voice")
+                    else "",
+                ),
+                _entry(
+                    "Core Cancellation Request",
+                    "Routed"
+                    if interruption.get("core_cancellation_requested")
+                    else "None",
+                    "Core owns task state",
+                ),
+                _entry(
+                    "Core Task Cancelled",
+                    "False"
+                    if not interruption.get("core_task_cancelled_by_voice")
+                    else "True",
+                ),
+                _entry(
+                    "Core Result Changed",
+                    "False"
+                    if not interruption.get("core_result_mutated_by_voice")
+                    else "True",
+                ),
+            ],
+        },
+        {
+            "title": "Wake Foundation",
+            "entries": [
+                _entry(
+                    "Wake Provider",
+                    _title(_text(wake.get("provider_kind")) or "Unavailable"),
+                    _text(wake.get("provider")) or "None",
+                ),
+                _entry(
+                    "Wake State",
+                    "Monitoring" if wake.get("monitoring_active") else "Inactive",
+                    "Mock provider active"
+                    if wake.get("mock_provider_active")
+                    else _text(wake.get("unavailable_reason")),
+                ),
+                _entry(
+                    "Wake Backend",
+                    _text(wake.get("wake_backend")) or "None",
+                    _text(wake.get("device")) or "No device configured",
+                ),
+                _entry(
+                    "Wake Permission",
+                    _title(_text(wake.get("permission_state")) or "Unknown"),
+                    _text(wake.get("permission_error")),
+                ),
+                _entry(
+                    "Last Wake",
+                    _text(_dict(wake.get("last_wake_event")).get("status")) or "None",
+                    _text(_dict(wake.get("last_wake_event")).get("rejected_reason")),
+                ),
+                _entry(
+                    "Ghost",
+                    _title(_text(_dict(wake.get("ghost")).get("status")) or "None"),
+                    _text(_dict(wake.get("ghost")).get("wake_status_label")),
+                ),
+                _entry(
+                    "Authority",
+                    "Core unchanged",
+                    "Wake does not start capture or route commands.",
+                ),
+            ],
+        },
+        {
+            "title": "Post-Wake Listen",
+            "entries": [
+                _entry(
+                    "Readiness",
+                    "Ready" if post_wake.get("ready") else "Not ready",
+                    "Bounded request window, not command authority.",
+                ),
+                _entry(
+                    "Active Window",
+                    _text(post_wake.get("active_listen_window_status")) or "None",
+                    _text(post_wake.get("active_listen_window_id")),
+                ),
+                _entry(
+                    "Last Window",
+                    _text(post_wake.get("last_listen_window_status")) or "None",
+                    _text(post_wake.get("last_listen_window_id")),
+                ),
+                _entry(
+                    "Capture",
+                    _text(post_wake.get("listen_window_capture_id")) or "None",
+                    _text(post_wake.get("listen_window_audio_input_id")),
+                ),
+                _entry(
+                    "Authority",
+                    "Core unchanged",
+                    "Listen windows do not route commands by themselves.",
+                ),
+            ],
+        },
+        {
+            "title": "Wake Loop",
+            "entries": [
+                _entry(
+                    "Readiness",
+                    "Ready"
+                    if wake_supervised_loop.get("wake_supervised_loop_ready")
+                    else "Not ready",
+                    ", ".join(
+                        str(item)
+                        for item in wake_supervised_loop.get("missing_capabilities")
+                        or []
+                    )
+                    or "One bounded request, then Dormant.",
+                ),
+                _entry(
+                    "Active Loop",
+                    _text(wake_supervised_loop.get("active_loop_stage")) or "None",
+                    _text(wake_supervised_loop.get("active_loop_id")),
+                ),
+                _entry(
+                    "Last Final Status",
+                    _title(_text(wake_supervised_loop.get("final_status")) or "None"),
+                    _text(wake_supervised_loop.get("failed_stage"))
+                    or _text(wake_supervised_loop.get("stopped_stage")),
+                ),
+                _entry(
+                    "Authority",
+                    _text(wake_supervised_loop.get("command_authority"))
+                    or "stormhelm_core",
+                    "Wake, capture, STT, TTS, and playback are not command authority.",
+                ),
+            ],
+        },
+        {
+            "title": "Realtime",
+            "entries": [
+                _entry(
+                    "Mode",
+                    _text(realtime.get("mode")) or "transcription_bridge",
+                    "Core bridge required."
+                    if realtime.get("mode") == "speech_to_speech_core_bridge"
+                    else "Transcription bridge only.",
+                ),
+                _entry(
+                    "Provider",
+                    _title(_text(realtime.get("provider_kind")) or "Unavailable"),
+                    _text(realtime.get("provider")) or "None",
+                ),
+                _entry(
+                    "Active Session",
+                    _text(realtime.get("active_realtime_session_id")) or "None",
+                    _text(realtime.get("last_realtime_session_status")) or "",
+                ),
+                _entry(
+                    "Transcript",
+                    _preview(
+                        realtime.get("partial_transcript_preview")
+                        or realtime.get("final_transcript_preview"),
+                        limit=88,
+                    )
+                    or "None",
+                    "Final transcripts route through Core.",
+                ),
+                _entry(
+                    "Direct Tools",
+                    "No" if not realtime.get("direct_tools_allowed") else "Yes",
+                    "Core bridge required.",
+                ),
+                _entry(
+                    "Core Bridge",
+                    "Required" if realtime.get("core_bridge_required", True) else "Off",
+                    "stormhelm_core_request",
+                ),
+                _entry(
+                    "Speech To Speech",
+                    "No"
+                    if not realtime.get("speech_to_speech_enabled")
+                    else "Yes",
+                    "Realtime audio output gated by Core."
+                    if realtime.get("speech_to_speech_enabled")
+                    else "Existing TTS/playback remains separate.",
+                ),
+                _entry(
+                    "Last Core Result",
+                    _text(realtime.get("last_core_result_state")) or "None",
+                    _text(realtime.get("last_spoken_summary_source")) or "",
+                ),
+            ],
+        },
+        {
             "title": "Truth",
             "entries": [
                 _entry(
@@ -808,12 +1483,16 @@ def _deck_payload(
                 ),
                 _entry(
                     "Realtime",
-                    "Not implemented"
-                    if truth_flags.get("no_realtime")
-                    else "Available",
+                    "Speech Core bridge"
+                    if truth_flags.get("realtime_speech_to_speech_core_bridge")
+                    else (
+                        "Transcription bridge"
+                        if truth_flags.get("realtime_transcription_bridge_only")
+                        else "Not active"
+                    ),
                 ),
                 _entry(
-                    "Always Listening",
+                    "Continuous Command Mode",
                     "False" if not truth_flags.get("always_listening") else "True",
                 ),
                 _entry("Audio Metadata", "Bounded", str(audio_metadata or {})),
@@ -821,6 +1500,100 @@ def _deck_payload(
         },
     ]
     return {"sections": sections}
+
+
+def _confirmation_label_detail(confirmation: dict[str, Any]) -> tuple[str, str]:
+    result = _dict(confirmation.get("last_result"))
+    status = _text(confirmation.get("last_status") or result.get("status"))
+    if not status:
+        return "", ""
+    message = _text(result.get("user_message"))
+    reason = _text(result.get("reason"))
+    mapping = {
+        "confirmed": (
+            "Confirmation accepted.",
+            "Action execution remains with Core and trust.",
+        ),
+        "rejected": ("Confirmation rejected.", message or "Pending approval was denied."),
+        "cancelled": (
+            "Confirmation rejected.",
+            message or "Pending approval was cancelled.",
+        ),
+        "expired": (
+            "Confirmation expired.",
+            message or "That confirmation is no longer fresh.",
+        ),
+        "stale": (
+            "Confirmation expired.",
+            message or "That confirmation is no longer fresh.",
+        ),
+        "binding_failed": (
+            "That confirmation no longer matches the current action.",
+            message or reason or "No action was approved.",
+        ),
+        "ambiguous": (
+            "I need a clearer confirmation.",
+            message or "The pending approval remains unchanged.",
+        ),
+        "no_pending_confirmation": (
+            "No pending confirmation.",
+            message or "No action was approved.",
+        ),
+        "shown": ("I can show the plan.", message or "Pending approval remains open."),
+        "waiting": ("Waiting.", message or "Pending approval remains open."),
+        "unsupported": ("No pending confirmation.", message or "No action was approved."),
+    }
+    return mapping.get(status, ("Confirmation required.", message or reason))
+
+
+def _wake_loop_label(wake_supervised_loop: dict[str, Any]) -> str:
+    status = _text(wake_supervised_loop.get("final_status"))
+    return {
+        "listen_timeout": "Capture timed out.",
+        "capture_cancelled": "Capture cancelled.",
+        "capture_failed": "Capture failed.",
+        "transcription_failed": "Transcription failed.",
+        "empty_transcript": "No transcript.",
+        "core_clarification_required": "Clarification required.",
+        "core_confirmation_required": "Confirmation required.",
+        "core_blocked": "Request blocked.",
+        "core_failed": "Core route failed.",
+        "tts_disabled": "Response prepared.",
+        "tts_failed": "Speech synthesis failed.",
+        "playback_unavailable": "Playback unavailable.",
+        "playback_failed": "Playback failed.",
+        "playback_stopped": "Playback stopped.",
+        "suppressed_or_muted": "Response prepared.",
+    }.get(status, "Returning to Dormant.")
+
+
+def _wake_loop_detail(wake_supervised_loop: dict[str, Any]) -> str:
+    result = _dict(wake_supervised_loop.get("last_loop_result"))
+    blocker = _text(
+        wake_supervised_loop.get("current_blocker") or result.get("current_blocker")
+    )
+    spoken_preview = _text(result.get("spoken_preview"))
+    transcript_preview = _text(result.get("transcript_preview"))
+    status = _text(wake_supervised_loop.get("final_status"))
+    if status == "suppressed_or_muted":
+        return "Response remains available visually."
+    if status in {
+        "tts_disabled",
+        "tts_failed",
+        "playback_unavailable",
+        "playback_failed",
+        "playback_stopped",
+    }:
+        return spoken_preview or blocker or "Core result remains available."
+    if status in {
+        "core_clarification_required",
+        "core_confirmation_required",
+        "core_blocked",
+    }:
+        return spoken_preview or blocker or "Core result state is preserved."
+    if status in {"transcription_failed", "empty_transcript"}:
+        return blocker or "Captured audio was not routed through Core."
+    return transcript_preview or blocker or "Wake loop stood down."
 
 
 def _entry(primary: str, secondary: str = "", detail: str = "") -> dict[str, str]:

@@ -45,8 +45,19 @@ Tests: `tests/test_assistant_orchestrator.py`, `tests/test_planner.py`, `tests/t
 | `/voice/capture/submit` | POST | Submit captured audio metadata through the controlled STT/Core/TTS path. | `src/stormhelm/core/api/app.py`, `src/stormhelm/core/voice/service.py` |
 | `/voice/capture/turn` | POST | Run a supervised capture-and-submit turn. | `src/stormhelm/core/api/app.py`, `src/stormhelm/core/voice/service.py` |
 | `/voice/playback/stop` | POST | Stop provider-owned playback state if supported. | `src/stormhelm/core/api/app.py`, `src/stormhelm/core/voice/service.py` |
+| `/voice/wake/readiness` | GET | Return wake readiness, including local provider/backend availability, without starting monitoring. | `src/stormhelm/core/api/app.py`, `src/stormhelm/core/voice/service.py` |
+| `/voice/wake/start` | POST | Start wake monitoring only when explicit wake/provider gates and local/mock provider availability allow it. | `src/stormhelm/core/api/app.py`, `src/stormhelm/core/voice/service.py` |
+| `/voice/wake/stop` | POST | Stop active wake monitoring without changing capture or Core task state. | `src/stormhelm/core/api/app.py`, `src/stormhelm/core/voice/service.py` |
+| `/voice/wake/simulate` | POST | Simulate a mock/dev wake event when wake gates allow it. | `src/stormhelm/core/api/app.py`, `src/stormhelm/core/voice/service.py` |
+| `/voice/wake/cancel` | POST | Cancel the active/mock wake session without capture or Core routing. | `src/stormhelm/core/api/app.py`, `src/stormhelm/core/voice/service.py` |
+| `/voice/wake/expire` | POST | Expire the active/mock wake session without capture or Core routing. | `src/stormhelm/core/api/app.py`, `src/stormhelm/core/voice/service.py` |
+| `/voice/wake/ghost` | GET | Return wake-to-Ghost presentation state without starting capture or routing Core. | `src/stormhelm/core/api/app.py`, `src/stormhelm/core/voice/service.py` |
+| `/voice/wake/ghost/cancel` | POST | Dismiss wake Ghost presentation and cancel the wake session only. | `src/stormhelm/core/api/app.py`, `src/stormhelm/core/voice/service.py` |
+| `/voice/vad/readiness` | GET | Return VAD readiness without starting detection. | `src/stormhelm/core/api/app.py`, `src/stormhelm/core/voice/service.py` |
+| `/voice/vad/speech-started` | POST | Simulate/mock speech activity start for an active capture/listen window. | `src/stormhelm/core/api/app.py`, `src/stormhelm/core/voice/service.py` |
+| `/voice/vad/speech-stopped` | POST | Simulate/mock speech activity stop and optional capture finalization. | `src/stormhelm/core/api/app.py`, `src/stormhelm/core/voice/service.py` |
 
-Tests: `tests/test_events.py`, `tests/test_ui_client_streaming.py`, `tests/test_snapshot_resilience.py`, `tests/test_storage.py`, `tests/test_voice_bridge_controls.py`, `tests/test_voice_capture_service.py`, `tests/test_voice_playback_service.py`
+Tests: `tests/test_events.py`, `tests/test_ui_client_streaming.py`, `tests/test_snapshot_resilience.py`, `tests/test_storage.py`, `tests/test_voice_bridge_controls.py`, `tests/test_voice_capture_service.py`, `tests/test_voice_playback_service.py`, `tests/test_voice_wake_service.py`, `tests/test_voice_local_wake_provider.py`, `tests/test_voice_wake_ghost_payload.py`, `tests/test_voice_vad_service.py`
 
 ## Slash Commands
 

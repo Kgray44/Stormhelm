@@ -32,13 +32,13 @@ def test_browser_destination_target_slots_stay_eval_stable_with_planner_v2() -> 
     assert slots["destination_name"] == "youtube"
 
 
-def test_deferred_weather_owner_reaches_existing_native_legacy_route() -> None:
+def test_restored_weather_owner_reaches_planner_v2_native_route() -> None:
     decision = _plan("what is the weather here")
 
     assert decision.structured_query is not None
     assert decision.structured_query.domain == "weather"
     assert [request.tool_name for request in decision.tool_requests] == ["weather_current"]
-    assert decision.debug.get("routing_engine") == "legacy_planner"
+    assert decision.debug.get("routing_engine") == "planner_v2"
 
 
 def test_terminal_direct_eval_taxonomy_matches_terminal_subsystem() -> None:

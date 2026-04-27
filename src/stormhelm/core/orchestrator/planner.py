@@ -89,6 +89,7 @@ KNOWN_FOLDER_ALIASES: dict[str, tuple[str, ...]] = {
 }
 DEFAULT_AVAILABLE_TOOLS = {
     "clock",
+    "system_info",
     "machine_status",
     "power_status",
     "power_projection",
@@ -115,6 +116,9 @@ DEFAULT_AVAILABLE_TOOLS = {
     "repair_action",
     "routine_execute",
     "routine_save",
+    "echo",
+    "notes_write",
+    "notes_recall",
     "trusted_hook_register",
     "trusted_hook_execute",
     "maintenance_action",
@@ -137,6 +141,7 @@ DEFAULT_AVAILABLE_TOOLS = {
     "deck_open_file",
     "external_open_file",
     "file_reader",
+    "shell_command",
 }
 
 DISCORD_RELAY_CONFIRM_PHRASES = {
@@ -365,6 +370,7 @@ class DeterministicPlanner:
                 calculation_evaluation=calculation_evaluation,
                 software_control_evaluation=software_control_evaluation,
                 screen_awareness_evaluation=screen_awareness_evaluation,
+                planner_v2_trace=planner_v2_trace,
             )
             debug["semantic_parse_proposal"] = semantic.to_dict()
             return self._decision_from_semantic(
@@ -1151,7 +1157,11 @@ class DeterministicPlanner:
         lower = normalized.normalized_text
         tokens = list(normalized.tokens)
         deictic = [token for token in tokens if token in {"this", "that", "it", "these", "those"}]
-        if any(phrase in lower for phrase in {"same as before", "same thing as before", "again", "continue", "resume", "where we left off"}):
+        if (
+            re.search(r"\bsame\b.{0,24}\b(?:before|thing|action|route|result|request)\b", lower)
+            or re.search(r"\b(?:again|continue|resume)\b", lower)
+            or re.search(r"\bwhere\b.{0,16}\bleft\s+off\b", lower)
+        ):
             continuity = ["continuity"]
         else:
             continuity = []
@@ -2013,6 +2023,7 @@ class DeterministicPlanner:
         calculation_evaluation: Any | None,
         software_control_evaluation: Any | None,
         screen_awareness_evaluation: ScreenPlannerEvaluation | None,
+        planner_v2_trace: Any | None = None,
     ) -> SemanticParseProposal:
         family = decision.winner.route_family
         slots = self._route_spine_slots(decision)
@@ -2024,6 +2035,13 @@ class DeterministicPlanner:
                 fallback_path="route_spine_generic_provider",
                 slots=slots,
             )
+        planner_v2_proposal = self._planner_v2_plan_draft_proposal(
+            planner_v2_trace,
+            decision,
+            slots=slots,
+        )
+        if planner_v2_proposal is not None:
+            return planner_v2_proposal
         if decision.clarification_needed and family == "file":
             return self._route_spine_clarification_proposal(decision, slots=slots)
         lower = decision.intent_frame.normalized_text
@@ -2172,6 +2190,31 @@ class DeterministicPlanner:
                     slots=slots,
                     evidence_note="route_spine preserved context-action ownership while restoring deterministic context binding",
                 )
+        if family == "system_control":
+            system_request = self._system_control_request(message, lower) or {
+                "action": "open_settings_page",
+                "target": decision.intent_frame.target_text or "settings",
+                "dry_run": True,
+            }
+            return self._merge_route_spine_proposal(
+                self._tool_proposal(
+                    query_shape=QueryShape.CONTROL_COMMAND,
+                    domain="system",
+                    tool_name="system_control",
+                    tool_arguments=system_request,
+                    request_type_hint="direct_action",
+                    family="system_control",
+                    subject=str(system_request.get("target") or system_request.get("action") or "system_control"),
+                    requested_action=str(system_request.get("action") or "system_control"),
+                    confidence=decision.winner.score or 0.92,
+                    evidence=["system-control phrasing matched a deterministic control request"],
+                    execution_type="execute_control_command",
+                    output_mode=ResponseMode.ACTION_RESULT.value,
+                    output_type="action",
+                ),
+                slots=slots,
+                evidence_note="route_spine preserved system-control ownership over app/search fallback",
+            )
         if family in {"app_control", "workflow", "software_control", "context_clarification"}:
             window_request = self._window_control_request(message, lower)
             if window_request is not None:
@@ -2529,7 +2572,9 @@ class DeterministicPlanner:
                 slots=slots,
             )
         if family == "task_continuity":
-            if self._looks_like_where_left_off(lower):
+            source_case = str(decision.intent_frame.extracted_entities.get("source_case") or "").strip().lower()
+            requested_tool = str(decision.intent_frame.extracted_entities.get("tool_name") or "").strip()
+            if requested_tool == "workspace_where_left_off" or source_case == "workspace_where_left_off" or self._looks_like_where_left_off(lower):
                 tool_name = "workspace_where_left_off"
                 requested_action = "where_left_off"
                 request_type_hint = "workspace_restore"
@@ -2668,7 +2713,17 @@ class DeterministicPlanner:
                 slots=slots,
             )
         if family == "workspace_operations":
-            if self._looks_like_workspace_restore(lower):
+            source_case = str(decision.intent_frame.extracted_entities.get("source_case") or "").strip().lower()
+            requested_tool = str(decision.intent_frame.extracted_entities.get("tool_name") or "").strip()
+            if requested_tool.startswith("workspace_"):
+                tool_name = requested_tool
+                requested_action = tool_name.removeprefix("workspace_")
+                request_type_hint = "workspace_restore" if tool_name == "workspace_restore" else "direct_action"
+            elif source_case == "workspace_restore":
+                tool_name = "workspace_restore"
+                requested_action = "restore"
+                request_type_hint = "workspace_restore"
+            elif self._looks_like_workspace_restore(lower):
                 tool_name = "workspace_restore"
                 requested_action = "restore"
                 request_type_hint = "workspace_restore"
@@ -2801,15 +2856,16 @@ class DeterministicPlanner:
                 slots=slots,
             )
         if family == "terminal":
+            shell_command = str(decision.intent_frame.extracted_entities.get("shell_command") or decision.intent_frame.target_text or "open_terminal").strip()
             return self._tool_proposal(
                 query_shape=QueryShape.CONTROL_COMMAND,
                 domain="terminal",
                 tool_name="shell_command",
-                tool_arguments={"command": "open_terminal", "target": decision.intent_frame.target_text, "dry_run": True},
-                request_type_hint="terminal_open",
+                tool_arguments={"command": shell_command, "target": decision.intent_frame.target_text, "dry_run": True},
+                request_type_hint="terminal_preflight",
                 family="terminal",
                 subject=decision.intent_frame.target_text or "terminal",
-                requested_action="open_terminal",
+                requested_action="shell_command_preflight",
                 confidence=decision.winner.score or 0.9,
                 evidence=["route_spine selected terminal from terminal/folder contract"],
                 execution_type="execute_control_command",
@@ -2845,6 +2901,96 @@ class DeterministicPlanner:
             evidence=["route_spine selected a family without a planner adapter; legacy fallback refused for migrated-family pass"],
             fallback_path="route_spine_unhandled_family",
             slots=slots,
+        )
+
+    def _planner_v2_plan_draft_proposal(
+        self,
+        trace: Any | None,
+        decision: RouteSpineDecision,
+        *,
+        slots: dict[str, Any],
+    ) -> SemanticParseProposal | None:
+        if trace is None or not bool(getattr(trace, "authoritative", False)):
+            return None
+        plan = getattr(trace, "plan_draft", None)
+        if plan is None:
+            return None
+        family = str(getattr(plan, "route_family", "") or decision.winner.route_family).strip()
+        tool_name = str(getattr(plan, "tool_name", "") or "").strip()
+        if not tool_name:
+            return None
+        if family not in {
+            "development",
+            "time",
+            "storage",
+            "location",
+            "weather",
+            "notes",
+            "watch_runtime",
+        }:
+            return None
+
+        plan_args = getattr(plan, "tool_arguments", None)
+        tool_arguments = dict(plan_args) if isinstance(plan_args, dict) else {}
+        request_type_hint = str(getattr(plan, "request_type_hint", "") or "").strip()
+        execution_type = str(getattr(plan, "execution_type", "") or "").strip()
+        subsystem = str(getattr(plan, "subsystem", "") or "").strip() or decision.winner.subsystem
+        subject = str(getattr(plan, "subject", "") or "").strip() or decision.intent_frame.target_text or family
+
+        query_shape = QueryShape.SUMMARY_REQUEST
+        output_mode = ResponseMode.SUMMARY_RESULT.value
+        output_type = "summary"
+        requested_metric: str | None = None
+        requested_action: str | None = None
+        domain = subsystem or family
+        if tool_name == "browser_context":
+            query_shape = QueryShape.BROWSER_CONTEXT
+            domain = "browser"
+            output_mode = ResponseMode.ACTION_RESULT.value
+            output_type = "action"
+            requested_action = "browser_context"
+            request_type_hint = request_type_hint or "browser_context"
+            execution_type = execution_type or "inspect_browser_context"
+        elif family in {"time", "storage", "location", "weather"}:
+            query_shape = QueryShape.CURRENT_STATUS
+            output_mode = ResponseMode.STATUS_SUMMARY.value
+            requested_metric = str(tool_arguments.get("focus") or family)
+            request_type_hint = request_type_hint or "direct_deterministic_fact"
+            execution_type = execution_type or "retrieve_current_status"
+        elif family == "development":
+            query_shape = QueryShape.CONTROL_COMMAND
+            output_mode = ResponseMode.ACTION_RESULT.value
+            output_type = "action"
+            requested_action = "echo"
+            request_type_hint = request_type_hint or "direct_echo"
+            execution_type = execution_type or "echo"
+        elif family == "notes":
+            query_shape = QueryShape.CONTROL_COMMAND
+            output_mode = ResponseMode.ACTION_RESULT.value
+            output_type = "action"
+            requested_action = "notes_write"
+            request_type_hint = request_type_hint or "notes_write"
+            execution_type = execution_type or "execute_control_command"
+
+        return self._merge_route_spine_proposal(
+            self._tool_proposal(
+                query_shape=query_shape,
+                domain=domain,
+                tool_name=tool_name,
+                tool_arguments=tool_arguments,
+                request_type_hint=request_type_hint,
+                family=family,
+                subject=subject,
+                requested_metric=requested_metric,
+                requested_action=requested_action,
+                confidence=decision.winner.score or 0.9,
+                evidence=["planner_v2 PlanDraft selected the authoritative tool contract"],
+                execution_type=execution_type,
+                output_mode=output_mode,
+                output_type=output_type,
+            ),
+            slots=slots,
+            evidence_note="planner_v2 PlanDraft remained authoritative through semantic handoff",
         )
 
     def _route_spine_clarification_proposal(
@@ -3049,10 +3195,13 @@ class DeterministicPlanner:
             )
         if family == "machine":
             focus = "time" if "time zone" in decision.intent_frame.normalized_text or "timezone" in decision.intent_frame.normalized_text else "identity"
+            source_case = str(decision.intent_frame.extracted_entities.get("source_case") or "").strip().lower()
+            requested_tool = str(decision.intent_frame.extracted_entities.get("tool_name") or "").strip()
+            tool_name = "system_info" if requested_tool == "system_info" or source_case == "system_info" or decision.intent_frame.raw_text.strip().lower().startswith("/system") else "machine_status"
             return self._tool_proposal(
                 query_shape=QueryShape.CURRENT_STATUS if focus == "time" else QueryShape.IDENTITY_LOOKUP,
                 domain="machine",
-                tool_name="machine_status",
+                tool_name=tool_name,
                 tool_arguments={"focus": focus},
                 request_type_hint="direct_deterministic_fact",
                 family="machine",
