@@ -8,7 +8,6 @@ from stormhelm.core.voice.events import publish_voice_event
 from stormhelm.core.voice.evaluation import VoicePipelineEvaluationResult
 from stormhelm.core.voice.evaluation import VoicePipelineExpectedResult
 from stormhelm.core.voice.evaluation import VoicePipelineScenario
-from stormhelm.core.voice.evaluation import VoicePipelineStageSummary
 from stormhelm.core.voice.evaluation import run_voice_pipeline_scenario
 from stormhelm.core.voice.evaluation import run_voice_pipeline_suite
 from stormhelm.core.voice.providers import MockVoiceProvider
@@ -61,7 +60,6 @@ __all__ = [
     "VoicePipelineEvaluationResult",
     "VoicePipelineExpectedResult",
     "VoicePipelineScenario",
-    "VoicePipelineStageSummary",
     "VoiceService",
     "VoiceState",
     "VoiceStateController",

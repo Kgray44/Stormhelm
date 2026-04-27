@@ -26,14 +26,6 @@ class VoiceEventType(str, Enum):
     AUDIO_INPUT_RECEIVED = "voice.audio_input_received"
     AUDIO_VALIDATION_FAILED = "voice.audio_validation_failed"
     MANUAL_TURN_RECEIVED = "voice.manual_turn_received"
-    CAPTURE_REQUEST_CREATED = "voice.capture_request_created"
-    CAPTURE_BLOCKED = "voice.capture_blocked"
-    CAPTURE_STARTED = "voice.capture_started"
-    CAPTURE_STOPPED = "voice.capture_stopped"
-    CAPTURE_CANCELLED = "voice.capture_cancelled"
-    CAPTURE_TIMEOUT = "voice.capture_timeout"
-    CAPTURE_FAILED = "voice.capture_failed"
-    CAPTURE_AUDIO_CREATED = "voice.capture_audio_created"
     WAKE_DETECTED = "voice.wake_detected"
     LISTENING_STARTED = "voice.listening_started"
     LISTENING_STOPPED = "voice.listening_stopped"
@@ -84,8 +76,6 @@ def build_voice_event_payload(
     audio_output_id: str | None = None,
     playback_request_id: str | None = None,
     playback_id: str | None = None,
-    capture_request_id: str | None = None,
-    capture_id: str | None = None,
     duration_ms: int | None = None,
     size_bytes: int | None = None,
     model: str | None = None,
@@ -129,8 +119,6 @@ def build_voice_event_payload(
         "audio_output_id": audio_output_id,
         "playback_request_id": playback_request_id,
         "playback_id": playback_id,
-        "capture_request_id": capture_request_id,
-        "capture_id": capture_id,
         "duration_ms": duration_ms,
         "size_bytes": size_bytes,
         "model": model,
@@ -170,8 +158,6 @@ def publish_voice_event(
     audio_output_id: str | None = None,
     playback_request_id: str | None = None,
     playback_id: str | None = None,
-    capture_request_id: str | None = None,
-    capture_id: str | None = None,
     duration_ms: int | None = None,
     size_bytes: int | None = None,
     model: str | None = None,
@@ -216,8 +202,6 @@ def publish_voice_event(
             audio_output_id=audio_output_id,
             playback_request_id=playback_request_id,
             playback_id=playback_id,
-            capture_request_id=capture_request_id,
-            capture_id=capture_id,
             duration_ms=duration_ms,
             size_bytes=size_bytes,
             model=model,
