@@ -109,6 +109,9 @@ _WORKSPACE_COMPACT_ITEM_KEYS = (
     "source",
     "score",
     "status",
+    "inclusionReasons",
+    "whyIncluded",
+    "surfaceLinks",
 )
 
 _WORKSPACE_COMMAND_TOKENS = {
@@ -319,6 +322,18 @@ class WorkspaceService:
                 compact[key] = value[:_WORKSPACE_COMPACT_STRING_LIMIT]
             elif isinstance(value, (int, float, bool)) or value is None:
                 compact[key] = value
+            elif key in {"inclusionReasons", "whyIncluded"} and isinstance(value, list):
+                compact[key] = [
+                    compact_reason
+                    for compact_reason in (self._compact_workspace_reason(entry) for entry in value[:8])
+                    if compact_reason
+                ]
+            elif key == "surfaceLinks" and isinstance(value, list):
+                compact[key] = [
+                    compact_link
+                    for compact_link in (self._compact_workspace_surface_link(entry) for entry in value[:8])
+                    if compact_link
+                ]
             elif isinstance(value, list):
                 compact[key] = [
                     str(entry)[:_WORKSPACE_COMPACT_STRING_LIMIT]
@@ -343,6 +358,39 @@ class WorkspaceService:
         if not compact.get("title") and item.get("name"):
             compact["title"] = str(item.get("name"))[:_WORKSPACE_COMPACT_STRING_LIMIT]
         return compact
+
+    def _compact_workspace_reason(self, reason: object) -> dict[str, Any] | None:
+        if not isinstance(reason, dict):
+            text = str(reason).strip()
+            return {"detail": text[:_WORKSPACE_COMPACT_STRING_LIMIT]} if text else None
+        compact: dict[str, Any] = {}
+        for key in ("code", "label", "detail", "reason", "source", "type", "value"):
+            value = str(reason.get(key) or "").strip()
+            if value:
+                compact[key] = value[:_WORKSPACE_COMPACT_STRING_LIMIT]
+        score = reason.get("score")
+        if isinstance(score, (int, float)):
+            compact["score"] = round(float(score), 3)
+        return compact or None
+
+    def _compact_workspace_surface_link(self, link: object) -> dict[str, Any] | None:
+        if not isinstance(link, dict):
+            return None
+        compact: dict[str, Any] = {}
+        for key in ("sourceSurface", "targetSurface"):
+            value = str(link.get(key) or "").strip()
+            if value:
+                compact[key] = value[:_WORKSPACE_COMPACT_STRING_LIMIT]
+        reasons = link.get("reasons")
+        if isinstance(reasons, list):
+            compact_reasons = [
+                compact_reason
+                for compact_reason in (self._compact_workspace_reason(reason) for reason in reasons[:8])
+                if compact_reason
+            ]
+            if compact_reasons:
+                compact["reasons"] = compact_reasons
+        return compact or None
 
     def _bounded_workspace_items(
         self,
@@ -1113,8 +1161,9 @@ class WorkspaceService:
         reasons: list[WorkspaceInclusionReason] | list[dict[str, Any]] | None = None,
         source_surface: str = "environment",
         activity_description: str = "",
+        workspace_summary: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        summary = self.active_workspace_summary(session_id)
+        summary = workspace_summary or self.active_workspace_summary(session_id)
         workspace_payload = summary.get("workspace") if isinstance(summary.get("workspace"), dict) else {}
         if not workspace_payload:
             return {"workspace": {}, "action": {}, "already_linked": False}
@@ -1197,10 +1246,21 @@ class WorkspaceService:
                 },
             )
 
-        updated = self.active_workspace_summary(session_id)
+        module = str(posture.get("active_module", "chartroom")) or "chartroom"
+        section = str(posture.get("section", target)) or target
+        bounded_items = self._bounded_workspace_items(opened_items, limit=WORKSPACE_ACTIVE_CONTEXT_ITEM_LIMIT)["items"]
+        bounded_active_item = self._compact_workspace_item(active_item)
         return {
-            "workspace": updated.get("workspace", {}),
-            "action": updated.get("action", {}),
+            "workspace": updated_workspace_payload,
+            "action": {
+                "type": "workspace_restore",
+                "target": "deck",
+                "module": module,
+                "section": section,
+                "workspace": updated_workspace_payload,
+                "items": bounded_items,
+                "active_item_id": str(bounded_active_item.get("itemId", "")) if bounded_active_item else "",
+            },
             "already_linked": already_linked,
         }
 

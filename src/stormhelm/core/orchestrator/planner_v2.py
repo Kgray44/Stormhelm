@@ -1815,10 +1815,45 @@ class PlannerV2:
     def _discord_relay_signal(self, text: str) -> bool:
         if _discord_conceptual_text(text):
             return False
-        direct_verb = re.search(r"\b(?:send|share|message|post|relay|forward|dm)\b", text)
+        if self._browser_context_signal(text) or "forum post" in text:
+            return False
+        direct_verb = re.search(r"\b(?:send|share|message|relay|forward|dm)\b", text)
+        explicit_post = re.search(r"\bpost\b.{0,24}\b(?:to|in)\b.{0,24}\b(?:discord|channel|chat|server|dm|message)\b", text) or re.search(
+            r"\bpost\s+(?:this|that|it)\b",
+            text,
+        )
         pass_along = re.search(r"\bpass\b.{0,12}\b(?:this|that|it)\b.{0,16}\balong\b", text)
-        relay_verb = direct_verb or pass_along
+        relay_verb = direct_verb or explicit_post or pass_along
         return bool(relay_verb and (re.search(r"\b(?:discord|baby|selected|highlighted|clipboard|this|that|it)\b", text) or pass_along))
+
+    def _browser_context_signal(self, text: str) -> bool:
+        return bool(
+            any(
+                phrase in text
+                for phrase in {
+                    "add this page to the workspace",
+                    "add this article to the workspace",
+                    "add this page as a reference",
+                    "collect the references from these tabs",
+                    "collect references from these tabs",
+                    "pull in the browser references related to this project",
+                    "summarize this article",
+                    "summarize this page",
+                    "summarize the current page",
+                    "show me the source i was just reading",
+                    "find the page i was just reading",
+                    "find the page from earlier",
+                    "find the tab",
+                    "find the page",
+                    "bring up the page",
+                    "bring that page forward",
+                }
+            )
+            or (" tab " in f" {text} " and text.startswith(("find ", "show ", "bring ")))
+            or ("page about" in text and any(text.startswith(prefix) for prefix in {"find ", "show ", "bring "}))
+            or re.search(r"\b(?:what|which)\b.{0,24}\b(?:browser\s+)?(?:page|tab)\b.{0,24}\bam i on\b", text)
+            or re.search(r"\bcurrent\b.{0,16}\b(?:browser\s+)?(?:page|tab)\b", text)
+        )
 
     def _expansion_conceptual_near_miss(self, text: str) -> bool:
         return (

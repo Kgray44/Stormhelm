@@ -381,7 +381,7 @@ class DurableTaskService:
         return compact
 
     def _compact_task_payload_value(self, value: Any, *, depth: int = 0) -> Any:
-        if depth > 4:
+        if depth > 5 and isinstance(value, (dict, list)):
             return {"truncated": True, "reason": "max_task_payload_depth"}
         if isinstance(value, dict):
             compact: dict[str, Any] = {}

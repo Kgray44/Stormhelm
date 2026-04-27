@@ -455,7 +455,7 @@ class ScreenAwarenessPlannerSeam:
             or self._contains_visible_referent(lower)
         ):
             return ScreenIntentType.EXPLAIN_VISIBLE_CONTENT, ["explicit visible-content explanation phrase matched"], 0.93
-        if any(phrase in lower for phrase in SOLVE_PHRASES) and (
+        if self._looks_like_visible_problem_request(lower) and (
             input_signals.get("selection_available")
             or input_signals.get("clipboard_available")
             or self._contains_visible_referent(lower)
@@ -485,6 +485,11 @@ class ScreenAwarenessPlannerSeam:
 
     def _contains_visible_referent(self, normalized_text: str) -> bool:
         return any(re.search(rf"\b{re.escape(hint)}\b", normalized_text) for hint in VISUAL_REFERENT_HINTS)
+
+    def _looks_like_visible_problem_request(self, normalized_text: str) -> bool:
+        if any(phrase in normalized_text for phrase in SOLVE_PHRASES):
+            return True
+        return bool(re.search(r"\bsolve\s+(?:this|that)\b", normalized_text))
 
     def _looks_like_visual_inspection_request(self, normalized_text: str) -> bool:
         return any(marker in normalized_text for marker in INSPECTION_MARKERS)

@@ -677,6 +677,29 @@ class RouteSpine:
         return bool(
             re.search(r"\b(?:what|which)\b.{0,24}\b(?:browser\s+)?(?:page|tab)\b.{0,24}\bam i on\b", text)
             or re.search(r"\bcurrent\b.{0,16}\b(?:browser\s+)?(?:page|tab)\b", text)
+            or any(
+                phrase in text
+                for phrase in {
+                    "add this page to the workspace",
+                    "add this article to the workspace",
+                    "add this page as a reference",
+                    "collect the references from these tabs",
+                    "collect references from these tabs",
+                    "pull in the browser references related to this project",
+                    "summarize this article",
+                    "summarize this page",
+                    "summarize the current page",
+                    "show me the source i was just reading",
+                    "find the page i was just reading",
+                    "find the page from earlier",
+                    "find the tab",
+                    "find the page",
+                    "bring up the page",
+                    "bring that page forward",
+                }
+            )
+            or (" tab " in f" {text} " and text.startswith(("find ", "show ", "bring ")))
+            or ("page about" in text and any(text.startswith(prefix) for prefix in {"find ", "show ", "bring "}))
         )
 
     def _machine_signal(self, text: str) -> bool:
