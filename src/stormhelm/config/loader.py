@@ -31,6 +31,7 @@ from stormhelm.config.models import (
     ToolEnablementConfig,
     UIConfig,
     VoiceConfig,
+    VoiceCaptureConfig,
     VoiceOpenAIConfig,
     VoicePlaybackConfig,
 )
@@ -317,6 +318,7 @@ def _build_app_config(
     voice_data = data.get("voice", {})
     voice_openai_data = voice_data.get("openai", {}) if isinstance(voice_data.get("openai"), dict) else {}
     voice_playback_data = voice_data.get("playback", {}) if isinstance(voice_data.get("playback"), dict) else {}
+    voice_capture_data = voice_data.get("capture", {}) if isinstance(voice_data.get("capture"), dict) else {}
     voice_config = VoiceConfig(
         enabled=bool(voice_data.get("enabled", False)),
         provider=str(voice_data.get("provider", "openai")).strip().lower() or "openai",
@@ -355,6 +357,21 @@ def _build_app_config(
             max_audio_bytes=int(voice_playback_data.get("max_audio_bytes", 10_000_000)),
             max_duration_ms=int(voice_playback_data.get("max_duration_ms", 120_000)),
             delete_transient_after_playback=bool(voice_playback_data.get("delete_transient_after_playback", True)),
+        ),
+        capture=VoiceCaptureConfig(
+            enabled=bool(voice_capture_data.get("enabled", False)),
+            provider=str(voice_capture_data.get("provider", "local")).strip().lower() or "local",
+            mode=str(voice_capture_data.get("mode", "push_to_talk")).strip().lower() or "push_to_talk",
+            device=str(voice_capture_data.get("device", "default")).strip() or "default",
+            sample_rate=int(voice_capture_data.get("sample_rate", 16000)),
+            channels=int(voice_capture_data.get("channels", 1)),
+            format=str(voice_capture_data.get("format", "wav")).strip().lower() or "wav",
+            max_duration_ms=int(voice_capture_data.get("max_duration_ms", 30_000)),
+            max_audio_bytes=int(voice_capture_data.get("max_audio_bytes", 10_000_000)),
+            auto_stop_on_max_duration=bool(voice_capture_data.get("auto_stop_on_max_duration", True)),
+            persist_captured_audio=bool(voice_capture_data.get("persist_captured_audio", False)),
+            delete_transient_after_turn=bool(voice_capture_data.get("delete_transient_after_turn", True)),
+            allow_dev_capture=bool(voice_capture_data.get("allow_dev_capture", False)),
         ),
     )
 
@@ -556,6 +573,28 @@ def _apply_env_overrides(data: ConfigDict, env: Mapping[str, str]) -> ConfigDict
             "voice.playback.delete_transient_after_playback",
             _parse_bool,
         ),
+        "STORMHELM_VOICE_CAPTURE_ENABLED": ("voice.capture.enabled", _parse_bool),
+        "STORMHELM_VOICE_CAPTURE_PROVIDER": ("voice.capture.provider", str),
+        "STORMHELM_VOICE_CAPTURE_MODE": ("voice.capture.mode", str),
+        "STORMHELM_VOICE_CAPTURE_DEVICE": ("voice.capture.device", str),
+        "STORMHELM_VOICE_CAPTURE_SAMPLE_RATE": ("voice.capture.sample_rate", int),
+        "STORMHELM_VOICE_CAPTURE_CHANNELS": ("voice.capture.channels", int),
+        "STORMHELM_VOICE_CAPTURE_FORMAT": ("voice.capture.format", str),
+        "STORMHELM_VOICE_CAPTURE_MAX_DURATION_MS": ("voice.capture.max_duration_ms", int),
+        "STORMHELM_VOICE_CAPTURE_MAX_AUDIO_BYTES": ("voice.capture.max_audio_bytes", int),
+        "STORMHELM_VOICE_CAPTURE_AUTO_STOP_ON_MAX_DURATION": (
+            "voice.capture.auto_stop_on_max_duration",
+            _parse_bool,
+        ),
+        "STORMHELM_VOICE_CAPTURE_PERSIST_CAPTURED_AUDIO": (
+            "voice.capture.persist_captured_audio",
+            _parse_bool,
+        ),
+        "STORMHELM_VOICE_CAPTURE_DELETE_TRANSIENT_AFTER_TURN": (
+            "voice.capture.delete_transient_after_turn",
+            _parse_bool,
+        ),
+        "STORMHELM_VOICE_CAPTURE_ALLOW_DEV_CAPTURE": ("voice.capture.allow_dev_capture", _parse_bool),
         "STORMHELM_VOICE_OPENAI_STT_MODEL": ("voice.openai.stt_model", str),
         "STORMHELM_VOICE_OPENAI_TRANSCRIPTION_LANGUAGE": ("voice.openai.transcription_language", str),
         "STORMHELM_VOICE_OPENAI_TRANSCRIPTION_PROMPT": ("voice.openai.transcription_prompt", str),

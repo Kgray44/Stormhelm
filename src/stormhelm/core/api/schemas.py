@@ -65,6 +65,22 @@ class CleanupExecutionRequest(BaseModel):
     destructive_confirmation: DestructiveCleanupConfirmationRequest | None = None
 
 
+class VoiceCaptureControlRequest(BaseModel):
+    capture_id: str | None = None
+    session_id: str = "default"
+    mode: str = "ghost"
+    reason: str = "user_released"
+    synthesize_response: bool = False
+    play_response: bool = False
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class VoicePlaybackControlRequest(BaseModel):
+    playback_id: str | None = None
+    reason: str = "user_requested"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class EventsResponse(BaseModel):
     events: list[dict[str, Any]]
     cursor: int | None = None

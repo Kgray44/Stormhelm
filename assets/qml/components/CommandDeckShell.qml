@@ -29,6 +29,7 @@ Item {
     property var requestComposer: ({})
     property var railItems: []
     property var statusItems: []
+    property var voiceState: ({})
     property var deckPanels: []
     property var hiddenPanels: []
     property var panelCatalog: []

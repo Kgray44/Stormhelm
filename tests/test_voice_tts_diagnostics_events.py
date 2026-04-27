@@ -43,7 +43,7 @@ def test_tts_status_snapshot_reports_last_synthesis_without_audio_bytes() -> Non
     snapshot = service.status_snapshot()
 
     assert synthesis.ok is True
-    assert snapshot["current_phase"] == "voice4"
+    assert snapshot["current_phase"] == "voice5"
     assert snapshot["tts"]["enabled"] is True
     assert snapshot["tts"]["spoken_responses_enabled"] is True
     assert snapshot["tts"]["provider"] == "mock"

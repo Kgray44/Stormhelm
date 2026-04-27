@@ -60,7 +60,7 @@ def test_playback_status_snapshot_reports_completed_playback_without_raw_audio()
     snapshot = service.status_snapshot()
 
     assert playback.ok is True
-    assert snapshot["current_phase"] == "voice4"
+    assert snapshot["current_phase"] == "voice5"
     assert snapshot["playback"]["enabled"] is True
     assert snapshot["playback"]["provider"] == "mock"
     assert snapshot["playback"]["available"] is True

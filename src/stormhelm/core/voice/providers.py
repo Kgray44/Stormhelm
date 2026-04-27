@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import sys
+import tempfile
+import threading
 import time
+import wave
 from collections.abc import Awaitable
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
@@ -16,6 +20,9 @@ from stormhelm.core.voice.availability import VoiceAvailability
 from stormhelm.core.voice.availability import compute_voice_availability
 from stormhelm.core.voice.models import VoiceAudioInput
 from stormhelm.core.voice.models import VoiceAudioOutput
+from stormhelm.core.voice.models import VoiceCaptureRequest
+from stormhelm.core.voice.models import VoiceCaptureResult
+from stormhelm.core.voice.models import VoiceCaptureSession
 from stormhelm.core.voice.models import VoicePlaybackRequest
 from stormhelm.core.voice.models import VoicePlaybackResult
 from stormhelm.core.voice.models import VoiceSpeechRequest
@@ -98,6 +105,979 @@ class AudioOutputProvider(Protocol):
     def start_audio_output(self) -> VoiceProviderOperationResult: ...
 
     def stop_audio_output(self) -> VoiceProviderOperationResult: ...
+
+
+@runtime_checkable
+class VoiceCaptureProvider(Protocol):
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def is_mock(self) -> bool: ...
+
+    def get_availability(self) -> dict[str, Any]: ...
+
+    def start_capture(
+        self,
+        request: VoiceCaptureRequest,
+    ) -> VoiceCaptureSession | VoiceCaptureResult | Awaitable[VoiceCaptureSession | VoiceCaptureResult]: ...
+
+    def stop_capture(
+        self,
+        capture_id: str | None = None,
+        *,
+        reason: str = "user_released",
+    ) -> VoiceCaptureResult | Awaitable[VoiceCaptureResult]: ...
+
+    def cancel_capture(
+        self,
+        capture_id: str | None = None,
+        *,
+        reason: str = "user_cancelled",
+    ) -> VoiceCaptureResult | Awaitable[VoiceCaptureResult]: ...
+
+    def get_active_capture(self) -> VoiceCaptureSession | None: ...
+
+
+@runtime_checkable
+class LocalCaptureBackend(Protocol):
+    dependency_name: str
+    platform_name: str
+
+    def get_availability(self, config: VoiceConfig) -> dict[str, Any]: ...
+
+    def start(self, request: VoiceCaptureRequest, output_path: Path) -> dict[str, Any]: ...
+
+    def stop(self, handle: dict[str, Any], *, reason: str) -> dict[str, Any]: ...
+
+    def cancel(self, handle: dict[str, Any], *, reason: str) -> None: ...
+
+    def cleanup(self, path: str | Path) -> None: ...
+
+
+@dataclass(slots=True)
+class MockCaptureProvider:
+    provider_name: str = "mock"
+    available: bool = True
+    blocked: bool = False
+    fail_capture: bool = False
+    timeout_on_stop: bool = False
+    error_code: str | None = None
+    error_message: str | None = None
+    capture_audio_bytes: bytes = b"mock captured audio"
+    duration_ms: int = 1000
+    start_call_count: int = 0
+    stop_call_count: int = 0
+    cancel_call_count: int = 0
+    _active_capture: VoiceCaptureSession | None = field(default=None, init=False, repr=False)
+
+    @property
+    def name(self) -> str:
+        return self.provider_name
+
+    @property
+    def is_mock(self) -> bool:
+        return True
+
+    def get_availability(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider_name,
+            "available": self.available and not self.blocked,
+            "unavailable_reason": None if self.available else "provider_unavailable",
+            "mock": True,
+        }
+
+    def start_capture(self, request: VoiceCaptureRequest) -> VoiceCaptureSession | VoiceCaptureResult:
+        if not request.allowed_to_capture:
+            return self._result(
+                request,
+                status="blocked",
+                ok=False,
+                error_code=request.blocked_reason or "capture_blocked",
+                error_message=f"Capture request blocked: {request.blocked_reason or 'capture_blocked'}.",
+            )
+        if self._active_capture is not None:
+            return self._result(
+                request,
+                status="blocked",
+                ok=False,
+                error_code="active_capture_exists",
+                error_message="A push-to-talk capture is already active.",
+            )
+        if not self.available:
+            return self._result(
+                request,
+                status="unavailable",
+                ok=False,
+                error_code="provider_unavailable",
+                error_message="Mock capture provider is unavailable.",
+            )
+        if self.blocked:
+            return self._result(
+                request,
+                status="blocked",
+                ok=False,
+                error_code="capture_blocked",
+                error_message="Mock capture provider blocked capture.",
+            )
+        self.start_call_count += 1
+        if self.fail_capture:
+            return self._result(
+                request,
+                status="failed",
+                ok=False,
+                error_code=self.error_code or "capture_failed",
+                error_message=self.error_message or "Mock capture provider failed to start.",
+            )
+        session = VoiceCaptureSession(
+            capture_request_id=request.capture_request_id,
+            session_id=request.session_id,
+            turn_id=request.turn_id,
+            provider=self.provider_name,
+            device=request.device,
+            status="recording",
+            max_duration_ms=request.max_duration_ms,
+            metadata={"source": request.source, "mock": True, "request": request.to_metadata()},
+            microphone_was_active=False,
+            always_listening_claimed=False,
+            wake_word_claimed=False,
+        )
+        self._active_capture = session
+        return session
+
+    def stop_capture(
+        self,
+        capture_id: str | None = None,
+        *,
+        reason: str = "user_released",
+    ) -> VoiceCaptureResult:
+        active = self._active_capture
+        if active is None or (capture_id and capture_id != active.capture_id):
+            return VoiceCaptureResult(
+                ok=False,
+                capture_request_id=None,
+                capture_id=capture_id,
+                status="unavailable",
+                provider=self.provider_name,
+                device="default",
+                stopped_at=utc_now_iso(),
+                stop_reason=reason,
+                error_code="no_active_capture",
+                error_message="No active push-to-talk capture exists.",
+                raw_audio_persisted=False,
+                microphone_was_active=False,
+                always_listening_claimed=False,
+                wake_word_claimed=False,
+            )
+        self.stop_call_count += 1
+        self._active_capture = None
+        if self.timeout_on_stop:
+            return VoiceCaptureResult(
+                ok=False,
+                capture_request_id=active.capture_request_id,
+                capture_id=active.capture_id,
+                status="timeout",
+                provider=self.provider_name,
+                device=active.device,
+                duration_ms=active.max_duration_ms,
+                stopped_at=utc_now_iso(),
+                stop_reason=reason,
+                error_code="capture_timeout",
+                error_message="Mock capture reached the configured max duration.",
+                metadata={"mock": True},
+                raw_audio_persisted=False,
+                microphone_was_active=False,
+                always_listening_claimed=False,
+                wake_word_claimed=False,
+            )
+        payload = bytes(self.capture_audio_bytes or b"")
+        if len(payload) > int(active.metadata.get("request", {}).get("max_audio_bytes", 0) or 0):
+            return VoiceCaptureResult(
+                ok=False,
+                capture_request_id=active.capture_request_id,
+                capture_id=active.capture_id,
+                status="failed",
+                provider=self.provider_name,
+                device=active.device,
+                duration_ms=self.duration_ms,
+                size_bytes=len(payload),
+                stopped_at=utc_now_iso(),
+                stop_reason=reason,
+                error_code="captured_audio_too_large",
+                error_message="Captured audio exceeded the configured size limit.",
+                metadata={"mock": True},
+                raw_audio_persisted=False,
+                microphone_was_active=False,
+                always_listening_claimed=False,
+                wake_word_claimed=False,
+            )
+        audio = VoiceAudioInput.from_bytes(
+            payload,
+            filename=f"{active.capture_id}.wav",
+            mime_type="audio/wav",
+            duration_ms=self.duration_ms,
+            sample_rate=int(active.metadata.get("request", {}).get("sample_rate", 16000) or 16000),
+            channels=int(active.metadata.get("request", {}).get("channels", 1) or 1),
+            source="mock",
+            metadata={
+                "capture_id": active.capture_id,
+                "capture_request_id": active.capture_request_id,
+                "capture_source": "push_to_talk",
+                "provider": self.provider_name,
+                "device": active.device,
+                "mock": True,
+            },
+        )
+        return VoiceCaptureResult(
+            ok=True,
+            capture_request_id=active.capture_request_id,
+            capture_id=active.capture_id,
+            status="completed",
+            provider=self.provider_name,
+            device=active.device,
+            audio_input=audio,
+            duration_ms=self.duration_ms,
+            size_bytes=audio.size_bytes,
+            stopped_at=utc_now_iso(),
+            stop_reason=reason,
+            metadata={"mock": True, "audio_input": audio.to_metadata()},
+            raw_audio_persisted=False,
+            microphone_was_active=False,
+            always_listening_claimed=False,
+            wake_word_claimed=False,
+        )
+
+    def cancel_capture(
+        self,
+        capture_id: str | None = None,
+        *,
+        reason: str = "user_cancelled",
+    ) -> VoiceCaptureResult:
+        active = self._active_capture
+        if active is None or (capture_id and capture_id != active.capture_id):
+            return VoiceCaptureResult(
+                ok=False,
+                capture_request_id=None,
+                capture_id=capture_id,
+                status="unavailable",
+                provider=self.provider_name,
+                device="default",
+                stopped_at=utc_now_iso(),
+                stop_reason=reason,
+                error_code="no_active_capture",
+                error_message="No active push-to-talk capture exists.",
+            )
+        self.cancel_call_count += 1
+        self._active_capture = None
+        return VoiceCaptureResult(
+            ok=False,
+            capture_request_id=active.capture_request_id,
+            capture_id=active.capture_id,
+            status="cancelled",
+            provider=self.provider_name,
+            device=active.device,
+            stopped_at=utc_now_iso(),
+            stop_reason=reason,
+            metadata={"mock": True},
+            raw_audio_persisted=False,
+            microphone_was_active=False,
+            always_listening_claimed=False,
+            wake_word_claimed=False,
+        )
+
+    def get_active_capture(self) -> VoiceCaptureSession | None:
+        return self._active_capture
+
+    def _result(
+        self,
+        request: VoiceCaptureRequest,
+        *,
+        status: str,
+        ok: bool,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> VoiceCaptureResult:
+        return VoiceCaptureResult(
+            ok=ok,
+            capture_request_id=request.capture_request_id,
+            capture_id=None,
+            status=status,
+            provider=self.provider_name,
+            device=request.device,
+            stopped_at=utc_now_iso(),
+            error_code=error_code,
+            error_message=error_message,
+            metadata={"request": request.to_metadata()},
+            raw_audio_persisted=False,
+            microphone_was_active=False,
+            always_listening_claimed=False,
+            wake_word_claimed=False,
+        )
+
+
+@dataclass(slots=True)
+class SoundDeviceWavCaptureBackend:
+    dependency_name: str = "sounddevice"
+    platform_name: str = field(default_factory=lambda: sys.platform)
+
+    def get_availability(self, config: VoiceConfig) -> dict[str, Any]:
+        supported = sys.platform.startswith(("win", "darwin", "linux"))
+        base: dict[str, Any] = {
+            "platform": self.platform_name,
+            "platform_supported": supported,
+            "dependency": self.dependency_name,
+            "dependency_available": False,
+            "device_configured": config.capture.device,
+            "device_available": None,
+            "permission_state": "unknown",
+        }
+        if not supported:
+            return {**base, "available": False, "unavailable_reason": "unsupported_platform"}
+        try:
+            import sounddevice as sd  # type: ignore[import-not-found]
+        except Exception:
+            return {**base, "available": False, "unavailable_reason": "dependency_missing"}
+
+        base["dependency_available"] = True
+        try:
+            device = None if str(config.capture.device or "default").strip().lower() == "default" else config.capture.device
+            sd.query_devices(device=device, kind="input")
+        except Exception as error:
+            return {
+                **base,
+                "available": False,
+                "unavailable_reason": "device_unavailable",
+                "device_available": False,
+                "provider_error": str(error),
+            }
+        return {**base, "available": True, "unavailable_reason": None, "device_available": True}
+
+    def start(self, request: VoiceCaptureRequest, output_path: Path) -> dict[str, Any]:
+        import sounddevice as sd  # type: ignore[import-not-found]
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        wav_file = wave.open(str(output_path), "wb")
+        wav_file.setnchannels(request.channels)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(request.sample_rate)
+        handle: dict[str, Any] = {
+            "output_path": str(output_path),
+            "wav_file": wav_file,
+            "bytes_written": 0,
+            "overflow": False,
+            "timed_out": False,
+            "started_at": time.perf_counter(),
+            "platform": self.platform_name,
+            "dependency": self.dependency_name,
+            "permission_state": "granted",
+        }
+
+        def callback(indata: Any, frames: int, time_info: Any, status: Any) -> None:
+            del frames, time_info, status
+            payload = indata.tobytes()
+            remaining = request.max_audio_bytes - int(handle["bytes_written"])
+            if remaining <= 0:
+                handle["overflow"] = True
+                raise sd.CallbackStop
+            if len(payload) > remaining:
+                payload = payload[:remaining]
+                handle["overflow"] = True
+            wav_file.writeframes(payload)
+            handle["bytes_written"] = int(handle["bytes_written"]) + len(payload)
+            if handle["overflow"]:
+                raise sd.CallbackStop
+
+        device = None if request.device.strip().lower() == "default" else request.device
+        stream = sd.InputStream(
+            samplerate=request.sample_rate,
+            channels=request.channels,
+            dtype="int16",
+            device=device,
+            callback=callback,
+        )
+        handle["stream"] = stream
+        try:
+            stream.start()
+        except Exception:
+            wav_file.close()
+            output_path.unlink(missing_ok=True)
+            raise
+        return handle
+
+    def stop(self, handle: dict[str, Any], *, reason: str) -> dict[str, Any]:
+        del reason
+        stream = handle.get("stream")
+        wav_file = handle.get("wav_file")
+        if stream is not None:
+            try:
+                stream.stop()
+            finally:
+                stream.close()
+        if wav_file is not None:
+            wav_file.close()
+        output_path = Path(str(handle.get("output_path") or ""))
+        elapsed_ms = int((time.perf_counter() - float(handle.get("started_at", time.perf_counter()))) * 1000)
+        return {
+            "output_path": str(output_path),
+            "duration_ms": elapsed_ms,
+            "size_bytes": output_path.stat().st_size if output_path.exists() else int(handle.get("bytes_written", 0)),
+            "timed_out": bool(handle.get("timed_out")),
+            "metadata": {
+                "dependency": self.dependency_name,
+                "platform": self.platform_name,
+                "overflow": bool(handle.get("overflow")),
+            },
+        }
+
+    def timeout(self, handle: dict[str, Any]) -> None:
+        handle["timed_out"] = True
+        stream = handle.get("stream")
+        if stream is not None:
+            stream.stop()
+
+    def cancel(self, handle: dict[str, Any], *, reason: str) -> None:
+        del reason
+        stream = handle.get("stream")
+        wav_file = handle.get("wav_file")
+        if stream is not None:
+            try:
+                stream.stop()
+            finally:
+                stream.close()
+        if wav_file is not None:
+            wav_file.close()
+        self.cleanup(str(handle.get("output_path") or ""))
+
+    def cleanup(self, path: str | Path) -> None:
+        if path:
+            Path(path).unlink(missing_ok=True)
+
+
+@dataclass(slots=True)
+class LocalCaptureProvider:
+    config: VoiceConfig
+    provider_name: str = "local"
+    backend: LocalCaptureBackend | None = None
+    temp_dir: str | Path | None = None
+    _active_capture: VoiceCaptureSession | None = field(default=None, init=False, repr=False)
+    _active_handle: dict[str, Any] | None = field(default=None, init=False, repr=False)
+    _active_request: VoiceCaptureRequest | None = field(default=None, init=False, repr=False)
+    _active_output_path: Path | None = field(default=None, init=False, repr=False)
+    _timeout_timer: threading.Timer | None = field(default=None, init=False, repr=False)
+    _timed_out_capture_id: str | None = field(default=None, init=False, repr=False)
+    _permission_error: str | None = field(default=None, init=False, repr=False)
+    _last_cleanup_warning: str | None = field(default=None, init=False, repr=False)
+
+    @property
+    def name(self) -> str:
+        return self.provider_name
+
+    @property
+    def is_mock(self) -> bool:
+        return False
+
+    def __post_init__(self) -> None:
+        if self.backend is None:
+            self.backend = SoundDeviceWavCaptureBackend()
+
+    def get_availability(self) -> dict[str, Any]:
+        base = {
+            "provider": self.provider_name,
+            "mock": False,
+            "local_capture_enabled": bool(self.config.capture.enabled),
+            "allow_dev_capture": bool(self.config.capture.allow_dev_capture),
+            "device_configured": self.config.capture.device,
+            "device": self.config.capture.device,
+            "platform": getattr(self.backend, "platform_name", sys.platform),
+            "dependency": getattr(self.backend, "dependency_name", "unknown"),
+            "platform_supported": None,
+            "dependency_available": None,
+            "device_available": None,
+            "permission_state": "unknown",
+            "permission_error": self._permission_error,
+            "cleanup_warning": self._last_cleanup_warning,
+        }
+        if not self.config.capture.enabled:
+            return {**base, "available": False, "unavailable_reason": "capture_disabled"}
+        if not self.config.capture.allow_dev_capture:
+            return {**base, "available": False, "unavailable_reason": "dev_capture_not_allowed"}
+        if self.backend is None:
+            return {**base, "available": False, "unavailable_reason": "provider_not_configured"}
+        try:
+            backend_availability = dict(self.backend.get_availability(self.config))
+        except Exception as error:
+            return {
+                **base,
+                "available": False,
+                "unavailable_reason": "provider_unavailable",
+                "provider_error": str(error),
+            }
+        reason = backend_availability.get("unavailable_reason")
+        available = bool(backend_availability.get("available"))
+        return {
+            **base,
+            **backend_availability,
+            "provider": self.provider_name,
+            "available": available,
+            "unavailable_reason": None if available else str(reason or "provider_unavailable"),
+            "mock": False,
+            "permission_error": self._permission_error or backend_availability.get("permission_error"),
+        }
+
+    def start_capture(self, request: VoiceCaptureRequest) -> VoiceCaptureSession | VoiceCaptureResult:
+        if not request.allowed_to_capture:
+            return self._result(
+                request,
+                status="blocked",
+                ok=False,
+                error_code=request.blocked_reason or "capture_blocked",
+                error_message=f"Capture request blocked: {request.blocked_reason or 'capture_blocked'}.",
+            )
+        if self._active_capture is not None:
+            return self._result(
+                request,
+                status="blocked",
+                ok=False,
+                error_code="active_capture_exists",
+                error_message="A push-to-talk capture is already active.",
+            )
+
+        availability = self.get_availability()
+        if not availability.get("available"):
+            reason = str(availability.get("unavailable_reason") or "provider_unavailable")
+            status = "blocked" if reason in {"capture_disabled", "dev_capture_not_allowed"} else "unavailable"
+            return self._result(
+                request,
+                status=status,
+                ok=False,
+                error_code=reason,
+                error_message=f"Local capture unavailable: {reason}.",
+                metadata={"availability": availability},
+            )
+
+        output_path = self._capture_output_path(request)
+        try:
+            handle = self.backend.start(request, output_path) if self.backend is not None else {}
+        except PermissionError as error:
+            self._permission_error = str(error)
+            return self._result(
+                request,
+                status="unavailable",
+                ok=False,
+                error_code="permission_denied",
+                error_message="Local capture permission was denied.",
+                metadata={"availability": {**availability, "permission_error": str(error)}},
+            )
+        except Exception as error:
+            return self._result(
+                request,
+                status="failed",
+                ok=False,
+                error_code="provider_error",
+                error_message=str(error),
+                metadata={"availability": availability},
+            )
+
+        if not isinstance(handle, dict):
+            handle = {"raw_handle": handle}
+        handle.setdefault("output_path", str(output_path))
+        capture_id = f"voice-capture-{uuid4().hex[:12]}"
+        metadata = {
+            "source": request.source,
+            "local_capture": True,
+            "request": request.to_metadata(),
+            "availability": availability,
+            "platform": handle.get("platform", availability.get("platform")),
+            "dependency": handle.get("dependency", availability.get("dependency")),
+            "permission_state": handle.get("permission_state", availability.get("permission_state", "unknown")),
+            "device_available": handle.get("device_available", availability.get("device_available")),
+            "file": self._file_metadata(output_path),
+        }
+        session = VoiceCaptureSession(
+            capture_id=capture_id,
+            capture_request_id=request.capture_request_id,
+            session_id=request.session_id,
+            turn_id=request.turn_id,
+            provider=self.provider_name,
+            device=request.device,
+            status="recording",
+            max_duration_ms=request.max_duration_ms,
+            metadata=metadata,
+            microphone_was_active=True,
+            always_listening_claimed=False,
+            wake_word_claimed=False,
+        )
+        self._active_capture = session
+        self._active_handle = handle
+        self._active_request = request
+        self._active_output_path = output_path
+        self._timed_out_capture_id = None
+        self._start_timeout_timer(capture_id, request)
+        return session
+
+    def stop_capture(
+        self,
+        capture_id: str | None = None,
+        *,
+        reason: str = "user_released",
+    ) -> VoiceCaptureResult:
+        active = self._active_capture
+        if active is None or (capture_id and capture_id != active.capture_id):
+            return self._no_active_result(capture_id, reason=reason)
+        request = self._active_request
+        handle = self._active_handle or {}
+        output_path = self._active_output_path
+        self._cancel_timeout_timer()
+        try:
+            payload = self.backend.stop(handle, reason=reason) if self.backend is not None else {}
+        except PermissionError as error:
+            self._permission_error = str(error)
+            result = VoiceCaptureResult(
+                ok=False,
+                capture_request_id=active.capture_request_id,
+                capture_id=active.capture_id,
+                status="unavailable",
+                provider=self.provider_name,
+                device=active.device,
+                stopped_at=utc_now_iso(),
+                stop_reason=reason,
+                error_code="permission_denied",
+                error_message="Local capture permission was denied.",
+                metadata={"capture": active.to_dict()},
+                raw_audio_persisted=False,
+                microphone_was_active=True,
+                always_listening_claimed=False,
+                wake_word_claimed=False,
+            )
+            self._clear_active_capture(cleanup_path=output_path)
+            return result
+        except Exception as error:
+            result = VoiceCaptureResult(
+                ok=False,
+                capture_request_id=active.capture_request_id,
+                capture_id=active.capture_id,
+                status="failed",
+                provider=self.provider_name,
+                device=active.device,
+                stopped_at=utc_now_iso(),
+                stop_reason=reason,
+                error_code="provider_error",
+                error_message=str(error),
+                metadata={"capture": active.to_dict()},
+                raw_audio_persisted=False,
+                microphone_was_active=True,
+                always_listening_claimed=False,
+                wake_word_claimed=False,
+            )
+            self._clear_active_capture(cleanup_path=output_path)
+            return result
+
+        if not isinstance(payload, dict):
+            payload = {}
+        output_path = Path(str(payload.get("output_path") or output_path or ""))
+        duration_ms = self._optional_int(payload.get("duration_ms"))
+        size_bytes = self._resolved_size(output_path, payload.get("size_bytes"))
+        timed_out = bool(payload.get("timed_out")) or self._timed_out_capture_id == active.capture_id
+        file_metadata = self._file_metadata(output_path, size_bytes=size_bytes)
+        base_metadata = {
+            "local_capture": True,
+            "capture": active.to_dict(),
+            "file": file_metadata,
+            "backend": dict(payload.get("metadata") or {}),
+            "cleanup_warning": self._last_cleanup_warning,
+        }
+        if timed_out:
+            self._clear_active_capture(cleanup_path=output_path)
+            return VoiceCaptureResult(
+                ok=False,
+                capture_request_id=active.capture_request_id,
+                capture_id=active.capture_id,
+                status="timeout",
+                provider=self.provider_name,
+                device=active.device,
+                duration_ms=duration_ms or active.max_duration_ms,
+                size_bytes=size_bytes,
+                stopped_at=utc_now_iso(),
+                stop_reason=reason,
+                error_code="capture_timeout",
+                error_message="Local capture reached the configured max duration.",
+                metadata=base_metadata,
+                raw_audio_persisted=False,
+                microphone_was_active=True,
+                always_listening_claimed=False,
+                wake_word_claimed=False,
+            )
+        max_audio_bytes = request.max_audio_bytes if request is not None else self.config.capture.max_audio_bytes
+        if size_bytes > max_audio_bytes:
+            self._clear_active_capture(cleanup_path=output_path)
+            return VoiceCaptureResult(
+                ok=False,
+                capture_request_id=active.capture_request_id,
+                capture_id=active.capture_id,
+                status="failed",
+                provider=self.provider_name,
+                device=active.device,
+                duration_ms=duration_ms,
+                size_bytes=size_bytes,
+                stopped_at=utc_now_iso(),
+                stop_reason=reason,
+                error_code="captured_audio_too_large",
+                error_message="Captured audio exceeded the configured size limit.",
+                metadata=base_metadata,
+                raw_audio_persisted=False,
+                microphone_was_active=True,
+                always_listening_claimed=False,
+                wake_word_claimed=False,
+            )
+        if not output_path.exists() or not output_path.is_file() or size_bytes <= 0:
+            self._clear_active_capture(cleanup_path=output_path)
+            return VoiceCaptureResult(
+                ok=False,
+                capture_request_id=active.capture_request_id,
+                capture_id=active.capture_id,
+                status="failed",
+                provider=self.provider_name,
+                device=active.device,
+                duration_ms=duration_ms,
+                size_bytes=size_bytes,
+                stopped_at=utc_now_iso(),
+                stop_reason=reason,
+                error_code="capture_audio_missing",
+                error_message="Local capture did not produce a usable audio file.",
+                metadata=base_metadata,
+                raw_audio_persisted=False,
+                microphone_was_active=True,
+                always_listening_claimed=False,
+                wake_word_claimed=False,
+            )
+        audio = VoiceAudioInput.from_file(
+            output_path,
+            mime_type=self._mime_type_for_format(request.format if request is not None else self.config.capture.format),
+            duration_ms=duration_ms,
+            sample_rate=request.sample_rate if request is not None else self.config.capture.sample_rate,
+            channels=request.channels if request is not None else self.config.capture.channels,
+            metadata={
+                "capture_id": active.capture_id,
+                "capture_request_id": active.capture_request_id,
+                "capture_source": "push_to_talk",
+                "provider": self.provider_name,
+                "device": active.device,
+                "local_capture": True,
+                "platform": active.metadata.get("platform"),
+                "dependency": active.metadata.get("dependency"),
+            },
+        )
+        result = VoiceCaptureResult(
+            ok=True,
+            capture_request_id=active.capture_request_id,
+            capture_id=active.capture_id,
+            status="completed",
+            provider=self.provider_name,
+            device=active.device,
+            audio_input=audio,
+            duration_ms=duration_ms,
+            size_bytes=audio.size_bytes,
+            stopped_at=utc_now_iso(),
+            stop_reason=reason,
+            metadata={**base_metadata, "audio_input": audio.to_metadata()},
+            raw_audio_persisted=bool(request and request.persist_audio),
+            microphone_was_active=True,
+            always_listening_claimed=False,
+            wake_word_claimed=False,
+        )
+        self._clear_active_capture(cleanup_path=None)
+        return result
+
+    def cancel_capture(
+        self,
+        capture_id: str | None = None,
+        *,
+        reason: str = "user_cancelled",
+    ) -> VoiceCaptureResult:
+        active = self._active_capture
+        if active is None or (capture_id and capture_id != active.capture_id):
+            return self._no_active_result(capture_id, reason=reason)
+        handle = self._active_handle or {}
+        output_path = self._active_output_path
+        self._cancel_timeout_timer()
+        try:
+            if self.backend is not None:
+                self.backend.cancel(handle, reason=reason)
+        except Exception as error:
+            self._last_cleanup_warning = str(error)
+        result = VoiceCaptureResult(
+            ok=False,
+            capture_request_id=active.capture_request_id,
+            capture_id=active.capture_id,
+            status="cancelled",
+            provider=self.provider_name,
+            device=active.device,
+            stopped_at=utc_now_iso(),
+            stop_reason=reason,
+            metadata={
+                "local_capture": True,
+                "capture": active.to_dict(),
+                "file": self._file_metadata(output_path),
+                "cleanup_warning": self._last_cleanup_warning,
+            },
+            raw_audio_persisted=False,
+            microphone_was_active=True,
+            always_listening_claimed=False,
+            wake_word_claimed=False,
+        )
+        self._clear_active_capture(cleanup_path=output_path)
+        return result
+
+    def get_active_capture(self) -> VoiceCaptureSession | None:
+        return self._active_capture
+
+    def cleanup_capture_audio(self, audio_input: VoiceAudioInput | None) -> str | None:
+        if audio_input is None or not audio_input.file_path:
+            return None
+        if not audio_input.transient or self.config.capture.persist_captured_audio:
+            return None
+        if not self.config.capture.delete_transient_after_turn:
+            return None
+        try:
+            if self.backend is not None:
+                self.backend.cleanup(audio_input.file_path)
+            else:
+                Path(audio_input.file_path).unlink(missing_ok=True)
+        except Exception as error:
+            self._last_cleanup_warning = str(error)
+            return self._last_cleanup_warning
+        self._last_cleanup_warning = None
+        return None
+
+    def _result(
+        self,
+        request: VoiceCaptureRequest,
+        *,
+        status: str,
+        ok: bool,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> VoiceCaptureResult:
+        return VoiceCaptureResult(
+            ok=ok,
+            capture_request_id=request.capture_request_id,
+            capture_id=None,
+            status=status,
+            provider=self.provider_name,
+            device=request.device,
+            stopped_at=utc_now_iso(),
+            error_code=error_code,
+            error_message=error_message,
+            metadata={"request": request.to_metadata(), **dict(metadata or {})},
+            raw_audio_persisted=False,
+            microphone_was_active=False,
+            always_listening_claimed=False,
+            wake_word_claimed=False,
+        )
+
+    def _no_active_result(self, capture_id: str | None, *, reason: str) -> VoiceCaptureResult:
+        return VoiceCaptureResult(
+            ok=False,
+            capture_request_id=None,
+            capture_id=capture_id,
+            status="unavailable",
+            provider=self.provider_name,
+            device=self.config.capture.device,
+            stopped_at=utc_now_iso(),
+            stop_reason=reason,
+            error_code="no_active_capture",
+            error_message="No active local capture exists.",
+            raw_audio_persisted=False,
+            microphone_was_active=False,
+            always_listening_claimed=False,
+            wake_word_claimed=False,
+        )
+
+    def _capture_output_path(self, request: VoiceCaptureRequest) -> Path:
+        base = Path(self.temp_dir) if self.temp_dir is not None else Path(tempfile.gettempdir()) / "stormhelm-voice-capture"
+        base.mkdir(parents=True, exist_ok=True)
+        extension = str(request.format or "wav").strip().lower() or "wav"
+        return base / f"{uuid4().hex}.{extension}"
+
+    def _start_timeout_timer(self, capture_id: str, request: VoiceCaptureRequest) -> None:
+        self._cancel_timeout_timer()
+        if not self.config.capture.auto_stop_on_max_duration or request.max_duration_ms <= 0:
+            return
+        timer = threading.Timer(request.max_duration_ms / 1000.0, self._mark_capture_timeout, args=(capture_id,))
+        timer.daemon = True
+        self._timeout_timer = timer
+        timer.start()
+
+    def _cancel_timeout_timer(self) -> None:
+        if self._timeout_timer is not None:
+            self._timeout_timer.cancel()
+        self._timeout_timer = None
+
+    def _mark_capture_timeout(self, capture_id: str) -> None:
+        if self._active_capture is None or self._active_capture.capture_id != capture_id:
+            return
+        self._timed_out_capture_id = capture_id
+        handle = self._active_handle
+        timeout = getattr(self.backend, "timeout", None)
+        if callable(timeout) and handle is not None:
+            try:
+                timeout(handle)
+            except Exception:
+                return
+
+    def _clear_active_capture(self, *, cleanup_path: Path | None) -> None:
+        self._cancel_timeout_timer()
+        if cleanup_path is not None and not self.config.capture.persist_captured_audio:
+            try:
+                if self.backend is not None:
+                    self.backend.cleanup(cleanup_path)
+                else:
+                    cleanup_path.unlink(missing_ok=True)
+            except Exception as error:
+                self._last_cleanup_warning = str(error)
+        self._active_capture = None
+        self._active_handle = None
+        self._active_request = None
+        self._active_output_path = None
+        self._timed_out_capture_id = None
+
+    def _file_metadata(self, path: str | Path | None, *, size_bytes: int | None = None) -> dict[str, Any]:
+        if not path:
+            return {"file_path": None, "size_bytes": size_bytes}
+        resolved = Path(path)
+        resolved_size = size_bytes if size_bytes is not None else (resolved.stat().st_size if resolved.exists() and resolved.is_file() else None)
+        return {
+            "file_path": str(resolved),
+            "filename": resolved.name,
+            "size_bytes": resolved_size,
+            "format": resolved.suffix.lstrip(".").lower(),
+            "transient": not self.config.capture.persist_captured_audio,
+        }
+
+    def _resolved_size(self, path: Path, fallback: Any) -> int:
+        value = self._optional_int(fallback)
+        if value is not None:
+            return value
+        return path.stat().st_size if path.exists() and path.is_file() else 0
+
+    def _optional_int(self, value: Any) -> int | None:
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _mime_type_for_format(self, format_name: str) -> str:
+        normalized = str(format_name or "wav").strip().lower() or "wav"
+        if normalized == "wav":
+            return "audio/wav"
+        if normalized == "mp3":
+            return "audio/mpeg"
+        if normalized in {"m4a", "mp4"}:
+            return "audio/mp4"
+        if normalized == "webm":
+            return "audio/webm"
+        return "application/octet-stream"
 
 
 @runtime_checkable

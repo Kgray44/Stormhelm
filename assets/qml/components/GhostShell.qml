@@ -12,6 +12,7 @@ Item {
     property var primaryCard: ({})
     property var actionStrip: []
     property var cornerReadouts: []
+    property var voiceState: ({})
     property string statusLine: ""
     property string connectionLabel: ""
     property string timeLabel: ""

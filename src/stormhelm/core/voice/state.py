@@ -13,6 +13,10 @@ class VoiceState(str, Enum):
     UNAVAILABLE = "unavailable"
     DORMANT = "dormant"
     MANUAL_INPUT_RECEIVED = "manual_input_received"
+    CAPTURING = "capturing"
+    CAPTURE_STOPPED = "capture_stopped"
+    CAPTURE_CANCELLED = "capture_cancelled"
+    CAPTURE_FAILED = "capture_failed"
     WAKE_DETECTED = "wake_detected"
     CONNECTING = "connecting"
     LISTENING = "listening"
@@ -72,6 +76,7 @@ class VoiceStateSnapshot:
 _LEGAL_TRANSITIONS: dict[VoiceState, set[VoiceState]] = {
     VoiceState.DORMANT: {
         VoiceState.MANUAL_INPUT_RECEIVED,
+        VoiceState.CAPTURING,
         VoiceState.WAKE_DETECTED,
         VoiceState.CONNECTING,
         VoiceState.LISTENING,
@@ -80,6 +85,16 @@ _LEGAL_TRANSITIONS: dict[VoiceState, set[VoiceState]] = {
         VoiceState.ERROR,
     },
     VoiceState.MANUAL_INPUT_RECEIVED: {VoiceState.CORE_ROUTING, VoiceState.ERROR},
+    VoiceState.CAPTURING: {
+        VoiceState.CAPTURE_STOPPED,
+        VoiceState.CAPTURE_CANCELLED,
+        VoiceState.CAPTURE_FAILED,
+        VoiceState.TRANSCRIBING,
+        VoiceState.ERROR,
+    },
+    VoiceState.CAPTURE_STOPPED: {VoiceState.DORMANT, VoiceState.TRANSCRIBING, VoiceState.ERROR},
+    VoiceState.CAPTURE_CANCELLED: {VoiceState.DORMANT, VoiceState.ERROR},
+    VoiceState.CAPTURE_FAILED: {VoiceState.DORMANT, VoiceState.ERROR},
     VoiceState.WAKE_DETECTED: {VoiceState.CONNECTING, VoiceState.LISTENING, VoiceState.ERROR},
     VoiceState.CONNECTING: {VoiceState.LISTENING, VoiceState.ERROR},
     VoiceState.LISTENING: {
@@ -190,7 +205,7 @@ class VoiceStateController:
     ) -> VoiceStateSnapshot:
         listening_allowed = (
             self.availability.stt_allowed
-            and bool(self.config.manual_input_enabled)
+            and (bool(self.config.manual_input_enabled) or bool(getattr(self.config, "capture", None) and self.config.capture.enabled))
             and state not in {VoiceState.DISABLED, VoiceState.UNAVAILABLE, VoiceState.MUTED, VoiceState.ERROR}
         )
         speaking_allowed = (

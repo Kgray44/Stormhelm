@@ -198,6 +198,21 @@ max_audio_bytes = 10000000
 max_duration_ms = 120000
 delete_transient_after_playback = true
 
+[voice.capture]
+enabled = false
+provider = "local"
+mode = "push_to_talk"
+device = "default"
+sample_rate = 16000
+channels = 1
+format = "wav"
+max_duration_ms = 30000
+max_audio_bytes = 10000000
+auto_stop_on_max_duration = true
+persist_captured_audio = false
+delete_transient_after_turn = true
+allow_dev_capture = false
+
 [safety]
 allowed_read_dirs = [
   "${PROJECT_ROOT}",

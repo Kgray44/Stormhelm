@@ -9,7 +9,9 @@ from stormhelm.ui.client import CoreApiClient
 
 
 class MainController(QtCore.QObject):
-    def __init__(self, *, config: AppConfig, bridge: UiBridge, client: CoreApiClient) -> None:
+    def __init__(
+        self, *, config: AppConfig, bridge: UiBridge, client: CoreApiClient
+    ) -> None:
         super().__init__(bridge)
         self.config = config
         self.bridge = bridge
@@ -26,7 +28,11 @@ class MainController(QtCore.QObject):
         self.refresh_timer.setInterval(self.config.ui.poll_interval_ms)
         self.refresh_timer.timeout.connect(self.poll)
         self.presence_timer = QtCore.QTimer(self)
-        self.presence_timer.setInterval(max(1000, int(self.config.lifecycle.shell_heartbeat_interval_seconds * 1000)))
+        self.presence_timer.setInterval(
+            max(
+                1000, int(self.config.lifecycle.shell_heartbeat_interval_seconds * 1000)
+            )
+        )
         self.presence_timer.timeout.connect(self._report_shell_presence)
         self.core_recovery_timer = QtCore.QTimer(self)
         self.core_recovery_timer.setSingleShot(True)
@@ -34,6 +40,21 @@ class MainController(QtCore.QObject):
 
         self.bridge.sendMessageRequested.connect(self._send_message)
         self.bridge.saveNoteRequested.connect(self._save_note)
+        self.bridge.voiceStartPushToTalkCaptureRequested.connect(
+            self._start_voice_capture
+        )
+        self.bridge.voiceStopPushToTalkCaptureRequested.connect(
+            self._stop_voice_capture
+        )
+        self.bridge.voiceCancelCaptureRequested.connect(self._cancel_voice_capture)
+        self.bridge.voiceSubmitCapturedAudioTurnRequested.connect(
+            self._submit_captured_audio_turn
+        )
+        self.bridge.voiceCaptureAndSubmitTurnRequested.connect(
+            self._capture_and_submit_voice_turn
+        )
+        self.bridge.voiceStopPlaybackRequested.connect(self._stop_voice_playback)
+        self.bridge.voiceReadinessRequested.connect(self._fetch_voice_readiness)
         self.bridge.modeChanged.connect(self._report_shell_presence)
         self.bridge.visibilityChanged.connect(self._report_shell_presence)
 
@@ -42,6 +63,8 @@ class MainController(QtCore.QObject):
         self.client.health_received.connect(self._handle_health)
         self.client.chat_received.connect(self._handle_chat)
         self.client.note_saved.connect(self._handle_note_saved)
+        if hasattr(self.client, "voice_action_received"):
+            self.client.voice_action_received.connect(self._handle_voice_action_result)
         if hasattr(self.client, "stream_event_received"):
             self.client.stream_event_received.connect(self._handle_stream_event)
         if hasattr(self.client, "stream_state_received"):
@@ -58,7 +81,9 @@ class MainController(QtCore.QObject):
                 self.bridge.set_status_line("Standing watch.")
             self.client.fetch_health()
             if hasattr(self.client, "start_event_stream"):
-                self.client.start_event_stream(session_id="default", cursor=self._stream_last_cursor)
+                self.client.start_event_stream(
+                    session_id="default", cursor=self._stream_last_cursor
+                )
         except Exception as error:
             self.bridge.set_connection_error(str(error))
             self.bridge.set_status_line(f"Core startup issue: {error}")
@@ -69,7 +94,10 @@ class MainController(QtCore.QObject):
         self._report_shell_presence()
         application = QtCore.QCoreApplication.instance()
         if application is not None:
-            application.aboutToQuit.connect(self._handle_app_about_to_quit, QtCore.Qt.ConnectionType.UniqueConnection)
+            application.aboutToQuit.connect(
+                self._handle_app_about_to_quit,
+                QtCore.Qt.ConnectionType.UniqueConnection,
+            )
 
     def poll(self) -> None:
         self._request_snapshot()
@@ -102,8 +130,42 @@ class MainController(QtCore.QObject):
 
     def _save_note(self, title: str, content: str) -> None:
         workspace = self.bridge.workspace_context_payload().get("workspace", {})
-        workspace_id = str(workspace.get("workspaceId", "")) if isinstance(workspace, dict) else ""
-        self.client.save_note(title, content, session_id="default", workspace_id=workspace_id)
+        workspace_id = (
+            str(workspace.get("workspaceId", "")) if isinstance(workspace, dict) else ""
+        )
+        self.client.save_note(
+            title, content, session_id="default", workspace_id=workspace_id
+        )
+
+    def _start_voice_capture(self, payload: dict[str, object]) -> None:
+        if hasattr(self.client, "start_voice_capture"):
+            self.client.start_voice_capture(dict(payload or {}))
+
+    def _stop_voice_capture(self, payload: dict[str, object]) -> None:
+        if hasattr(self.client, "stop_voice_capture"):
+            self.client.stop_voice_capture(dict(payload or {}))
+
+    def _cancel_voice_capture(self, payload: dict[str, object]) -> None:
+        if hasattr(self.client, "cancel_voice_capture"):
+            self.client.cancel_voice_capture(dict(payload or {}))
+
+    def _submit_captured_audio_turn(self, payload: dict[str, object]) -> None:
+        if hasattr(self.client, "submit_captured_audio_turn"):
+            self.client.submit_captured_audio_turn(dict(payload or {}))
+
+    def _capture_and_submit_voice_turn(self, payload: dict[str, object]) -> None:
+        if hasattr(self.client, "capture_and_submit_voice_turn"):
+            self.client.capture_and_submit_voice_turn(dict(payload or {}))
+
+    def _stop_voice_playback(self, payload: dict[str, object]) -> None:
+        if hasattr(self.client, "stop_voice_playback"):
+            self.client.stop_voice_playback(dict(payload or {}))
+
+    def _fetch_voice_readiness(self) -> None:
+        if hasattr(self.client, "fetch_voice_readiness"):
+            self.client.fetch_voice_readiness()
+        else:
+            self._request_snapshot(force=True)
 
     def _handle_error(self, purpose: str, error: str) -> None:
         if str(purpose).startswith("/snapshot"):
@@ -111,7 +173,9 @@ class MainController(QtCore.QObject):
         if self._is_connection_disruption(purpose, error):
             self._core_online = False
             if self._manual_backend_shutdown_requested:
-                self.bridge.set_connection_error("Backend stopped from tray for local testing.")
+                self.bridge.set_connection_error(
+                    "Backend stopped from tray for local testing."
+                )
                 return
             self.bridge.set_connection_error(f"{purpose}: {error}")
             self._schedule_core_recovery(error)
@@ -137,6 +201,10 @@ class MainController(QtCore.QObject):
         self.bridge.note_saved(payload)
         self._request_snapshot(force=True)
 
+    def _handle_voice_action_result(self, payload: dict) -> None:
+        self.bridge.apply_voice_action_result(payload)
+        self._request_snapshot(force=True)
+
     def _handle_snapshot(self, payload: dict) -> None:
         self._complete_snapshot_request()
         if self._manual_backend_shutdown_requested:
@@ -146,7 +214,9 @@ class MainController(QtCore.QObject):
             self._core_recovery_scheduled = False
             self.bridge.set_status_line("Standing watch.")
         self.bridge.apply_snapshot(payload)
-        self._stream_last_cursor = self._latest_cursor_from_snapshot(payload) or self._stream_last_cursor
+        self._stream_last_cursor = (
+            self._latest_cursor_from_snapshot(payload) or self._stream_last_cursor
+        )
 
     def _handle_stream_event(self, payload: dict) -> None:
         cursor = payload.get("cursor")
@@ -187,11 +257,15 @@ class MainController(QtCore.QObject):
         browser_target = str(action.get("browser_target", "")).strip().lower()
         browser_command = str(action.get("browser_command", "")).strip()
         if browser_target and str(action.get("kind", "url")).strip().lower() == "url":
-            self._open_in_browser_target(browser_target, target, browser_command=browser_command or None)
+            self._open_in_browser_target(
+                browser_target, target, browser_command=browser_command or None
+            )
             return
         QtGui.QDesktopServices.openUrl(QtCore.QUrl(target))
 
-    def _open_in_browser_target(self, browser_target: str, url: str, *, browser_command: str | None = None) -> None:
+    def _open_in_browser_target(
+        self, browser_target: str, url: str, *, browser_command: str | None = None
+    ) -> None:
         browser_commands = {
             "msedge": "msedge",
             "edge": "msedge",
@@ -203,7 +277,9 @@ class MainController(QtCore.QObject):
             "opera": "opera",
             "vivaldi": "vivaldi",
         }
-        command = browser_command or browser_commands.get((browser_target or "").strip().lower())
+        command = browser_command or browser_commands.get(
+            (browser_target or "").strip().lower()
+        )
         if not command or not QtCore.QProcess.startDetached(command, [url]):
             QtGui.QDesktopServices.openUrl(QtCore.QUrl(url))
 
@@ -224,7 +300,9 @@ class MainController(QtCore.QObject):
 
     def _is_connection_disruption(self, purpose: str, error: str) -> bool:
         normalized_purpose = str(purpose or "").strip().lower()
-        if normalized_purpose.startswith("/snapshot") or normalized_purpose.startswith("/health"):
+        if normalized_purpose.startswith("/snapshot") or normalized_purpose.startswith(
+            "/health"
+        ):
             return True
         normalized_error = str(error or "").strip().lower()
         disruption_markers = (
@@ -247,7 +325,8 @@ class MainController(QtCore.QObject):
             (
                 int(item.get("cursor") or item.get("event_id") or 0)
                 for item in events
-                if isinstance(item, dict) and isinstance(item.get("cursor") or item.get("event_id"), int)
+                if isinstance(item, dict)
+                and isinstance(item.get("cursor") or item.get("event_id"), int)
             ),
             default=0,
         )
@@ -255,7 +334,13 @@ class MainController(QtCore.QObject):
 
     def _event_requires_snapshot_reconciliation(self, payload: dict) -> bool:
         visibility = str(payload.get("visibility_scope", "")).strip().lower()
-        if visibility in {"watch_surface", "systems_surface", "deck_context", "ghost_hint", "operator_blocking"}:
+        if visibility in {
+            "watch_surface",
+            "systems_surface",
+            "deck_context",
+            "ghost_hint",
+            "operator_blocking",
+        }:
             return True
         severity = str(payload.get("severity", "")).strip().lower()
         return severity in {"warning", "error", "critical"}
@@ -268,7 +353,9 @@ class MainController(QtCore.QObject):
 
     def request_backend_shutdown(self) -> None:
         if not hasattr(self.client, "shutdown_backend"):
-            self.bridge.set_operation_error("Backend shutdown is unavailable in this shell build.")
+            self.bridge.set_operation_error(
+                "Backend shutdown is unavailable in this shell build."
+            )
             return
         self._manual_backend_shutdown_requested = True
         self._core_online = False
@@ -279,7 +366,9 @@ class MainController(QtCore.QObject):
 
     def _handle_app_about_to_quit(self) -> None:
         if hasattr(self.client, "report_shell_detached"):
-            self.client.report_shell_detached(self.bridge.shell_presence_payload().get("pid"), sync=True)
+            self.client.report_shell_detached(
+                self.bridge.shell_presence_payload().get("pid"), sync=True
+            )
         if hasattr(self.client, "stop_event_stream"):
             self.client.stop_event_stream()
 
@@ -288,17 +377,24 @@ class MainController(QtCore.QObject):
             return
         hold_summary = ""
         if hasattr(self.bridge, "lifecycle_restart_hold_summary"):
-            hold_summary = str(self.bridge.lifecycle_restart_hold_summary() or "").strip()
+            hold_summary = str(
+                self.bridge.lifecycle_restart_hold_summary() or ""
+            ).strip()
         if hold_summary:
             self.bridge.set_status_line(f"Core restart hold: {hold_summary}")
             return
         if self._core_recovery_scheduled:
             return
-        if self._core_recovery_attempts >= self.config.lifecycle.max_core_restart_attempts:
+        if (
+            self._core_recovery_attempts
+            >= self.config.lifecycle.max_core_restart_attempts
+        ):
             self.bridge.set_status_line(f"Core restart hold: {error}")
             return
         self._core_recovery_scheduled = True
-        self.core_recovery_timer.start(max(0, int(self.config.lifecycle.core_restart_backoff_ms)))
+        self.core_recovery_timer.start(
+            max(0, int(self.config.lifecycle.core_restart_backoff_ms))
+        )
 
     def _attempt_core_recovery(self) -> None:
         self._core_recovery_scheduled = False
@@ -307,11 +403,16 @@ class MainController(QtCore.QObject):
             ensure_core_running(self.config)
         except Exception as error:
             self.bridge.set_status_line(f"Core restart issue: {error}")
-            if self._core_recovery_attempts < self.config.lifecycle.max_core_restart_attempts:
+            if (
+                self._core_recovery_attempts
+                < self.config.lifecycle.max_core_restart_attempts
+            ):
                 self._schedule_core_recovery(str(error))
             return
         if hasattr(self.client, "fetch_health"):
             self.client.fetch_health()
         self._request_snapshot(force=True)
         if hasattr(self.client, "start_event_stream"):
-            self.client.start_event_stream(session_id="default", cursor=self._stream_last_cursor)
+            self.client.start_event_stream(
+                session_id="default", cursor=self._stream_last_cursor
+            )

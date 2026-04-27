@@ -89,6 +89,16 @@ Voice-6B adds:
 - voice-core state mapping where explicit active capture maps to `listening`, transcription/Core routing maps to `thinking`, playback maps to `speaking`, and disabled/unavailable states map to `warning`;
 - event/snapshot reconciliation through the existing stream and polling pattern, with no frontend-owned command router.
 
+Voice-7 adds:
+
+- a typed `VoiceReadinessReport` that distinguishes disabled, misconfigured, unavailable, degraded, and ready voice states;
+- a typed `VoicePipelineStageSummary` that preserves capture, STT, Core bridge, TTS, and playback stage truth without collapsing partial success into overall success;
+- readiness diagnostics under `VoiceService.status_snapshot()["readiness"]` plus compact `/voice/readiness` and `/voice/pipeline` API surfaces;
+- readiness and stage summary content in the Ghost/Deck `voiceState` payload, with bounded previews and no raw audio or secrets;
+- a refined Command Deck voice station with readiness, stage, capture, pipeline, and truth sections;
+- a `voice.refreshReadiness` local surface action that refreshes backend readiness instead of touching providers directly;
+- Ghost copy hardening for capture disabled, provider unavailable, capture cancelled, transcribing, Core routing, response prepared, and playback active states.
+
 Still not implemented:
 
 - real wake word detection;
@@ -102,6 +112,8 @@ Still not implemented:
 - full interruption or barge-in command semantics;
 - direct voice command execution;
 - frontend command authority;
+- provider calls from UI;
+- secret editing UI;
 - sensitive action confirmation execution;
 - raw audio persistence by default;
 - generated audio persistence by default;
@@ -123,6 +135,6 @@ voice available = voice.enabled
                && configured voice OpenAI models are present
 ```
 
-If a mock provider is active, diagnostics must say so. If a later feature is not implemented yet, diagnostics must report `not_implemented` or a truthful `no_*` runtime flag instead of implying listening, speaking, Realtime, or production audio playback support. Voice-2 supports controlled audio file/blob/fixture STT only; it must not imply live microphone capture or continuous listening. Voice-3 supports controlled TTS audio artifact generation only; it must not imply Stormhelm spoke aloud, that playback occurred, or that the user heard the response. Voice-4 can truthfully report controlled local playback through a provider boundary, but playback completion still does not mean the underlying task succeeded or that the user heard it. Voice-5 can truthfully report an explicit push-to-talk/manual capture boundary, but capture completion still does not mean transcription succeeded, Core understood intent, an action completed, TTS generated audio, playback occurred, or the user heard it. Voice-6A may record one explicitly started local capture when all gates and dependencies allow it; local capture availability still must not imply wake word, VAD, Realtime, always-listening, continuous conversation, or command authority. Voice-6B may expose push-to-talk controls in Ghost/Deck, but those controls still only call backend `VoiceService` actions and must not call providers, tools, or Core directly from the frontend.
+If a mock provider is active, diagnostics must say so. If a later feature is not implemented yet, diagnostics must report `not_implemented` or a truthful `no_*` runtime flag instead of implying listening, speaking, Realtime, or production audio playback support. Voice-2 supports controlled audio file/blob/fixture STT only; it must not imply live microphone capture or continuous listening. Voice-3 supports controlled TTS audio artifact generation only; it must not imply Stormhelm spoke aloud, that playback occurred, or that the user heard the response. Voice-4 can truthfully report controlled local playback through a provider boundary, but playback completion still does not mean the underlying task succeeded or that the user heard it. Voice-5 can truthfully report an explicit push-to-talk/manual capture boundary, but capture completion still does not mean transcription succeeded, Core understood intent, an action completed, TTS generated audio, playback occurred, or the user heard it. Voice-6A may record one explicitly started local capture when all gates and dependencies allow it; local capture availability still must not imply wake word, VAD, Realtime, always-listening, continuous conversation, or command authority. Voice-6B may expose push-to-talk controls in Ghost/Deck, but those controls still only call backend `VoiceService` actions and must not call providers, tools, or Core directly from the frontend. Voice-7 may expose readiness and setup hints, but readiness still distinguishes enabled from available, available from active, capture from transcription, Core routing from action success, TTS generation from playback, and playback from the user hearing the response.
 
-Recommended next phase: Voice-7 should add a small operator-facing configuration/check panel or refine the push-to-talk UX only if needed, while keeping wake word, VAD, Realtime, continuous listening, and full interruption semantics out of scope until their dedicated phases.
+Recommended next phase: refine operator configuration affordances only if needed, or move to the next dedicated voice phase while keeping wake word, VAD, Realtime, continuous listening, and full interruption semantics out of scope until their dedicated phases.

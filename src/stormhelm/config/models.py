@@ -295,6 +295,23 @@ class VoicePlaybackConfig:
 
 
 @dataclass(slots=True)
+class VoiceCaptureConfig:
+    enabled: bool = False
+    provider: str = "local"
+    mode: str = "push_to_talk"
+    device: str = "default"
+    sample_rate: int = 16000
+    channels: int = 1
+    format: str = "wav"
+    max_duration_ms: int = 30_000
+    max_audio_bytes: int = 10_000_000
+    auto_stop_on_max_duration: bool = True
+    persist_captured_audio: bool = False
+    delete_transient_after_turn: bool = True
+    allow_dev_capture: bool = False
+
+
+@dataclass(slots=True)
 class VoiceConfig:
     enabled: bool = False
     provider: str = "openai"
@@ -306,6 +323,7 @@ class VoiceConfig:
     debug_mock_provider: bool = True
     openai: VoiceOpenAIConfig = field(default_factory=VoiceOpenAIConfig)
     playback: VoicePlaybackConfig = field(default_factory=VoicePlaybackConfig)
+    capture: VoiceCaptureConfig = field(default_factory=VoiceCaptureConfig)
 
 
 @dataclass(slots=True)
