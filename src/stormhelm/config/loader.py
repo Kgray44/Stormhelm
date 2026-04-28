@@ -534,8 +534,8 @@ def _build_app_config(
             ),
             tts_model=str(voice_openai_data.get("tts_model", "gpt-4o-mini-tts")).strip()
             or "gpt-4o-mini-tts",
-            tts_voice=str(voice_openai_data.get("tts_voice", "cedar")).strip()
-            or "cedar",
+            tts_voice=str(voice_openai_data.get("tts_voice", "onyx")).strip()
+            or "onyx",
             tts_format=str(voice_openai_data.get("tts_format", "mp3")).strip().lower()
             or "mp3",
             tts_speed=float(voice_openai_data.get("tts_speed", 1.0)),

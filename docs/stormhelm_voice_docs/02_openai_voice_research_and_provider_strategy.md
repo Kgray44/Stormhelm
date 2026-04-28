@@ -86,7 +86,7 @@ The docs list built-in voices:
 - `marin`
 - `cedar`
 
-The docs recommend `marin` or `cedar` for best quality. Stormhelm should audition `cedar`, `marin`, `onyx`, `echo`, and `sage`, with `cedar` as the first likely default.
+Stormhelm auditioned `cedar`, `marin`, `onyx`, `ash`, `echo`, `sage`, and `verse`; `onyx` is the selected default voice.
 
 ### 2.5 Realtime Speech-to-Speech
 
@@ -222,7 +222,7 @@ transcription_model_fast = "gpt-4o-mini-transcribe"
 tts_model = "gpt-4o-mini-tts"
 realtime_model = "gpt-realtime-1.5"
 realtime_model_fast = "gpt-realtime-mini"
-voice = "cedar"
+voice = "onyx"
 fallback_voice = "marin"
 ```
 

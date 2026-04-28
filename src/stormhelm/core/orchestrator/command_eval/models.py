@@ -116,6 +116,8 @@ class CoreObservation:
     route_state: dict[str, Any] = field(default_factory=dict)
     planner_debug: dict[str, Any] = field(default_factory=dict)
     planner_obedience: dict[str, Any] = field(default_factory=dict)
+    response_active_request_state: dict[str, Any] = field(default_factory=dict)
+    snapshot_active_request_state: dict[str, Any] = field(default_factory=dict)
     stage_timings_ms: dict[str, float] = field(default_factory=dict)
     response_json_bytes: int = 0
     event_count: int = 0
@@ -329,6 +331,8 @@ class CommandEvalResult:
             "expected_verification_state": self.case.expected.verification,
             "actual_verification_state": self.observation.verification_state,
             "planner_obedience": self.observation.planner_obedience,
+            "response_active_request_state": self.observation.response_active_request_state,
+            "snapshot_active_request_state": self.observation.snapshot_active_request_state,
             "result_state": self.observation.result_state,
             "verification_state": self.observation.verification_state,
             "approval_state": approval_state,
@@ -460,6 +464,16 @@ def command_eval_result_from_dict(payload: dict[str, Any]) -> CommandEvalResult:
         route_state=dict(observation_payload.get("route_state") or {}),
         planner_debug=dict(observation_payload.get("planner_debug") or {}),
         planner_obedience=dict(observation_payload.get("planner_obedience") or {}),
+        response_active_request_state=dict(
+            observation_payload.get("response_active_request_state")
+            or payload.get("response_active_request_state")
+            or {}
+        ),
+        snapshot_active_request_state=dict(
+            observation_payload.get("snapshot_active_request_state")
+            or payload.get("snapshot_active_request_state")
+            or {}
+        ),
         stage_timings_ms=dict(observation_payload.get("stage_timings_ms") or _stage_timings_from_payload(payload)),
         response_json_bytes=int(observation_payload.get("response_json_bytes") or payload.get("response_json_bytes") or 0),
         event_count=int(observation_payload.get("event_count") or payload.get("event_count") or 0),

@@ -280,7 +280,7 @@ class VoiceOpenAIConfig:
     max_audio_seconds: float = 30.0
     max_audio_bytes: int = 25 * 1024 * 1024
     tts_model: str = "gpt-4o-mini-tts"
-    tts_voice: str = "cedar"
+    tts_voice: str = "onyx"
     tts_format: str = "mp3"
     tts_speed: float = 1.0
     max_tts_chars: int = 600

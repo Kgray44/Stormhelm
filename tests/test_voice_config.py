@@ -42,7 +42,7 @@ def test_load_config_defaults_voice_to_disabled_foundation(temp_project_root) ->
     assert config.voice.openai.max_audio_seconds == 30
     assert config.voice.openai.max_audio_bytes == 25 * 1024 * 1024
     assert config.voice.openai.tts_model == "gpt-4o-mini-tts"
-    assert config.voice.openai.tts_voice == "cedar"
+    assert config.voice.openai.tts_voice == "onyx"
     assert config.voice.openai.tts_format == "mp3"
     assert config.voice.openai.tts_speed == 1.0
     assert config.voice.openai.max_tts_chars == 600

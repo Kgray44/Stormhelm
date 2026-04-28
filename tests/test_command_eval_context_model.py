@@ -83,6 +83,26 @@ def test_planner_v2_seeded_browser_correction_binds_to_prior_owner() -> None:
     assert trace.route_decision.generic_provider_allowed is False
 
 
+def test_planner_v2_correction_prior_owner_without_alternate_clarifies_natively() -> None:
+    trace = PlannerV2().plan(
+        "no, use the other one",
+        active_request_state={
+            "family": "browser_destination",
+            "subject": "https://example.com",
+            "parameters": {
+                "url": "https://example.com",
+                "tool_name": "external_open_url",
+                "context_freshness": "current",
+            },
+        },
+    )
+
+    assert trace.route_decision.selected_route_family == "browser_destination"
+    assert trace.context_binding.status == "missing"
+    assert trace.result_state_draft.result_state == "needs_clarification"
+    assert trace.route_decision.generic_provider_allowed is False
+
+
 def test_planner_v2_seeded_software_can_handle_this_binds_to_prior_owner() -> None:
     trace = PlannerV2().plan(
         "can you handle this?",
@@ -100,4 +120,150 @@ def test_planner_v2_seeded_software_can_handle_this_binds_to_prior_owner() -> No
 
     assert trace.route_decision.selected_route_family == "software_control"
     assert trace.context_binding.status == "available"
+    assert trace.route_decision.generic_provider_allowed is False
+
+
+def test_planner_v2_confirmation_with_pending_preview_binds_only_to_preview() -> None:
+    trace = PlannerV2().plan(
+        "yes, go ahead with that preview",
+        active_request_state={
+            "family": "browser_destination",
+            "subject": "https://example.com",
+            "parameters": {
+                "url": "https://example.com",
+                "tool_name": "external_open_url",
+                "pending_preview": {"id": "preview-browser-1", "status": "pending"},
+                "request_stage": "preview",
+                "context_freshness": "current",
+            },
+        },
+    )
+
+    assert trace.route_decision.selected_route_family == "browser_destination"
+    assert trace.context_binding.context_type == "pending_preview"
+    assert trace.plan_draft.tool_name == "external_open_url"
+    assert trace.route_decision.generic_provider_allowed is False
+
+
+def test_planner_v2_confirmation_without_pending_preview_clarifies() -> None:
+    trace = PlannerV2().plan(
+        "yes, go ahead",
+        active_request_state={
+            "family": "browser_destination",
+            "subject": "https://example.com",
+            "parameters": {
+                "url": "https://example.com",
+                "tool_name": "external_open_url",
+                "context_freshness": "current",
+            },
+        },
+    )
+
+    assert trace.route_decision.selected_route_family == "context_clarification"
+    assert trace.context_binding.status == "missing"
+    assert trace.context_binding.missing_preconditions == ("no_pending_confirmation",)
+    assert trace.result_state_draft.result_state == "needs_clarification"
+    assert trace.route_decision.generic_provider_allowed is False
+
+
+def test_planner_v2_stale_confirmation_clarifies_even_with_pending_preview() -> None:
+    trace = PlannerV2().plan(
+        "yes, go ahead",
+        active_request_state={
+            "family": "browser_destination",
+            "subject": "https://example.com",
+            "parameters": {
+                "url": "https://example.com",
+                "tool_name": "external_open_url",
+                "pending_preview": {"id": "preview-browser-old", "status": "pending"},
+                "request_stage": "preview",
+                "context_freshness": "stale",
+            },
+        },
+    )
+
+    assert trace.route_decision.selected_route_family == "context_clarification"
+    assert trace.result_state_draft.result_state == "needs_clarification"
+    assert trace.route_decision.generic_provider_allowed is False
+
+
+def test_planner_v2_active_browser_state_supplies_url_for_real_followup() -> None:
+    trace = PlannerV2().plan(
+        "do the same thing as before",
+        active_request_state={
+            "family": "browser_destination",
+            "subject": "https://example.com",
+            "route": {"tool_name": "external_open_url"},
+            "parameters": {
+                "url": "https://example.com",
+                "tool_name": "external_open_url",
+                "source_case": "external_open_url",
+                "context_freshness": "current",
+            },
+        },
+    )
+
+    assert trace.route_decision.selected_route_family == "browser_destination"
+    assert trace.plan_draft.tool_name == "external_open_url"
+    assert trace.plan_draft.tool_arguments["url"] == "https://example.com"
+    assert trace.context_binding.status == "available"
+    assert trace.route_decision.generic_provider_allowed is False
+
+
+def test_planner_v2_seeded_file_state_missing_path_clarifies() -> None:
+    trace = PlannerV2().plan(
+        "do the same thing as before",
+        active_request_state={
+            "family": "file",
+            "subject": "file",
+            "parameters": {
+                "tool_name": "file_reader",
+                "context_freshness": "current",
+            },
+        },
+    )
+
+    assert trace.route_decision.selected_route_family == "file"
+    assert trace.context_binding.status == "missing"
+    assert trace.result_state_draft.result_state == "needs_clarification"
+    assert trace.route_decision.generic_provider_allowed is False
+
+
+def test_planner_v2_active_workspace_state_preserves_prior_tool() -> None:
+    trace = PlannerV2().plan(
+        "do the same thing as before",
+        active_request_state={
+            "family": "workspace_operations",
+            "subject": "workspace",
+            "route": {"tool_name": "workspace_save"},
+            "parameters": {
+                "tool_name": "workspace_save",
+                "source_case": "workspace_save",
+                "context_freshness": "current",
+            },
+        },
+    )
+
+    assert trace.route_decision.selected_route_family == "workspace_operations"
+    assert trace.plan_draft.tool_name == "workspace_save"
+    assert trace.route_decision.generic_provider_allowed is False
+
+
+def test_planner_v2_stale_active_state_clarifies_without_binding_prior_owner() -> None:
+    trace = PlannerV2().plan(
+        "do the same thing as before",
+        active_request_state={
+            "family": "browser_destination",
+            "subject": "https://example.com",
+            "route": {"tool_name": "external_open_url"},
+            "parameters": {
+                "url": "https://example.com",
+                "tool_name": "external_open_url",
+                "context_freshness": "stale",
+            },
+        },
+    )
+
+    assert trace.route_decision.selected_route_family == "context_clarification"
+    assert trace.result_state_draft.result_state == "needs_clarification"
     assert trace.route_decision.generic_provider_allowed is False

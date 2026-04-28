@@ -382,6 +382,7 @@ class VoicePlaybackRequest:
     metadata: dict[str, Any] = field(default_factory=dict)
     allowed_to_play: bool = False
     blocked_reason: str | None = None
+    data: bytes | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -2189,6 +2190,38 @@ class VoicePipelineStageSummary:
 
 
 @dataclass(slots=True, frozen=True)
+class VoiceRuntimeModeReadiness:
+    selected_mode: str
+    effective_mode: str
+    status: str
+    ready: bool
+    degraded: bool
+    blocked: bool
+    disabled: bool
+    required_config_flags: list[str] = field(default_factory=list)
+    required_providers: list[str] = field(default_factory=list)
+    required_subcomponents: list[str] = field(default_factory=list)
+    forbidden_subcomponents: list[str] = field(default_factory=list)
+    expected_subsystem_posture: dict[str, str] = field(default_factory=dict)
+    missing_requirements: list[str] = field(default_factory=list)
+    contradictory_settings: list[str] = field(default_factory=list)
+    blocking_reasons: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    user_facing_summary: str = ""
+    next_fix: str | None = None
+    provider_availability: dict[str, Any] = field(default_factory=dict)
+    live_playback_available: bool = False
+    artifact_persistence_enabled: bool = False
+    artifact_persistence_counts_as_live_playback: bool = False
+    core_bridge_available: bool = False
+    trust_confirmation_available: bool = False
+    truth_flags: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True, frozen=True)
 class VoiceReadinessReport:
     overall_status: str
     voice_enabled: bool
@@ -2211,6 +2244,7 @@ class VoiceReadinessReport:
     warnings: list[str] = field(default_factory=list)
     next_setup_action: str | None = None
     user_facing_reason: str = ""
+    runtime_mode: dict[str, Any] = field(default_factory=dict)
     truth_flags: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -2241,6 +2275,7 @@ __all__ = [
     "VoicePlaybackResult",
     "VoicePipelineStageSummary",
     "VoiceReadinessReport",
+    "VoiceRuntimeModeReadiness",
     "VoiceRealtimeReadiness",
     "VoiceRealtimeCoreBridgeCall",
     "VoiceRealtimeResponseGate",

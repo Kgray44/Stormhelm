@@ -647,6 +647,13 @@ class AssistantOrchestrator:
                     if software_response.active_request_state is not None:
                         if software_response.active_request_state:
                             self.session_state.set_active_request_state(session_id, software_response.active_request_state)
+                        elif planned.active_request_state:
+                            self.session_state.set_active_request_state(session_id, planned.active_request_state)
+                            self._learn_from_message(
+                                session_id=session_id,
+                                message=message,
+                                request_state=planned.active_request_state,
+                            )
                         else:
                             self.session_state.clear_active_request_state(session_id)
                     software_debug = dict(planner_debug.get("software_control") or {})
@@ -778,6 +785,17 @@ class AssistantOrchestrator:
                         self.session_state.set_active_request_state(session_id, planned.active_request_state)
                         self._learn_from_message(session_id=session_id, message=message, request_state=planned.active_request_state)
                     assistant_text = self.persona.report(planned.assistant_message)
+                elif (
+                    planned.active_request_state
+                    and planned.structured_query is not None
+                    and planned.structured_query.query_shape == QueryShape.SOFTWARE_CONTROL_REQUEST
+                ):
+                    self.session_state.set_active_request_state(session_id, planned.active_request_state)
+                    self._learn_from_message(session_id=session_id, message=message, request_state=planned.active_request_state)
+                    target = str(planned.active_request_state.get("subject") or "that software").strip()
+                    assistant_text = self.persona.report(
+                        f"I prepared the software-control plan for {target}. No external action has run."
+                    )
                 elif self.provider is not None and self.config.openai.enabled:
                     assistant_text, jobs, actions = await self._handle_provider_turn(
                         message=message,
@@ -1305,6 +1323,7 @@ class AssistantOrchestrator:
             message=message,
             active_context=active_context,
         )
+        initial_context_items = list(input_items) if isinstance(input_items, list) else []
         all_actions: list[dict[str, Any]] = []
         all_jobs: list[dict[str, Any]] = []
         final_text = ""
@@ -1335,7 +1354,7 @@ class AssistantOrchestrator:
             )
             all_jobs.extend(jobs)
             all_actions.extend(actions)
-            input_items = [
+            function_outputs = [
                 {
                     "type": "function_call_output",
                     "call_id": tool_call.call_id,
@@ -1343,6 +1362,7 @@ class AssistantOrchestrator:
                 }
                 for tool_call, job in zip(result.tool_calls, jobs, strict=False)
             ]
+            input_items = [*initial_context_items, *function_outputs] if initial_context_items else function_outputs
             previous_response_id = result.response_id
             if not final_text:
                 final_text = tool_text

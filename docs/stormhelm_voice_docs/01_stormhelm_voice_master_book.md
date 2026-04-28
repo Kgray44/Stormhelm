@@ -269,7 +269,7 @@ OpenAI voice selection should be treated as a configurable canonical profile:
 
 ```toml
 [voice.speech]
-voice = "cedar"   # candidate default
+voice = "onyx"   # selected default
 speed = 0.92       # if supported by provider/client playback layer
 style = "stormhelm_default"
 ```
@@ -485,6 +485,23 @@ Examples:
 - OpenAI unavailable: voice unavailable; typed interaction remains available if Core is healthy.
 - Network unavailable: local wake may still work, but voice command understanding/speech are disabled or degraded according to provider mode.
 
+Voice-LP1 local playback backfill:
+
+- local playback is backend-owned by the voice playback provider;
+- MP3/WAV TTS outputs may play through the configured local device when `voice.playback.enabled=true`, `provider=local`, and the local playback gate is explicitly allowed;
+- transient in-memory TTS bytes may be materialized only inside the provider for playback and must not appear in status/events;
+- if the local backend or device is unavailable, Stormhelm reports a typed playback failure/unavailable reason and preserves the TTS artifact/result;
+- playback completion is provider delivery state only and does not prove the user heard the audio.
+
+Voice-I1 runtime integration tightening:
+
+- voice runtime modes are evaluated explicitly as `disabled`, `manual_only`, `output_only`, `push_to_talk`, `wake_supervised`, `realtime_transcription`, or `realtime_speech_core_bridge`;
+- the runtime report distinguishes selected mode, effective mode, ready/degraded/blocked/disabled state, missing requirements, contradictory settings, provider availability, and next fix;
+- `output_only` requires live playback and OpenAI TTS availability; persisted TTS artifacts are debug output and do not count as live speech;
+- provider aggregation must distinguish configured, enabled, available, active, mocked, unavailable, blocked by config, and blocked by missing provider;
+- Ghost remains concise and Deck may show the mode/readiness detail;
+- runtime mode readiness does not grant command authority, route Core, enable wake/capture/VAD/Realtime, or weaken trust/interruption/confirmation laws.
+
 ## 18. Configuration Doctrine
 
 Recommended configuration skeleton:
@@ -518,7 +535,7 @@ confidence_threshold = 0.65
 [voice.output]
 enabled = true
 tts_model = "gpt-4o-mini-tts"
-voice = "cedar"
+voice = "onyx"
 format = "pcm"
 streaming = true
 interruptible = true

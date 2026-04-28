@@ -17,7 +17,7 @@ Tests: `tests/test_voice_config.py`, `tests/test_voice_availability.py`, `tests/
 | Controlled audio STT | Bounded file/blob/fixture-style audio metadata can be transcribed through the configured provider path. | No | `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/voice/service.py` | `tests/test_voice_audio_turn.py`, `tests/test_voice_stt_provider.py` |
 | TTS artifact generation | Core-approved text or explicit safe test text can be rendered into a controlled speech artifact. | No | `src/stormhelm/core/voice/speech_renderer.py`, `src/stormhelm/core/voice/service.py` | `tests/test_voice_tts_provider.py`, `tests/test_voice_tts_from_turn_result.py` |
 | Push-to-talk capture boundary | Explicit start/stop/cancel/submit actions exist. Local capture is separately gated. | No | `src/stormhelm/core/api/app.py`, `src/stormhelm/core/voice/service.py` | `tests/test_voice_capture_service.py`, `tests/test_voice_bridge_controls.py` |
-| Playback boundary | Playback requests and stop controls exist behind provider/config gates. | No | `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/voice/service.py` | `tests/test_voice_playback_service.py`, `tests/test_voice_playback_provider.py` |
+| Playback boundary | Playback requests and stop controls exist behind provider/config gates. Voice-LP1 adds a real Windows local playback provider for MP3/WAV output while preserving mock/unavailable paths. | No | `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/voice/service.py` | `tests/test_voice_playback_service.py`, `tests/test_voice_playback_provider.py` |
 | Interruption and barge-in hardening | Active playback can be stopped, spoken output muted, capture/listen windows cancelled, pending confirmations rejected, and cancellation/correction phrases routed safely without direct task cancellation. | No; controlled by explicit action or bounded voice context. | `src/stormhelm/core/voice/service.py`, `src/stormhelm/core/api/app.py`, `src/stormhelm/ui/voice_surface.py` | `tests/test_voice_interruption_service.py`, `tests/test_voice_interruption_bridge.py`, `tests/test_voice_barge_in_interruption.py` |
 | Wake word foundation | Wake config, provider contracts, mock wake events, wake sessions, readiness, diagnostics, and events exist without real wake listening. | No | `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/voice/service.py`, `src/stormhelm/core/api/app.py` | `tests/test_voice_wake_config.py`, `tests/test_voice_wake_service.py` |
 | Local wake provider boundary | A disabled-by-default `LocalWakeWordProvider` can wrap an optional local backend and report dependency/platform/device/permission state. | Only when explicitly enabled and the local backend is available. | `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/voice/service.py` | `tests/test_voice_local_wake_provider.py` |
@@ -84,10 +84,34 @@ Useful fields to inspect:
 | vad | VAD config/readiness/provider/session/activity status. Speech activity is not command intent or semantic completion. |
 | spoken_confirmation | Confirmation classifier/binding/result status, pending count, freshness/strength settings, and truth flags that confirmation does not execute actions. |
 | realtime | Realtime config/readiness/session/transcript/Core-bridge status, including `direct_tools_allowed=false`, `direct_action_tools_exposed=false`, `core_bridge_required=true`, speech mode flags, last Core result state, and response-gating source. |
+| runtime_mode | Selected/effective voice mode, readiness, missing requirements, contradictory settings, provider availability, and the next settings fix. |
 | truth flags | Explicit no-wake-word/no-realtime/no-always-listening style flags. |
 
 Sources: `src/stormhelm/core/container.py`, `src/stormhelm/core/voice/service.py`, `src/stormhelm/core/voice/state.py`
 Tests: `tests/test_voice_state.py`, `tests/test_voice_diagnostics.py`
+
+## Runtime Modes
+
+Voice-I1 adds a backend-owned runtime mode readiness report. It does not enable new voice powers; it explains whether the selected mode is actually coherent with the enabled providers and subcomponents.
+
+Supported runtime modes:
+
+| Mode | Requires | Expected off posture | Common blocker |
+|---|---|---|---|
+| `disabled` | Voice disabled. | Everything inactive. | None; this is the safe default. |
+| `manual_only` | Voice enabled and manual input enabled. | Capture/wake/Realtime can remain off. | Manual input disabled. |
+| `output_only` | Voice enabled, spoken responses enabled, OpenAI TTS available, local playback enabled and available. | Capture, wake, post-wake listen, VAD, and Realtime disabled. | `output_voice_configured_but_playback_disabled` or `output_voice_configured_but_playback_unavailable`. |
+| `push_to_talk` | Capture enabled and available; OpenAI STT available. | Wake/post-wake/Realtime disabled. | Capture or STT unavailable. |
+| `wake_supervised` | Local wake, post-wake listen, capture, OpenAI STT, and Core bridge available. | Realtime disabled. | Wake, post-wake, capture, STT, or Core bridge unavailable. |
+| `realtime_transcription` | Realtime enabled in transcription bridge mode and Core bridge available. | Direct Realtime tools disabled. | Realtime unavailable or direct tools enabled. |
+| `realtime_speech_core_bridge` | Realtime enabled in speech Core-bridge mode with audio output and Core bridge available. | Direct Realtime tools disabled. | Speech flags, Realtime provider, or Core bridge unavailable. |
+
+The report is available in `voice.runtime_mode` and is also carried into Ghost/Deck payloads. `selected_mode` is the configured mode; `effective_mode` is what Stormhelm can actually evaluate after `voice.enabled`; `status` is `ready`, `degraded`, `blocked`, or `disabled`; `next_fix` is the most direct settings change.
+
+Artifact persistence is deliberately separate from live playback. `voice.openai.persist_tts_outputs=true` can keep a generated file for debugging, but it never satisfies output-only live speech. If output-only mode is selected and playback is disabled or unavailable, Stormhelm reports that it cannot speak live.
+
+Sources: `src/stormhelm/core/voice/service.py`, `src/stormhelm/core/voice/models.py`, `src/stormhelm/ui/voice_surface.py`
+Tests: `tests/test_voice_runtime_modes.py`, `tests/test_voice_readiness.py`, `tests/test_voice_ui_state_payload.py`
 
 ## Enable For Development
 
@@ -279,6 +303,55 @@ Release matrix:
 Sources: `src/stormhelm/core/voice/evaluation.py`, `src/stormhelm/core/voice/service.py`, `src/stormhelm/ui/voice_surface.py`
 Tests: `tests/test_voice_release_evaluation.py`, `tests/test_voice_latency_instrumentation.py`, `tests/test_voice_release_hardening.py`
 
+## Output-Only Live Playback
+
+Voice-LP1 backfills real local playback for generated TTS audio. Voice-I1 makes output-only mode treat that live playback path as a requirement, not an optional nice-to-have. The backend remains provider-owned: UI/API calls `VoiceService`, `VoiceService` creates a playback request, and the local provider plays the file or transient in-memory TTS bytes through the configured local device. Playback still only means the provider started/completed/stopped output delivery; it never proves the user heard the response, mutates Core result state, executes tools, or bypasses trust.
+
+For an output-only voice test, use local playback and keep every input path disabled:
+
+```powershell
+$env:STORMHELM_OPENAI_ENABLED = "true"
+$env:OPENAI_API_KEY = "<your key>"
+$env:STORMHELM_VOICE_ENABLED = "true"
+$env:STORMHELM_VOICE_MODE = "output_only"
+$env:STORMHELM_VOICE_SPOKEN_RESPONSES_ENABLED = "true"
+$env:STORMHELM_VOICE_DEBUG_MOCK_PROVIDER = "false"
+$env:STORMHELM_VOICE_PLAYBACK_ENABLED = "true"
+$env:STORMHELM_VOICE_PLAYBACK_PROVIDER = "local"
+$env:STORMHELM_VOICE_PLAYBACK_DEVICE = "default"
+$env:STORMHELM_VOICE_PLAYBACK_VOLUME = "1.0"
+$env:STORMHELM_VOICE_PLAYBACK_ALLOW_DEV_PLAYBACK = "true"
+$env:STORMHELM_VOICE_CAPTURE_ENABLED = "false"
+$env:STORMHELM_VOICE_WAKE_ENABLED = "false"
+$env:STORMHELM_VOICE_POST_WAKE_ENABLED = "false"
+$env:STORMHELM_VOICE_VAD_ENABLED = "false"
+$env:STORMHELM_VOICE_REALTIME_ENABLED = "false"
+```
+
+If `voice.openai.persist_tts_outputs=false`, playback can still use transient TTS bytes; those bytes are private request data and are not included in events/status payloads. If the Windows MCI backend or device is unavailable, status reports a typed reason such as `local_playback_platform_unsupported`, `local_playback_dependency_missing`, or `device_unavailable` instead of silently falling back to artifact-only output.
+
+After startup, check the runtime mode report:
+
+```powershell
+(Invoke-RestMethod http://127.0.0.1:8765/status).voice.runtime_mode
+```
+
+For a no-sound, no-OpenAI mock smoke:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\voice_output_smoke.py
+```
+
+For the opt-in live output-only smoke, verify your output device first, then set the explicit live flag:
+
+```powershell
+$env:STORMHELM_RUN_LIVE_VOICE_SMOKE = "1"
+.\.venv\Scripts\python.exe scripts\voice_output_smoke.py --live
+```
+
+Sources: `src/stormhelm/core/voice/models.py`, `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/voice/service.py`, `config/default.toml`
+Tests: `tests/test_voice_playback_service.py`, `tests/test_voice_playback_provider.py`, `tests/test_voice_runtime_modes.py`
+
 ## Playback Controls
 
 TTS artifact generation and audio playback are separate. A generated speech artifact does not mean playback occurred.
@@ -291,6 +364,7 @@ To allow local playback during development:
 
 ```powershell
 $env:STORMHELM_VOICE_PLAYBACK_ENABLED = "true"
+$env:STORMHELM_VOICE_PLAYBACK_PROVIDER = "local"
 $env:STORMHELM_VOICE_PLAYBACK_ALLOW_DEV_PLAYBACK = "true"
 ```
 

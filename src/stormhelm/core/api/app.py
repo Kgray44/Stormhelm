@@ -51,6 +51,7 @@ def _terminate_current_process() -> None:
 
 def create_app(config: AppConfig | None = None) -> FastAPI:
     container = build_container(config)
+    voice_output_tasks: set[asyncio.Task[None]] = set()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -59,6 +60,10 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         try:
             yield
         finally:
+            for task in list(voice_output_tasks):
+                task.cancel()
+            if voice_output_tasks:
+                await asyncio.gather(*voice_output_tasks, return_exceptions=True)
             await container.stop()
 
     app = FastAPI(title="Stormhelm Core", version=__version__, lifespan=lifespan)
@@ -80,6 +85,107 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "install_mode": current.lifecycle.install_state.install_mode.value,
             "pid": os.getpid(),
         }
+
+    def _assistant_voice_text(result: dict[str, object]) -> str:
+        assistant_message = (
+            result.get("assistant_message") if isinstance(result, dict) else {}
+        )
+        if not isinstance(assistant_message, dict):
+            return ""
+        metadata = assistant_message.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        for candidate in (
+            metadata.get("spoken_response"),
+            metadata.get("micro_response"),
+            assistant_message.get("content"),
+        ):
+            text = str(candidate or "").strip()
+            if text:
+                return text
+        return ""
+
+    def _voice_output_enabled(current: CoreContainer) -> bool:
+        voice_config = current.voice.config
+        return bool(
+            voice_config.enabled
+            and str(voice_config.mode or "").strip().lower() != "disabled"
+            and voice_config.spoken_responses_enabled
+            and voice_config.playback.enabled
+        )
+
+    def _schedule_assistant_voice_output(
+        current: CoreContainer,
+        result: dict[str, object],
+        *,
+        session_id: str,
+        surface_mode: str,
+        active_module: str,
+    ) -> None:
+        if not _voice_output_enabled(current):
+            return
+        text = _assistant_voice_text(result)
+        if not text:
+            return
+
+        assistant_message = result.get("assistant_message")
+        metadata = (
+            assistant_message.get("metadata")
+            if isinstance(assistant_message, dict)
+            and isinstance(assistant_message.get("metadata"), dict)
+            else None
+        )
+        if isinstance(metadata, dict):
+            metadata["voice_output"] = {
+                "scheduled": True,
+                "source": "assistant_response",
+                "mode": current.voice.config.mode,
+                "playback_requested": True,
+                "user_heard_claimed": False,
+            }
+
+        async def _run_voice_output() -> None:
+            try:
+                synthesis = await current.voice.synthesize_speech_text(
+                    text,
+                    source="assistant_response",
+                    persona_mode=surface_mode or "ghost",
+                    session_id=session_id,
+                    metadata={
+                        "active_module": active_module,
+                        "assistant_response_voice_output": True,
+                    },
+                )
+                if synthesis.ok:
+                    await current.voice.play_speech_output(
+                        synthesis,
+                        session_id=session_id,
+                        metadata={
+                            "active_module": active_module,
+                            "assistant_response_voice_output": True,
+                        },
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                current.events.publish(
+                    event_family="voice",
+                    event_type="voice.assistant_output_failed",
+                    severity="error",
+                    subsystem="voice",
+                    session_id=session_id,
+                    message="Assistant response voice output failed.",
+                    payload={
+                        "source": "assistant_response",
+                        "error_code": "assistant_voice_output_failed",
+                        "error_message": str(error),
+                        "raw_audio_present": False,
+                        "user_heard_claimed": False,
+                    },
+                )
+
+        task = asyncio.create_task(_run_voice_output())
+        voice_output_tasks.add(task)
+        task.add_done_callback(voice_output_tasks.discard)
 
     @app.get("/health")
     def health(request: Request) -> dict[str, object]:
@@ -134,6 +240,14 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 ],
                 "server_response_write_ms": 0.0,
             }
+        if isinstance(result, dict):
+            _schedule_assistant_voice_output(
+                current,
+                result,
+                session_id=payload.session_id,
+                surface_mode=payload.surface_mode,
+                active_module=payload.active_module,
+            )
         return result
 
     @app.get("/chat/history")

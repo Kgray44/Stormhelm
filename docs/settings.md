@@ -270,17 +270,32 @@ Voice is disabled by default. Enabling voice does not enable wake word, always-l
 |---|---|---|---|---|---|---|
 | `voice.enabled` | bool | `false` | No | bool | TOML/env | Voice status remains unavailable if false. |
 | `voice.provider` | string | `openai` | No | `openai`, mock/test provider names in code | TOML/env | Availability fails if unsupported for the selected path. |
-| `voice.mode` | string | `disabled` | No | `disabled`, implemented mode labels | TOML/env | `disabled` blocks voice availability. |
+| `voice.mode` | string | `disabled` | No | `disabled`, `manual_only`, `output_only`, `push_to_talk`, `wake_supervised`, `realtime_transcription`, `realtime_speech_core_bridge` | TOML/env | Runtime mode readiness reports blocked/degraded states when required subcomponents do not match the mode. |
 | `voice.wake_word_enabled` | bool | `false` | No | bool | TOML/env | Legacy truth flag; Voice-11 uses `[voice.wake]` for the provider boundary. |
 | `voice.spoken_responses_enabled` | bool | `false` | No | bool | TOML/env | Allows spoken-response/TTS posture when provider gates pass. |
 | `voice.manual_input_enabled` | bool | `true` | No | bool | TOML/env | Enables manual transcript voice-turn path. |
-| `voice.realtime_enabled` | bool | `false` | No | bool | TOML/env | Present as a truth flag; Realtime sessions are not implemented. |
+| `voice.realtime_enabled` | bool | `false` | No | bool | TOML/env | Legacy truth flag; concrete Realtime behavior is controlled by `[voice.realtime]`. |
 | `voice.debug_mock_provider` | bool | `true` | No | bool | TOML/env | Allows deterministic mock-provider behavior for tests/dev diagnostics. |
 
 Env overrides: `STORMHELM_VOICE_ENABLED`, `STORMHELM_VOICE_PROVIDER`, `STORMHELM_VOICE_MODE`, `STORMHELM_VOICE_WAKE_WORD_ENABLED`, `STORMHELM_VOICE_SPOKEN_RESPONSES_ENABLED`, `STORMHELM_VOICE_MANUAL_INPUT_ENABLED`, `STORMHELM_VOICE_REALTIME_ENABLED`, `STORMHELM_VOICE_DEBUG_MOCK_PROVIDER`.
 
+Runtime mode readiness is derived by `VoiceService` and exposed in `voice.runtime_mode` status/UI payloads. It distinguishes configured, enabled, available, active, mocked, unavailable, blocked-by-config, and blocked-by-provider states for TTS, playback, capture, wake, VAD, Realtime, Core bridge, and trust/confirmation.
+
+Common mode blockers:
+
+| Mode | Blocking state | Direct fix |
+|---|---|---|
+| `output_only` | `output_voice_configured_but_playback_disabled` | Enable `voice.playback.enabled`. |
+| `output_only` | `output_voice_configured_but_playback_unavailable` | Fix local playback provider/device availability. |
+| `output_only` | `output_voice_configured_but_tts_unavailable` | Enable OpenAI/TTS config and API key. |
+| `push_to_talk` | `push_to_talk_capture_disabled` or `push_to_talk_capture_unavailable` | Enable/fix `[voice.capture]`. |
+| `wake_supervised` | wake/post-wake/capture/STT/Core bridge unavailable | Enable the missing local wake/listen/capture/STT/Core seam. |
+| `realtime_speech_core_bridge` | `realtime_direct_tools_forbidden` | Keep `voice.realtime.direct_tools_allowed=false`; direct tools are never a valid fix. |
+
+`voice.openai.persist_tts_outputs=true` is artifact/debug behavior. It does not count as live playback for `output_only`.
+
 Sources: `config/default.toml`, `src/stormhelm/config/models.py`, `src/stormhelm/config/loader.py`, `src/stormhelm/core/voice/availability.py`
-Tests: `tests/test_voice_config.py`, `tests/test_voice_availability.py`
+Tests: `tests/test_voice_config.py`, `tests/test_voice_availability.py`, `tests/test_voice_runtime_modes.py`
 
 ## Voice OpenAI
 
@@ -293,12 +308,12 @@ Tests: `tests/test_voice_config.py`, `tests/test_voice_availability.py`
 | `voice.openai.max_audio_seconds` | number | `30` | No | seconds | TOML/env | Controlled audio above the limit is rejected. |
 | `voice.openai.max_audio_bytes` | int | `26214400` | No | positive bytes | TOML/env | Controlled audio above the limit is rejected. |
 | `voice.openai.tts_model` | string | `gpt-4o-mini-tts` | Required for OpenAI TTS | model id | TOML/env | TTS diagnostics can report missing model. |
-| `voice.openai.tts_voice` | string | `cedar` | No | provider-supported voice | TOML/env | Unsupported voices return provider errors. |
+| `voice.openai.tts_voice` | string | `onyx` | No | provider-supported voice | TOML/env | Unsupported voices return provider errors. |
 | `voice.openai.tts_format` | string | `mp3` | No | provider-supported format | TOML/env | Used for generated speech artifacts. |
 | `voice.openai.tts_speed` | number | `1.0` | No | provider-supported range | TOML/env | Used for speech synthesis requests. |
 | `voice.openai.max_tts_chars` | int | `600` | No | positive int | TOML/env | Long spoken text is blocked. |
 | `voice.openai.output_audio_dir` | path/string | empty | No | path | TOML/env | Empty means transient/default output handling. |
-| `voice.openai.persist_tts_outputs` | bool | `false` | No | bool | TOML/env | Generated audio is not retained by default. |
+| `voice.openai.persist_tts_outputs` | bool | `false` | No | bool | TOML/env | Generated audio is not retained by default; persisted artifacts do not count as live playback. |
 | `voice.openai.realtime_model` | string | `gpt-realtime` | No | model id | TOML/env | Stored for future Realtime; not a live Realtime claim. |
 | `voice.openai.vad_mode` | string | `server_vad` | No | provider mode label | TOML/env | Stored for future VAD; VAD is not implemented. |
 

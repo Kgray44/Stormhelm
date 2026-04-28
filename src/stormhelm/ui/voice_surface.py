@@ -70,6 +70,9 @@ def build_voice_ui_state(status: dict[str, Any] | None) -> dict[str, Any]:
     confirmation = _dict(voice.get("spoken_confirmation"))
     runtime_truth = _dict(voice.get("runtime_truth"))
     readiness = _readiness_payload(_dict(voice.get("readiness")))
+    runtime_mode = _runtime_mode_payload(
+        _dict(voice.get("runtime_mode") or readiness.get("runtime_mode"))
+    )
     wake_supervised_loop = _dict(voice.get("wake_supervised_loop"))
 
     voice_available = bool(availability.get("available", voice.get("available", False)))
@@ -253,6 +256,7 @@ def build_voice_ui_state(status: dict[str, Any] | None) -> dict[str, Any]:
         tts=tts,
         playback=playback,
         readiness=readiness,
+        runtime_mode=runtime_mode,
         pipeline_summary=pipeline_summary,
         capture_provider=capture_provider,
         provider_kind=provider_kind,
@@ -356,6 +360,13 @@ def build_voice_ui_state(status: dict[str, Any] | None) -> dict[str, Any]:
         "last_spoken_response_preview": spoken_preview,
         "last_synthesis_status": _text(tts.get("last_synthesis_state")) or None,
         "last_playback_status": _text(playback.get("last_playback_status")) or None,
+        "voice_runtime_mode": runtime_mode.get("selected_mode"),
+        "voice_effective_mode": runtime_mode.get("effective_mode"),
+        "voice_runtime_readiness": runtime_mode,
+        "live_playback_available": bool(runtime_mode.get("live_playback_available")),
+        "artifact_persistence_enabled": bool(
+            runtime_mode.get("artifact_persistence_enabled")
+        ),
         "spoken_confirmation_enabled": bool(confirmation.get("enabled", False)),
         "pending_confirmation_count": int(
             confirmation.get("pending_confirmation_count") or 0
@@ -553,6 +564,25 @@ def _readiness_payload(readiness: dict[str, Any]) -> dict[str, Any]:
     payload.setdefault("truth_flags", _truth_flags({}, {}))
     payload.setdefault("user_facing_reason", "")
     payload.setdefault("next_setup_action", None)
+    return payload
+
+
+def _runtime_mode_payload(runtime_mode: dict[str, Any]) -> dict[str, Any]:
+    payload = _sanitize(runtime_mode)
+    if not isinstance(payload, dict):
+        payload = {}
+    payload.setdefault("selected_mode", "disabled")
+    payload.setdefault("effective_mode", payload.get("selected_mode") or "disabled")
+    payload.setdefault("status", "unavailable")
+    payload.setdefault("blocking_reasons", [])
+    payload.setdefault("warnings", [])
+    payload.setdefault("missing_requirements", [])
+    payload.setdefault("contradictory_settings", [])
+    payload.setdefault("user_facing_summary", "")
+    payload.setdefault("next_fix", None)
+    payload.setdefault("live_playback_available", False)
+    payload.setdefault("artifact_persistence_enabled", False)
+    payload.setdefault("artifact_persistence_counts_as_live_playback", False)
     return payload
 
 
@@ -1072,6 +1102,7 @@ def _deck_payload(
     tts: dict[str, Any],
     playback: dict[str, Any],
     readiness: dict[str, Any],
+    runtime_mode: dict[str, Any],
     pipeline_summary: dict[str, Any],
     capture_provider: str,
     provider_kind: str,
@@ -1086,6 +1117,27 @@ def _deck_payload(
     realtime: dict[str, Any],
 ) -> dict[str, Any]:
     sections = [
+        {
+            "title": "Runtime Mode",
+            "entries": [
+                _entry(
+                    "Mode",
+                    _title(_text(runtime_mode.get("effective_mode"))),
+                    _text(runtime_mode.get("user_facing_summary")),
+                ),
+                _entry(
+                    "Live Playback",
+                    "Available"
+                    if runtime_mode.get("live_playback_available")
+                    else "Unavailable",
+                    "TTS artifacts are not counted as live playback.",
+                ),
+                _entry(
+                    "Next Fix",
+                    _text(runtime_mode.get("next_fix")) or "None",
+                ),
+            ],
+        },
         {
             "title": "Readiness",
             "entries": [

@@ -2,18 +2,64 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from stormhelm.config.models import OpenAIConfig
 from stormhelm.config.models import VoiceConfig
 from stormhelm.config.models import VoiceOpenAIConfig
 from stormhelm.config.models import VoicePlaybackConfig
+from stormhelm.core.events import EventBuffer
 from stormhelm.core.voice.models import VoiceAudioOutput
+from stormhelm.core.voice.models import VoicePlaybackRequest
+from stormhelm.core.voice.providers import LocalPlaybackProvider
 from stormhelm.core.voice.providers import MockPlaybackProvider
 from stormhelm.core.voice.providers import MockVoiceProvider
 from stormhelm.core.voice.service import build_voice_subsystem
 
 from tests.test_voice_manual_turn import RecordingCoreBridge
+
+
+class FakeLocalPlaybackBackend:
+    dependency_name = "fake_local_player"
+    platform_name = "win32"
+
+    def __init__(self, *, fail_playback: bool = False) -> None:
+        self.fail_playback = fail_playback
+        self.play_calls: list[dict[str, object]] = []
+
+    def get_availability(self, config: VoiceConfig) -> dict[str, object]:
+        return {
+            "provider": "local",
+            "backend": self.dependency_name,
+            "platform": self.platform_name,
+            "dependency": self.dependency_name,
+            "dependency_available": True,
+            "device": config.playback.device,
+            "device_available": True,
+            "available": True,
+            "unavailable_reason": None,
+        }
+
+    def play_file(
+        self,
+        path: str | Path,
+        *,
+        request: VoicePlaybackRequest,
+        playback_id: str,
+    ) -> dict[str, object]:
+        resolved = Path(path)
+        self.play_calls.append(
+            {
+                "path": str(resolved),
+                "bytes": resolved.read_bytes() if resolved.exists() else b"",
+                "request_data_present": request.data is not None,
+                "playback_id": playback_id,
+            }
+        )
+        if self.fail_playback:
+            raise RuntimeError("fake local playback failed")
+        return {"status": "completed", "elapsed_ms": 7, "played_locally": True}
 
 
 def _openai_config(*, enabled: bool = True, api_key: str | None = "test-key") -> OpenAIConfig:
@@ -61,6 +107,37 @@ def _service(**config_overrides: Any):
     return service
 
 
+def _local_output_service(tmp_path: Path, *, fail_playback: bool = False):
+    events = EventBuffer(capacity=96)
+    playback_config = VoicePlaybackConfig(
+        enabled=True,
+        provider="local",
+        device="default",
+        volume=0.75,
+        allow_dev_playback=True,
+        max_audio_bytes=1024,
+        max_duration_ms=5000,
+        delete_transient_after_playback=True,
+    )
+    service = build_voice_subsystem(
+        _voice_config(
+            mode="output_only",
+            debug_mock_provider=False,
+            playback=playback_config,
+        ),
+        _openai_config(),
+        events=events,
+    )
+    backend = FakeLocalPlaybackBackend(fail_playback=fail_playback)
+    service.provider = MockVoiceProvider(tts_audio_bytes=b"local voice bytes")
+    service.playback_provider = LocalPlaybackProvider(
+        config=service.config,
+        backend=backend,
+        temp_dir=tmp_path,
+    )
+    return service, events, backend
+
+
 def _audio_output(data: bytes = b"voice bytes", *, format: str = "mp3", duration_ms: int | None = None) -> VoiceAudioOutput:
     metadata = {"duration_ms": duration_ms} if duration_ms is not None else {}
     return VoiceAudioOutput.from_bytes(data, format=format, metadata=metadata)
@@ -80,6 +157,26 @@ def test_play_speech_output_plays_voice3_synthesis_without_mutating_task_state()
     assert playback.played_locally is True
     assert playback.user_heard_claimed is False
     assert service.playback_provider.playback_call_count == 1
+
+
+def test_output_only_playback_can_transition_from_dormant_without_error(
+    tmp_path: Path,
+) -> None:
+    service, _events, _backend = _local_output_service(tmp_path)
+    synthesis = asyncio.run(
+        service.synthesize_speech_text(
+            "Current weather is clear.",
+            source="assistant_response",
+            session_id="default",
+        )
+    )
+
+    playback = asyncio.run(service.play_speech_output(synthesis, session_id="default"))
+
+    assert playback.ok is True
+    assert playback.status == "completed"
+    assert service.state_controller.snapshot().state.value == "dormant"
+    assert service.last_error == {"code": None, "message": None}
 
 
 def test_playback_is_blocked_when_playback_disabled_even_if_tts_generated_audio() -> None:
@@ -184,3 +281,70 @@ def test_stop_playback_stops_active_output_without_cancelling_core_tasks() -> No
     assert stopped.user_heard_claimed is False
     assert no_active.ok is False
     assert no_active.error_code == "no_active_playback"
+
+
+def test_output_only_mode_synthesizes_and_invokes_real_local_playback_provider(
+    tmp_path: Path,
+) -> None:
+    service, events, backend = _local_output_service(tmp_path)
+
+    synthesis = asyncio.run(
+        service.synthesize_speech_text(
+            "Bearing acquired.",
+            source="output_only_test",
+            session_id="voice-session",
+        )
+    )
+    playback = asyncio.run(
+        service.play_speech_output(
+            synthesis,
+            session_id="voice-session",
+            turn_id="turn-output",
+        )
+    )
+    recent = events.recent(limit=96)
+    event_types = [event["event_type"] for event in recent]
+
+    assert synthesis.ok is True
+    assert playback.ok is True
+    assert playback.status == "completed"
+    assert playback.provider == "local"
+    assert playback.played_locally is True
+    assert playback.user_heard_claimed is False
+    assert backend.play_calls
+    assert backend.play_calls[0]["bytes"] == b"local voice bytes"
+    assert backend.play_calls[0]["request_data_present"] is True
+    assert "voice.playback_started" in event_types
+    assert "voice.playback_completed" in event_types
+    assert "voice.capture_started" not in event_types
+    assert "voice.wake_detected" not in event_types
+    assert "voice.realtime_session_started" not in event_types
+    assert "local voice bytes" not in str(recent)
+    assert "local voice bytes" not in str(service.status_snapshot())
+
+
+def test_local_playback_failure_preserves_synthesis_result_without_core_mutation(
+    tmp_path: Path,
+) -> None:
+    service, events, backend = _local_output_service(tmp_path, fail_playback=True)
+
+    synthesis = asyncio.run(
+        service.synthesize_speech_text(
+            "Bearing acquired.",
+            source="output_only_test",
+            session_id="voice-session",
+        )
+    )
+    playback = asyncio.run(service.play_speech_output(synthesis, session_id="voice-session"))
+    event_types = [event["event_type"] for event in events.recent(limit=96)]
+
+    assert synthesis.ok is True
+    assert synthesis.audio_output is not None
+    assert backend.play_calls
+    assert playback.ok is False
+    assert playback.status == "failed"
+    assert playback.error_code == "local_playback_failed"
+    assert playback.user_heard_claimed is False
+    assert service.last_synthesis_result == synthesis
+    assert "voice.playback_failed" in event_types
+    assert "voice.core_request_started" not in event_types

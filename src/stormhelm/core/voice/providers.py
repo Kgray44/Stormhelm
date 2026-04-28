@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 import tempfile
 import threading
@@ -1535,10 +1536,237 @@ class MockPlaybackProvider:
         )
 
 
+class WindowsMCIPlaybackBackend:
+    """Small Windows-only MP3/WAV player using the stdlib MCI binding."""
+
+    dependency_name = "winmm_mci"
+
+    def __init__(self) -> None:
+        self.platform_name = sys.platform
+        self._aliases: dict[str, str] = {}
+        self._lock = threading.Lock()
+
+    def get_availability(self, config: VoiceConfig) -> dict[str, Any]:
+        device = str(config.playback.device or "default").strip() or "default"
+        device_available = device.lower() == "default"
+        if not sys.platform.startswith("win"):
+            return {
+                "provider": "local",
+                "backend": self.dependency_name,
+                "platform": sys.platform,
+                "dependency": self.dependency_name,
+                "dependency_available": False,
+                "device": device,
+                "device_available": device_available,
+                "available": False,
+                "unavailable_reason": "local_playback_platform_unsupported",
+            }
+        try:
+            import ctypes
+
+            getattr(ctypes.windll, "winmm")
+        except Exception:
+            return {
+                "provider": "local",
+                "backend": self.dependency_name,
+                "platform": sys.platform,
+                "dependency": self.dependency_name,
+                "dependency_available": False,
+                "device": device,
+                "device_available": device_available,
+                "available": False,
+                "unavailable_reason": "local_playback_dependency_missing",
+            }
+        if not device_available:
+            return {
+                "provider": "local",
+                "backend": self.dependency_name,
+                "platform": sys.platform,
+                "dependency": self.dependency_name,
+                "dependency_available": True,
+                "device": device,
+                "device_available": False,
+                "available": False,
+                "unavailable_reason": "device_unavailable",
+            }
+        return {
+            "provider": "local",
+            "backend": self.dependency_name,
+            "platform": sys.platform,
+            "dependency": self.dependency_name,
+            "dependency_available": True,
+            "device": device,
+            "device_available": True,
+            "available": True,
+            "unavailable_reason": None,
+        }
+
+    def play_file(
+        self,
+        path: str | Path,
+        *,
+        request: VoicePlaybackRequest,
+        playback_id: str,
+    ) -> dict[str, Any]:
+        resolved = Path(path)
+        if not resolved.exists() or not resolved.is_file():
+            return {
+                "status": "failed",
+                "error_code": "audio_file_missing",
+                "error_message": "Playback audio file was missing.",
+            }
+        availability = self._request_availability(request)
+        if not bool(availability.get("available")):
+            reason = str(
+                availability.get("unavailable_reason") or "local_playback_unavailable"
+            )
+            return {
+                "status": "unavailable",
+                "error_code": reason,
+                "error_message": f"Local playback unavailable: {reason}.",
+            }
+        started = time.perf_counter()
+        alias = "stormhelm_voice_" + "".join(
+            character if character.isalnum() else "_"
+            for character in str(playback_id or uuid4().hex)
+        )
+        with self._lock:
+            self._aliases[playback_id] = alias
+        try:
+            self._mci(f'open "{resolved}" alias {alias}')
+            try:
+                volume = int(max(0.0, min(1.0, float(request.volume))) * 1000)
+                self._mci(f"setaudio {alias} volume to {volume}")
+            except Exception:
+                pass
+            self._mci(f"play {alias} wait")
+            return {
+                "status": "completed",
+                "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                "played_locally": True,
+            }
+        except Exception as error:
+            return {
+                "status": "failed",
+                "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                "error_code": "local_playback_failed",
+                "error_message": str(error),
+            }
+        finally:
+            try:
+                self._mci(f"close {alias}")
+            except Exception:
+                pass
+            with self._lock:
+                self._aliases.pop(playback_id, None)
+
+    def stop(
+        self, playback_id: str | None = None, *, reason: str = "user_requested"
+    ) -> dict[str, Any]:
+        del reason
+        with self._lock:
+            if playback_id:
+                aliases = [self._aliases.get(playback_id)] if playback_id in self._aliases else []
+            else:
+                aliases = list(self._aliases.values())
+        aliases = [alias for alias in aliases if alias]
+        if not aliases:
+            return {"status": "unavailable", "error_code": "no_active_playback"}
+        for alias in aliases:
+            try:
+                self._mci(f"stop {alias}")
+                self._mci(f"close {alias}")
+            except Exception:
+                pass
+        return {"status": "stopped", "elapsed_ms": 0}
+
+    def _mci(self, command: str) -> str:
+        import ctypes
+
+        buffer = ctypes.create_unicode_buffer(512)
+        result = ctypes.windll.winmm.mciSendStringW(command, buffer, len(buffer), 0)
+        if result == 0:
+            return buffer.value
+        error_buffer = ctypes.create_unicode_buffer(512)
+        try:
+            ctypes.windll.winmm.mciGetErrorStringW(result, error_buffer, len(error_buffer))
+            message = error_buffer.value or f"MCI error {result}"
+        except Exception:
+            message = f"MCI error {result}"
+        raise RuntimeError(message)
+
+    def _request_availability(self, request: VoicePlaybackRequest) -> dict[str, Any]:
+        device = str(request.device or "default").strip() or "default"
+        device_available = device.lower() == "default"
+        if not sys.platform.startswith("win"):
+            return {
+                "provider": "local",
+                "backend": self.dependency_name,
+                "platform": sys.platform,
+                "dependency": self.dependency_name,
+                "dependency_available": False,
+                "device": device,
+                "device_available": device_available,
+                "available": False,
+                "unavailable_reason": "local_playback_platform_unsupported",
+            }
+        try:
+            import ctypes
+
+            getattr(ctypes.windll, "winmm")
+        except Exception:
+            return {
+                "provider": "local",
+                "backend": self.dependency_name,
+                "platform": sys.platform,
+                "dependency": self.dependency_name,
+                "dependency_available": False,
+                "device": device,
+                "device_available": device_available,
+                "available": False,
+                "unavailable_reason": "local_playback_dependency_missing",
+            }
+        if not device_available:
+            return {
+                "provider": "local",
+                "backend": self.dependency_name,
+                "platform": sys.platform,
+                "dependency": self.dependency_name,
+                "dependency_available": True,
+                "device": device,
+                "device_available": False,
+                "available": False,
+                "unavailable_reason": "device_unavailable",
+            }
+        return {
+            "provider": "local",
+            "backend": self.dependency_name,
+            "platform": sys.platform,
+            "dependency": self.dependency_name,
+            "dependency_available": True,
+            "device": device,
+            "device_available": True,
+            "available": True,
+            "unavailable_reason": None,
+        }
+
+
 @dataclass(slots=True)
 class LocalPlaybackProvider:
     config: VoiceConfig
     provider_name: str = "local"
+    backend: Any | None = None
+    temp_dir: str | Path | None = None
+    _active_playback: VoicePlaybackResult | None = field(
+        default=None, init=False, repr=False
+    )
+    _active_temp_path: Path | None = field(default=None, init=False, repr=False)
+    _active_thread: threading.Thread | None = field(default=None, init=False, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.backend is None:
+            self.backend = WindowsMCIPlaybackBackend()
 
     @property
     def name(self) -> str:
@@ -1549,29 +1777,88 @@ class LocalPlaybackProvider:
         return False
 
     def get_availability(self) -> dict[str, Any]:
+        if not self.config.playback.enabled:
+            return {
+                "provider": self.provider_name,
+                "provider_kind": "local",
+                "available": False,
+                "unavailable_reason": "playback_disabled",
+                "mock": False,
+                "enabled": False,
+                "allow_dev_playback": bool(self.config.playback.allow_dev_playback),
+            }
+        if not self.config.playback.allow_dev_playback:
+            return {
+                "provider": self.provider_name,
+                "provider_kind": "local",
+                "available": False,
+                "unavailable_reason": "dev_playback_not_allowed",
+                "mock": False,
+                "enabled": True,
+                "allow_dev_playback": False,
+            }
+        backend_availability = {}
+        if self.backend is not None and hasattr(self.backend, "get_availability"):
+            backend_availability = dict(self.backend.get_availability(self.config))
+        available = bool(backend_availability.get("available"))
+        reason = backend_availability.get("unavailable_reason")
+        if not available and reason is None:
+            if backend_availability.get("device_available") is False:
+                reason = "device_unavailable"
+            elif backend_availability.get("dependency_available") is False:
+                reason = "local_playback_dependency_missing"
+            else:
+                reason = "local_playback_unavailable"
         return {
+            **backend_availability,
             "provider": self.provider_name,
-            "available": False,
-            "unavailable_reason": "local_playback_not_implemented",
+            "provider_kind": "local",
+            "available": available,
+            "unavailable_reason": reason,
             "mock": False,
+            "enabled": True,
+            "allow_dev_playback": True,
         }
 
-    def play(self, request: VoicePlaybackRequest) -> VoicePlaybackResult:
-        return VoicePlaybackResult(
-            ok=False,
-            playback_request_id=request.playback_request_id,
-            audio_output_id=request.audio_output_id,
-            synthesis_id=request.synthesis_id,
-            session_id=request.session_id,
-            turn_id=request.turn_id,
-            provider=self.provider_name,
-            device=request.device,
-            status="unavailable",
-            error_code="local_playback_not_implemented",
-            error_message="Real local playback is not implemented in this Voice-4 boundary.",
-            output_metadata=request.to_metadata(),
-            played_locally=False,
-            user_heard_claimed=False,
+    async def play(self, request: VoicePlaybackRequest) -> VoicePlaybackResult:
+        if not request.allowed_to_play:
+            return self._result(
+                request,
+                ok=False,
+                status="blocked",
+                error_code=request.blocked_reason or "playback_blocked",
+                error_message=f"Playback request blocked: {request.blocked_reason or 'playback_blocked'}.",
+            )
+        availability = self.get_availability()
+        if not bool(availability.get("available")):
+            reason = str(availability.get("unavailable_reason") or "local_playback_unavailable")
+            return self._result(
+                request,
+                ok=False,
+                status="unavailable",
+                error_code=reason,
+                error_message=f"Local playback unavailable: {reason}.",
+                extra_metadata={"availability": availability},
+            )
+        try:
+            audio_path, should_delete = self._materialize_audio_path(request)
+        except ValueError as error:
+            return self._result(
+                request,
+                ok=False,
+                status="failed",
+                error_code=str(error) or "missing_audio_output",
+                error_message="Local playback request did not include playable audio.",
+                extra_metadata={"availability": availability},
+            )
+
+        playback_id = f"voice-playback-{uuid4().hex[:12]}"
+        return await self._play_foreground(
+            request,
+            audio_path,
+            should_delete,
+            playback_id=playback_id,
+            availability=availability,
         )
 
     def stop(
@@ -1580,23 +1867,202 @@ class LocalPlaybackProvider:
         *,
         reason: str = "user_requested",
     ) -> VoicePlaybackResult:
-        del playback_id
-        return VoicePlaybackResult(
-            ok=False,
-            playback_request_id=None,
-            audio_output_id=None,
-            provider=self.provider_name,
-            device=self.config.playback.device,
-            status="unavailable",
-            error_code="no_active_playback",
-            error_message="No active local playback exists.",
-            output_metadata={"reason": reason},
-            played_locally=False,
+        with self._lock:
+            active = self._active_playback
+            temp_path = self._active_temp_path
+        if active is None:
+            return VoicePlaybackResult(
+                ok=False,
+                playback_request_id=None,
+                audio_output_id=None,
+                provider=self.provider_name,
+                device=self.config.playback.device,
+                status="unavailable",
+                error_code="no_active_playback",
+                error_message="No active local playback exists.",
+                output_metadata={"reason": reason},
+                played_locally=False,
+                user_heard_claimed=False,
+            )
+        backend_result = {}
+        if self.backend is not None and hasattr(self.backend, "stop"):
+            backend_result = dict(self.backend.stop(playback_id or active.playback_id, reason=reason))
+        self._cleanup_temp_path(temp_path)
+        stopped = replace(
+            active,
+            ok=True,
+            status="stopped",
+            stopped_at=utc_now_iso(),
+            error_code=None,
+            error_message=None,
+            elapsed_ms=backend_result.get("elapsed_ms")
+            if isinstance(backend_result.get("elapsed_ms"), int)
+            else active.elapsed_ms,
+            output_metadata={
+                **dict(active.output_metadata),
+                "stop_reason": reason,
+                "backend_status": backend_result.get("status"),
+            },
             user_heard_claimed=False,
         )
+        with self._lock:
+            self._active_playback = None
+            self._active_temp_path = None
+        return stopped
 
     def get_active_playback(self) -> VoicePlaybackResult | None:
-        return None
+        with self._lock:
+            return self._active_playback
+
+    async def _play_foreground(
+        self,
+        request: VoicePlaybackRequest,
+        audio_path: Path,
+        should_delete: bool,
+        *,
+        playback_id: str,
+        availability: dict[str, Any],
+    ) -> VoicePlaybackResult:
+        started_at = utc_now_iso()
+        started_result = self._result(
+            request,
+            ok=True,
+            status="started",
+            playback_id=playback_id,
+            started_at=started_at,
+            played_locally=True,
+            extra_metadata={
+                "availability": availability,
+                "backend": availability.get("backend"),
+            },
+        )
+        with self._lock:
+            self._active_playback = started_result
+            self._active_temp_path = audio_path if should_delete else None
+        try:
+            backend_result = await asyncio.to_thread(
+                self.backend.play_file,
+                    audio_path,
+                    request=request,
+                    playback_id=playback_id,
+            )
+            backend_result = dict(backend_result)
+        except Exception as error:
+            backend_result = {
+                "status": "failed",
+                "error_code": "local_playback_failed",
+                "error_message": str(error),
+            }
+        status = str(backend_result.get("status") or "completed").strip().lower()
+        if should_delete and status != "started":
+            self._cleanup_temp_path(audio_path)
+        ok = status in {"started", "completed", "stopped"}
+        result = self._result(
+            request,
+            ok=ok,
+            status=status,
+            playback_id=playback_id,
+            started_at=started_at if ok else None,
+            completed_at=utc_now_iso() if status == "completed" else None,
+            stopped_at=utc_now_iso() if status == "stopped" else None,
+            elapsed_ms=backend_result.get("elapsed_ms")
+            if isinstance(backend_result.get("elapsed_ms"), int)
+            else None,
+            error_code=backend_result.get("error_code") if not ok else None,
+            error_message=backend_result.get("error_message") if not ok else None,
+            played_locally=bool(backend_result.get("played_locally", ok)),
+            extra_metadata={
+                "availability": availability,
+                "backend": availability.get("backend"),
+            },
+        )
+        if status == "started":
+            with self._lock:
+                self._active_playback = result
+                self._active_temp_path = audio_path if should_delete else None
+        else:
+            with self._lock:
+                if (
+                    self._active_playback is not None
+                    and self._active_playback.playback_id == playback_id
+                ):
+                    self._active_playback = None
+                    self._active_temp_path = None
+        return result
+
+    def _materialize_audio_path(self, request: VoicePlaybackRequest) -> tuple[Path, bool]:
+        if request.file_path:
+            resolved = Path(str(request.file_path))
+            if resolved.exists() and resolved.is_file():
+                return resolved, False
+        if request.data is None:
+            raise ValueError("missing_audio_output")
+        temp_root = Path(self.temp_dir) if self.temp_dir is not None else Path(tempfile.gettempdir()) / "stormhelm-voice-playback"
+        temp_root.mkdir(parents=True, exist_ok=True)
+        suffix = "".join(character for character in request.format if character.isalnum())
+        suffix = suffix or "mp3"
+        path = temp_root / f"{request.playback_request_id}.{suffix}"
+        path.write_bytes(bytes(request.data))
+        return path, True
+
+    def _cleanup_temp_path(self, path: Path | None) -> None:
+        if path is None:
+            return
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            return
+
+    def _result(
+        self,
+        request: VoicePlaybackRequest,
+        *,
+        ok: bool,
+        status: str,
+        playback_id: str | None = None,
+        started_at: str | None = None,
+        completed_at: str | None = None,
+        stopped_at: str | None = None,
+        elapsed_ms: int | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        played_locally: bool = False,
+        extra_metadata: dict[str, Any] | None = None,
+    ) -> VoicePlaybackResult:
+        output_metadata = {
+            "audio_output_id": request.audio_output_id,
+            "format": request.format,
+            "mime_type": request.mime_type,
+            "size_bytes": request.size_bytes,
+            "duration_ms": request.duration_ms,
+            "audio_ref": request.audio_ref,
+            "file_path": request.file_path,
+            "backend_owned_playback": True,
+            "raw_audio_present": False,
+        }
+        if extra_metadata:
+            output_metadata.update(extra_metadata)
+        return VoicePlaybackResult(
+            ok=ok,
+            playback_request_id=request.playback_request_id,
+            audio_output_id=request.audio_output_id,
+            synthesis_id=request.synthesis_id,
+            session_id=request.session_id,
+            turn_id=request.turn_id,
+            provider=self.provider_name,
+            device=request.device,
+            status=status,
+            playback_id=playback_id or f"voice-playback-{uuid4().hex[:12]}",
+            started_at=started_at,
+            completed_at=completed_at,
+            stopped_at=stopped_at,
+            elapsed_ms=elapsed_ms,
+            error_code=error_code,
+            error_message=error_message,
+            output_metadata=output_metadata,
+            played_locally=played_locally,
+            user_heard_claimed=False,
+        )
 
 
 @dataclass(slots=True)
@@ -3330,7 +3796,7 @@ class OpenAIVoiceProvider(OpenAIVoiceProviderStub):
 
     @property
     def tts_voice(self) -> str:
-        return str(self.config.openai.tts_voice or "").strip() or "cedar"
+        return str(self.config.openai.tts_voice or "").strip() or "onyx"
 
     @property
     def tts_format(self) -> str:

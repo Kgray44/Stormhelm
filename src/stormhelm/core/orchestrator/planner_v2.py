@@ -21,6 +21,7 @@ PLANNER_V2_ROUTE_FAMILIES = {
     "file",
     "context_action",
     "context_clarification",
+    "unsupported",
     "screen_awareness",
     "software_control",
     "watch_runtime",
@@ -535,6 +536,14 @@ class ContextBinder:
         active_request_state: dict[str, Any],
         recent_tool_results: list[dict[str, Any]],
     ) -> ContextBinding:
+        requested_tool = str(frame.extracted_entities.get("tool_name") or "").strip()
+        if requested_tool in {"trusted_hook_execute", "trusted_hook_register"}:
+            return ContextBinding(
+                context_reference=frame.context_reference,
+                context_type="routine",
+                status="available",
+                label=frame.target_text or "trusted hook",
+            )
         if frame.clarification_reason == "routine_context":
             return self._missing(frame, "routine_context")
         if frame.operation == "save" or self._routine_save_contextual(frame):
@@ -875,6 +884,40 @@ class CandidateGenerator:
                 decline_reasons=("requires_calculation_owner_hint",),
                 tool_candidates=spec.tool_candidates,
             )
+        if spec.route_family == "unsupported" and frame.native_owner_hint != "unsupported":
+            return RouteCandidate(
+                route_family=spec.route_family,
+                subsystem=spec.subsystem,
+                score=0.0,
+                accepted=False,
+                score_factors={"unsupported_owner_gate": 0.0},
+                decline_reasons=("requires_explicit_unsupported_external_commitment_signal",),
+                tool_candidates=spec.tool_candidates,
+            )
+        if (
+            spec.route_family == "desktop_search"
+            and frame.native_owner_hint != "desktop_search"
+            and not self._desktop_search_signal(frame.normalized_text)
+        ):
+            return RouteCandidate(
+                route_family=spec.route_family,
+                subsystem=spec.subsystem,
+                score=0.0,
+                accepted=False,
+                score_factors={"desktop_search_signal_gate": 0.0},
+                decline_reasons=("requires_local_file_or_desktop_search_signal",),
+                tool_candidates=spec.tool_candidates,
+            )
+        if spec.route_family == "system_control" and frame.native_owner_hint != "system_control":
+            return RouteCandidate(
+                route_family=spec.route_family,
+                subsystem=spec.subsystem,
+                score=0.0,
+                accepted=False,
+                score_factors={"system_control_signal_gate": 0.0},
+                decline_reasons=("requires_explicit_system_control_signal",),
+                tool_candidates=spec.tool_candidates,
+            )
         if frame.native_owner_hint == spec.route_family:
             factors["native_owner_hint"] = 0.42
             score += 0.42
@@ -968,6 +1011,17 @@ class CandidateGenerator:
             return True
         return False
 
+    def _desktop_search_signal(self, text: str) -> bool:
+        if re.search(r"\b(?:youtube|google|bing|duckduckgo|tripadvisor|amazon|wikipedia|reddit|github)\b", text):
+            return False
+        if re.search(r"\b(?:search|look up|lookup|find)\b.{0,40}\b(?:web|internet|online|site|website|youtube|google)\b", text):
+            return False
+        return bool(
+            re.search(r"\b(?:find|search|locate|pull up|open)\b.{0,48}\b(?:file|files|folder|folders|document|documents|downloads|desktop|screenshot|screenshots|readme|pdf|docx|txt)\b", text)
+            or re.search(r"\b(?:recent|latest)\b.{0,24}\b(?:file|files|document|documents|download|downloads|screenshot|screenshots)\b", text)
+            or re.search(r"\b(?:documents|downloads|desktop)\b.{0,24}\b(?:file|folder|document)\b", text)
+        )
+
 
 class RouteArbitrator:
     def decide(
@@ -976,6 +1030,23 @@ class RouteArbitrator:
         candidates: tuple[RouteCandidate, ...],
     ) -> RouteDecision:
         considered = tuple(candidate.route_family for candidate in candidates)
+        if (
+            frame.generic_provider_allowed
+            and frame.generic_provider_reason == "operator_wrapper_browser_near_miss_no_native_action"
+        ):
+            return RouteDecision(
+                routing_engine="generic_provider",
+                selected_route_family="generic_provider",
+                selected_subsystem="provider",
+                selected_route_spec="",
+                score=0.35,
+                route_candidates=candidates,
+                candidate_specs_considered=considered,
+                native_decline_reasons=self._declines(candidates),
+                generic_provider_allowed=True,
+                generic_provider_gate_reason=frame.generic_provider_reason,
+                authoritative=True,
+            )
         if self._conceptual_near_miss(frame):
             return RouteDecision(
                 routing_engine="generic_provider",
@@ -1009,6 +1080,7 @@ class RouteArbitrator:
                 for candidate in candidates
             )
             missing = selected.missing_preconditions
+            selected_unsupported = selected.route_family == "unsupported"
             return RouteDecision(
                 routing_engine="planner_v2",
                 selected_route_family=selected.route_family,
@@ -1018,8 +1090,10 @@ class RouteArbitrator:
                 route_candidates=selected_candidates,
                 candidate_specs_considered=considered,
                 native_decline_reasons=self._declines(candidates),
-                generic_provider_allowed=False,
-                generic_provider_gate_reason="native_route_candidate_present",
+                generic_provider_allowed=selected_unsupported,
+                generic_provider_gate_reason="unsupported_external_commitment_allows_safe_planning_help"
+                if selected_unsupported
+                else "native_route_candidate_present",
                 clarification_needed=bool(missing),
                 clarification_text=self._clarification_text(selected.route_family, missing, frame),
                 missing_preconditions=missing,
@@ -1136,7 +1210,14 @@ class PlanBuilder:
             return PlanDraft(family, "calculations", frame.operation, frame.target_type, subject=subject, request_type_hint="calculation_response", execution_type="calculation_evaluate")
         if family == "browser_destination":
             url = str(binding.value or frame.extracted_entities.get("url") or frame.target_text)
-            tool = "deck_open_url" if surface_mode.strip().lower() == "deck" else "external_open_url"
+            requested_tool = str(frame.extracted_entities.get("tool_name") or "").strip()
+            tool = (
+                requested_tool
+                if requested_tool in {"external_open_url", "deck_open_url"}
+                else "deck_open_url"
+                if surface_mode.strip().lower() == "deck"
+                else "external_open_url"
+            )
             return PlanDraft(family, "browser", "open", "website", subject=url, tool_name=tool, tool_arguments={"url": url}, request_type_hint="direct_action", execution_type="resolve_url_then_open_in_browser", requires_execution=True)
         if family == "app_control":
             if frame.operation == "status":
@@ -1145,8 +1226,18 @@ class PlanBuilder:
             return PlanDraft(family, "system", action, "app", subject=subject, tool_name="app_control", tool_arguments={"action": action, "target": subject}, request_type_hint="direct_action", execution_type="execute_control_command", requires_execution=True)
         if family == "file":
             path = str(binding.value or frame.extracted_entities.get("path") or frame.target_text)
-            tool = "file_reader" if frame.operation == "inspect" else "deck_open_file" if surface_mode.strip().lower() == "deck" else "external_open_file"
-            return PlanDraft(family, "files", frame.operation, "file", subject=path, tool_name=tool, tool_arguments={"path": path}, request_type_hint="file_read" if tool == "file_reader" else "direct_action", execution_type="read_file" if tool == "file_reader" else "execute_control_command", requires_execution=tool != "file_reader")
+            requested_tool = str(frame.extracted_entities.get("tool_name") or "").strip()
+            tool = (
+                requested_tool
+                if requested_tool in {"file_reader", "deck_open_file", "external_open_file"}
+                else "file_reader"
+                if frame.operation == "inspect"
+                else "deck_open_file"
+                if surface_mode.strip().lower() == "deck"
+                else "external_open_file"
+            )
+            operation = "inspect" if tool == "file_reader" else frame.operation
+            return PlanDraft(family, "files", operation, "file", subject=path, tool_name=tool, tool_arguments={"path": path}, request_type_hint="file_read" if tool == "file_reader" else "direct_action", execution_type="read_file" if tool == "file_reader" else "execute_control_command", requires_execution=tool != "file_reader")
         if family == "context_action":
             return PlanDraft(family, "context", frame.operation, "selected_text", subject="selection", tool_name="context_action", tool_arguments={"operation": "inspect", "source": "selection"}, request_type_hint="context_action", execution_type="execute_context_action")
         if family == "context_clarification":
@@ -1156,7 +1247,12 @@ class PlanBuilder:
         if family == "software_control":
             return PlanDraft(family, "software_control", frame.operation, "software_package", subject=subject, request_type_hint="software_control_response", execution_type="software_control_execute", requires_execution=frame.operation in {"install", "uninstall", "update", "repair"})
         if family == "network":
-            return PlanDraft(family, "system", "status", "system_resource", subject="network", tool_name="network_status", tool_arguments={"focus": "overview"}, request_type_hint="direct_deterministic_fact", execution_type="retrieve_current_status")
+            requested_tool = str(frame.extracted_entities.get("tool_name") or "").strip()
+            tool_name = requested_tool if requested_tool in {"network_status", "network_throughput", "network_diagnosis"} else "network_status"
+            request_type_hint = "deterministic_diagnostic_request" if tool_name == "network_diagnosis" else "direct_deterministic_fact"
+            execution_type = "diagnostic_summary" if tool_name == "network_diagnosis" else "retrieve_current_status"
+            focus = "diagnosis" if tool_name == "network_diagnosis" else "throughput" if tool_name == "network_throughput" else "overview"
+            return PlanDraft(family, "system", "status", "system_resource", subject="network", tool_name=tool_name, tool_arguments={"focus": focus}, request_type_hint=request_type_hint, execution_type=execution_type)
         if family == "watch_runtime":
             source_case = str(frame.extracted_entities.get("source_case") or "").strip().lower()
             if source_case == "browser_context" or str(frame.extracted_entities.get("tool_name") or "").strip().lower() == "browser_context":
@@ -1185,6 +1281,10 @@ class PlanBuilder:
                 args = {"text": subject or frame.raw_text, "dry_run": True}
             elif family in {"file_operation", "maintenance", "software_recovery"}:
                 args = {"query": frame.raw_text, "target": subject, "dry_run": True}
+            elif family == "storage" and tool_name == "storage_diagnosis":
+                args = {"focus": "capacity_pressure"}
+                request_type_hint = "deterministic_diagnostic_request"
+                execution_type = "diagnostic_summary"
             else:
                 args = {"focus": family}
             return PlanDraft(
@@ -1202,12 +1302,40 @@ class PlanBuilder:
         if family == "workspace_operations":
             tool_name = self._workspace_tool(frame)
             action = tool_name.replace("workspace_", "")
-            args = {"query": frame.raw_text} if tool_name in {"workspace_assemble", "workspace_restore"} else {}
+            if tool_name in {"workspace_assemble", "workspace_restore", "workspace_archive"}:
+                args = {"query": frame.raw_text}
+            elif tool_name == "workspace_rename":
+                args = {"new_name": str(frame.extracted_entities.get("new_name") or frame.extracted_entities.get("alternate_target") or frame.target_text or "").strip()}
+            elif tool_name == "workspace_tag":
+                tags = frame.extracted_entities.get("tags")
+                if isinstance(tags, (list, tuple)):
+                    args = {"tags": [str(tag) for tag in tags if str(tag).strip()]}
+                else:
+                    label = str(frame.extracted_entities.get("alternate_target") or frame.target_text or "").strip()
+                    args = {"tags": [label]} if label else {}
+            else:
+                args = {}
             return PlanDraft(family, "workspace", frame.operation, "workspace", subject=subject or action, tool_name=tool_name, tool_arguments=args, request_type_hint="workspace_operation", execution_type=f"{action}_workspace", requires_execution=True)
         if family == "routine":
-            tool_name = "routine_save" if frame.operation == "save" else "routine_execute"
-            action = "save_routine" if tool_name == "routine_save" else "execute_routine"
-            return PlanDraft(family, "routine", frame.operation, "routine", subject=subject or "routine", tool_name=tool_name, tool_arguments={"query": frame.raw_text, "target": subject}, request_type_hint=tool_name, execution_type=action, requires_execution=True)
+            requested_tool = str(frame.extracted_entities.get("tool_name") or "").strip()
+            tool_name = requested_tool if requested_tool in {"routine_execute", "routine_save", "trusted_hook_execute", "trusted_hook_register"} else "routine_save" if frame.operation == "save" else "routine_execute"
+            action = (
+                "register_trusted_hook"
+                if tool_name == "trusted_hook_register"
+                else "execute_trusted_hook"
+                if tool_name == "trusted_hook_execute"
+                else "save_routine"
+                if tool_name == "routine_save"
+                else "execute_routine"
+            )
+            args: dict[str, Any] = {"query": frame.raw_text, "target": subject}
+            hook_name = str(frame.extracted_entities.get("hook_name") or "").strip()
+            hook_path = str(frame.extracted_entities.get("path") or "").strip()
+            if hook_name:
+                args["hook_name"] = hook_name
+            if hook_path:
+                args["path"] = hook_path
+            return PlanDraft(family, "routine", frame.operation, "routine", subject=subject or "routine", tool_name=tool_name, tool_arguments=args, request_type_hint=tool_name, execution_type=action, requires_execution=True)
         if family == "workflow":
             return PlanDraft(family, "workflow", frame.operation, "workspace", subject=subject or "workflow", tool_name="workflow_execute", tool_arguments={"query": frame.raw_text, "workflow_kind": subject or "workflow"}, request_type_hint="workflow_execution", execution_type="execute_workflow", requires_execution=True)
         if family == "task_continuity":
@@ -1274,6 +1402,13 @@ class ResultStateComposer:
                 response_mode="summary",
                 user_facing_status="not_native",
                 message="No native command family owns that request.",
+            )
+        if decision.selected_route_family == "unsupported":
+            return ResultStateDraft(
+                result_state="unsupported",
+                response_mode="summary",
+                user_facing_status="blocked_unsupported",
+                message="That request is unsupported as a native command, so no real external action will run.",
             )
         if decision.clarification_needed or policy.execution_blocked:
             message = decision.clarification_text or "I need more context before I can do that."
@@ -1414,6 +1549,17 @@ class PlannerV2:
     ) -> IntentFrame:
         text = frame.normalized_text
         raw_lower = str(frame.raw_text or "").strip().lower()
+        if re.search(r"\bbattery\s+acid\b", text):
+            frame.operation = "unknown"
+            frame.target_type = "unknown"
+            frame.target_text = ""
+            frame.native_owner_hint = None
+            frame.candidate_route_families = []
+            frame.generic_provider_allowed = True
+            frame.generic_provider_reason = "power_near_miss_no_native_action"
+            frame.clarification_needed = False
+            frame.clarification_reason = ""
+            return frame
         if self._expansion_conceptual_near_miss(text):
             frame.operation = "unknown"
             frame.target_type = "unknown"
@@ -1425,8 +1571,37 @@ class PlannerV2:
             frame.clarification_needed = False
             frame.clarification_reason = ""
             return frame
+        if self._unsupported_external_commitment_signal(text):
+            frame.operation = "send"
+            frame.target_type = "unknown"
+            frame.target_text = "external commitment"
+            frame.context_reference = "none"
+            frame.context_status = "available"
+            frame.risk_class = "external_send"
+            frame.native_owner_hint = "unsupported"
+            frame.candidate_route_families = ["unsupported"]
+            frame.generic_provider_allowed = False
+            frame.generic_provider_reason = "native_route_candidate_present"
+            frame.clarification_needed = False
+            frame.clarification_reason = ""
+            return frame
         if self._browser_correction_near_miss(text):
-            self._set_context_clarification(frame, reason="browser_near_miss_requires_clarification")
+            frame.operation = "unknown"
+            frame.target_type = "unknown"
+            frame.target_text = ""
+            if re.search(r"\b(?:stormhelm\s+)?route\s+for\s+this\b", text):
+                frame.native_owner_hint = None
+                frame.candidate_route_families = []
+                frame.generic_provider_allowed = True
+                frame.generic_provider_reason = "operator_wrapper_browser_near_miss_no_native_action"
+                frame.clarification_needed = False
+                frame.clarification_reason = ""
+                return frame
+            self._set_context_clarification(
+                frame,
+                reason="browser_destination_near_miss",
+                context_status="missing",
+            )
             return frame
         if self._echo_command_near_miss(text, raw_lower):
             frame.operation = "inspect"
@@ -1460,6 +1635,22 @@ class PlannerV2:
             frame.clarification_needed = False
             frame.clarification_reason = ""
             return frame
+        if self._slash_system_command(frame.raw_text):
+            frame.operation = "status"
+            frame.target_type = "system_resource"
+            frame.target_text = "system information"
+            frame.context_reference = "none"
+            frame.context_status = "available"
+            frame.risk_class = "read_only"
+            frame.native_owner_hint = "machine"
+            frame.candidate_route_families = ["machine"]
+            frame.extracted_entities["source_case"] = "system_info"
+            frame.extracted_entities["tool_name"] = "system_info"
+            frame.generic_provider_allowed = False
+            frame.generic_provider_reason = "native_route_candidate_present"
+            frame.clarification_needed = False
+            frame.clarification_reason = ""
+            return frame
         if raw_lower.startswith("/shell"):
             command = frame.raw_text.split(maxsplit=1)[1] if len(frame.raw_text.split(maxsplit=1)) > 1 else ""
             frame.operation = "launch"
@@ -1472,6 +1663,44 @@ class PlannerV2:
             frame.candidate_route_families = ["terminal"]
             frame.extracted_entities["shell_command"] = command or "open_terminal"
             frame.extracted_entities["tool_name"] = "shell_command"
+            frame.generic_provider_allowed = False
+            frame.generic_provider_reason = "native_route_candidate_present"
+            frame.clarification_needed = False
+            frame.clarification_reason = ""
+            return frame
+        file_reader_path = self._slash_read_path(frame.raw_text)
+        if file_reader_path:
+            frame.operation = "inspect"
+            frame.target_type = "file"
+            frame.target_text = file_reader_path
+            frame.context_reference = "none"
+            frame.context_status = "available"
+            frame.risk_class = "read_only"
+            frame.native_owner_hint = "file"
+            frame.candidate_route_families = ["file"]
+            frame.extracted_entities["path"] = file_reader_path
+            frame.extracted_entities["source_case"] = "file_reader"
+            frame.extracted_entities["tool_name"] = "file_reader"
+            frame.generic_provider_allowed = False
+            frame.generic_provider_reason = "native_route_candidate_present"
+            frame.clarification_needed = False
+            frame.clarification_reason = ""
+            return frame
+        if frame.native_owner_hint == "trust_approvals":
+            return frame
+        trusted_hook = self._trusted_hook_request(frame.raw_text)
+        if trusted_hook:
+            tool_name = str(trusted_hook.get("tool_name") or "trusted_hook_execute")
+            frame.operation = "save" if tool_name == "trusted_hook_register" else "launch"
+            frame.target_type = "routine"
+            frame.target_text = str(trusted_hook.get("hook_name") or "trusted hook")
+            frame.context_reference = "none"
+            frame.context_status = "available"
+            frame.risk_class = "dry_run_plan"
+            frame.native_owner_hint = "routine"
+            frame.candidate_route_families = ["routine"]
+            frame.extracted_entities.update(trusted_hook)
+            frame.extracted_entities["source_case"] = tool_name
             frame.generic_provider_allowed = False
             frame.generic_provider_reason = "native_route_candidate_present"
             frame.clarification_needed = False
@@ -1661,24 +1890,50 @@ class PlannerV2:
         trust = active_request_state.get("trust") if isinstance(active_request_state.get("trust"), dict) else {}
         parameters = active_request_state.get("parameters") if isinstance(active_request_state.get("parameters"), dict) else {}
         stage = str(parameters.get("request_stage") or "").strip().lower()
+        if not self._active_state_is_reusable(active_request_state):
+            return ""
         if trust and stage == "awaiting_confirmation" and self._followup_signal(frame.normalized_text):
             return "trust_approvals"
         if family not in PLANNER_V2_ROUTE_FAMILIES:
             return ""
         if family in {"generic_provider", "unsupported", "context_clarification"}:
             return ""
-        if frame.native_owner_hint:
+        if frame.native_owner_hint and frame.native_owner_hint != "context_clarification":
             return ""
         text = frame.normalized_text
         if not self._followup_signal(text, frame=frame):
             return ""
         return family
 
+    def _active_state_is_reusable(self, active_request_state: dict[str, Any]) -> bool:
+        if not isinstance(active_request_state, dict) or not active_request_state:
+            return False
+        parameters = active_request_state.get("parameters") if isinstance(active_request_state.get("parameters"), dict) else {}
+        if active_request_state.get("context_reusable") is False or parameters.get("context_reusable") is False:
+            return False
+        freshness = str(
+            parameters.get("context_freshness")
+            or active_request_state.get("context_freshness")
+            or "current"
+        ).strip().lower()
+        return freshness not in {"stale", "expired", "ambiguous", "conflicting"}
+
+    def _explicit_confirmation_signal(self, text: str) -> bool:
+        normalized = re.sub(r"[\s,]+", " ", text.strip().lower()).strip()
+        return bool(
+            normalized in {"yes", "go ahead", "confirm", "continue", "proceed", "approve", "allow", "do it"}
+            or normalized.startswith(("yes ", "go ahead", "confirm ", "continue ", "proceed ", "approve ", "allow "))
+        )
+
     def _ambiguous_deictic_clarification_signal(self, frame: IntentFrame, active_request_state: dict[str, Any]) -> bool:
         if frame.native_owner_hint:
             return False
         active_family = str(active_request_state.get("family") or "").strip().lower()
-        if active_family and active_family not in {"generic_provider", "unsupported", "context_clarification"}:
+        if (
+            active_family
+            and active_family not in {"generic_provider", "unsupported", "context_clarification"}
+            and self._active_state_is_reusable(active_request_state)
+        ):
             return False
         if frame.speech_act in {"question", "explanation_request", "comparison"}:
             return False
@@ -1720,9 +1975,11 @@ class PlannerV2:
     def _system_control_signal(self, text: str) -> bool:
         if re.search(r"\b(?:file|note|notes|document|readme)\b", text):
             return False
+        if re.fullmatch(r"(?:could you\s+|please\s+|pls\s+)?(?:open|show|launch|start)\s+(?:system\s+)?settings", text):
+            return False
         return bool(
-            re.search(r"\b(?:open|show|launch|start|opne)\b.{0,36}\b(?:settings?|bluetooth|wi-?fi|wifi|display|sound|privacy|network)\b", text)
-            or re.search(r"\b(?:settings?|bluetooth|wi-?fi|wifi|display|sound|privacy|network)\b.{0,24}\bsettings?\b", text)
+            re.search(r"\b(?:open|show|launch|start|opne)\b.{0,36}\b(?:bluetooth|wi-?fi|wifi|display|sound|privacy|network|location)\s+settings?\b", text)
+            or re.search(r"\b(?:bluetooth|wi-?fi|wifi|display|sound|privacy|network|location)\b.{0,24}\bsettings?\b", text)
         )
 
     def _direct_status_family(self, text: str, raw_lower: str) -> str:
@@ -1734,12 +1991,20 @@ class PlannerV2:
             return "notes"
         if re.search(r"\b(?:what time is it|current time|time right now)\b", text):
             return "time"
-        if re.search(r"\b(?:disk space|storage space|free space)\b", text):
+        if re.search(r"\b(?:what machine|what computer|machine name|os version|time ?zone|timezone|this computer)\b", text):
+            return "machine"
+        if self._network_status_signal(text):
+            return "network"
+        if self._storage_diagnosis_signal(text) or re.search(r"\b(?:disk space|storage space|free space)\b", text):
             return "storage"
         if re.search(r"\b(?:where am i|current location|my location)\b", text):
             return "location"
         if re.search(r"\bweather\b", text) and not re.search(r"\b(?:weathering|whether)\b", text):
             return "weather"
+        if re.search(r"\bpower\s+(?:at|from|for)\b.{0,32}\d", text):
+            return ""
+        if re.search(r"\bbattery\s+acid\b", text):
+            return ""
         if re.search(r"\b(?:battery|charging|power)\b", text):
             return "power"
         if re.search(r"\b(?:cpu|memory|ram|resource usage|computer sluggish)\b", text):
@@ -1777,6 +2042,10 @@ class PlannerV2:
             frame.target_type = "selected_text"
         if family in DIRECT_STATUS_FAMILY_TOOLS:
             frame.extracted_entities["tool_name"] = DIRECT_STATUS_FAMILY_TOOLS[family][1]
+        if family == "network":
+            frame.extracted_entities["tool_name"] = self._network_tool_name(frame.normalized_text)
+        if family == "storage":
+            frame.extracted_entities["tool_name"] = "storage_diagnosis" if self._storage_diagnosis_signal(frame.normalized_text) else "storage_status"
         frame.extracted_entities["source_case"] = family if family not in {"time", "development"} else "clock" if family == "time" else "echo"
         frame.target_text = self._strip_known_verbs(frame.raw_text) or family.replace("_", " ")
 
@@ -1808,6 +2077,67 @@ class PlannerV2:
         target = " ".join(target.split()).strip(" .,:;!?")
         return target or "system settings"
 
+    def _unsupported_external_commitment_signal(self, text: str) -> bool:
+        transactional = bool(re.search(r"\b(?:book|buy|purchase|order|pay|reserve)\b", text))
+        external_target = bool(re.search(r"\b(?:flight|hotel|ticket|item|subscription|real\s+world|pay\s+for)\b", text))
+        immediate = bool(re.search(r"\b(?:now|for real|actually|immediately)\b", text))
+        return transactional and external_target and immediate
+
+    def _slash_system_command(self, raw_text: str) -> bool:
+        return bool(re.search(r"(?:^|\s)/system(?:\b|$)", str(raw_text or ""), flags=re.IGNORECASE))
+
+    def _slash_read_path(self, raw_text: str) -> str:
+        match = re.search(r"(?:^|\s)/read\s+(?P<path>(?:[A-Za-z]:\\|\\\\|/)[^\s,;?!]+)", str(raw_text or ""), flags=re.IGNORECASE)
+        if not match:
+            return ""
+        return str(match.group("path") or "").strip(" .,:;!?\"'")
+
+    def _trusted_hook_request(self, raw_text: str) -> dict[str, Any]:
+        text = str(raw_text or "").strip()
+        register = re.search(
+            r"\bregister\s+trusted\s+hook\s+(?P<hook>.+?)\s+for\s+(?P<path>(?:[A-Za-z]:\\|\\\\|/)[^\s,;?!]+)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if register:
+            return {
+                "tool_name": "trusted_hook_register",
+                "hook_name": " ".join(str(register.group("hook") or "").split()).strip(" .,:;!?"),
+                "path": str(register.group("path") or "").strip(" .,:;!?\"'"),
+            }
+        execute = re.search(
+            r"\brun\s+trusted\s+hook\s+(?P<hook>[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+){0,4})",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if execute:
+            hook = " ".join(str(execute.group("hook") or "").split()).strip(" .,:;!?")
+            hook = re.sub(r"\s+(?:real\s+quick|quick)\b.*$", "", hook, flags=re.IGNORECASE).strip()
+            return {"tool_name": "trusted_hook_execute", "hook_name": hook or "trusted hook"}
+        return {}
+
+    def _network_status_signal(self, text: str) -> bool:
+        if re.search(r"\b(?:neural\s+network|network\s+architecture|network\s+effects)\b", text):
+            return False
+        return bool(
+            re.search(r"\b(?:am i online|internet status|connection status|which wifi|which wi-fi|ssid)\b", text)
+            or re.search(r"\b(?:internet|network|wifi|wi-fi)\b.{0,36}\b(?:speed|throughput|lagging|slow|down|outage|diagnos|broken)\b", text)
+            or re.search(r"\b(?:why|diagnos|troubleshoot|fix)\b.{0,36}\b(?:wifi|wi-fi|network|internet|connection)\b", text)
+        )
+
+    def _network_tool_name(self, text: str) -> str:
+        if re.search(r"\b(?:speed|throughput|bandwidth)\b", text):
+            return "network_throughput"
+        if re.search(r"\b(?:why|lagging|slow|outage|diagnos|troubleshoot|broken|fix)\b", text):
+            return "network_diagnosis"
+        return "network_status"
+
+    def _storage_diagnosis_signal(self, text: str) -> bool:
+        return bool(
+            re.search(r"\b(?:why|diagnos|what'?s|what is)\b.{0,36}\b(?:disk|drive|storage)\b.{0,36}\b(?:full|almost full|filling|pressure|low)\b", text)
+            or re.search(r"\b(?:disk|drive|storage)\b.{0,36}\b(?:almost full|full|filling up|pressure|low space)\b", text)
+        )
+
     def _bare_action_deictic_generic_provider_preferred(self, text: str) -> bool:
         return bool(
             re.match(r"^(?:click|press|tap|scroll|hover)\s+(?:this|that|it|there)\b", text)
@@ -1838,6 +2168,15 @@ class PlannerV2:
         recent_tool_results: list[dict[str, Any]],
     ) -> None:
         parameters = active_request_state.get("parameters") if isinstance(active_request_state.get("parameters"), dict) else {}
+        if self._explicit_confirmation_signal(frame.normalized_text) and self._active_state_confirmation_target(active_request_state, parameters) is None:
+            self._set_context_clarification(
+                frame,
+                reason="no_pending_confirmation",
+                context_status="missing",
+            )
+            return
+        route = active_request_state.get("route") if isinstance(active_request_state.get("route"), dict) else {}
+        route_tool_name = str(route.get("tool_name") or "").strip()
         subject = str(active_request_state.get("subject") or parameters.get("target_name") or family.replace("_", " ")).strip()
         operation, target_type, target_text, context_reference, risk_class = self._active_followup_shape(
             family,
@@ -1853,10 +2192,38 @@ class PlannerV2:
         frame.candidate_route_families = [family]
         frame.generic_provider_allowed = False
         frame.generic_provider_reason = "native_route_candidate_present"
-        for key in ("source_case", "tool_name", "path", "operation", "operation_type", "target_name", "shell_command"):
-            if key in parameters and parameters.get(key) not in {None, ""}:
+        for key in (
+            "source_case",
+            "tool_name",
+            "path",
+            "url",
+            "operation",
+            "operation_type",
+            "target_name",
+            "destination_name",
+            "destination_alias",
+            "target_url",
+            "new_name",
+            "tags",
+            "shell_command",
+            "pending_preview",
+            "alternate_target",
+            "alternate_target_url",
+            "alternate_target_path",
+            "previous_choice",
+        ):
+            if key in parameters and self._context_value_present(parameters.get(key)):
                 frame.extracted_entities[key] = parameters.get(key)
+        if route_tool_name:
+            frame.extracted_entities.setdefault("tool_name", route_tool_name)
+            frame.extracted_entities.setdefault("source_case", route_tool_name)
+        if self._correction_signal(frame.normalized_text) and self._active_state_alternate_target(parameters) is None:
+            frame.context_status = "missing"
+            frame.clarification_needed = True
+            frame.clarification_reason = "alternate_target"
+            return
         bound = self._active_followup_context(
+            frame=frame,
             family=family,
             target_type=target_type,
             active_context=active_context,
@@ -1875,6 +2242,15 @@ class PlannerV2:
         frame.context_status = "missing" if missing_reason else "available"
         frame.clarification_needed = bool(missing_reason)
         frame.clarification_reason = missing_reason
+
+    def _context_value_present(self, value: Any) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, (list, tuple, set, dict)):
+            return bool(value)
+        return True
 
     def _active_followup_shape(
         self,
@@ -1932,11 +2308,18 @@ class PlannerV2:
         if family == "desktop_search":
             return "search", "file", subject or "desktop search", "previous_result", "read_only"
         if family == "workspace_operations":
-            source_case = str(parameters.get("source_case") or "").strip().lower()
-            operation = "open" if "restore" in source_case else "assemble"
+            source_case = str(parameters.get("source_case") or parameters.get("tool_name") or "").strip().lower()
+            if "restore" in source_case:
+                operation = "open"
+            elif "save" in source_case:
+                operation = "save"
+            elif "list" in source_case:
+                operation = "status"
+            else:
+                operation = "assemble"
             return operation, "workspace", subject or "workspace", "previous_result", "dry_run_plan"
         if family == "routine":
-            source_case = str(parameters.get("source_case") or "").strip().lower()
+            source_case = str(parameters.get("source_case") or parameters.get("tool_name") or "").strip().lower()
             operation = "save" if "save" in source_case else "launch"
             return operation, "routine", subject or "routine", "previous_result", "dry_run_plan"
         if family == "workflow":
@@ -1965,14 +2348,51 @@ class PlannerV2:
     def _active_followup_context(
         self,
         *,
+        frame: IntentFrame,
         family: str,
         target_type: str,
         active_context: dict[str, Any],
         active_request_state: dict[str, Any],
         recent_tool_results: list[dict[str, Any]],
     ) -> dict[str, Any] | None:
+        parameters = active_request_state.get("parameters") if isinstance(active_request_state.get("parameters"), dict) else {}
+        correction_target = self._active_state_alternate_target(parameters)
+        if correction_target is not None and self._correction_signal(frame.normalized_text):
+            return {
+                "type": target_type,
+                "source": "active_request_state.alternate_target",
+                "label": str(correction_target.get("label") or correction_target.get("value") or "alternate target"),
+                "value": correction_target.get("value"),
+                "confidence": 0.88,
+            }
+        preview_target = self._active_state_confirmation_target(active_request_state, parameters)
+        if preview_target is not None and self._explicit_confirmation_signal(frame.normalized_text):
+            return {
+                "type": "pending_preview",
+                "source": "active_request_state.pending_preview",
+                "label": str(preview_target.get("label") or preview_target.get("value") or "pending preview"),
+                "value": preview_target.get("value"),
+                "confidence": 0.9,
+            }
         if family == "browser_destination":
-            return self._recent_website_context(active_context, recent_tool_results)
+            bound = self._recent_website_context(active_context, recent_tool_results)
+            if bound is not None:
+                return bound
+            url = str(parameters.get("url") or parameters.get("target_url") or "").strip()
+            if not url:
+                structured_query = active_request_state.get("structured_query")
+                slots = structured_query.get("slots") if isinstance(structured_query, dict) and isinstance(structured_query.get("slots"), dict) else {}
+                tool_arguments = slots.get("tool_arguments") if isinstance(slots.get("tool_arguments"), dict) else {}
+                url = str(tool_arguments.get("url") or tool_arguments.get("target_url") or "").strip()
+            if url:
+                return {
+                    "type": "website",
+                    "source": "active_request_state",
+                    "label": str(active_request_state.get("subject") or url),
+                    "value": url,
+                    "confidence": 0.87,
+                }
+            return None
         if family == "context_action":
             selection = active_context.get("selection") if isinstance(active_context.get("selection"), dict) else {}
             if selection.get("value"):
@@ -1996,6 +2416,22 @@ class PlannerV2:
                     "confidence": 0.9,
                 }
             return None
+        if family == "file":
+            path = str(parameters.get("path") or parameters.get("target_path") or "").strip()
+            if not path:
+                structured_query = active_request_state.get("structured_query")
+                slots = structured_query.get("slots") if isinstance(structured_query, dict) and isinstance(structured_query.get("slots"), dict) else {}
+                tool_arguments = slots.get("tool_arguments") if isinstance(slots.get("tool_arguments"), dict) else {}
+                path = str(tool_arguments.get("path") or tool_arguments.get("target_path") or "").strip()
+            if path:
+                return {
+                    "type": "file",
+                    "source": "active_request_state",
+                    "label": str(active_request_state.get("subject") or path),
+                    "value": path,
+                    "confidence": 0.87,
+                }
+            return None
         if target_type in {"prior_calculation", "prior_result"}:
             bound = ContextBinder()._prior_calculation(active_context, active_request_state, recent_tool_results)
             if bound is not None:
@@ -2005,7 +2441,6 @@ class PlannerV2:
             "network",
             "watch_runtime",
             "software_control",
-            "file",
             "routine",
             "workspace_operations",
             "workflow",
@@ -2033,6 +2468,74 @@ class PlannerV2:
             if trust:
                 return {"type": "approval_object", "source": "active_request_state", "label": str(trust.get("request_id") or "approval request"), "value": dict(active_request_state), "confidence": 0.9}
         return None
+
+    def _correction_signal(self, text: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(?:no[, ]+|nah[, ]+|not\s+that|not\s+that\s+one|use\s+the\s+other|other\s+one|the\s+other)\b",
+                text,
+            )
+        )
+
+    def _active_state_alternate_target(self, parameters: dict[str, Any]) -> dict[str, Any] | None:
+        path = str(parameters.get("alternate_target_path") or "").strip()
+        if path:
+            return {"label": str(parameters.get("alternate_target") or path), "value": path}
+        url = str(parameters.get("alternate_target_url") or "").strip()
+        if url:
+            return {"label": str(parameters.get("alternate_target") or url), "value": url}
+        target = parameters.get("alternate_target")
+        if self._context_value_present(target):
+            return {"label": str(target), "value": target}
+        return None
+
+    def _active_state_confirmation_target(
+        self,
+        active_request_state: dict[str, Any],
+        parameters: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        pending_preview = parameters.get("pending_preview") if isinstance(parameters.get("pending_preview"), dict) else {}
+        trust = active_request_state.get("trust") if isinstance(active_request_state.get("trust"), dict) else {}
+        pending_id = str(
+            parameters.get("pending_confirmation_id")
+            or parameters.get("pending_preview_id")
+            or pending_preview.get("id")
+            or trust.get("request_id")
+            or (
+                "software_control_confirmation"
+                if str(active_request_state.get("family") or "").strip().lower() == "software_control"
+                and str(parameters.get("request_stage") or "").strip().lower()
+                in {"awaiting_confirmation", "awaiting_approval", "pending_confirmation"}
+                else ""
+            )
+            or ""
+        ).strip()
+        if not (pending_preview or trust or pending_id):
+            return None
+        value = (
+            parameters.get("url")
+            or parameters.get("target_url")
+            or parameters.get("path")
+            or parameters.get("target_path")
+            or parameters.get("new_name")
+            or parameters.get("target_name")
+            or parameters.get("destination_alias")
+            or parameters.get("destination_name")
+            or parameters.get("alternate_target")
+            or active_request_state.get("subject")
+        )
+        if not self._context_value_present(value):
+            value = dict(active_request_state)
+        label = (
+            parameters.get("destination_alias")
+            or parameters.get("destination_name")
+            or parameters.get("target_name")
+            or parameters.get("new_name")
+            or parameters.get("alternate_target")
+            or active_request_state.get("subject")
+            or "pending preview"
+        )
+        return {"label": str(label), "value": value}
 
     def _recent_website_context(self, active_context: dict[str, Any], recent_tool_results: list[dict[str, Any]]) -> dict[str, Any] | None:
         for entity in IntentFrameExtractor()._recent_entities(active_context, recent_tool_results):
@@ -2129,6 +2632,7 @@ class PlannerV2:
             return False
         return bool(
             "routine" in text
+            or "trusted hook" in text
             or "saved workflow" in text
             or re.search(r"\bremember\b.{0,24}\b(?:this|that)\b.{0,16}\bworkflow\b", text)
             or re.search(r"\b(?:run|rerun|execute)\b.{0,36}\b(?:health check|normal setup|cleanup|saved workflow)\b", text)

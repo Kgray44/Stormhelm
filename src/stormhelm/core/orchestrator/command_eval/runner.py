@@ -861,6 +861,7 @@ class ProcessIsolatedCommandUsabilityHarness(CommandUsabilityHarness):
             observation = _build_observation(
                 case=case,
                 payload=request_result["payload"],
+                snapshot=request_result.get("snapshot") if isinstance(request_result.get("snapshot"), dict) else {},
                 latency_ms=request_result["latency_ms"],
                 http_boundary_ms=request_result["http_boundary_ms"],
                 event_collection_ms=request_result["event_collection_ms"],
@@ -1032,8 +1033,20 @@ def _post_case_over_http(
         )
         event_collection_ms = (perf_counter() - event_started) * 1000
         events_payload = events_response.json() if events_response.content else {}
+        snapshot_response = client.get(
+            "/snapshot",
+            params={
+                "session_id": request_payload.get("session_id", "default"),
+                "event_limit": 0,
+                "job_limit": 0,
+                "note_limit": 0,
+                "history_limit": 0,
+            },
+        )
+        snapshot_payload = snapshot_response.json() if snapshot_response.content else {}
     return {
         "payload": payload,
+        "snapshot": snapshot_payload,
         "status_code": response.status_code,
         "events": tuple(events_payload.get("events") or ()),
         "latency_ms": round((perf_counter() - started) * 1000, 3),
@@ -1176,7 +1189,9 @@ def _build_observation(
     checkpoint_path: str = "",
     child_pid: int = 0,
     ai_provider_calls: tuple[dict[str, Any], ...] = (),
+    snapshot: dict[str, Any] | None = None,
 ) -> CoreObservation:
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
     assistant_message = payload.get("assistant_message") if isinstance(payload, dict) else {}
     if not isinstance(assistant_message, dict):
         assistant_message = {}
@@ -1196,6 +1211,12 @@ def _build_observation(
         total_latency_ms=latency_ms,
     )
     route_family = _route_family(route_state, planner_debug, tool_chain, assistant_message)
+    response_active_request_state = (
+        payload.get("active_request_state") if isinstance(payload.get("active_request_state"), dict) else {}
+    )
+    snapshot_active_request_state = (
+        snapshot.get("active_request_state") if isinstance(snapshot.get("active_request_state"), dict) else {}
+    )
     payload_diagnostics = _payload_diagnostics(
         payload=payload,
         tool_results=tool_results,
@@ -1226,6 +1247,8 @@ def _build_observation(
         route_state=route_state,
         planner_debug=planner_debug,
         planner_obedience=planner_obedience,
+        response_active_request_state=dict(response_active_request_state),
+        snapshot_active_request_state=dict(snapshot_active_request_state),
         stage_timings_ms=stage_timings,
         response_json_bytes=int(response_json_bytes),
         event_count=len(events),

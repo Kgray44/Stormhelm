@@ -48,6 +48,7 @@ from stormhelm.core.voice.models import VoiceRealtimeResponseGate
 from stormhelm.core.voice.models import VoiceRealtimeSession
 from stormhelm.core.voice.models import VoiceRealtimeTranscriptEvent
 from stormhelm.core.voice.models import VoiceRealtimeTurnResult
+from stormhelm.core.voice.models import VoiceRuntimeModeReadiness
 from stormhelm.core.voice.models import VoiceSpeechRequest
 from stormhelm.core.voice.models import VoiceSpeechSynthesisResult
 from stormhelm.core.voice.models import VoiceSpokenConfirmationIntent
@@ -5497,6 +5498,12 @@ class VoiceService:
                 status=result.status,
                 source="playback",
             )
+        elif result.status == "stopped":
+            self._publish_playback_terminal(
+                VoiceEventType.PLAYBACK_STOPPED, result, "Voice playback stopped."
+            )
+            self._cleanup_transient_playback_audio(allowed_request)
+            self._transition_from_speaking(completed=False)
         elif result.status == "blocked":
             self._publish_playback_terminal(
                 VoiceEventType.PLAYBACK_BLOCKED, result, "Voice playback blocked."
@@ -6237,8 +6244,580 @@ class VoiceService:
             )
         )
 
+    def runtime_mode_readiness_report(self) -> VoiceRuntimeModeReadiness:
+        selected_mode = self._runtime_mode_name(self.config.mode)
+        effective_mode = "disabled" if not self.config.enabled else selected_mode
+        availability = self.availability
+        capture_availability = self._capture_provider_availability()
+        playback_availability = self._playback_provider_availability()
+        wake_availability = self._wake_provider_availability()
+        vad_availability = self._vad_provider_availability()
+        realtime_availability = self._realtime_provider_availability()
+
+        voice_available = bool(availability.available)
+        tts_available = bool(
+            self.config.enabled
+            and self.openai_config.enabled
+            and bool(self.openai_config.api_key)
+            and availability.tts_allowed
+            and self.config.spoken_responses_enabled
+        )
+        stt_available = bool(
+            self.config.enabled
+            and self.openai_config.enabled
+            and bool(self.openai_config.api_key)
+            and availability.stt_allowed
+        )
+        live_playback_available = bool(
+            self.config.playback.enabled and playback_availability.get("available")
+        )
+        capture_available = bool(
+            self.config.capture.enabled and capture_availability.get("available")
+        )
+        wake_available = bool(
+            self.config.wake.enabled and wake_availability.get("available")
+        )
+        post_wake_ready = bool(
+            self.config.post_wake.enabled
+            and self.config.post_wake.allow_dev_post_wake
+            and self.config.wake.enabled
+            and self.config.capture.enabled
+        )
+        vad_available = bool(self.config.vad.enabled and vad_availability.get("available"))
+        realtime_available = bool(
+            self.config.realtime.enabled and realtime_availability.get("available")
+        )
+        core_bridge_available = self.core_bridge is not None
+        trust_confirmation_available = bool(self.config.confirmation.enabled)
+
+        mode_requirements = self._runtime_mode_requirements(effective_mode)
+        required_config_flags = list(mode_requirements["required_config_flags"])
+        required_providers = list(mode_requirements["required_providers"])
+        required_subcomponents = list(mode_requirements["required_subcomponents"])
+        forbidden_subcomponents = list(mode_requirements["forbidden_subcomponents"])
+        expected_posture = dict(mode_requirements["expected_subsystem_posture"])
+
+        missing: list[str] = []
+        blocking_reasons: list[str] = []
+        warnings: list[str] = []
+        contradictions: list[str] = []
+
+        if effective_mode == "disabled":
+            blocking_reasons.append("voice_disabled")
+        elif not voice_available:
+            blocking_reasons.append(
+                availability.unavailable_reason or "voice_provider_unavailable"
+            )
+            missing.append("voice")
+
+        if effective_mode == "output_only":
+            if not self.config.spoken_responses_enabled:
+                blocking_reasons.append("output_voice_configured_but_spoken_disabled")
+                missing.append("spoken_responses")
+            if not tts_available:
+                blocking_reasons.append("output_voice_configured_but_tts_unavailable")
+                missing.append("openai_tts")
+            if not self.config.playback.enabled:
+                blocking_reasons.append("output_voice_configured_but_playback_disabled")
+                missing.append("live_playback")
+            elif not live_playback_available:
+                blocking_reasons.append(
+                    "output_voice_configured_but_playback_unavailable"
+                )
+                missing.append("live_playback")
+            if self.config.capture.enabled:
+                contradictions.append("output_only_capture_should_be_disabled")
+            if self.config.wake.enabled:
+                contradictions.append("output_only_wake_should_be_disabled")
+            if self.config.post_wake.enabled:
+                contradictions.append("output_only_post_wake_should_be_disabled")
+            if self.config.vad.enabled:
+                contradictions.append("output_only_vad_should_be_disabled")
+            if self.config.realtime.enabled:
+                contradictions.append("output_only_realtime_should_be_disabled")
+
+        elif effective_mode == "push_to_talk":
+            if not stt_available:
+                blocking_reasons.append("push_to_talk_stt_unavailable")
+                missing.append("openai_stt")
+            if not self.config.capture.enabled:
+                blocking_reasons.append("push_to_talk_capture_disabled")
+                missing.append("capture")
+            elif not capture_available:
+                blocking_reasons.append("push_to_talk_capture_unavailable")
+                missing.append("capture")
+            if self.config.wake.enabled:
+                contradictions.append("push_to_talk_wake_should_be_disabled")
+            if self.config.realtime.enabled:
+                contradictions.append("push_to_talk_realtime_should_be_disabled")
+
+        elif effective_mode == "wake_supervised":
+            if not wake_available:
+                blocking_reasons.append("wake_supervised_wake_unavailable")
+                missing.append("wake")
+            if not post_wake_ready:
+                blocking_reasons.append("wake_supervised_post_wake_unavailable")
+                missing.append("post_wake")
+            if not capture_available:
+                blocking_reasons.append("wake_supervised_capture_unavailable")
+                missing.append("capture")
+            if not stt_available:
+                blocking_reasons.append("wake_supervised_stt_unavailable")
+                missing.append("openai_stt")
+            if not core_bridge_available:
+                blocking_reasons.append("wake_supervised_core_bridge_unavailable")
+                missing.append("core_bridge")
+
+        elif effective_mode == "realtime_transcription":
+            if self.config.realtime.mode != "transcription_bridge":
+                blocking_reasons.append("realtime_transcription_mode_mismatch")
+            if not realtime_available:
+                blocking_reasons.append("realtime_transcription_provider_unavailable")
+                missing.append("realtime")
+            if not core_bridge_available:
+                blocking_reasons.append("realtime_transcription_core_bridge_unavailable")
+                missing.append("core_bridge")
+            if self.config.realtime.direct_tools_allowed:
+                blocking_reasons.append("realtime_direct_tools_forbidden")
+
+        elif effective_mode == "realtime_speech_core_bridge":
+            if self.config.realtime.mode != "speech_to_speech_core_bridge":
+                blocking_reasons.append("realtime_speech_mode_mismatch")
+            if not self.config.realtime.speech_to_speech_enabled:
+                blocking_reasons.append("realtime_speech_disabled")
+                missing.append("speech_to_speech")
+            if not self.config.realtime.audio_output_from_realtime:
+                blocking_reasons.append("realtime_speech_audio_output_disabled")
+                missing.append("realtime_audio_output")
+            if not realtime_available:
+                blocking_reasons.append("realtime_speech_provider_unavailable")
+                missing.append("realtime")
+            if not core_bridge_available:
+                blocking_reasons.append("realtime_speech_core_bridge_unavailable")
+                missing.append("core_bridge")
+            if self.config.realtime.direct_tools_allowed:
+                blocking_reasons.append("realtime_direct_tools_forbidden")
+
+        elif effective_mode == "manual_only":
+            if not self.config.manual_input_enabled:
+                blocking_reasons.append("manual_input_disabled")
+                missing.append("manual_input")
+            if not voice_available:
+                missing.append("voice")
+
+        else:
+            blocking_reasons.append("unsupported_voice_mode")
+
+        if contradictions and not blocking_reasons:
+            warnings.extend(contradictions)
+        missing = self._dedupe_strings(missing)
+        blocking_reasons = self._dedupe_strings(blocking_reasons)
+        warnings = self._dedupe_strings(warnings)
+        contradictions = self._dedupe_strings(contradictions)
+
+        if effective_mode == "disabled":
+            status = "disabled"
+        elif blocking_reasons:
+            status = "blocked"
+        elif warnings:
+            status = "degraded"
+        else:
+            status = "ready"
+
+        provider_availability = {
+            "voice": {
+                "configured": bool(availability.provider_configured),
+                "enabled": bool(self.config.enabled),
+                "available": voice_available,
+                "active": self.state_controller.snapshot().state.value != "disabled",
+                "mocked": bool(availability.mock_provider_active),
+                "unavailable_reason": availability.unavailable_reason,
+                "blocked_by_config": not self.config.enabled,
+                "blocked_by_missing_provider": not bool(availability.provider_configured),
+            },
+            "tts": {
+                "configured": bool(self.openai_config.enabled),
+                "enabled": bool(self.config.spoken_responses_enabled),
+                "available": tts_available,
+                "active": bool(self.last_synthesis_result),
+                "mocked": bool(getattr(self.provider, "is_mock", False)),
+                "unavailable_reason": None if tts_available else self._tts_unavailable_reason(),
+                "blocked_by_config": not self.config.spoken_responses_enabled,
+                "blocked_by_missing_provider": not self.openai_config.enabled
+                or not bool(self.openai_config.api_key),
+            },
+            "stt": {
+                "configured": bool(self.openai_config.enabled),
+                "enabled": bool(self.config.enabled),
+                "available": stt_available,
+                "active": False,
+                "mocked": bool(getattr(self.provider, "is_mock", False)),
+                "unavailable_reason": None if stt_available else self._stt_unavailable_reason(),
+                "blocked_by_config": not self.config.enabled,
+                "blocked_by_missing_provider": not self.openai_config.enabled
+                or not bool(self.openai_config.api_key),
+            },
+            "playback": {
+                **dict(playback_availability),
+                "configured": bool(self.config.playback.provider),
+                "enabled": bool(self.config.playback.enabled),
+                "active": self._active_playback() is not None,
+                "mocked": bool(getattr(self.playback_provider, "is_mock", False)),
+                "blocked_by_config": not self.config.playback.enabled,
+                "blocked_by_missing_provider": not bool(
+                    playback_availability.get("available")
+                )
+                and bool(self.config.playback.enabled),
+            },
+            "capture": {
+                **dict(capture_availability),
+                "configured": bool(self.config.capture.provider),
+                "enabled": bool(self.config.capture.enabled),
+                "available": capture_available,
+                "active": self._active_capture() is not None,
+                "mocked": bool(getattr(self.capture_provider, "is_mock", False)),
+                "blocked_by_config": not self.config.capture.enabled,
+            },
+            "wake": {
+                **dict(wake_availability),
+                "configured": bool(self.config.wake.provider),
+                "enabled": bool(self.config.wake.enabled),
+                "available": wake_available,
+                "active": bool(self.wake_monitoring_active),
+                "mocked": bool(getattr(self.wake_provider, "is_mock", False)),
+                "blocked_by_config": not self.config.wake.enabled,
+            },
+            "vad": {
+                **dict(vad_availability),
+                "configured": bool(self.config.vad.provider),
+                "enabled": bool(self.config.vad.enabled),
+                "available": vad_available,
+                "active": self.active_vad_session is not None,
+                "mocked": bool(getattr(self.vad_provider, "is_mock", False)),
+                "blocked_by_config": not self.config.vad.enabled,
+            },
+            "realtime": {
+                **dict(realtime_availability),
+                "configured": bool(self.config.realtime.provider),
+                "enabled": bool(self.config.realtime.enabled),
+                "available": realtime_available,
+                "active": self.active_realtime_session is not None,
+                "mocked": bool(getattr(self.realtime_provider, "is_mock", False)),
+                "direct_tools_allowed": False,
+                "direct_action_tools_exposed": False,
+                "core_bridge_required": True,
+                "blocked_by_config": not self.config.realtime.enabled,
+            },
+            "core_bridge": {
+                "configured": self.core_bridge is not None,
+                "enabled": True,
+                "available": core_bridge_available,
+                "active": False,
+                "mocked": False,
+                "unavailable_reason": None
+                if core_bridge_available
+                else "core_bridge_unavailable",
+            },
+            "trust_confirmation": {
+                "configured": True,
+                "enabled": bool(self.config.confirmation.enabled),
+                "available": trust_confirmation_available,
+                "active": False,
+                "mocked": False,
+                "unavailable_reason": None
+                if trust_confirmation_available
+                else "confirmation_disabled",
+            },
+        }
+
+        return VoiceRuntimeModeReadiness(
+            selected_mode=selected_mode,
+            effective_mode=effective_mode,
+            status=status,
+            ready=status == "ready",
+            degraded=status == "degraded",
+            blocked=status == "blocked",
+            disabled=status == "disabled",
+            required_config_flags=required_config_flags,
+            required_providers=required_providers,
+            required_subcomponents=required_subcomponents,
+            forbidden_subcomponents=forbidden_subcomponents,
+            expected_subsystem_posture=expected_posture,
+            missing_requirements=missing,
+            contradictory_settings=contradictions,
+            blocking_reasons=blocking_reasons,
+            warnings=warnings,
+            user_facing_summary=self._runtime_mode_user_summary(
+                effective_mode, status, blocking_reasons, warnings
+            ),
+            next_fix=self._runtime_mode_next_fix(effective_mode, blocking_reasons),
+            provider_availability=provider_availability,
+            live_playback_available=live_playback_available,
+            artifact_persistence_enabled=bool(self.config.openai.persist_tts_outputs),
+            artifact_persistence_counts_as_live_playback=False,
+            core_bridge_available=core_bridge_available,
+            trust_confirmation_available=trust_confirmation_available,
+            truth_flags={
+                "command_authority": "stormhelm_core",
+                "openai_voice_not_command_authority": True,
+                "wake_detection_local_only": True,
+                "cloud_wake_detection": False,
+                "always_listening": False,
+                "continuous_listening": False,
+                "direct_realtime_tools_allowed": False,
+                "direct_realtime_action_tools_exposed": False,
+                "playback_does_not_claim_user_heard": True,
+                "artifact_persistence_is_not_live_playback": True,
+            },
+        )
+
+    def _runtime_mode_name(self, mode: str | None) -> str:
+        normalized = str(mode or "disabled").strip().lower()
+        aliases = {
+            "manual": "manual_only",
+            "manual_voice": "manual_only",
+            "ptt": "push_to_talk",
+            "wake": "wake_supervised",
+            "wake_loop": "wake_supervised",
+            "realtime": "realtime_transcription",
+            "realtime_speech": "realtime_speech_core_bridge",
+            "speech_to_speech_core_bridge": "realtime_speech_core_bridge",
+        }
+        normalized = aliases.get(normalized, normalized)
+        if normalized in {
+            "disabled",
+            "manual_only",
+            "output_only",
+            "push_to_talk",
+            "wake_supervised",
+            "realtime_transcription",
+            "realtime_speech_core_bridge",
+        }:
+            return normalized
+        return "unsupported"
+
+    def _runtime_mode_requirements(self, mode: str) -> dict[str, Any]:
+        base = {
+            "required_config_flags": ["voice.enabled"],
+            "required_providers": [],
+            "required_subcomponents": ["voice"],
+            "forbidden_subcomponents": [],
+            "expected_subsystem_posture": {},
+        }
+        table: dict[str, dict[str, Any]] = {
+            "disabled": {
+                **base,
+                "required_config_flags": [],
+                "required_subcomponents": [],
+                "expected_subsystem_posture": {
+                    "capture": "disabled",
+                    "wake": "disabled",
+                    "post_wake": "disabled",
+                    "vad": "disabled",
+                    "realtime": "disabled",
+                    "playback": "disabled",
+                },
+            },
+            "manual_only": {
+                **base,
+                "required_config_flags": ["voice.enabled", "voice.manual_input_enabled"],
+                "required_subcomponents": ["voice", "manual_input"],
+                "forbidden_subcomponents": ["capture", "wake", "post_wake", "realtime"],
+                "expected_subsystem_posture": {
+                    "capture": "disabled",
+                    "wake": "disabled",
+                    "post_wake": "disabled",
+                    "realtime": "disabled",
+                },
+            },
+            "output_only": {
+                **base,
+                "required_config_flags": [
+                    "voice.enabled",
+                    "voice.spoken_responses_enabled",
+                    "voice.playback.enabled",
+                ],
+                "required_providers": ["openai_tts", "local_playback"],
+                "required_subcomponents": [
+                    "voice",
+                    "openai_tts",
+                    "spoken_responses",
+                    "live_playback",
+                ],
+                "forbidden_subcomponents": [
+                    "capture",
+                    "wake",
+                    "post_wake",
+                    "vad",
+                    "realtime",
+                ],
+                "expected_subsystem_posture": {
+                    "capture": "disabled",
+                    "wake": "disabled",
+                    "post_wake": "disabled",
+                    "vad": "disabled",
+                    "realtime": "disabled",
+                    "playback": "enabled_available",
+                },
+            },
+            "push_to_talk": {
+                **base,
+                "required_config_flags": [
+                    "voice.enabled",
+                    "voice.capture.enabled",
+                ],
+                "required_providers": ["openai_stt", "capture"],
+                "required_subcomponents": ["voice", "capture", "openai_stt"],
+                "forbidden_subcomponents": ["wake", "post_wake", "realtime"],
+                "expected_subsystem_posture": {
+                    "capture": "enabled_available",
+                    "wake": "disabled",
+                    "post_wake": "disabled",
+                    "realtime": "disabled",
+                },
+            },
+            "wake_supervised": {
+                **base,
+                "required_config_flags": [
+                    "voice.enabled",
+                    "voice.wake.enabled",
+                    "voice.post_wake.enabled",
+                    "voice.capture.enabled",
+                ],
+                "required_providers": ["local_wake", "capture", "openai_stt"],
+                "required_subcomponents": [
+                    "voice",
+                    "wake",
+                    "post_wake",
+                    "capture",
+                    "openai_stt",
+                    "core_bridge",
+                ],
+                "forbidden_subcomponents": ["realtime"],
+                "expected_subsystem_posture": {
+                    "wake": "enabled_available",
+                    "post_wake": "enabled",
+                    "capture": "enabled_available",
+                    "realtime": "disabled",
+                },
+            },
+            "realtime_transcription": {
+                **base,
+                "required_config_flags": [
+                    "voice.enabled",
+                    "voice.realtime.enabled",
+                    "voice.realtime.core_bridge_required",
+                ],
+                "required_providers": ["realtime"],
+                "required_subcomponents": ["voice", "realtime", "core_bridge"],
+                "forbidden_subcomponents": ["direct_realtime_tools"],
+                "expected_subsystem_posture": {
+                    "realtime": "enabled_available",
+                    "direct_realtime_tools": "disabled",
+                },
+            },
+            "realtime_speech_core_bridge": {
+                **base,
+                "required_config_flags": [
+                    "voice.enabled",
+                    "voice.realtime.enabled",
+                    "voice.realtime.speech_to_speech_enabled",
+                    "voice.realtime.audio_output_from_realtime",
+                    "voice.realtime.core_bridge_required",
+                ],
+                "required_providers": ["realtime"],
+                "required_subcomponents": [
+                    "voice",
+                    "realtime",
+                    "realtime_audio_output",
+                    "core_bridge",
+                ],
+                "forbidden_subcomponents": ["direct_realtime_tools"],
+                "expected_subsystem_posture": {
+                    "realtime": "enabled_available",
+                    "direct_realtime_tools": "disabled",
+                    "core_bridge": "required",
+                },
+            },
+        }
+        return table.get(mode, base)
+
+    def _runtime_mode_user_summary(
+        self,
+        mode: str,
+        status: str,
+        blocking_reasons: list[str],
+        warnings: list[str],
+    ) -> str:
+        if status == "disabled":
+            return "Voice is disabled."
+        if "output_voice_configured_but_playback_disabled" in blocking_reasons:
+            return "Output voice is enabled, but local playback is disabled."
+        if "output_voice_configured_but_playback_unavailable" in blocking_reasons:
+            return "Output voice is enabled, but local playback is unavailable."
+        if "output_voice_configured_but_tts_unavailable" in blocking_reasons:
+            return "Output voice is enabled, but OpenAI TTS is unavailable."
+        if mode == "output_only" and status == "ready":
+            return "Output voice is ready: OpenAI TTS and local playback are available."
+        if status == "blocked":
+            return f"{self._runtime_mode_title(mode)} mode is blocked."
+        if status == "degraded":
+            if warnings:
+                return f"{self._runtime_mode_title(mode)} mode has contradictory settings."
+            return f"{self._runtime_mode_title(mode)} mode is degraded."
+        return f"{self._runtime_mode_title(mode)} mode is ready."
+
+    def _runtime_mode_title(self, mode: str) -> str:
+        return str(mode or "voice").replace("_", " ").title()
+
+    def _runtime_mode_next_fix(
+        self, mode: str, blocking_reasons: list[str]
+    ) -> str | None:
+        if "voice_disabled" in blocking_reasons:
+            return "Enable voice.enabled."
+        if "output_voice_configured_but_playback_disabled" in blocking_reasons:
+            return "Enable voice.playback.enabled for output-only live speech."
+        if "output_voice_configured_but_playback_unavailable" in blocking_reasons:
+            return "Fix local playback availability for output-only live speech."
+        if "output_voice_configured_but_tts_unavailable" in blocking_reasons:
+            return "Enable OpenAI TTS configuration for output-only speech."
+        if "push_to_talk_capture_disabled" in blocking_reasons:
+            return "Enable voice.capture.enabled for push-to-talk."
+        if "push_to_talk_capture_unavailable" in blocking_reasons:
+            return "Fix capture provider availability for push-to-talk."
+        if "wake_supervised_wake_unavailable" in blocking_reasons:
+            return "Enable and configure the local wake provider."
+        if "wake_supervised_post_wake_unavailable" in blocking_reasons:
+            return "Enable post-wake listen and its dev/live gate."
+        if "realtime_direct_tools_forbidden" in blocking_reasons:
+            return "Set voice.realtime.direct_tools_allowed=false."
+        if mode.startswith("realtime") and any("core_bridge" in item for item in blocking_reasons):
+            return "Attach the Stormhelm Core bridge before starting Realtime voice."
+        return None
+
+    def _tts_unavailable_reason(self) -> str:
+        if not self.config.spoken_responses_enabled:
+            return "spoken_responses_disabled"
+        if not self.openai_config.enabled:
+            return "openai_disabled"
+        if not self.openai_config.api_key:
+            return "api_key_missing"
+        if not self.availability.tts_allowed:
+            return self.availability.unavailable_reason or "tts_unavailable"
+        return "tts_unavailable"
+
+    def _stt_unavailable_reason(self) -> str:
+        if not self.openai_config.enabled:
+            return "openai_disabled"
+        if not self.openai_config.api_key:
+            return "api_key_missing"
+        if not self.availability.stt_allowed:
+            return self.availability.unavailable_reason or "stt_unavailable"
+        return "stt_unavailable"
+
     def readiness_report(self) -> VoiceReadinessReport:
         availability = self.availability
+        runtime_mode = self.runtime_mode_readiness_report()
         capture_availability = self._capture_provider_availability()
         playback_availability = self._playback_provider_availability()
         current_phase = self.pipeline_stage_summary().stage
@@ -6289,8 +6868,14 @@ class VoiceService:
         ):
             blocking_reasons.append(availability.unavailable_reason)
 
+        if runtime_mode.blocked and runtime_mode.effective_mode != "manual_only":
+            blocking_reasons.extend(runtime_mode.blocking_reasons)
+        if runtime_mode.degraded and runtime_mode.effective_mode != "manual_only":
+            warnings.extend(runtime_mode.warnings)
+
         if not self.config.capture.enabled:
-            warnings.append("capture_disabled")
+            if runtime_mode.effective_mode != "output_only":
+                warnings.append("capture_disabled")
         elif not capture_ready:
             reason = str(
                 capture_availability.get("unavailable_reason") or "provider_unavailable"
@@ -6307,13 +6892,21 @@ class VoiceService:
         if not self.config.spoken_responses_enabled:
             warnings.append("spoken_responses_disabled")
         if not self.config.playback.enabled:
-            warnings.append("playback_disabled")
+            if runtime_mode.effective_mode == "output_only":
+                blocking_reasons.append("output_voice_configured_but_playback_disabled")
+            else:
+                warnings.append("playback_disabled")
         elif not playback_ready:
             reason = str(
                 playback_availability.get("unavailable_reason")
                 or "provider_unavailable"
             )
-            warnings.append(f"playback_{reason}")
+            if runtime_mode.effective_mode == "output_only":
+                blocking_reasons.append(
+                    "output_voice_configured_but_playback_unavailable"
+                )
+            else:
+                warnings.append(f"playback_{reason}")
         if availability.mock_provider_active or bool(
             getattr(self.capture_provider, "is_mock", False)
         ):
@@ -6332,10 +6925,12 @@ class VoiceService:
             blocking_reasons=blocking_reasons,
             warnings=warnings,
             capture_ready=capture_ready,
+            runtime_mode=runtime_mode,
         )
         next_setup_action = self._readiness_next_setup_action(
             blocking_reasons=blocking_reasons,
             warnings=warnings,
+            runtime_mode=runtime_mode,
         )
         return VoiceReadinessReport(
             overall_status=overall_status,
@@ -6361,6 +6956,7 @@ class VoiceService:
             warnings=warnings,
             next_setup_action=next_setup_action,
             user_facing_reason=user_reason,
+            runtime_mode=runtime_mode.to_dict(),
             truth_flags=self._voice_truth_flags(),
         )
 
@@ -6807,6 +7403,7 @@ class VoiceService:
         post_wake_listen = self._post_wake_listen_status_snapshot()
         wake_supervised_loop = self._wake_supervised_loop_status_snapshot()
         realtime_status = self._realtime_status_snapshot()
+        runtime_mode = dict(readiness.get("runtime_mode") or {})
         return {
             "phase": "voice0",
             "current_phase": "voice5",
@@ -6842,6 +7439,7 @@ class VoiceService:
             "legacy_wake_word_enabled": self.config.wake_word_enabled,
             "spoken_responses_enabled": self.config.spoken_responses_enabled,
             "manual_input_enabled": self.config.manual_input_enabled,
+            "runtime_mode": runtime_mode,
             "mock_provider_active": self.availability.mock_provider_active,
             "last_error": {
                 "code": self.last_error.get("code") or state.error_code,
@@ -7746,6 +8344,8 @@ class VoiceService:
             }
         ):
             return "misconfigured"
+        if any(reason.startswith("output_voice_configured_but_") for reason in blocking_reasons):
+            return "misconfigured"
         if manual_ready or capture_ready:
             return "degraded" if blocking_reasons or warnings else "ready"
         return "unavailable" if blocking_reasons else "degraded"
@@ -7757,9 +8357,13 @@ class VoiceService:
         blocking_reasons: list[str],
         warnings: list[str],
         capture_ready: bool,
+        runtime_mode: VoiceRuntimeModeReadiness | None = None,
     ) -> str:
         if overall_status == "disabled":
             return "Voice is disabled."
+        if runtime_mode is not None and runtime_mode.effective_mode != "manual_only":
+            if runtime_mode.status in {"ready", "blocked", "degraded"}:
+                return runtime_mode.user_facing_summary
         if "api_key_missing" in blocking_reasons:
             return "OpenAI is not configured."
         if "openai_disabled" in blocking_reasons:
@@ -7779,10 +8383,20 @@ class VoiceService:
         return "Voice readiness is degraded."
 
     def _readiness_next_setup_action(
-        self, *, blocking_reasons: list[str], warnings: list[str]
+        self,
+        *,
+        blocking_reasons: list[str],
+        warnings: list[str],
+        runtime_mode: VoiceRuntimeModeReadiness | None = None,
     ) -> str | None:
         if "voice_disabled" in blocking_reasons:
             return "Enable voice in configuration."
+        if (
+            runtime_mode is not None
+            and runtime_mode.effective_mode != "manual_only"
+            and runtime_mode.next_fix
+        ):
+            return runtime_mode.next_fix
         if "api_key_missing" in blocking_reasons:
             return "Configure an OpenAI API key."
         if "openai_disabled" in blocking_reasons:
@@ -8857,6 +9471,7 @@ class VoiceService:
             metadata=request_metadata,
             allowed_to_play=False,
             blocked_reason=blocked_reason,
+            data=audio_output.data if audio_output is not None else None,
         )
 
     def _playback_request_block_reason(
@@ -9206,9 +9821,17 @@ class VoiceService:
         )
 
     def _transition_to_speaking(self, request: VoicePlaybackRequest) -> None:
-        if self.state_controller.snapshot().state == VoiceState.SPEAKING:
+        current_state = self.state_controller.snapshot().state
+        if current_state == VoiceState.SPEAKING:
             return
         try:
+            if current_state == VoiceState.DORMANT:
+                self.state_controller.transition_to(
+                    VoiceState.SPEAKING_READY,
+                    event_id=self._last_event_id(),
+                    turn_id=request.turn_id,
+                    source="playback",
+                )
             self.state_controller.transition_to(
                 VoiceState.SPEAKING,
                 event_id=self._last_event_id(),

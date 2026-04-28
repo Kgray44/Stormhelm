@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -100,6 +101,10 @@ def build_command_usability_corpus(*, min_cases: int = 1000) -> list[CommandEval
             expected_subsystem = blueprint.subsystem
             expected_tools = blueprint.tools
             expected_target_slots = dict(blueprint.target_slots or {})
+            active_expectation = _active_owner_expectation_for_style(blueprint, style, active_request_state)
+            if active_expectation is not None:
+                expected_route_family, expected_subsystem, expected_tools = active_expectation
+                expected_target_slots = {}
             expected_clarification = (
                 blueprint.clarification
                 if blueprint.clarification is not None and style not in {"deictic", "follow_up", "ambiguous"}
@@ -115,8 +120,12 @@ def build_command_usability_corpus(*, min_cases: int = 1000) -> list[CommandEval
                 expected_tools = ()
                 expected_target_slots = {}
                 expected_clarification = "expected"
+            elif style == "ambiguous" and _active_state_has_native_owner(active_request_state):
+                expected_clarification = "none"
             elif style == "follow_up" and blueprint.route_family == "browser_destination":
                 expected_target_slots = {"destination_name": "Stormhelm docs"}
+            elif style in {"confirm", "correction"}:
+                expected_target_slots = {}
             elif _expects_native_clarification(blueprint, style):
                 expected_tools = ()
                 expected_target_slots = {}
@@ -203,6 +212,8 @@ def build_command_usability_corpus(*, min_cases: int = 1000) -> list[CommandEval
 def _approval_expectation(blueprint: _Blueprint, style: str) -> str:
     if blueprint.approval != "not_expected":
         return blueprint.approval
+    if style == "confirm" and _has_pending_confirmation(_request_state_for_style(blueprint, style)):
+        return "allowed"
     if blueprint.route_family == "discord_relay" and style in {"deictic", "follow_up", "ambiguous"}:
         return "allowed"
     if _expects_context_clarification(blueprint, style, active_request_state=_request_state_for_style(blueprint, style)):
@@ -303,15 +314,37 @@ def _context_for_style(blueprint: _Blueprint, style: str) -> dict[str, Any]:
 
 def _request_state_for_style(blueprint: _Blueprint, style: str) -> dict[str, Any]:
     if blueprint.active_request_state:
-        return dict(blueprint.active_request_state)
+        state = deepcopy(blueprint.active_request_state)
+        if style in {"follow_up", "confirm", "correction", "ambiguous", "deictic"}:
+            parameters = state.setdefault("parameters", {})
+            if isinstance(parameters, dict):
+                parameters.setdefault("context_freshness", "current")
+                parameters.setdefault("context_reusable", True)
+                family = str(state.get("family") or "").strip().lower()
+                if family == "maintenance":
+                    parameters.setdefault("source_case", "maintenance")
+                    parameters.setdefault("tool_name", "maintenance_action")
+                    parameters.setdefault("target", state.get("subject") or "maintenance")
+                if style == "confirm":
+                    parameters.setdefault("request_stage", "awaiting_confirmation")
+                    parameters.setdefault("pending_preview", {"preview_id": f"{blueprint.key}-preview", "source_case": blueprint.key})
+                elif style == "correction":
+                    parameters.setdefault("request_stage", "preview")
+                    parameters.setdefault("previous_choice", _previous_choice_for_blueprint(blueprint))
+                    parameters.setdefault("alternate_target", _alternate_target_for_blueprint(blueprint))
+                else:
+                    parameters.setdefault("request_stage", "preview")
+        return state
     if style in {"follow_up", "confirm", "correction"}:
         parameters: dict[str, Any] = {
             "source_case": blueprint.key,
             "request_stage": "awaiting_confirmation" if style == "confirm" else "preview",
             "context_freshness": "current",
+            "context_reusable": True,
         }
         if blueprint.tools:
             parameters["tool_name"] = blueprint.tools[0]
+        parameters.update(_target_parameters_for_blueprint(blueprint))
         if blueprint.key.startswith("software_control_"):
             parameters["operation_type"] = blueprint.key.removeprefix("software_control_")
             parameters["target_name"] = _software_target_for_blueprint(blueprint.canonical)
@@ -328,6 +361,66 @@ def _request_state_for_style(blueprint: _Blueprint, style: str) -> dict[str, Any
             "parameters": parameters,
         }
     return {}
+
+
+def _target_parameters_for_blueprint(blueprint: _Blueprint) -> dict[str, Any]:
+    if blueprint.route_family == "browser_destination":
+        destination = str((blueprint.target_slots or {}).get("destination_name") or "").strip()
+        if destination:
+            return {"destination_name": destination, "url": f"https://www.{destination}.com"}
+        url = _first_url_like_token(blueprint.canonical)
+        return {"url": url} if url else {}
+    if blueprint.route_family == "file":
+        path = _first_path_like_token(blueprint.canonical)
+        return {"path": path} if path else {}
+    if blueprint.route_family == "discord_relay":
+        return {"destination_alias": "Baby", "payload_hint": "selected_text"}
+    if blueprint.route_family == "workspace_operations":
+        if blueprint.key == "workspace_rename":
+            return {"new_name": "Packaging Notes"}
+        if blueprint.key == "workspace_tag":
+            return {"tags": ["packaging"]}
+    if blueprint.route_family == "routine":
+        if blueprint.key == "trusted_hook_register":
+            return {"hook_name": "build-check", "path": r"C:\Stormhelm\scripts\check.ps1"}
+        if blueprint.key == "trusted_hook_execute":
+            return {"hook_name": "build-check"}
+    return {}
+
+
+def _first_url_like_token(text: str) -> str:
+    for token in text.split():
+        candidate = token.strip(".,;:!?()[]{}<>\"'")
+        if candidate.startswith(("http://", "https://")):
+            return candidate
+    return ""
+
+
+def _first_path_like_token(text: str) -> str:
+    for token in text.split():
+        candidate = token.strip(".,;:!?()[]{}<>\"'")
+        if ":\\" in candidate or candidate.startswith(("/", ".\\")):
+            return candidate
+    return ""
+
+
+def _active_owner_expectation_for_style(
+    blueprint: _Blueprint,
+    style: str,
+    active_request_state: dict[str, Any],
+) -> tuple[str, str, tuple[str, ...]] | None:
+    if style not in {"follow_up", "ambiguous", "correction"}:
+        return None
+    active_family = str(active_request_state.get("family") or "").strip().lower()
+    if not active_family or active_family in {"generic_provider", "unsupported", "context_clarification"}:
+        return None
+    if active_family == blueprint.route_family or blueprint.route_family == "trust_approvals":
+        return None
+    parameters = active_request_state.get("parameters") if isinstance(active_request_state.get("parameters"), dict) else {}
+    tool_name = str(parameters.get("tool_name") or "").strip()
+    if active_family == "maintenance":
+        return ("maintenance", "maintenance", (tool_name or "maintenance_action",))
+    return None
 
 
 def _previous_choice_for_blueprint(blueprint: _Blueprint) -> str:
@@ -382,7 +475,7 @@ def _context_metadata_for_style(
     expected_prior_family = str(active_request_state.get("family") or "") if _active_state_has_native_owner(active_request_state) else ""
     expected_prior_tool = str(parameters.get("tool_name") or (expected_tools[0] if expected_tools else ""))
     expected_alternate_target = str(parameters.get("alternate_target") or "")
-    expected_confirmation_state = _confirmation_state(active_request_state)
+    expected_confirmation_state = _confirmation_state(active_request_state) if style == "confirm" else ""
     seeded_required = lane in {
         "seeded_context_binding",
         "real_multiturn_followup",

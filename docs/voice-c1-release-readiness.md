@@ -1,6 +1,6 @@
 # Stormhelm Voice C1 Release Readiness
 
-Voice-C1 consolidates the implemented Voice-0 through Voice-20 stack into a reviewable release-readiness record. It does not add voice capability. It records what exists, how it is gated, how authority is preserved, what can be dogfooded, and what still needs live-provider validation.
+Voice-C1 consolidates the implemented Voice-0 through Voice-20 stack into a reviewable release-readiness record. Voice-I1 tightens runtime mode coherence on top of that stack. Neither phase adds voice command authority; they record what exists, how it is gated, how authority is preserved, what can be dogfooded, and what still needs live-provider validation.
 
 Current posture:
 
@@ -8,6 +8,7 @@ Current posture:
 - Full regression is not repo-green: current known baseline is `55 failed / 1202 passed`, with the known failures in non-voice planner/orchestrator/routing areas.
 - Voice remains disabled by default. Live OpenAI, local capture, local wake, playback, and Realtime paths require explicit configuration or opt-in smoke testing.
 - OpenAI may hear bounded active-session audio and may speak approved/gated text. Stormhelm Core remains command authority.
+- Runtime mode readiness now reports whether the selected mode is ready, degraded, blocked, or disabled, with exact next-fix guidance.
 
 ## Phase Inventory
 
@@ -17,7 +18,7 @@ Current posture:
 | Voice-1 manual turn | Manual transcript enters existing Core bridge as voice-originated turn. | `src/stormhelm/core/voice/service.py`, `src/stormhelm/core/voice/bridge.py` | `tests/test_voice_manual_turn.py`, `tests/test_voice_core_bridge_contracts.py` | Voice off; manual flag true | Core/orchestrator | Transcript routes through Core. | Safe for dev use. |
 | Voice-2 STT bridge | Controlled bounded audio can be transcribed then routed through VoiceTurn/Core. | `src/stormhelm/core/voice/providers.py`, `service.py` | `tests/test_voice_audio_turn.py`, `tests/test_voice_stt_provider.py` | Off | OpenAI STT when enabled | STT produces transcript only. | Mock-tested; live smoke required. |
 | Voice-3 TTS | Core-approved text can produce controlled speech artifact. | `speech_renderer.py`, `providers.py`, `service.py` | `tests/test_voice_tts_provider.py`, `tests/test_voice_tts_from_turn_result.py` | Off | OpenAI TTS when enabled | TTS speaks approved text only. | Mock-tested; live smoke required. |
-| Voice-4 playback | Playback and stop controls behind provider gates. | `providers.py`, `service.py` | `tests/test_voice_playback_service.py`, `tests/test_voice_playback_provider.py` | Off | Local playback provider | Playback state is not proof user heard audio. | Mock/stub safe. |
+| Voice-4 playback | Playback and stop controls behind provider gates. Voice-LP1 adds real local MP3/WAV playback on Windows through the local provider while preserving mock/unavailable behavior. | `providers.py`, `service.py` | `tests/test_voice_playback_service.py`, `tests/test_voice_playback_provider.py` | Off | Local playback provider | Playback state is not proof user heard audio. | Mock-tested; local smoke required. |
 | Voice-5 push-to-talk | Explicit start/stop/cancel/submit capture boundary. | `core/api/app.py`, `service.py` | `tests/test_voice_capture_service.py`, `tests/test_voice_bridge_controls.py` | Off | Local capture if enabled | Capture is not command authority. | Bounded, dev-gated. |
 | Voice-6A capture provider | Guarded local capture provider boundary. | `providers.py`, `service.py` | `tests/test_voice_capture_provider.py`, `tests/test_voice_capture_service.py` | Off | Local mic backend if configured | Real mic never runs without explicit capture. | Needs live smoke. |
 | Voice-6B UI controls | Ghost/Deck push-to-talk controls mapped to backend actions. | `src/stormhelm/ui/bridge.py`, `client.py`, `voice_surface.py` | `tests/test_voice_bridge_controls.py`, `tests/test_voice_ui_state_payload.py` | UI visible only from backend state | Core API | UI does not invent voice state. | Backend-owned. |
@@ -35,6 +36,7 @@ Current posture:
 | Voice-18 Realtime transcription | Disabled OpenAI Realtime transcription bridge with partial/final transcripts. | `providers.py`, `service.py`, `core/api/app.py` | `tests/test_voice_realtime_transcription_bridge.py` | Off | OpenAI Realtime if enabled | Partial status only; final transcript routes through Core. | Mock-tested; live smoke needed. |
 | Voice-19 Realtime speech | Speech-to-speech surface through strict `stormhelm_core_request` bridge. | `models.py`, `providers.py`, `service.py`, `ui/voice_surface.py` | `tests/test_voice_realtime_speech_core_bridge.py` | Off | OpenAI Realtime if enabled | Realtime is ears/mouth; Core is command authority. | Mock-tested; live smoke needed. |
 | Voice-20 release hardening | Release evaluator, latency diagnostics, fallbacks, redaction, authority tripwires, event/UI truth. | `evaluation.py`, `service.py`, tests | `tests/test_voice_release_evaluation.py`, `tests/test_voice_latency_instrumentation.py`, `tests/test_voice_release_hardening.py` | Diagnostic | Mocks by default | Hardening only; no new authority. | Release-readiness evidence. |
+| Voice-I1 runtime integration | Mode coherence/readiness, provider aggregation, output-only live playback expectations, smoke helper, and concise Ghost/Deck status. | `models.py`, `service.py`, `ui/voice_surface.py`, `scripts/voice_output_smoke.py` | `tests/test_voice_runtime_modes.py` | Diagnostic/status only | Depends on selected mode | Reports mode blockers; does not enable new powers. | Runtime truth tightened. |
 
 ## Config Matrix
 
@@ -43,10 +45,11 @@ Current posture:
 | `voice.enabled` | `false` | Voice stack inert except diagnostics/manual config state. | Set true in config/env. | Always-listening, mic capture, or command authority. |
 | `voice.provider` | `openai` | Provider name only. | Provider-specific gates and API key. | Provider is active or trusted to route commands. |
 | `voice.mode` | `disabled` | No automatic audio mode. | Explicit mode selection by config. | Realtime or continuous listening. |
+| Runtime mode readiness | Derived from `voice.mode` plus provider state. | Reports disabled/ready/degraded/blocked with next fix. | `VoiceService.runtime_mode_readiness_report()`. | A provider being active, a route being approved, or a command being executed. |
 | `voice.manual_input_enabled` | `true` | Manual transcript path exists while voice runtime stays off. | Use manual voice API/action. | Audio was captured. |
 | OpenAI STT | `gpt-4o-mini-transcribe`; bounded limits | No calls unless audio path enabled and submitted. | `OPENAI_API_KEY`, OpenAI enabled, voice/STT path enabled. | Command meaning, trust, approval, or execution. |
-| OpenAI TTS | `gpt-4o-mini-tts`, voice `cedar`, persistence off | No calls unless approved text is synthesized. | TTS config, OpenAI enabled, speech request. | Text generation authority or proof user heard audio. |
-| Playback | `enabled=false`, `provider=local`, dev gate false | No audio playback. | Playback enabled and provider available. | Core result mutation or user-heard proof. |
+| OpenAI TTS | `gpt-4o-mini-tts`, voice `onyx`, persistence off | No calls unless approved text is synthesized. | TTS config, OpenAI enabled, speech request. | Text generation authority or proof user heard audio. |
+| Playback | `enabled=false`, `provider=local`, dev gate false | No audio playback. | Playback enabled, local provider available, and `allow_dev_playback=true` for local trials. | Core result mutation, user-heard proof, or file-only fallback when playback was requested. |
 | Capture | `enabled=false`, `provider=local`, push-to-talk, persistence off | No mic capture. | Capture enabled, explicit start/stop/submit. | Wake, STT, or command execution. |
 | Wake | `enabled=false`, `provider=mock`, phrase `Stormhelm`, local backend unavailable | No monitoring. | Wake enabled plus allowed provider/backend. | Cloud wake, capture, STT, or Core routing. |
 | Post-wake listen | `enabled=false`, `8000ms`, auto capture/submit true | No listen window. | Accepted wake plus post-wake enabled. | Understanding, routing, or continuous listening. |
@@ -75,15 +78,27 @@ Current posture:
 | Core | Command meaning, routing, trust, task state, verification. | Stormhelm Core/planner/orchestrator/trust/task graph. | Voice never bypasses Core. |
 | Task/trust systems | Approval and task cancellation authority where applicable. | Existing trust/task APIs. | Voice may request routing only; no direct tool execution. |
 
+## Runtime Mode Matrix
+
+| Mode | Required posture | Forbidden/confusing posture | Readiness notes |
+|---|---|---|---|
+| `disabled` | `voice.enabled=false`. | None. | Safe default. |
+| `manual_only` | Manual input enabled and Core bridge available for routed turns. | No audio claim. | Manual transcript only. |
+| `output_only` | Voice enabled, spoken responses enabled, OpenAI TTS available, live playback enabled and available. | Capture, wake, post-wake, VAD, and Realtime should be disabled. | MP3 persistence is debug/artifact behavior and does not count as live speech. |
+| `push_to_talk` | Capture provider available and OpenAI STT available. | Wake/post-wake/Realtime should be disabled. | Capture remains explicit. |
+| `wake_supervised` | Local wake, post-wake listen, capture, STT, and Core bridge ready. | Realtime not required. | One bounded post-wake request only. |
+| `realtime_transcription` | Realtime transcription mode and Core bridge ready. | Direct Realtime tools. | Partial transcripts are status only; final transcripts route through Core. |
+| `realtime_speech_core_bridge` | Realtime speech mode, audio output, and Core bridge ready. | Direct Realtime tools or result strengthening. | Realtime is ears/mouth only. |
+
 ## Release Notes
 
 Implemented:
 
-- Typed voice foundation, manual voice turns, bounded audio STT, TTS artifacts, playback boundary, push-to-talk capture boundary, wake foundation/local wake boundary, wake-to-Ghost presentation, post-wake listen windows, VAD foundation, wake-driven loop, spoken confirmation, interruption/barge-in hardening, Realtime transcription bridge, Realtime speech-to-speech Core bridge, and Voice-20 release hardening.
+- Typed voice foundation, manual voice turns, bounded audio STT, TTS artifacts, playback boundary, push-to-talk capture boundary, wake foundation/local wake boundary, wake-to-Ghost presentation, post-wake listen windows, VAD foundation, wake-driven loop, spoken confirmation, interruption/barge-in hardening, Realtime transcription bridge, Realtime speech-to-speech Core bridge, Voice-20 release hardening, and Voice-I1 runtime mode coherence.
 
 Disabled by default:
 
-- Voice runtime, capture, playback, wake monitoring, post-wake listen, VAD, Realtime transcription, Realtime speech, live provider behavior, and persisted audio.
+- Voice runtime, capture, local playback, wake monitoring, post-wake listen, VAD, Realtime transcription, Realtime speech, live provider behavior, and persisted audio.
 
 Mock/fake-only or mostly mock-tested:
 
@@ -91,11 +106,12 @@ Mock/fake-only or mostly mock-tested:
 
 Real provider boundary present but not release-proven by default:
 
-- OpenAI STT, OpenAI TTS, OpenAI Realtime, local capture, local wake backend, local playback.
+- OpenAI STT, OpenAI TTS, OpenAI Realtime, local capture, local wake backend, local playback device behavior.
 
 Requires explicit configuration:
 
 - OpenAI credentials and provider enablement, voice runtime enablement, live capture/playback/wake providers, post-wake listen, VAD finalization, Realtime session mode, Realtime speech audio output, and live smoke-test flags.
+- Output-only live speech requires `voice.mode=output_only`, `spoken_responses_enabled=true`, OpenAI TTS availability, `voice.playback.enabled=true`, and local playback availability.
 
 Safe to dogfood:
 
@@ -104,7 +120,7 @@ Safe to dogfood:
 Should not be claimed release-ready yet:
 
 - Full repo regression, because the known baseline remains `55 failed / 1202 passed` outside the voice suite.
-- Live OpenAI voice, local microphone capture, local wake, local playback, and Realtime speech behavior until opt-in smoke tests run on the target machine.
+- Live OpenAI voice, local microphone capture, local wake, local playback device behavior, and Realtime speech behavior until opt-in smoke tests run on the target machine.
 - Continuous voice conversation, cloud wake, direct Realtime tools, unrestricted voice automation, and voice-driven direct task cancellation. These are not implemented.
 
 ## Opt-In Live Smoke Plan
@@ -120,6 +136,7 @@ All live smoke tests are skipped by default. Require an explicit flag such as `S
 | Local capture | Capture enabled, dev/live gate, mic permission. | Push-to-talk short utterance. | Capture starts/stops explicitly and produces bounded metadata. | Dormant capture or background streaming. |
 | Local wake | Wake enabled, local provider available, dev/live gate. | Say configured wake phrase only. | Local wake session/presentation created. | Dormant wake audio sent to OpenAI. |
 | Playback | Playback enabled and provider available. | Play generated smoke artifact. | Playback start/completion/failure reported truthfully. | Claim user heard audio. |
+| Output-only voice smoke | OpenAI TTS and playback configured, live flag if using real providers. | "Bearing acquired. Voice output test complete." | TTS bytes produced; local playback starts/completes or reports typed failure. | Capture/wake/VAD/Realtime start, raw bytes in status, artifact-only silent fallback. |
 
 Recommended live smoke guardrails:
 
@@ -190,6 +207,17 @@ Optional live smoke tests:
 $env:STORMHELM_VOICE_LIVE_SMOKE = "1"
 # Run only the explicit live smoke test module or marker after verifying provider config.
 .\.venv\Scripts\python.exe -m pytest -m voice_live_smoke -q
+```
+
+Output-only smoke helper:
+
+```powershell
+# Mock/fake by default: no OpenAI call and no sound.
+.\.venv\Scripts\python.exe scripts\voice_output_smoke.py
+
+# Opt-in live OpenAI TTS plus local playback.
+$env:STORMHELM_RUN_LIVE_VOICE_SMOKE = "1"
+.\.venv\Scripts\python.exe scripts\voice_output_smoke.py --live
 ```
 
 ## Dirty Worktree And Commit Hygiene

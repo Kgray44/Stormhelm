@@ -585,6 +585,27 @@ OpenAI-dependent latency targets should be measured but not made brittle early b
 - audit source records voice;
 - trust is not weakened.
 
+### Voice-LP1 Done When
+
+- real local playback provider is available behind explicit `voice.playback` gates;
+- generated TTS audio can be played through the configured local device without UI/Core direct playback;
+- normal tests use fake playback backends and do not play sound;
+- missing dependency/device cases report typed unavailable reasons;
+- transient/generated audio bytes are not logged in status or events;
+- playback failure preserves the TTS artifact/result;
+- stop-speaking can stop active provider-owned playback when the backend supports it;
+- playback never claims the user heard audio, mutates Core result state, executes tools, or bypasses trust.
+
+### Voice-I1 Done When
+
+- a typed runtime mode readiness report exists for `disabled`, `manual_only`, `output_only`, `push_to_talk`, `wake_supervised`, `realtime_transcription`, and `realtime_speech_core_bridge`;
+- output-only mode requires OpenAI TTS plus live playback and reports `output_voice_configured_but_playback_disabled` or `output_voice_configured_but_playback_unavailable` instead of implying artifact-only speech is live output;
+- capture, wake, post-wake, VAD, and Realtime stay off in output-only mode unless explicitly configured, and contradictory settings are surfaced;
+- provider readiness distinguishes configured, enabled, available, active, mocked, unavailable, blocked-by-config, and blocked-by-provider states;
+- Ghost/Deck/status expose the mode/readiness/next-fix summary without dashboard bloat or false authority claims;
+- smoke helpers are mock/fake by default and live provider tests require an explicit opt-in flag;
+- no voice authority, trust, confirmation, interruption, Realtime, wake, or privacy boundary is weakened.
+
 ### Voice-5 Done When
 
 - local wake provider works or mock/real provider seam exists;

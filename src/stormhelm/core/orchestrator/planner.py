@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import re
 from typing import Any
 
@@ -312,8 +313,11 @@ class DeterministicPlanner:
             **(workspace_context or {}),
             **(active_context or {}),
         }
+        planner_v2_input = normalized.raw_text or message
+        if self._operator_wrapper_browser_near_miss(message, normalized.normalized_text):
+            planner_v2_input = str(message or "")
         planner_v2_trace = self._planner_v2.plan(
-            normalized.raw_text or message,
+            planner_v2_input,
             surface_mode=surface_mode,
             active_module=active_module,
             active_context=planner_v2_context,
@@ -371,6 +375,7 @@ class DeterministicPlanner:
                 software_control_evaluation=software_control_evaluation,
                 screen_awareness_evaluation=screen_awareness_evaluation,
                 planner_v2_trace=planner_v2_trace,
+                learned_preferences=learned_preferences or {},
             )
             debug["semantic_parse_proposal"] = semantic.to_dict()
             return self._decision_from_semantic(
@@ -461,6 +466,7 @@ class DeterministicPlanner:
                 calculation_evaluation=calculation_evaluation,
                 software_control_evaluation=software_control_evaluation,
                 screen_awareness_evaluation=screen_awareness_evaluation,
+                learned_preferences=learned_preferences or {},
             )
             debug["semantic_parse_proposal"] = semantic.to_dict()
             return self._decision_from_semantic(
@@ -1861,6 +1867,15 @@ class DeterministicPlanner:
         text = re.sub(r"\s*--\s*quick\s+quick\s*$", "", text, flags=re.IGNORECASE)
         return self._repair_common_command_typos(text.strip(" ?"))
 
+    def _operator_wrapper_browser_near_miss(self, message: str, normalized_text: str) -> bool:
+        original = " ".join(str(message or "").split()).strip().lower()
+        if not re.match(r"^i\s+need\s+the\s+stormhelm\s+route\s+for\s+this\s*:", original):
+            return False
+        return bool(
+            re.search(r"\b(?:almost|nearly|sort of|kind of)\b.{0,32}\b(?:open|launch|navigate|go to)\b.{0,32}\bbrowser\b", normalized_text)
+            and re.search(r"\b(?:not exactly|not quite|but not|instead)\b", normalized_text)
+        )
+
     def _repair_common_command_typos(self, message: str) -> str:
         replacements = (
             (r"\bopne\b", "open"),
@@ -2024,6 +2039,7 @@ class DeterministicPlanner:
         software_control_evaluation: Any | None,
         screen_awareness_evaluation: ScreenPlannerEvaluation | None,
         planner_v2_trace: Any | None = None,
+        learned_preferences: dict[str, dict[str, object]] | None = None,
     ) -> SemanticParseProposal:
         family = decision.winner.route_family
         slots = self._route_spine_slots(decision)
@@ -2039,6 +2055,7 @@ class DeterministicPlanner:
             planner_v2_trace,
             decision,
             slots=slots,
+            learned_preferences=learned_preferences or {},
         )
         if planner_v2_proposal is not None:
             return planner_v2_proposal
@@ -2191,6 +2208,25 @@ class DeterministicPlanner:
                     evidence_note="route_spine preserved context-action ownership while restoring deterministic context binding",
                 )
         if family == "system_control":
+            if self._looks_like_open_location_settings(lower):
+                return self._merge_route_spine_proposal(
+                    self._tool_proposal(
+                        query_shape=QueryShape.CONTROL_COMMAND,
+                        domain="location",
+                        tool_name="external_open_url",
+                        tool_arguments={"url": "ms-settings:privacy-location"},
+                        request_type_hint="direct_action",
+                        family="location",
+                        subject="open_settings",
+                        requested_action="open_location_settings",
+                        confidence=decision.winner.score or 0.95,
+                        evidence=["open location settings phrase detected"],
+                        execution_type="execute_control_command",
+                        output_mode=ResponseMode.ACTION_RESULT.value,
+                    ),
+                    slots=slots,
+                    evidence_note="route_spine preserved system-control ownership while restoring location-settings URI semantics",
+                )
             system_request = self._system_control_request(message, lower) or {
                 "action": "open_settings_page",
                 "target": decision.intent_frame.target_text or "settings",
@@ -2400,6 +2436,62 @@ class DeterministicPlanner:
                     )
             if decision.clarification_needed:
                 return self._route_spine_clarification_proposal(decision, slots=slots)
+            requested_tool = str(decision.intent_frame.extracted_entities.get("tool_name") or "").strip()
+            trusted_hook_register = self._trusted_hook_register_request(message, lower)
+            if trusted_hook_register is not None or requested_tool == "trusted_hook_register":
+                hook_args = trusted_hook_register or {
+                    "hook_name": str(
+                        decision.intent_frame.extracted_entities.get("hook_name")
+                        or decision.intent_frame.target_text
+                        or "trusted hook"
+                    ).strip(),
+                    "path": str(decision.intent_frame.extracted_entities.get("path") or "").strip(),
+                    "query": message,
+                    "dry_run": True,
+                }
+                return self._tool_proposal(
+                    query_shape=QueryShape.CONTROL_COMMAND,
+                    domain="system",
+                    tool_name="trusted_hook_register",
+                    tool_arguments=hook_args,
+                    request_type_hint="trusted_hook_registration",
+                    family="routine",
+                    subject=str(hook_args.get("hook_name") or "trusted_hook"),
+                    requested_action="register_trusted_hook",
+                    confidence=decision.winner.score or 0.95,
+                    evidence=["planner_v2 selected trusted hook registration from routine contract"],
+                    execution_type="register_trusted_hook",
+                    output_mode=ResponseMode.ACTION_RESULT.value,
+                    output_type="action",
+                    slots=slots,
+                )
+            trusted_hook = self._trusted_hook_execute_request(message, lower)
+            if trusted_hook is not None or requested_tool == "trusted_hook_execute":
+                hook_args = trusted_hook or {
+                    "hook_name": str(
+                        decision.intent_frame.extracted_entities.get("hook_name")
+                        or decision.intent_frame.target_text
+                        or "trusted hook"
+                    ).strip(),
+                    "query": message,
+                    "dry_run": True,
+                }
+                return self._tool_proposal(
+                    query_shape=QueryShape.CONTROL_COMMAND,
+                    domain="system",
+                    tool_name="trusted_hook_execute",
+                    tool_arguments=hook_args,
+                    request_type_hint="trusted_hook_execution",
+                    family="routine",
+                    subject=str(hook_args.get("hook_name") or "trusted_hook"),
+                    requested_action="execute_trusted_hook",
+                    confidence=decision.winner.score or 0.95,
+                    evidence=["planner_v2 selected trusted hook execution from routine contract"],
+                    execution_type="execute_control_command",
+                    output_mode=ResponseMode.ACTION_RESULT.value,
+                    output_type="action",
+                    slots=slots,
+                )
             routine_execute = self._routine_execute_request(message, lower) or {}
             routine_name = str(
                 routine_execute.get("routine_name")
@@ -2909,6 +3001,7 @@ class DeterministicPlanner:
         decision: RouteSpineDecision,
         *,
         slots: dict[str, Any],
+        learned_preferences: dict[str, dict[str, object]],
     ) -> SemanticParseProposal | None:
         if trace is None or not bool(getattr(trace, "authoritative", False)):
             return None
@@ -2919,15 +3012,60 @@ class DeterministicPlanner:
         tool_name = str(getattr(plan, "tool_name", "") or "").strip()
         if not tool_name:
             return None
-        if family not in {
+        rich_route_spine_families = {
+            "app_control",
+            "browser_destination",
+            "calculations",
+            "context_action",
+            "context_clarification",
+            "desktop_search",
+            "discord_relay",
+            "file",
+            "file_operation",
+            "machine",
+            "maintenance",
+            "network",
+            "power",
+            "resources",
+            "routine",
+            "screen_awareness",
+            "software_control",
+            "software_recovery",
+            "system_control",
+            "task_continuity",
+            "terminal",
+            "trust_approvals",
+            "watch_runtime",
+            "window_control",
+            "workflow",
+            "workspace_operations",
+        }
+        if family in rich_route_spine_families:
+            return None
+        frame = getattr(trace, "intent_frame", None)
+        entities = getattr(frame, "extracted_entities", {}) if frame is not None else {}
+        selected_context = entities.get("selected_context") if isinstance(entities, dict) else {}
+        active_state_contextual = bool(
+            isinstance(selected_context, dict)
+            and str(selected_context.get("source") or "").startswith("active_request_state")
+        ) or bool(
+            isinstance(entities, dict)
+            and (
+                entities.get("pending_preview")
+                or entities.get("alternate_target")
+                or entities.get("previous_choice")
+            )
+        )
+
+        planner_v2_passthrough_families = {
             "development",
             "time",
             "storage",
             "location",
             "weather",
             "notes",
-            "watch_runtime",
-        }:
+        }
+        if family not in planner_v2_passthrough_families:
             return None
 
         plan_args = getattr(plan, "tool_arguments", None)
@@ -2951,12 +3089,117 @@ class DeterministicPlanner:
             requested_action = "browser_context"
             request_type_hint = request_type_hint or "browser_context"
             execution_type = execution_type or "inspect_browser_context"
-        elif family in {"time", "storage", "location", "weather"}:
+        elif family == "weather":
+            lower = decision.intent_frame.normalized_text
+            if self._looks_like_save_home_location(lower):
+                source_mode = "current"
+                context_value = selected_context.get("value") if isinstance(selected_context, dict) else {}
+                parameters = (
+                    context_value.get("parameters")
+                    if isinstance(context_value, dict) and isinstance(context_value.get("parameters"), dict)
+                    else {}
+                )
+                source_mode = str(parameters.get("location_mode") or parameters.get("mode") or source_mode).strip().lower() or source_mode
+                return self._merge_route_spine_proposal(
+                    self._tool_proposal(
+                        query_shape=QueryShape.CONTROL_COMMAND,
+                        domain="location",
+                        tool_name="save_location",
+                        tool_arguments={"target": "home", "source_mode": source_mode},
+                        request_type_hint="direct_action",
+                        family="location",
+                        subject="save_home",
+                        requested_action="save_home_location",
+                        confidence=decision.winner.score or 0.95,
+                        evidence=["save home location phrase detected through planner_v2 weather handoff"],
+                        execution_type="execute_control_command",
+                        output_mode=ResponseMode.ACTION_RESULT.value,
+                    ),
+                    slots=slots,
+                    evidence_note="planner_v2 preserved weather context while routing the save-home follow-up to location storage",
+                )
+            named_location = None
+            named_location_type = None
+            location_reference = self._location_reference_override(lower)
+            if location_reference is not None:
+                named_location, named_location_type = location_reference
+            preferred_open_target = str(
+                self._preference_value(learned_preferences, "weather", "open_target")
+                or tool_arguments.get("open_target")
+                or "none"
+            ).strip().lower() or "none"
+            open_target = self._open_target(lower, previous="none", preferred=preferred_open_target)
+            forecast_target = self._forecast_target(
+                lower,
+                previous=str(tool_arguments.get("forecast_target") or "current").strip().lower() or "current",
+            )
+            location_mode = (
+                "named"
+                if named_location
+                else self._location_mode(
+                    lower,
+                        previous=str(
+                            tool_arguments.get("location_mode")
+                            or self._preference_value(learned_preferences, "weather", "location_mode")
+                            or "auto"
+                        ).strip().lower()
+                        or "auto",
+                )
+            )
+            tool_arguments = {
+                "open_target": open_target,
+                "location_mode": location_mode,
+                "allow_home_fallback": self._allow_home_fallback(lower, previous=True),
+                "forecast_target": forecast_target,
+            }
+            if named_location:
+                tool_arguments["named_location"] = named_location
+                tool_arguments["named_location_type"] = named_location_type or "saved_alias"
+            query_shape = QueryShape.FORECAST_REQUEST if forecast_target != "current" else QueryShape.CURRENT_STATUS
+            output_mode = ResponseMode.FORECAST_SUMMARY.value
+            requested_metric = "forecast" if forecast_target != "current" else "current_conditions"
+            request_type_hint = (
+                "direct_action"
+                if open_target != "none"
+                else "deterministic_projection_request"
+                if forecast_target != "current"
+                else "direct_deterministic_fact"
+            )
+            execution_type = "retrieve_forecast" if forecast_target != "current" else "retrieve_current_status"
+        elif family == "location":
+            lower = decision.intent_frame.normalized_text
+            named_location = None
+            named_location_type = None
+            location_reference = self._location_reference_override(lower)
+            if location_reference is not None:
+                named_location, named_location_type = location_reference
+            mode = (
+                "named"
+                if named_location
+                else self._location_mode(
+                    lower,
+                    previous=str(tool_arguments.get("mode") or tool_arguments.get("location_mode") or "auto").strip().lower()
+                    or "auto",
+                )
+            )
+            tool_arguments = {
+                "mode": mode,
+                "allow_home_fallback": self._allow_home_fallback(lower, previous=mode != "current"),
+            }
+            if named_location:
+                tool_arguments["named_location"] = named_location
+                tool_arguments["named_location_type"] = named_location_type or "saved_alias"
             query_shape = QueryShape.CURRENT_STATUS
             output_mode = ResponseMode.STATUS_SUMMARY.value
+            requested_metric = "location"
+            request_type_hint = "direct_deterministic_fact"
+            execution_type = "retrieve_current_status"
+        elif family in {"time", "storage"}:
+            query_shape = QueryShape.DIAGNOSTIC_CAUSAL if "diagnosis" in tool_name else QueryShape.CURRENT_STATUS
+            output_mode = ResponseMode.DIAGNOSTIC_SUMMARY.value if "diagnosis" in tool_name else ResponseMode.STATUS_SUMMARY.value
             requested_metric = str(tool_arguments.get("focus") or family)
-            request_type_hint = request_type_hint or "direct_deterministic_fact"
-            execution_type = execution_type or "retrieve_current_status"
+            request_type_hint = request_type_hint or ("deterministic_diagnostic_request" if "diagnosis" in tool_name else "direct_deterministic_fact")
+            execution_type = execution_type or ("diagnostic_summary" if "diagnosis" in tool_name else "retrieve_current_status")
         elif family == "development":
             query_shape = QueryShape.CONTROL_COMMAND
             output_mode = ResponseMode.ACTION_RESULT.value
@@ -2971,6 +3214,45 @@ class DeterministicPlanner:
             requested_action = "notes_write"
             request_type_hint = request_type_hint or "notes_write"
             execution_type = execution_type or "execute_control_command"
+        elif family == "browser_destination":
+            query_shape = QueryShape.OPEN_BROWSER_DESTINATION
+            domain = "browser"
+            output_mode = ResponseMode.ACTION_RESULT.value
+            output_type = "action"
+            requested_action = "open"
+            request_type_hint = request_type_hint or "direct_action"
+            execution_type = execution_type or "resolve_url_then_open_in_browser"
+        elif family == "file":
+            query_shape = QueryShape.CONTROL_COMMAND
+            domain = "files"
+            output_mode = ResponseMode.ACTION_RESULT.value
+            output_type = "action"
+            requested_action = "read_file" if tool_name == "file_reader" else "open"
+            request_type_hint = request_type_hint or ("file_read" if tool_name == "file_reader" else "direct_action")
+            execution_type = execution_type or ("read_file" if tool_name == "file_reader" else "execute_control_command")
+        elif family == "workspace_operations":
+            query_shape = QueryShape.WORKSPACE_REQUEST
+            domain = "workspace"
+            output_mode = ResponseMode.WORKSPACE_RESULT.value
+            output_type = "action"
+            requested_action = tool_name.removeprefix("workspace_") if tool_name.startswith("workspace_") else "workspace"
+            request_type_hint = request_type_hint or "workspace_operation"
+            execution_type = execution_type or f"{requested_action}_workspace"
+        elif family == "routine":
+            query_shape = QueryShape.ROUTINE_REQUEST
+            domain = "workflow"
+            output_mode = ResponseMode.ACTION_RESULT.value
+            output_type = "action"
+            requested_action = tool_name
+            request_type_hint = request_type_hint or tool_name
+            execution_type = execution_type or ("save_routine" if tool_name == "routine_save" else "execute_routine")
+        elif family in {"power", "network", "resources"}:
+            query_shape = QueryShape.DIAGNOSTIC_CAUSAL if "diagnosis" in tool_name else QueryShape.CURRENT_METRIC if "throughput" in tool_name else QueryShape.CURRENT_STATUS
+            domain = "network" if family == "network" else "system"
+            output_mode = ResponseMode.DIAGNOSTIC_SUMMARY.value if "diagnosis" in tool_name else ResponseMode.NUMERIC_METRIC.value if "throughput" in tool_name or family == "resources" else ResponseMode.STATUS_SUMMARY.value
+            requested_metric = str(tool_arguments.get("focus") or family)
+            request_type_hint = request_type_hint or ("deterministic_diagnostic_request" if "diagnosis" in tool_name else "direct_deterministic_fact")
+            execution_type = execution_type or ("diagnostic_summary" if "diagnosis" in tool_name else "retrieve_current_status")
 
         return self._merge_route_spine_proposal(
             self._tool_proposal(
@@ -3067,7 +3349,8 @@ class DeterministicPlanner:
         family = decision.winner.route_family
         lower = decision.intent_frame.normalized_text
         if family == "network":
-            if self._looks_like_network_throughput(lower):
+            requested_tool = str(decision.intent_frame.extracted_entities.get("tool_name") or "").strip()
+            if requested_tool == "network_throughput" or self._looks_like_network_throughput(lower):
                 metric = self._network_throughput_metric(lower)
                 return self._tool_proposal(
                     query_shape=QueryShape.CURRENT_METRIC,
@@ -3107,7 +3390,7 @@ class DeterministicPlanner:
                     output_mode=ResponseMode.HISTORY_SUMMARY.value,
                     slots=slots,
                 )
-            if self._looks_like_network_diagnosis(lower):
+            if requested_tool == "network_diagnosis" or self._looks_like_network_diagnosis(lower):
                 return self._tool_proposal(
                     query_shape=QueryShape.DIAGNOSTIC_CAUSAL,
                     domain="network",
@@ -3143,12 +3426,18 @@ class DeterministicPlanner:
             )
         if family == "watch_runtime":
             browser_context = self._browser_context_request(decision.intent_frame.raw_text, lower, active_context={})
-            tool_name = "browser_context" if browser_context is not None else "activity_summary"
+            requested_tool = str(decision.intent_frame.extracted_entities.get("tool_name") or "").strip()
+            source_case = str(decision.intent_frame.extracted_entities.get("source_case") or "").strip().lower()
+            tool_name = (
+                "browser_context"
+                if browser_context is not None or requested_tool == "browser_context" or source_case == "browser_context"
+                else "activity_summary"
+            )
             return self._tool_proposal(
                 query_shape=QueryShape.BROWSER_CONTEXT if tool_name == "browser_context" else QueryShape.SUMMARY_REQUEST,
                 domain="browser" if tool_name == "browser_context" else "activity",
                 tool_name=tool_name,
-                tool_arguments=browser_context or {},
+                tool_arguments=browser_context or ({"operation": "current_page"} if tool_name == "browser_context" else {}),
                 request_type_hint="browser_context" if tool_name == "browser_context" else "activity_summary",
                 family="watch_runtime",
                 subject="browser_context" if tool_name == "browser_context" else "summary",
@@ -5559,12 +5848,18 @@ class DeterministicPlanner:
         if not family:
             return {}
         parameters = dict(structured_query.slots.get("tool_arguments") or {})
+        route_tool_name = str(execution_plan.tool_name or "").strip()
         parameters.update(
             {
                 "query_shape": structured_query.query_shape.value,
                 "execution_type": structured_query.execution_type,
+                "context_freshness": "current",
+                "context_reusable": True,
             }
         )
+        if route_tool_name:
+            parameters.setdefault("tool_name", route_tool_name)
+            parameters.setdefault("source_case", route_tool_name)
         if structured_query.query_shape == QueryShape.CALCULATION_REQUEST:
             calculation_request = structured_query.slots.get("calculation_request")
             if isinstance(calculation_request, dict):
@@ -5611,8 +5906,12 @@ class DeterministicPlanner:
             "subject": execution_plan.subject or family,
             "request_type": execution_plan.request_type,
             "query_shape": structured_query.query_shape.value,
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+            "context_source": "real_http_session",
+            "context_freshness": "current",
+            "context_reusable": True,
             "route": {
-                "tool_name": execution_plan.tool_name or "",
+                "tool_name": route_tool_name,
                 "response_mode": execution_plan.response_mode.value,
             },
             "parameters": parameters,
