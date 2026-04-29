@@ -521,6 +521,16 @@ class ContextBinder:
         bound = self._workspace_context(active_context, active_request_state, recent_tool_results)
         if self._workspace_needs_seed(frame):
             if bound is None:
+                tool_name = str(frame.extracted_entities.get("tool_name") or "").strip()
+                if tool_name in {"workspace_rename", "workspace_tag"}:
+                    return ContextBinding(
+                        context_reference=frame.context_reference,
+                        context_type="workspace",
+                        context_source="current_workspace_implicit",
+                        status="available",
+                        label="current workspace",
+                        freshness="current",
+                    )
                 return self._missing(frame, "workspace_seed_context")
             return self._bound(frame, bound, context_type="workspace")
         return self._bound(frame, bound, context_type="workspace") if bound is not None else ContextBinding(
@@ -1285,6 +1295,23 @@ class PlanBuilder:
                 args = {"focus": "capacity_pressure"}
                 request_type_hint = "deterministic_diagnostic_request"
                 execution_type = "diagnostic_summary"
+            elif family == "resources" and tool_name == "resource_diagnosis":
+                args = {"present_in": "none"}
+                request_type_hint = "deterministic_diagnostic_request"
+                execution_type = "diagnostic_summary"
+            elif family == "power" and tool_name == "power_diagnosis":
+                args = {"present_in": "none"}
+                request_type_hint = "deterministic_diagnostic_request"
+                execution_type = "diagnostic_summary"
+            elif family == "power" and tool_name == "power_projection":
+                args = {
+                    "metric": "time_to_empty" if "empty" in frame.normalized_text else "drain_rate" if "drain" in frame.normalized_text else "time_to_percent",
+                    "target_percent": None,
+                    "assume_unplugged": "unplug" in frame.normalized_text,
+                    "present_in": "none",
+                }
+                request_type_hint = "deterministic_projection_request"
+                execution_type = "project_power_state"
             else:
                 args = {"focus": family}
             return PlanDraft(
@@ -1354,8 +1381,21 @@ class PlanBuilder:
         tool_name = str(frame.extracted_entities.get("tool_name") or "").strip()
         if tool_name.startswith("workspace_"):
             return tool_name
-        if source_case in {"workspace_restore", "workspace_assemble", "workspace_save", "workspace_list", "workspace_archive", "workspace_clear"}:
+        if source_case in {
+            "workspace_restore",
+            "workspace_assemble",
+            "workspace_save",
+            "workspace_list",
+            "workspace_archive",
+            "workspace_clear",
+            "workspace_rename",
+            "workspace_tag",
+        }:
             return source_case
+        if re.search(r"\brename\b.{0,40}\b(?:workspace|wrkspace)\b", text):
+            return "workspace_rename"
+        if re.search(r"\btag\b.{0,40}\b(?:workspace|wrkspace)\b", text):
+            return "workspace_tag"
         if "restore" in text or "open" in text:
             return "workspace_restore"
         if "save" in text or "snapshot" in text:
@@ -1585,6 +1625,22 @@ class PlannerV2:
             frame.clarification_needed = False
             frame.clarification_reason = ""
             return frame
+        if self._saved_locations_list_signal(text):
+            frame.operation = "status"
+            frame.target_type = "system_resource"
+            frame.target_text = "saved locations"
+            frame.context_reference = "none"
+            frame.context_status = "available"
+            frame.risk_class = "read_only"
+            frame.native_owner_hint = "location"
+            frame.candidate_route_families = ["location"]
+            frame.extracted_entities["source_case"] = "saved_locations"
+            frame.extracted_entities["tool_name"] = "saved_locations"
+            frame.generic_provider_allowed = False
+            frame.generic_provider_reason = "native_route_candidate_present"
+            frame.clarification_needed = False
+            frame.clarification_reason = ""
+            return frame
         if self._browser_correction_near_miss(text):
             frame.operation = "unknown"
             frame.target_type = "unknown"
@@ -1618,6 +1674,24 @@ class PlannerV2:
             frame.generic_provider_reason = "native_route_candidate_present"
             frame.clarification_needed = True
             frame.clarification_reason = "echo_command_intent"
+            return frame
+        note_payload = self._slash_note_payload(frame.raw_text)
+        if note_payload:
+            frame.operation = "save"
+            frame.target_type = "selected_text"
+            frame.target_text = note_payload
+            frame.context_reference = "none"
+            frame.context_status = "available"
+            frame.risk_class = "dry_run_plan"
+            frame.native_owner_hint = "notes"
+            frame.candidate_route_families = ["notes"]
+            frame.extracted_entities["note_text"] = note_payload
+            frame.extracted_entities["source_case"] = "notes_write"
+            frame.extracted_entities["tool_name"] = "notes_write"
+            frame.generic_provider_allowed = False
+            frame.generic_provider_reason = "native_route_candidate_present"
+            frame.clarification_needed = False
+            frame.clarification_reason = ""
             return frame
         if raw_lower.startswith("/system"):
             frame.operation = "status"
@@ -1686,6 +1760,22 @@ class PlannerV2:
             frame.clarification_needed = False
             frame.clarification_reason = ""
             return frame
+        if self._workspace_list_signal(text):
+            frame.operation = "open"
+            frame.target_type = "workspace"
+            frame.target_text = "workspace list"
+            frame.context_reference = "none"
+            frame.context_status = "available"
+            frame.risk_class = "read_only"
+            frame.native_owner_hint = "workspace_operations"
+            frame.candidate_route_families = ["workspace_operations"]
+            frame.extracted_entities["source_case"] = "workspace_list"
+            frame.extracted_entities["tool_name"] = "workspace_list"
+            frame.generic_provider_allowed = False
+            frame.generic_provider_reason = "native_route_candidate_present"
+            frame.clarification_needed = False
+            frame.clarification_reason = ""
+            return frame
         if frame.native_owner_hint == "trust_approvals":
             return frame
         trusted_hook = self._trusted_hook_request(frame.raw_text)
@@ -1737,6 +1827,12 @@ class PlannerV2:
         direct_family = self._direct_status_family(text, raw_lower)
         if direct_family and not frame.native_owner_hint:
             self._apply_direct_status_frame(frame, direct_family)
+        elif frame.native_owner_hint == "power" and not frame.extracted_entities.get("tool_name"):
+            frame.extracted_entities["tool_name"] = self._power_tool_name(text)
+            frame.extracted_entities["source_case"] = frame.extracted_entities["tool_name"]
+        elif frame.native_owner_hint == "resources" and not frame.extracted_entities.get("tool_name"):
+            frame.extracted_entities["tool_name"] = self._resource_tool_name(text)
+            frame.extracted_entities["source_case"] = frame.extracted_entities["tool_name"]
         active_followup_owner = self._active_state_followup_owner(frame, active_request_state)
         if active_followup_owner:
             self._apply_active_state_followup(
@@ -1780,7 +1876,6 @@ class PlannerV2:
             frame.generic_provider_reason = "native_route_candidate_present"
         if (
             frame.operation in {"install", "uninstall", "update", "repair"}
-            and frame.target_type == "unknown"
             and self._software_lifecycle_text(text)
         ):
             frame.target_type = "software_package"
@@ -1806,9 +1901,22 @@ class PlannerV2:
             frame.operation = self._workspace_operation(text)
             frame.target_type = "workspace"
             frame.target_text = self._strip_known_verbs(frame.raw_text) or "workspace"
+            workspace_tool = self._workspace_tool(frame)
+            frame.extracted_entities["tool_name"] = workspace_tool
+            frame.extracted_entities["source_case"] = workspace_tool
+            if workspace_tool == "workspace_rename":
+                new_name = self._workspace_rename_target(frame.raw_text)
+                if new_name:
+                    frame.extracted_entities["new_name"] = new_name
+            elif workspace_tool == "workspace_tag":
+                tags = self._workspace_tags(frame.raw_text)
+                if tags:
+                    frame.extracted_entities["tags"] = tags
             if any(term in text.split() for term in {"this", "that", "there"}) or any(phrase in text for phrase in {"where we are", "where i am"}):
                 frame.context_reference = "this" if "this" in text.split() else "that" if "that" in text.split() else "there"
                 has_context = bool(active_context.get("current_resolution") or active_context.get("workspace") or active_context.get("current_task"))
+                if workspace_tool in {"workspace_rename", "workspace_tag"}:
+                    has_context = True
                 frame.context_status = "available" if has_context else "missing"
                 frame.clarification_needed = not has_context
                 frame.clarification_reason = "" if has_context else "workspace_seed_context"
@@ -2019,6 +2127,22 @@ class PlannerV2:
             return "software_recovery"
         return ""
 
+    def _saved_locations_list_signal(self, text: str) -> bool:
+        if re.search(r"\b(?:location|locations|saved place|saved places)\b.{0,24}\b(?:concept|theory|idea|architecture|settings)\b", text):
+            return False
+        return bool(
+            re.search(r"\b(?:show|list|display|view|see|open)\b.{0,48}\b(?:my\s+)?saved\s+(?:locations?|places?)\b", text)
+            or re.search(r"\b(?:what|which)\b.{0,36}\bsaved\s+(?:locations?|places?)\b", text)
+        )
+
+    def _workspace_list_signal(self, text: str) -> bool:
+        if re.search(r"\b(?:workspace|workspaces|wrkspace|wrkspaces)\b.{0,24}\b(?:concept|theory|idea|philosophy|design)\b", text):
+            return False
+        return bool(
+            re.search(r"\b(?:show|list|display|view|see|open)\b.{0,32}\b(?:my\s+)?(?:workspaces|workspace list|wrkspaces|wrkspace list)\b", text)
+            or re.search(r"\b(?:what|which)\b.{0,24}\b(?:workspaces|wrkspaces)\b", text)
+        )
+
     def _apply_direct_status_frame(self, frame: IntentFrame, family: str) -> None:
         frame.native_owner_hint = family
         frame.candidate_route_families = [family]
@@ -2044,9 +2168,21 @@ class PlannerV2:
             frame.extracted_entities["tool_name"] = DIRECT_STATUS_FAMILY_TOOLS[family][1]
         if family == "network":
             frame.extracted_entities["tool_name"] = self._network_tool_name(frame.normalized_text)
+        if family == "power":
+            frame.extracted_entities["tool_name"] = self._power_tool_name(frame.normalized_text)
+        if family == "resources":
+            frame.extracted_entities["tool_name"] = self._resource_tool_name(frame.normalized_text)
         if family == "storage":
             frame.extracted_entities["tool_name"] = "storage_diagnosis" if self._storage_diagnosis_signal(frame.normalized_text) else "storage_status"
-        frame.extracted_entities["source_case"] = family if family not in {"time", "development"} else "clock" if family == "time" else "echo"
+        frame.extracted_entities["source_case"] = (
+            str(frame.extracted_entities.get("tool_name") or family)
+            if family in {"network", "power", "resources", "storage"}
+            else family
+            if family not in {"time", "development"}
+            else "clock"
+            if family == "time"
+            else "echo"
+        )
         frame.target_text = self._strip_known_verbs(frame.raw_text) or family.replace("_", " ")
 
     def _echo_payload(self, raw_text: str) -> str:
@@ -2092,6 +2228,14 @@ class PlannerV2:
             return ""
         return str(match.group("path") or "").strip(" .,:;!?\"'")
 
+    def _slash_note_payload(self, raw_text: str) -> str:
+        match = re.search(r"(?:^|\s)/note(?:\s+|$)(?P<payload>.*)$", str(raw_text or ""), flags=re.IGNORECASE)
+        if not match:
+            return ""
+        payload = str(match.group("payload") or "").strip()
+        payload = re.sub(r"\s+(?:without\s+.*|if\s+that\s+is\s+the\s+right\s+route.*)$", "", payload, flags=re.IGNORECASE).strip()
+        return " ".join(payload.split()).strip(" .,:;!?\"'")
+
     def _trusted_hook_request(self, raw_text: str) -> dict[str, Any]:
         text = str(raw_text or "").strip()
         register = re.search(
@@ -2131,6 +2275,27 @@ class PlannerV2:
         if re.search(r"\b(?:why|lagging|slow|outage|diagnos|troubleshoot|broken|fix)\b", text):
             return "network_diagnosis"
         return "network_status"
+
+    def _power_tool_name(self, text: str) -> str:
+        if re.search(r"\b(?:why|diagnos|troubleshoot)\b.{0,40}\b(?:battery|charging|power|drain|draining)\b", text):
+            return "power_diagnosis"
+        if re.search(r"\b(?:battery|power)\b.{0,32}\b(?:drain|draining|drains)\b", text):
+            return "power_diagnosis"
+        if re.search(r"\b(?:how long|time to|until|empty|full|unplug|power draw|drain rate)\b", text):
+            return "power_projection"
+        return "power_status"
+
+    def _resource_tool_name(self, text: str) -> str:
+        if self._resource_diagnosis_signal(text):
+            return "resource_diagnosis"
+        return "resource_status"
+
+    def _resource_diagnosis_signal(self, text: str) -> bool:
+        return bool(
+            re.search(r"\b(?:why|diagnos|troubleshoot|what'?s wrong)\b.{0,48}\b(?:computer|machine|pc|cpu|memory|ram|gpu|resources?)\b", text)
+            or re.search(r"\b(?:computer|machine|pc|system)\b.{0,40}\b(?:sluggish|slow|laggy|bogged down|dragging)\b", text)
+            or re.search(r"\b(?:cpu|memory|ram|gpu|resources?)\b.{0,40}\b(?:bottleneck|pressure|spike|high|pegged|sluggish|slow)\b", text)
+        )
 
     def _storage_diagnosis_signal(self, text: str) -> bool:
         return bool(
@@ -2597,7 +2762,7 @@ class PlannerV2:
         return " ".join(text.split()).strip(" ?") or "software"
 
     def _software_lifecycle_text(self, text: str) -> bool:
-        if any(term in text for term in {"environment", "workspace", "workflow", "paragraph", "text"}):
+        if any(term in text for term in {"environment", "workspace", "workflow", "paragraph", "text", "file", "folder"}):
             return False
         return bool(re.search(r"\b(?:install|download|setup|set up|uninstall|update|upgrade|repair)\b", text))
 
@@ -2620,12 +2785,66 @@ class PlannerV2:
             or re.search(r"\b(?:assemble|gather|snapshot)\b.{0,36}\b(?:project|notes|everything|where we are|where i am)\b", text)
         )
 
+    def _workspace_tool(self, frame: IntentFrame) -> str:
+        text = frame.normalized_text
+        source_case = str(frame.extracted_entities.get("source_case") or "").strip().lower()
+        tool_name = str(frame.extracted_entities.get("tool_name") or "").strip()
+        if tool_name.startswith("workspace_"):
+            return tool_name
+        if source_case in {
+            "workspace_restore",
+            "workspace_assemble",
+            "workspace_save",
+            "workspace_list",
+            "workspace_archive",
+            "workspace_clear",
+            "workspace_rename",
+            "workspace_tag",
+        }:
+            return source_case
+        if re.search(r"\brename\b.{0,40}\b(?:workspace|wrkspace)\b", text):
+            return "workspace_rename"
+        if re.search(r"\btag\b.{0,40}\b(?:workspace|wrkspace)\b", text):
+            return "workspace_tag"
+        if "restore" in text or "open" in text:
+            return "workspace_restore"
+        if "save" in text or "snapshot" in text:
+            return "workspace_save"
+        if "list" in text or "show" in text:
+            return "workspace_list"
+        return "workspace_assemble"
+
     def _workspace_operation(self, text: str) -> str:
+        if re.search(r"\brename\b.{0,40}\b(?:workspace|wrkspace)\b", text):
+            return "rename"
+        if re.search(r"\btag\b.{0,40}\b(?:workspace|wrkspace)\b", text):
+            return "tag"
         if any(term in text for term in {"save", "snapshot"}):
             return "save"
         if any(term in text for term in {"open", "restore", "list", "show"}):
             return "open"
         return "assemble"
+
+    def _workspace_rename_target(self, raw_text: str) -> str:
+        match = re.search(r"\brename\b.{0,28}\b(?:workspace|wrkspace)\b\s+to\s+(?P<name>.+)$", raw_text, flags=re.IGNORECASE)
+        if not match:
+            return ""
+        name = str(match.group("name") or "")
+        name = re.sub(r"\s+(?:real\s+quick|quick\s+quick|without\s+.*|if\s+that\s+is\s+the\s+right\s+route.*)$", "", name, flags=re.IGNORECASE)
+        return " ".join(name.split()).strip(" .,:;!?\"'")
+
+    def _workspace_tags(self, raw_text: str) -> list[str]:
+        match = re.search(r"\btag\b.{0,28}\b(?:workspace|wrkspace)\b(?:\s+with)?\s+(?P<tags>.+)$", raw_text, flags=re.IGNORECASE)
+        if not match:
+            return []
+        tag_text = str(match.group("tags") or "")
+        tag_text = re.sub(r"\s+(?:real\s+quick|quick\s+quick|without\s+.*|if\s+that\s+is\s+the\s+right\s+route.*)$", "", tag_text, flags=re.IGNORECASE)
+        tag_text = " ".join(tag_text.split()).strip(" .,:;!?\"'")
+        if not tag_text:
+            return []
+        if "," in tag_text:
+            return [part.strip() for part in tag_text.split(",") if part.strip()]
+        return [tag_text]
 
     def _routine_signal(self, text: str) -> bool:
         if _routine_conceptual_text(text):

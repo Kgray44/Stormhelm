@@ -94,6 +94,7 @@ Tests: `tests/test_launcher.py`, `tests/test_config_loader.py`
 | Approval, secrets, local-first behavior, data retention | [security-and-trust.md](security-and-trust.md) |
 | Setup, tests, adding routes/adapters/settings/UI | [development.md](development.md) |
 | Test/evaluation matrix | [testing-evaluation.md](testing-evaluation.md) |
+| L0-L3 latency tracing, budgets, triage, snapshots, and Kraken output | [latency-tracing.md](latency-tracing.md) |
 | Common failures and fixes | [troubleshooting.md](troubleshooting.md) |
 | End-to-end examples | [examples.md](examples.md) |
 | Implemented vs planned | [roadmap.md](roadmap.md) |

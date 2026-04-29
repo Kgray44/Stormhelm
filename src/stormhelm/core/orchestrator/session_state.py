@@ -175,6 +175,89 @@ class ConversationStateStore:
                 filtered.append(item)
         return filtered
 
+    def get_turn_context_snapshot(
+        self,
+        session_id: str,
+        *,
+        max_age_seconds: float | None = None,
+        prefer_local_memory: bool = False,
+    ) -> dict[str, object]:
+        """Load the per-turn context buckets with one preference snapshot.
+
+        The command-eval compact path writes continuity state to both semantic
+        memory and local preferences. Reading the local snapshot first avoids
+        repeated empty semantic-memory queries while preserving the same
+        session-scoped state and freshness rules.
+        """
+        state = self.preferences.get_all()
+        recent_tool_results: list[dict[str, object]] = []
+        if not prefer_local_memory:
+            recent_tool_results = self.memory.list_recent_session_tool_results(
+                session_id,
+                max_age_seconds=max_age_seconds,
+            )
+        if not recent_tool_results:
+            recent_tool_results = self._recent_tool_results_from_state(
+                state,
+                session_id,
+                max_age_seconds=max_age_seconds,
+            )
+
+        recent_context_resolutions: list[dict[str, object]] = []
+        if not prefer_local_memory:
+            recent_context_resolutions = self.memory.list_recent_context_resolutions(session_id)
+        if not recent_context_resolutions:
+            recent_context_resolutions = self._recent_context_resolutions_from_state(state, session_id)
+
+        learned_preferences: dict[str, dict[str, object]] = {}
+        if not prefer_local_memory:
+            learned_preferences = self.memory.get_learned_preferences()
+        if not learned_preferences:
+            learned_preferences = self._learned_preferences_from_state(state)
+
+        return {
+            "active_posture": self._dict_value(state, self._posture_key(session_id)),
+            "active_request_state": self._dict_value(state, self._request_state_key(session_id)),
+            "active_context": self._dict_value(state, self._active_context_key(session_id)),
+            "recent_tool_results": recent_tool_results,
+            "recent_context_resolutions": recent_context_resolutions,
+            "learned_preferences": learned_preferences,
+            "source": "local_preference_snapshot" if prefer_local_memory else "semantic_memory_then_local_snapshot",
+        }
+
+    def _dict_value(self, state: dict[str, object], key: str) -> dict[str, object]:
+        value = state.get(key)
+        if isinstance(value, dict):
+            return dict(value)
+        return {}
+
+    def _recent_tool_results_from_state(
+        self,
+        state: dict[str, object],
+        session_id: str,
+        *,
+        max_age_seconds: float | None = None,
+    ) -> list[dict[str, object]]:
+        value = state.get(self._recent_tool_results_key(session_id))
+        if not isinstance(value, list):
+            return []
+        results = [dict(item) for item in value if isinstance(item, dict)]
+        if max_age_seconds is None:
+            return results
+        threshold = datetime.now(timezone.utc).timestamp() - max_age_seconds
+        filtered: list[dict[str, object]] = []
+        for item in results:
+            captured_at = item.get("captured_at")
+            if not isinstance(captured_at, str):
+                continue
+            try:
+                captured = datetime.fromisoformat(captured_at.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                continue
+            if captured >= threshold:
+                filtered.append(item)
+        return filtered
+
     def remember_tool_result(
         self,
         session_id: str,
@@ -219,6 +302,13 @@ class ConversationStateStore:
         if memory_results:
             return memory_results
         state = self.preferences.get_all()
+        return self._recent_context_resolutions_from_state(state, session_id)
+
+    def _recent_context_resolutions_from_state(
+        self,
+        state: dict[str, object],
+        session_id: str,
+    ) -> list[dict[str, object]]:
         value = state.get(self._recent_context_resolutions_key(session_id))
         if not isinstance(value, list):
             return []
@@ -309,6 +399,9 @@ class ConversationStateStore:
         if learned:
             return learned
         state = self.preferences.get_all()
+        return self._learned_preferences_from_state(state)
+
+    def _learned_preferences_from_state(self, state: dict[str, object]) -> dict[str, dict[str, object]]:
         value = state.get(self._preference_memory_key())
         if not isinstance(value, dict):
             return {}

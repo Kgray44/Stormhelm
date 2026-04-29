@@ -937,6 +937,33 @@ def test_assistant_reports_honest_parse_failure_for_malformed_calculation(temp_c
     assert "parse" in payload["assistant_message"]["content"].lower()
 
 
+def test_assistant_direct_commands_emit_typed_direct_handler_debug(temp_config) -> None:
+    readme = Path(temp_config.storage.data_dir).parent / "README.md"
+    readme.write_text("Stormhelm test readme", encoding="utf-8")
+
+    cases = [
+        ("/system", "machine", "system_info"),
+        (f"/read {readme}", "file", "file_reader"),
+    ]
+    for message, expected_family, expected_tool in cases:
+        assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
+        payload = _run_assistant_once(
+            assistant,
+            jobs,
+            executor,
+            message=message,
+            surface_mode="ghost",
+            active_module="chartroom",
+        )
+
+        planner_debug = _planner_debug(payload)
+        assert planner_debug["routing_engine"] == "direct_handler"
+        assert planner_debug["direct_handler_typed"] is True
+        assert planner_debug["route_family"] == expected_family
+        assert planner_debug["tool_chain"] == [expected_tool]
+        assert planner_debug["legacy_fallback_used"] is False
+
+
 def test_assistant_routes_engineering_style_expression_to_local_calculation_lane(temp_config) -> None:
     assistant, jobs, executor, _ = _build_assistant(temp_config, system_probe=FakeSystemProbe())
 

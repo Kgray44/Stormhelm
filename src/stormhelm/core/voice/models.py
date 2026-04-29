@@ -28,6 +28,20 @@ _MIME_BY_EXTENSION: dict[str, str] = {
 }
 
 
+class VoiceTTSOutputMode(str, Enum):
+    BUFFERED = "buffered"
+    STREAMING = "streaming"
+
+
+class VoiceLiveAudioFormat(str, Enum):
+    PCM = "pcm"
+    WAV = "wav"
+    MP3 = "mp3"
+    AAC = "aac"
+    FLAC = "flac"
+    OPUS = "opus"
+
+
 @dataclass(slots=True, frozen=True)
 class VoiceAudioInput:
     source: str
@@ -452,6 +466,7 @@ class VoicePlaybackResult:
     output_metadata: dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=utc_now_iso)
     played_locally: bool = False
+    partial_playback: bool = False
     user_heard_claimed: bool = False
 
     def to_dict(self) -> dict[str, Any]:
@@ -475,7 +490,648 @@ class VoicePlaybackResult:
             "output_metadata": dict(self.output_metadata),
             "created_at": self.created_at,
             "played_locally": self.played_locally,
+            "partial_playback": self.partial_playback,
             "user_heard_claimed": False,
+        }
+
+
+@dataclass(slots=True, frozen=True)
+class VoiceStreamingTTSRequest:
+    speech_request: VoiceSpeechRequest
+    live_format: str = "pcm"
+    artifact_format: str = "mp3"
+    output_mode: VoiceTTSOutputMode | str = VoiceTTSOutputMode.STREAMING
+    tts_stream_id: str = field(
+        default_factory=lambda: f"voice-tts-stream-{uuid4().hex[:12]}"
+    )
+    created_at: str = field(default_factory=utc_now_iso)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_speech_request(
+        cls,
+        speech_request: VoiceSpeechRequest,
+        *,
+        live_format: str = "pcm",
+        artifact_format: str = "mp3",
+        metadata: dict[str, Any] | None = None,
+    ) -> "VoiceStreamingTTSRequest":
+        return cls(
+            speech_request=speech_request,
+            live_format=live_format,
+            artifact_format=artifact_format,
+            metadata=dict(metadata or {}),
+        )
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "live_format",
+            str(self.live_format or "pcm").strip().lower() or "pcm",
+        )
+        object.__setattr__(
+            self,
+            "artifact_format",
+            str(self.artifact_format or "mp3").strip().lower() or "mp3",
+        )
+        if not isinstance(self.output_mode, VoiceTTSOutputMode):
+            normalized = str(self.output_mode or "streaming").strip().lower()
+            object.__setattr__(
+                self,
+                "output_mode",
+                VoiceTTSOutputMode.STREAMING
+                if normalized == "streaming"
+                else VoiceTTSOutputMode.BUFFERED,
+            )
+
+    @property
+    def speech_request_id(self) -> str:
+        return self.speech_request.speech_request_id
+
+    def to_metadata(self) -> dict[str, Any]:
+        return {
+            "tts_stream_id": self.tts_stream_id,
+            "speech_request_id": self.speech_request_id,
+            "session_id": self.speech_request.session_id,
+            "turn_id": self.speech_request.turn_id,
+            "provider": self.speech_request.provider,
+            "model": self.speech_request.model,
+            "voice": self.speech_request.voice,
+            "live_format": self.live_format,
+            "artifact_format": self.artifact_format,
+            "output_mode": self.output_mode.value,
+            "created_at": self.created_at,
+            "text_preview": _preview_text(self.speech_request.text),
+            "text_hash": self.speech_request.text_hash,
+            "allowed_to_synthesize": self.speech_request.allowed_to_synthesize,
+            "raw_audio_present": False,
+            "metadata": dict(self.metadata),
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        return self.to_metadata()
+
+
+@dataclass(slots=True, frozen=True)
+class VoiceStreamingTTSChunk:
+    tts_stream_id: str
+    speech_request_id: str
+    chunk_index: int
+    size_bytes: int
+    live_format: str = "pcm"
+    provider: str = ""
+    model: str = ""
+    voice: str = ""
+    session_id: str | None = None
+    turn_id: str | None = None
+    received_at: str = field(default_factory=utc_now_iso)
+    first_chunk: bool = False
+    final_chunk: bool = False
+    duration_ms: int | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    data: bytes | None = field(default=None, repr=False, compare=False)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "tts_stream_id": self.tts_stream_id,
+            "speech_request_id": self.speech_request_id,
+            "chunk_index": self.chunk_index,
+            "size_bytes": self.size_bytes,
+            "live_format": self.live_format,
+            "provider": self.provider,
+            "model": self.model,
+            "voice": self.voice,
+            "session_id": self.session_id,
+            "turn_id": self.turn_id,
+            "received_at": self.received_at,
+            "first_chunk": self.first_chunk,
+            "final_chunk": self.final_chunk,
+            "duration_ms": self.duration_ms,
+            "metadata": dict(self.metadata),
+            "raw_audio_present": False,
+        }
+
+
+@dataclass(slots=True, frozen=True)
+class VoiceStreamingTTSResult:
+    ok: bool
+    tts_stream_id: str
+    speech_request_id: str
+    provider: str
+    model: str
+    voice: str
+    live_format: str
+    artifact_format: str
+    status: str
+    chunks: tuple[VoiceStreamingTTSChunk, ...] = ()
+    first_chunk_at: str | None = None
+    final_chunk_at: str | None = None
+    total_chunks: int = 0
+    first_audio_byte_ms: int | None = None
+    streaming_started: bool = False
+    streaming_completed: bool = False
+    streaming_cancelled: bool = False
+    partial_audio: bool = False
+    fallback_used: bool = False
+    error_code: str | None = None
+    error_message: str | None = None
+    created_at: str = field(default_factory=utc_now_iso)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "tts_stream_id": self.tts_stream_id,
+            "speech_request_id": self.speech_request_id,
+            "provider": self.provider,
+            "model": self.model,
+            "voice": self.voice,
+            "live_format": self.live_format,
+            "artifact_format": self.artifact_format,
+            "status": self.status,
+            "chunks": [chunk.to_dict() for chunk in self.chunks[:24]],
+            "first_chunk_at": self.first_chunk_at,
+            "final_chunk_at": self.final_chunk_at,
+            "total_chunks": self.total_chunks,
+            "first_audio_byte_ms": self.first_audio_byte_ms,
+            "streaming_started": self.streaming_started,
+            "streaming_completed": self.streaming_completed,
+            "streaming_cancelled": self.streaming_cancelled,
+            "partial_audio": self.partial_audio,
+            "fallback_used": self.fallback_used,
+            "error_code": self.error_code,
+            "error_message": self.error_message,
+            "created_at": self.created_at,
+            "metadata": dict(self.metadata),
+            "raw_audio_present": False,
+        }
+
+
+@dataclass(slots=True, frozen=True)
+class VoiceLivePlaybackRequest:
+    speech_request_id: str | None
+    provider: str
+    device: str
+    audio_format: str
+    playback_stream_id: str = field(
+        default_factory=lambda: f"voice-playback-stream-{uuid4().hex[:12]}"
+    )
+    playback_request_id: str = field(
+        default_factory=lambda: f"voice-live-playback-request-{uuid4().hex[:12]}"
+    )
+    tts_stream_id: str | None = None
+    session_id: str | None = None
+    turn_id: str | None = None
+    volume: float = 1.0
+    created_at: str = field(default_factory=utc_now_iso)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    allowed_to_play: bool = False
+    blocked_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "provider", str(self.provider or "local").strip().lower() or "local"
+        )
+        object.__setattr__(
+            self, "device", str(self.device or "default").strip() or "default"
+        )
+        object.__setattr__(
+            self,
+            "audio_format",
+            str(self.audio_format or "pcm").strip().lower() or "pcm",
+        )
+        try:
+            volume = float(self.volume)
+        except (TypeError, ValueError):
+            volume = 1.0
+        object.__setattr__(self, "volume", min(1.0, max(0.0, volume)))
+
+    def to_metadata(self) -> dict[str, Any]:
+        return {
+            "playback_stream_id": self.playback_stream_id,
+            "playback_request_id": self.playback_request_id,
+            "tts_stream_id": self.tts_stream_id,
+            "speech_request_id": self.speech_request_id,
+            "session_id": self.session_id,
+            "turn_id": self.turn_id,
+            "provider": self.provider,
+            "device": self.device,
+            "audio_format": self.audio_format,
+            "volume": self.volume,
+            "created_at": self.created_at,
+            "metadata": dict(self.metadata),
+            "allowed_to_play": self.allowed_to_play,
+            "blocked_reason": self.blocked_reason,
+            "raw_audio_present": False,
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        return self.to_metadata()
+
+
+@dataclass(slots=True, frozen=True)
+class VoiceLivePlaybackSession:
+    playback_stream_id: str
+    playback_request_id: str
+    provider: str
+    device: str
+    audio_format: str
+    status: str
+    session_id: str | None = None
+    turn_id: str | None = None
+    tts_stream_id: str | None = None
+    speech_request_id: str | None = None
+    started_at: str | None = field(default_factory=utc_now_iso)
+    first_chunk_received_at: str | None = None
+    playback_started_at: str | None = None
+    completed_at: str | None = None
+    cancelled_at: str | None = None
+    chunk_count: int = 0
+    bytes_received: int = 0
+    partial_playback: bool = False
+    user_heard_claimed: bool = False
+    error_code: str | None = None
+    error_message: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "playback_stream_id": self.playback_stream_id,
+            "playback_request_id": self.playback_request_id,
+            "provider": self.provider,
+            "device": self.device,
+            "audio_format": self.audio_format,
+            "status": self.status,
+            "session_id": self.session_id,
+            "turn_id": self.turn_id,
+            "tts_stream_id": self.tts_stream_id,
+            "speech_request_id": self.speech_request_id,
+            "started_at": self.started_at,
+            "first_chunk_received_at": self.first_chunk_received_at,
+            "playback_started_at": self.playback_started_at,
+            "completed_at": self.completed_at,
+            "cancelled_at": self.cancelled_at,
+            "chunk_count": self.chunk_count,
+            "bytes_received": self.bytes_received,
+            "partial_playback": self.partial_playback,
+            "user_heard_claimed": False,
+            "error_code": self.error_code,
+            "error_message": self.error_message,
+            "metadata": dict(self.metadata),
+            "raw_audio_present": False,
+        }
+
+
+@dataclass(slots=True, frozen=True)
+class VoiceLivePlaybackChunkResult:
+    ok: bool
+    playback_stream_id: str
+    chunk_index: int
+    status: str
+    size_bytes: int
+    first_chunk_received_at: str | None = None
+    playback_started_at: str | None = None
+    playback_started: bool = False
+    error_code: str | None = None
+    error_message: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "playback_stream_id": self.playback_stream_id,
+            "chunk_index": self.chunk_index,
+            "status": self.status,
+            "size_bytes": self.size_bytes,
+            "first_chunk_received_at": self.first_chunk_received_at,
+            "playback_started_at": self.playback_started_at,
+            "playback_started": self.playback_started,
+            "error_code": self.error_code,
+            "error_message": self.error_message,
+            "metadata": dict(self.metadata),
+            "raw_audio_present": False,
+        }
+
+
+@dataclass(slots=True, frozen=True)
+class VoiceLivePlaybackResult:
+    ok: bool
+    playback_stream_id: str | None
+    playback_request_id: str | None
+    provider: str
+    device: str
+    audio_format: str
+    status: str
+    session_id: str | None = None
+    turn_id: str | None = None
+    tts_stream_id: str | None = None
+    speech_request_id: str | None = None
+    started_at: str | None = None
+    first_chunk_received_at: str | None = None
+    playback_started_at: str | None = None
+    completed_at: str | None = None
+    cancelled_at: str | None = None
+    chunk_count: int = 0
+    bytes_received: int = 0
+    partial_playback: bool = False
+    error_code: str | None = None
+    error_message: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    user_heard_claimed: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "playback_stream_id": self.playback_stream_id,
+            "playback_request_id": self.playback_request_id,
+            "provider": self.provider,
+            "device": self.device,
+            "audio_format": self.audio_format,
+            "status": self.status,
+            "session_id": self.session_id,
+            "turn_id": self.turn_id,
+            "tts_stream_id": self.tts_stream_id,
+            "speech_request_id": self.speech_request_id,
+            "started_at": self.started_at,
+            "first_chunk_received_at": self.first_chunk_received_at,
+            "playback_started_at": self.playback_started_at,
+            "completed_at": self.completed_at,
+            "cancelled_at": self.cancelled_at,
+            "chunk_count": self.chunk_count,
+            "bytes_received": self.bytes_received,
+            "partial_playback": self.partial_playback,
+            "error_code": self.error_code,
+            "error_message": self.error_message,
+            "metadata": dict(self.metadata),
+            "user_heard_claimed": False,
+            "raw_audio_present": False,
+        }
+
+
+@dataclass(slots=True, frozen=True)
+class VoicePlaybackPrewarmRequest:
+    session_id: str | None = None
+    turn_id: str | None = None
+    device: str = "default"
+    audio_format: str = "pcm"
+    provider: str = "local"
+    request_id: str = field(
+        default_factory=lambda: f"voice-playback-prewarm-{uuid4().hex[:12]}"
+    )
+    created_at: str = field(default_factory=utc_now_iso)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "request_id": self.request_id,
+            "session_id": self.session_id,
+            "turn_id": self.turn_id,
+            "device": self.device,
+            "audio_format": self.audio_format,
+            "provider": self.provider,
+            "created_at": self.created_at,
+            "metadata": dict(self.metadata),
+            "raw_audio_present": False,
+        }
+
+
+@dataclass(slots=True, frozen=True)
+class VoicePlaybackPrewarmResult:
+    ok: bool
+    request_id: str
+    provider: str
+    device: str
+    audio_format: str
+    status: str
+    playback_started: bool = False
+    stream_sink_prepared: bool = False
+    cancellation_ready: bool = False
+    prewarm_ms: int | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    created_at: str = field(default_factory=utc_now_iso)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "request_id": self.request_id,
+            "provider": self.provider,
+            "device": self.device,
+            "audio_format": self.audio_format,
+            "status": self.status,
+            "playback_started": False,
+            "stream_sink_prepared": self.stream_sink_prepared,
+            "cancellation_ready": self.cancellation_ready,
+            "prewarm_ms": self.prewarm_ms,
+            "error_code": self.error_code,
+            "error_message": self.error_message,
+            "created_at": self.created_at,
+            "metadata": dict(self.metadata),
+            "raw_audio_present": False,
+        }
+
+
+@dataclass(slots=True, frozen=True)
+class VoiceProviderPrewarmRequest:
+    session_id: str | None = None
+    turn_id: str | None = None
+    provider: str = "openai"
+    model: str | None = None
+    voice: str | None = None
+    live_format: str = "pcm"
+    artifact_format: str = "mp3"
+    request_id: str = field(
+        default_factory=lambda: f"voice-provider-prewarm-{uuid4().hex[:12]}"
+    )
+    created_at: str = field(default_factory=utc_now_iso)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "request_id": self.request_id,
+            "session_id": self.session_id,
+            "turn_id": self.turn_id,
+            "provider": self.provider,
+            "model": self.model,
+            "voice": self.voice,
+            "live_format": self.live_format,
+            "artifact_format": self.artifact_format,
+            "created_at": self.created_at,
+            "metadata": dict(self.metadata),
+            "raw_audio_present": False,
+        }
+
+
+@dataclass(slots=True, frozen=True)
+class VoiceProviderPrewarmResult:
+    ok: bool
+    request_id: str
+    provider: str
+    status: str
+    model: str | None = None
+    voice: str | None = None
+    live_format: str | None = None
+    artifact_format: str | None = None
+    api_key_present: bool = False
+    client_prepared: bool = False
+    request_shell_prepared: bool = False
+    tts_called: bool = False
+    network_called: bool = False
+    prewarm_ms: int | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    created_at: str = field(default_factory=utc_now_iso)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "request_id": self.request_id,
+            "provider": self.provider,
+            "status": self.status,
+            "model": self.model,
+            "voice": self.voice,
+            "live_format": self.live_format,
+            "artifact_format": self.artifact_format,
+            "api_key_present": self.api_key_present,
+            "client_prepared": self.client_prepared,
+            "request_shell_prepared": self.request_shell_prepared,
+            "tts_called": False,
+            "network_called": False,
+            "prewarm_ms": self.prewarm_ms,
+            "error_code": self.error_code,
+            "error_message": self.error_message,
+            "created_at": self.created_at,
+            "metadata": dict(self.metadata),
+            "raw_audio_present": False,
+        }
+
+
+@dataclass(slots=True, frozen=True)
+class VoiceOutputPrewarmResult:
+    ok: bool
+    status: str
+    provider_result: VoiceProviderPrewarmResult | None = None
+    playback_result: VoicePlaybackPrewarmResult | None = None
+    prewarm_ms: int | None = None
+    fallback_reason: str | None = None
+    created_at: str = field(default_factory=utc_now_iso)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "status": self.status,
+            "provider_result": self.provider_result.to_dict()
+            if self.provider_result is not None
+            else None,
+            "playback_result": self.playback_result.to_dict()
+            if self.playback_result is not None
+            else None,
+            "prewarm_ms": self.prewarm_ms,
+            "fallback_reason": self.fallback_reason,
+            "created_at": self.created_at,
+            "raw_audio_present": False,
+        }
+
+
+@dataclass(slots=True, frozen=True)
+class VoiceFirstAudioLatency:
+    core_result_to_tts_start_ms: int | None = None
+    tts_start_to_first_chunk_ms: int | None = None
+    first_chunk_to_playback_start_ms: int | None = None
+    core_result_to_first_audio_ms: int | None = None
+    request_to_first_audio_ms: int | None = None
+    streaming_enabled: bool = False
+    live_format: str | None = None
+    artifact_format: str | None = None
+    fallback_used: bool = False
+    prewarm_used: bool = False
+    prewarm_ms: int | None = None
+    playback_prewarmed: bool = False
+    provider_prewarmed: bool = False
+    first_audio_available: bool = False
+    first_audio_budget_exceeded: bool = False
+    partial_playback: bool = False
+    user_heard_claimed: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "core_result_to_tts_start_ms": self.core_result_to_tts_start_ms,
+            "tts_start_to_first_chunk_ms": self.tts_start_to_first_chunk_ms,
+            "first_chunk_to_playback_start_ms": self.first_chunk_to_playback_start_ms,
+            "core_result_to_first_audio_ms": self.core_result_to_first_audio_ms,
+            "request_to_first_audio_ms": self.request_to_first_audio_ms,
+            "streaming_enabled": self.streaming_enabled,
+            "live_format": self.live_format,
+            "artifact_format": self.artifact_format,
+            "fallback_used": self.fallback_used,
+            "prewarm_used": self.prewarm_used,
+            "prewarm_ms": self.prewarm_ms,
+            "playback_prewarmed": self.playback_prewarmed,
+            "provider_prewarmed": self.provider_prewarmed,
+            "first_audio_available": self.first_audio_available,
+            "first_audio_budget_exceeded": self.first_audio_budget_exceeded,
+            "partial_playback": self.partial_playback,
+            "user_heard_claimed": False,
+        }
+
+
+@dataclass(slots=True, frozen=True)
+class VoiceStreamingSpeechOutputResult:
+    ok: bool
+    status: str
+    speech_request_id: str | None
+    session_id: str | None = None
+    turn_id: str | None = None
+    streaming_enabled: bool = False
+    first_audio_available: bool = False
+    tts_result: VoiceStreamingTTSResult | None = None
+    playback_result: VoiceLivePlaybackResult | None = None
+    buffered_synthesis_result: VoiceSpeechSynthesisResult | None = None
+    buffered_playback_result: VoicePlaybackResult | None = None
+    latency: VoiceFirstAudioLatency = field(default_factory=VoiceFirstAudioLatency)
+    fallback_used: bool = False
+    partial_playback: bool = False
+    completion_claimed: bool = False
+    verification_claimed: bool = False
+    error_code: str | None = None
+    error_message: str | None = None
+    created_at: str = field(default_factory=utc_now_iso)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "status": self.status,
+            "speech_request_id": self.speech_request_id,
+            "session_id": self.session_id,
+            "turn_id": self.turn_id,
+            "streaming_enabled": self.streaming_enabled,
+            "first_audio_available": self.first_audio_available,
+            "tts_result": self.tts_result.to_dict()
+            if self.tts_result is not None
+            else None,
+            "playback_result": self.playback_result.to_dict()
+            if self.playback_result is not None
+            else None,
+            "buffered_synthesis_result": self.buffered_synthesis_result.to_dict()
+            if self.buffered_synthesis_result is not None
+            else None,
+            "buffered_playback_result": self.buffered_playback_result.to_dict()
+            if self.buffered_playback_result is not None
+            else None,
+            "latency": self.latency.to_dict(),
+            "fallback_used": self.fallback_used,
+            "partial_playback": self.partial_playback,
+            "completion_claimed": False,
+            "verification_claimed": False,
+            "error_code": self.error_code,
+            "error_message": self.error_message,
+            "created_at": self.created_at,
+            "metadata": dict(self.metadata),
+            "user_heard_claimed": False,
+            "raw_audio_present": False,
         }
 
 
@@ -2271,9 +2927,20 @@ __all__ = [
     "VoiceInterruptionIntent",
     "VoiceInterruptionRequest",
     "VoiceInterruptionResult",
+    "VoiceFirstAudioLatency",
+    "VoiceLiveAudioFormat",
+    "VoiceLivePlaybackChunkResult",
+    "VoiceLivePlaybackRequest",
+    "VoiceLivePlaybackResult",
+    "VoiceLivePlaybackSession",
+    "VoiceOutputPrewarmResult",
     "VoicePlaybackRequest",
+    "VoicePlaybackPrewarmRequest",
+    "VoicePlaybackPrewarmResult",
     "VoicePlaybackResult",
     "VoicePipelineStageSummary",
+    "VoiceProviderPrewarmRequest",
+    "VoiceProviderPrewarmResult",
     "VoiceReadinessReport",
     "VoiceRuntimeModeReadiness",
     "VoiceRealtimeReadiness",
@@ -2284,6 +2951,11 @@ __all__ = [
     "VoiceRealtimeTurnResult",
     "VoiceSpeechRequest",
     "VoiceSpeechSynthesisResult",
+    "VoiceStreamingSpeechOutputResult",
+    "VoiceStreamingTTSChunk",
+    "VoiceStreamingTTSRequest",
+    "VoiceStreamingTTSResult",
+    "VoiceTTSOutputMode",
     "VoiceSpokenConfirmationIntent",
     "VoiceSpokenConfirmationIntentKind",
     "VoiceSpokenConfirmationRequest",

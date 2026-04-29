@@ -444,6 +444,7 @@ class CommandUsabilityHarness:
         session_id = self._session_id(case, case_index)
         request_payload = case.payload()
         request_payload["session_id"] = session_id
+        request_payload.setdefault("response_profile", "command_eval_compact")
         if case.active_request_state:
             container.assistant.session_state.set_active_request_state(session_id, case.active_request_state)
         audit_start = _provider_audit_line_count(self.provider_audit_path)
@@ -718,6 +719,7 @@ class ProcessIsolatedCommandUsabilityHarness(CommandUsabilityHarness):
         session_id = self._session_id(case, case_index)
         request_payload = case.payload()
         request_payload["session_id"] = session_id
+        request_payload.setdefault("response_profile", "command_eval_compact")
         runtime_dir = self.output_dir / "runtime" / f"{case_index:04d}-{uuid4().hex[:10]}"
         self._prepare_runtime_dir(runtime_dir)
         port = _free_tcp_port()
@@ -775,6 +777,7 @@ class ProcessIsolatedCommandUsabilityHarness(CommandUsabilityHarness):
         session_id = self._session_id(case, case_index)
         request_payload = case.payload()
         request_payload["session_id"] = session_id
+        request_payload.setdefault("response_profile", "command_eval_compact")
         observation = self._send_request_with_hard_timeout(
             case=case,
             session_id=session_id,
@@ -865,6 +868,7 @@ class ProcessIsolatedCommandUsabilityHarness(CommandUsabilityHarness):
                 latency_ms=request_result["latency_ms"],
                 http_boundary_ms=request_result["http_boundary_ms"],
                 event_collection_ms=request_result["event_collection_ms"],
+                snapshot_ms=float(request_result.get("snapshot_ms") or 0.0),
                 status_code=request_result["status_code"],
                 events=tuple(request_result.get("events") or ()),
                 session_id=session_id,
@@ -1041,8 +1045,10 @@ def _post_case_over_http(
                 "job_limit": 0,
                 "note_limit": 0,
                 "history_limit": 0,
+                "compact": True,
             },
         )
+        snapshot_ms = (perf_counter() - event_started) * 1000 - event_collection_ms
         snapshot_payload = snapshot_response.json() if snapshot_response.content else {}
     return {
         "payload": payload,
@@ -1052,6 +1058,7 @@ def _post_case_over_http(
         "latency_ms": round((perf_counter() - started) * 1000, 3),
         "http_boundary_ms": round(http_boundary_ms, 3),
         "event_collection_ms": round(event_collection_ms, 3),
+        "snapshot_ms": round(snapshot_ms, 3),
         "response_json_bytes": response_json_bytes,
     }
 
@@ -1182,6 +1189,7 @@ def _build_observation(
     status_code: int,
     events: tuple[dict[str, Any], ...],
     session_id: str,
+    snapshot_ms: float = 0.0,
     input_boundary: str = "POST /chat/send",
     response_json_bytes: int = 0,
     stdout_tail: str = "",
@@ -1208,6 +1216,7 @@ def _build_observation(
         tool_results=tool_results,
         http_boundary_ms=http_boundary_ms,
         event_collection_ms=event_collection_ms,
+        snapshot_ms=snapshot_ms,
         total_latency_ms=latency_ms,
     )
     route_family = _route_family(route_state, planner_debug, tool_chain, assistant_message)
@@ -1250,6 +1259,9 @@ def _build_observation(
         response_active_request_state=dict(response_active_request_state),
         snapshot_active_request_state=dict(snapshot_active_request_state),
         stage_timings_ms=stage_timings,
+        latency_trace=dict(metadata.get("latency_trace") or {}) if isinstance(metadata.get("latency_trace"), dict) else {},
+        latency_summary=dict(metadata.get("latency_summary") or {}) if isinstance(metadata.get("latency_summary"), dict) else {},
+        budget_result=dict(metadata.get("budget_result") or {}) if isinstance(metadata.get("budget_result"), dict) else {},
         response_json_bytes=int(response_json_bytes),
         event_count=len(events),
         job_count=len(jobs),
@@ -1277,6 +1289,7 @@ def _stage_timings_from_metadata(
     http_boundary_ms: float,
     event_collection_ms: float,
     total_latency_ms: float,
+    snapshot_ms: float = 0.0,
 ) -> dict[str, float]:
     stage_timings = metadata.get("stage_timings_ms") if isinstance(metadata.get("stage_timings_ms"), dict) else {}
     if not stage_timings:
@@ -1285,6 +1298,7 @@ def _stage_timings_from_metadata(
     timings["http_boundary_ms"] = round(float(http_boundary_ms or 0.0), 3)
     timings["http_client_wait_ms"] = round(float(http_boundary_ms or 0.0), 3)
     timings["event_collection_ms"] = round(float(event_collection_ms or 0.0), 3)
+    timings["snapshot_ms"] = round(float(snapshot_ms or 0.0), 3)
     timings["dry_run_executor_ms"] = round(_dry_run_executor_ms(tool_results), 3)
     timings["total_latency_ms"] = round(float(total_latency_ms or 0.0), 3)
     return timings

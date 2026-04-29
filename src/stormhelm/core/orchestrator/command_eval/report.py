@@ -12,6 +12,73 @@ from .models import STAGE_LATENCY_FIELDS
 from .models import json_ready
 
 
+_L44_INLINE_CORRECT_ROUTES = {
+    "browser_destination",
+    "calculations",
+    "trust_approvals",
+    "voice_control",
+}
+
+_L44_EXPECTED_HANDLER_STATUS = {
+    "workspace.assemble_deep": {
+        "route_family": "workspace_operations",
+        "desired_status": "converted",
+        "current_async_status": "continuation_handler_implemented",
+    },
+    "workspace.restore_deep": {
+        "route_family": "workspace_operations",
+        "desired_status": "converted",
+        "current_async_status": "continuation_handler_implemented",
+    },
+    "software_control.verify_operation": {
+        "route_family": "software_control",
+        "desired_status": "converted",
+        "current_async_status": "continuation_handler_implemented",
+    },
+    "software_recovery.run_recovery_plan": {
+        "route_family": "software_recovery",
+        "desired_status": "converted",
+        "current_async_status": "continuation_handler_implemented",
+    },
+    "discord_relay.dispatch_approved_preview": {
+        "route_family": "discord_relay",
+        "desired_status": "converted",
+        "current_async_status": "continuation_handler_implemented",
+    },
+    "network.run_live_diagnosis": {
+        "route_family": "network",
+        "desired_status": "converted",
+        "current_async_status": "continuation_handler_implemented",
+    },
+    "screen_awareness.verify_change": {
+        "route_family": "screen_awareness",
+        "desired_status": "candidate",
+        "current_async_status": "continuation_handler_missing",
+        "missing_reason": "no_clean_worker_seam",
+    },
+    "software_control.execute_approved_operation": {
+        "route_family": "software_control",
+        "desired_status": "later",
+        "current_async_status": "needs_trust_seam_first",
+        "missing_reason": "unsafe_without_trust_boundary",
+    },
+}
+
+_L44_ROUTE_DESIRED_STATUS = {
+    "browser_destination": "inline",
+    "calculations": "inline",
+    "discord_relay": "converted_dispatch_only",
+    "network": "converted_live_diagnosis",
+    "provider_fallback": "provider_wait",
+    "screen_awareness": "candidate",
+    "software_control": "converted_verify_only",
+    "software_recovery": "converted",
+    "trust_approvals": "inline",
+    "voice_control": "inline",
+    "workspace_operations": "converted_deep_work",
+}
+
+
 def write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(json_ready(payload), indent=2, sort_keys=True, default=str), encoding="utf-8")
@@ -123,12 +190,15 @@ def build_checkpoint_summary(results: list[CommandEvalResult], *, feature_audit:
         ),
         "latency_ms": {
             "min": _percentile(latencies, 0.0),
+            "p50": _percentile(latencies, 0.5),
             "median": _percentile(latencies, 0.5),
             "p90": _percentile(latencies, 0.9),
             "p95": _percentile(latencies, 0.95),
+            "p99": _percentile(latencies, 0.99),
             "max": _percentile(latencies, 1.0),
         },
         "stage_latency_summary": _stage_latency_summary(results),
+        "kraken_latency_report": _kraken_latency_report(results),
         "unattributed_latency": {
             "top_20": _top_unattributed(results),
             "by_route_family": _unattributed_by_route_family(results),
@@ -189,6 +259,9 @@ def build_checkpoint_report(
         "",
         "## Per-Stage Latency Summary",
         _format_nested_counts(summary["stage_latency_summary"]),
+        "",
+        "## Kraken Latency Report",
+        _format_kraken_latency_report(summary["kraken_latency_report"]),
         "",
         "## Slowest 20 Requests",
         _compact_result_table(summary["slowest_20_requests"]),
@@ -384,6 +457,127 @@ def _format_nested_counts(counts: dict[str, dict[str, Any]]) -> str:
     return "\n".join(f"- {key}: {dict(value)}" for key, value in counts.items())
 
 
+def _format_kraken_latency_report(report: dict[str, Any]) -> str:
+    if not report:
+        return "- No data."
+    lines = [
+        f"- total_latency_ms: {report.get('total_latency_ms', {})}",
+        f"- budget_exceeded_count: {report.get('budget_exceeded_count', 0)}",
+        f"- budget_exceeded_continuing_count: {report.get('budget_exceeded_continuing_count', 0)}",
+        f"- hard_timeout_count: {report.get('hard_timeout_count', 0)}",
+        f"- provider_call_count: {report.get('provider_call_count', 0)}",
+        f"- partial_response_count: {report.get('partial_response_count', 0)}",
+        f"- async_initial_response_count: {report.get('async_initial_response_count', 0)}",
+        f"- progress_event_count: {report.get('progress_event_count', 0)}",
+        f"- job_required_count: {report.get('job_required_count', 0)}",
+        f"- task_required_count: {report.get('task_required_count', 0)}",
+        f"- event_progress_required_count: {report.get('event_progress_required_count', 0)}",
+        f"- converted_subsystem_route_count: {report.get('converted_subsystem_route_count', 0)}",
+        f"- conversion_count_by_route_family: {report.get('conversion_count_by_route_family', {})}",
+        f"- expected_conversion_missing_count: {report.get('expected_conversion_missing_count', 0)}",
+        f"- implemented_handler_count: {report.get('implemented_handler_count', 0)}",
+        f"- handler_count_by_route_family: {report.get('handler_count_by_route_family', {})}",
+        f"- missing_handler_count_by_reason: {report.get('missing_handler_count_by_reason', {})}",
+        f"- conversion_success_count: {report.get('conversion_success_count', 0)}",
+        f"- unsafe_claim_count_by_handler: {report.get('unsafe_claim_count_by_handler', {})}",
+        f"- p95_continuation_runtime_by_handler: {report.get('p95_continuation_runtime_by_handler', {})}",
+        f"- p95_inline_front_half_ms: {report.get('p95_inline_front_half_ms')}",
+        f"- p95_worker_back_half_ms: {report.get('p95_worker_back_half_ms')}",
+        f"- p95_continuation_queue_wait_ms: {report.get('p95_continuation_queue_wait_ms')}",
+        f"- p95_continuation_run_ms: {report.get('p95_continuation_run_ms')}",
+        f"- voice_first_audio_ms: {report.get('voice_first_audio_ms', {})}",
+        f"- voice_core_to_first_audio_ms: {report.get('voice_core_to_first_audio_ms', {})}",
+        f"- voice_streaming_enabled_count: {report.get('voice_streaming_enabled_count', 0)}",
+        f"- voice_streaming_fallback_count: {report.get('voice_streaming_fallback_count', 0)}",
+        f"- voice_prewarm_used_count: {report.get('voice_prewarm_used_count', 0)}",
+        f"- voice_partial_playback_count: {report.get('voice_partial_playback_count', 0)}",
+        f"- by_async_strategy: {report.get('by_async_strategy', {})}",
+        f"- queue_wait_ms: {report.get('queue_wait_ms', {})}",
+        f"- job_run_ms: {report.get('job_run_ms', {})}",
+        f"- job_total_ms: {report.get('job_total_ms', {})}",
+        f"- subsystem_cap_wait_ms: {report.get('subsystem_cap_wait_ms', {})}",
+        f"- worker_lane_counts: {report.get('worker_lane_counts', {})}",
+        f"- scheduler_strategy_counts: {report.get('scheduler_strategy_counts', {})}",
+        f"- scheduler_pressure_state_counts: {report.get('scheduler_pressure_state_counts', {})}",
+        f"- queue_wait_budget_exceeded_count: {report.get('queue_wait_budget_exceeded_count', 0)}",
+        f"- subsystem_cap_wait_count: {report.get('subsystem_cap_wait_count', 0)}",
+        f"- retry_policy_counts: {report.get('retry_policy_counts', {})}",
+        f"- retry_count_total: {report.get('retry_count_total', 0)}",
+        f"- saturation_event_count: {report.get('saturation_event_count', 0)}",
+        f"- starvation_warning_count: {report.get('starvation_warning_count', 0)}",
+        f"- async_strategy_by_worker_lane: {report.get('async_strategy_by_worker_lane', {})}",
+        f"- background_job_impact_summary: {report.get('background_job_impact_summary', {})}",
+        f"- fail_fast_count: {report.get('fail_fast_count', 0)}",
+        f"- route_triage_ms: {report.get('route_triage_ms', {})}",
+        f"- fast_path_hit_rate: {report.get('fast_path_hit_rate', 0)}",
+        f"- fast_path_correctness_rate: {report.get('fast_path_correctness_rate', 0)}",
+        f"- snapshot_hit_rate: {report.get('snapshot_hit_rate', 0)}",
+        f"- snapshot_miss_count_by_family: {report.get('snapshot_miss_count_by_family', {})}",
+        f"- stale_cautious_use_count: {report.get('stale_cautious_use_count', 0)}",
+        f"- heavy_context_avoidance_count: {report.get('heavy_context_avoidance_count', 0)}",
+        f"- snapshot_hit_vs_miss_latency: {report.get('snapshot_hit_vs_miss_latency', {})}",
+        f"- invalidation_events_count: {report.get('invalidation_events_count', 0)}",
+        f"- provider_fallback_suppressed_count: {report.get('provider_fallback_suppressed_count', 0)}",
+        f"- native_route_protection_count: {report.get('native_route_protection_count', 0)}",
+        f"- heavy_context_loaded_count_by_route_family: {report.get('heavy_context_loaded_count_by_route_family', {})}",
+        f"- by_route_family: {report.get('by_route_family', {})}",
+        f"- by_longest_stage: {report.get('by_longest_stage', {})}",
+        f"- by_execution_mode: {report.get('by_execution_mode', {})}",
+        f"- budget_exceeded_by_execution_mode: {report.get('budget_exceeded_by_execution_mode', {})}",
+        f"- fail_fast_reasons: {report.get('fail_fast_reasons', {})}",
+        "- top_10_slowest_rows:",
+    ]
+    for row in report.get("top_10_slowest_rows", [])[:10]:
+        if not isinstance(row, dict):
+            continue
+        lines.append(
+            "  - `{test_id}` {total_latency_ms} ms | {actual_route_family} | "
+            "longest={longest_stage} {longest_stage_ms} ms | budget={budget_label} exceeded={budget_exceeded}".format(
+                **{
+                    "test_id": row.get("test_id", ""),
+                    "total_latency_ms": row.get("total_latency_ms", 0),
+                    "actual_route_family": row.get("actual_route_family", ""),
+                    "longest_stage": row.get("longest_stage", ""),
+                    "longest_stage_ms": row.get("longest_stage_ms", 0),
+                    "budget_label": row.get("budget_label", ""),
+                    "budget_exceeded": row.get("budget_exceeded", False),
+                }
+            )
+        )
+    for label in (
+        "top_slow_instant_routes",
+        "top_slow_plan_first_routes",
+        "top_slow_async_first_acknowledgements",
+        "sync_blocked_async_expected_rows",
+        "top_slow_rows_with_snapshot_misses",
+        "slowest_continuation_rows",
+        "missing_conversion_rows",
+        "unsafe_claim_rows",
+    ):
+        lines.append(f"- {label}:")
+        for row in report.get(label, [])[:10]:
+            if not isinstance(row, dict):
+                continue
+            lines.append(
+                "  - `{test_id}` {total_latency_ms} ms | mode={execution_mode} | "
+                "first_feedback={first_feedback_ms} ms | route={actual_route_family} | "
+                "partial={partial_response_returned} async_expected={async_expected} "
+                "fail_fast={fail_fast_reason}".format(
+                    **{
+                        "test_id": row.get("test_id", ""),
+                        "total_latency_ms": row.get("total_latency_ms", 0),
+                        "execution_mode": row.get("execution_mode", ""),
+                        "first_feedback_ms": row.get("first_feedback_ms", ""),
+                        "actual_route_family": row.get("actual_route_family", ""),
+                        "partial_response_returned": row.get("partial_response_returned", False),
+                        "async_expected": row.get("async_expected", False),
+                        "fail_fast_reason": row.get("fail_fast_reason", ""),
+                    }
+                )
+            )
+    return "\n".join(lines)
+
+
 def _missing_telemetry_table(rows: list[dict[str, Any]]) -> str:
     if not rows:
         return "- None."
@@ -414,17 +608,921 @@ def _stage_latency_summary(results: list[CommandEvalResult]) -> dict[str, dict[s
     for field in (*STAGE_LATENCY_FIELDS, "unattributed_latency_ms"):
         values = sorted(float(result.to_dict().get(field) or 0.0) for result in results)
         if not values:
-            summary[field] = {"count": 0, "min": None, "median": None, "p90": None, "p95": None, "max": None}
+            summary[field] = {"count": 0, "min": None, "p50": None, "median": None, "p90": None, "p95": None, "p99": None, "max": None}
             continue
         summary[field] = {
             "count": len(values),
             "min": _percentile(values, 0.0),
+            "p50": _percentile(values, 0.5),
             "median": _percentile(values, 0.5),
             "p90": _percentile(values, 0.9),
             "p95": _percentile(values, 0.95),
+            "p99": _percentile(values, 0.99),
             "max": _percentile(values, 1.0),
         }
     return summary
+
+
+def _kraken_latency_report(results: list[CommandEvalResult]) -> dict[str, Any]:
+    rows = [result.to_dict() for result in results]
+    total_values = [float(row.get("total_latency_ms") or row.get("latency_ms") or 0.0) for row in rows]
+    by_route: dict[str, list[float]] = defaultdict(list)
+    by_longest_stage: dict[str, list[float]] = defaultdict(list)
+    by_execution_mode: dict[str, list[float]] = defaultdict(list)
+    by_async_strategy: dict[str, list[float]] = defaultdict(list)
+    async_strategy_by_worker_lane: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
+    queue_wait_values: list[float] = []
+    job_run_values: list[float] = []
+    job_total_values: list[float] = []
+    subsystem_cap_wait_values: list[float] = []
+    worker_lane_counts: Counter[str] = Counter()
+    scheduler_strategy_counts: Counter[str] = Counter()
+    scheduler_pressure_counts: Counter[str] = Counter()
+    retry_policy_counts: Counter[str] = Counter()
+    cancellation_state_counts: Counter[str] = Counter()
+    yield_state_counts: Counter[str] = Counter()
+    restart_recovery_state_counts: Counter[str] = Counter()
+    queue_wait_budget_exceeded_count = 0
+    subsystem_cap_wait_count = 0
+    retry_count_total = 0
+    triage_values: list[float] = []
+    heavy_context_by_route: dict[str, int] = defaultdict(int)
+    budget_by_execution_mode: Counter[str] = Counter()
+    fast_path_rows = 0
+    fast_path_correct = 0
+    snapshot_hit_rows = 0
+    snapshot_miss_by_family: Counter[str] = Counter()
+    snapshot_hit_latencies: list[float] = []
+    snapshot_miss_latencies: list[float] = []
+    cache_benefit_by_route: Counter[str] = Counter()
+    stale_cautious_use_count = 0
+    heavy_context_avoidance_count = 0
+    invalidation_events_count = 0
+    async_initial_response_count = 0
+    progress_event_count = 0
+    job_required_count = 0
+    task_required_count = 0
+    event_progress_required_count = 0
+    saturation_event_count = 0
+    starvation_warning_count = 0
+    background_job_rows = 0
+    background_job_latency: list[float] = []
+    converted_subsystem_route_count = 0
+    conversion_by_route: Counter[str] = Counter()
+    expected_conversion_missing_count = 0
+    inline_front_half_values: list[float] = []
+    worker_back_half_values: list[float] = []
+    continuation_queue_wait_values: list[float] = []
+    continuation_run_values: list[float] = []
+    continuation_total_values: list[float] = []
+    implemented_handler_count = 0
+    handler_count_by_route: Counter[str] = Counter()
+    missing_handler_by_reason: Counter[str] = Counter()
+    conversion_success_count = 0
+    unsafe_claim_by_handler: Counter[str] = Counter()
+    continuation_runtime_by_handler: dict[str, list[float]] = defaultdict(list)
+    voice_first_audio_values: list[float] = []
+    voice_core_to_first_audio_values: list[float] = []
+    voice_streaming_enabled_count = 0
+    voice_fallback_count = 0
+    voice_prewarm_used_count = 0
+    voice_partial_playback_count = 0
+    for row in rows:
+        total = float(row.get("total_latency_ms") or row.get("latency_ms") or 0.0)
+        route = str(row.get("actual_route_family") or row.get("expected_route_family") or "unknown")
+        stage = str(row.get("longest_stage") or "unknown")
+        execution_mode = str(row.get("execution_mode") or "unknown")
+        async_strategy = str(row.get("async_strategy") or "")
+        if not async_strategy and (row.get("subsystem_continuation_created") or row.get("direct_subsystem_async_converted")):
+            async_strategy = "create_job"
+        async_strategy = async_strategy or "none"
+        worker_lane = str(row.get("worker_lane") or "unknown")
+        by_route[route].append(total)
+        by_longest_stage[stage].append(total)
+        by_execution_mode[execution_mode].append(total)
+        by_async_strategy[async_strategy].append(total)
+        async_strategy_by_worker_lane[async_strategy][worker_lane].append(total)
+        worker_lane_counts[worker_lane] += 1
+        queue_wait_values.append(float(row.get("queue_wait_ms") or 0.0))
+        job_run_values.append(float(row.get("job_run_ms") or 0.0))
+        job_total_values.append(float(row.get("job_total_ms") or 0.0))
+        subsystem_cap_wait = float(row.get("subsystem_cap_wait_ms") or 0.0)
+        subsystem_cap_wait_values.append(subsystem_cap_wait)
+        if subsystem_cap_wait > 0:
+            subsystem_cap_wait_count += 1
+        if row.get("queue_wait_budget_exceeded"):
+            queue_wait_budget_exceeded_count += 1
+        scheduler_strategy = str(row.get("scheduler_strategy") or "unknown")
+        scheduler_strategy_counts[scheduler_strategy] += 1
+        pressure_state = str(row.get("scheduler_pressure_state") or "unknown")
+        scheduler_pressure_counts[pressure_state] += 1
+        retry_policy = str(row.get("retry_policy") or "none")
+        retry_policy_counts[retry_policy] += 1
+        retry_count_total += int(row.get("retry_count") or 0)
+        cancellation_state_counts[str(row.get("cancellation_state") or "unknown")] += 1
+        yield_state_counts[str(row.get("yield_state") or "unknown")] += 1
+        restart_recovery_state_counts[str(row.get("restart_recovery_state") or "unknown")] += 1
+        if float(row.get("worker_saturation_percent") or 0.0) >= 100.0:
+            saturation_event_count += 1
+        if row.get("starvation_detected"):
+            starvation_warning_count += 1
+        if int(row.get("background_job_count") or 0) > 0 or worker_lane == "background":
+            background_job_rows += 1
+            background_job_latency.append(total)
+        triage_ms = float(row.get("route_triage_ms") or 0.0)
+        if triage_ms >= 0:
+            triage_values.append(triage_ms)
+        if row.get("heavy_context_loaded"):
+            heavy_context_by_route[route] += 1
+        if row.get("fast_path_used"):
+            fast_path_rows += 1
+            likely = row.get("likely_route_families") if isinstance(row.get("likely_route_families"), list) else []
+            if route in likely:
+                fast_path_correct += 1
+        if row.get("budget_exceeded"):
+            budget_by_execution_mode[execution_mode] += 1
+        if row.get("snapshot_hot_path_hit"):
+            snapshot_hit_rows += 1
+            snapshot_hit_latencies.append(total)
+        miss_reason = row.get("snapshot_miss_reason") if isinstance(row.get("snapshot_miss_reason"), dict) else {}
+        if miss_reason:
+            snapshot_miss_latencies.append(total)
+            for family in miss_reason:
+                snapshot_miss_by_family[str(family)] += 1
+        if row.get("stale_snapshot_used_cautiously"):
+            stale_cautious_use_count += 1
+        if row.get("heavy_context_avoided_by_snapshot"):
+            heavy_context_avoidance_count += 1
+            cache_benefit_by_route[route] += 1
+        invalidation_events_count += int(row.get("invalidation_count") or 0)
+        if row.get("async_initial_response_returned") or row.get("returned_before_subsystem_completion"):
+            async_initial_response_count += 1
+        progress_event_count += int(row.get("progress_event_count") or 0)
+        if row.get("job_required"):
+            job_required_count += 1
+        if row.get("task_required"):
+            task_required_count += 1
+        if row.get("event_progress_required"):
+            event_progress_required_count += 1
+        if row.get("direct_subsystem_async_converted"):
+            converted_subsystem_route_count += 1
+            conversion_by_route[route] += 1
+            conversion_success_count += 1
+        if row.get("async_conversion_expected") and not row.get("direct_subsystem_async_converted"):
+            expected_conversion_missing_count += 1
+        if row.get("voice_streaming_tts_enabled"):
+            voice_streaming_enabled_count += 1
+        voice_first_audio = float(row.get("voice_first_audio_ms") or 0.0)
+        if voice_first_audio > 0:
+            voice_first_audio_values.append(voice_first_audio)
+        voice_core_to_first_audio = float(row.get("voice_core_to_first_audio_ms") or 0.0)
+        if voice_core_to_first_audio > 0:
+            voice_core_to_first_audio_values.append(voice_core_to_first_audio)
+        if row.get("voice_streaming_fallback_used"):
+            voice_fallback_count += 1
+        if row.get("voice_prewarm_used"):
+            voice_prewarm_used_count += 1
+        if row.get("voice_partial_playback"):
+            voice_partial_playback_count += 1
+        inline_front_half_values.append(float(row.get("inline_front_half_ms") or 0.0))
+        worker_back_half_values.append(float(row.get("worker_back_half_ms") or 0.0))
+        continuation_queue_wait_values.append(float(row.get("continuation_queue_wait_ms") or 0.0))
+        continuation_run_values.append(float(row.get("continuation_run_ms") or 0.0))
+        continuation_total_values.append(float(row.get("continuation_total_ms") or 0.0))
+        handler = str(row.get("subsystem_continuation_handler") or row.get("subsystem_continuation_kind") or "")
+        if handler:
+            continuation_runtime_by_handler[handler].append(float(row.get("continuation_total_ms") or 0.0))
+        handler_implemented = _l44_inferred_handler_implemented(row, handler)
+        if handler_implemented:
+            implemented_handler_count += 1
+            handler_count_by_route[route] += 1
+        missing_reason = str(row.get("subsystem_continuation_handler_missing_reason") or "")
+        if missing_reason:
+            missing_handler_by_reason[missing_reason] += 1
+        if row.get("subsystem_continuation_created") and row.get("returned_before_subsystem_completion") and str(row.get("result_state") or "").lower() in {"completed", "verified"}:
+            unsafe_claim_by_handler[handler or "unknown"] += 1
+    return {
+        "total_latency_ms": _value_summary(total_values),
+        "by_route_family": {
+            route: _value_summary(values)
+            for route, values in sorted(by_route.items())
+        },
+        "by_longest_stage": {
+            stage: _value_summary(values)
+            for stage, values in sorted(by_longest_stage.items())
+        },
+        "by_execution_mode": {
+            mode: _value_summary(values)
+            for mode, values in sorted(by_execution_mode.items())
+        },
+        "by_async_strategy": {
+            strategy: _value_summary(values)
+            for strategy, values in sorted(by_async_strategy.items())
+        },
+        "queue_wait_ms": _value_summary(queue_wait_values),
+        "job_run_ms": _value_summary(job_run_values),
+        "job_total_ms": _value_summary(job_total_values),
+        "subsystem_cap_wait_ms": _value_summary(subsystem_cap_wait_values),
+        "worker_lane_counts": dict(sorted(worker_lane_counts.items())),
+        "scheduler_strategy_counts": dict(sorted(scheduler_strategy_counts.items())),
+        "scheduler_pressure_state_counts": dict(sorted(scheduler_pressure_counts.items())),
+        "queue_wait_budget_exceeded_count": queue_wait_budget_exceeded_count,
+        "subsystem_cap_wait_count": subsystem_cap_wait_count,
+        "retry_policy_counts": dict(sorted(retry_policy_counts.items())),
+        "retry_count_total": retry_count_total,
+        "cancellation_state_counts": dict(sorted(cancellation_state_counts.items())),
+        "yield_state_counts": dict(sorted(yield_state_counts.items())),
+        "restart_recovery_state_counts": dict(sorted(restart_recovery_state_counts.items())),
+        "saturation_event_count": saturation_event_count,
+        "starvation_warning_count": starvation_warning_count,
+        "async_strategy_by_worker_lane": {
+            strategy: {
+                lane: _value_summary(values)
+                for lane, values in sorted(lane_values.items())
+            }
+            for strategy, lane_values in sorted(async_strategy_by_worker_lane.items())
+        },
+        "background_job_impact_summary": {
+            "rows_with_background_jobs": background_job_rows,
+            "latency_ms": _value_summary(background_job_latency),
+        },
+        "route_triage_ms": _value_summary(triage_values),
+        "fast_path_hit_rate": round(fast_path_rows / len(rows), 4) if rows else 0.0,
+        "fast_path_correctness_rate": round(fast_path_correct / fast_path_rows, 4) if fast_path_rows else 0.0,
+        "snapshot_hit_rate": round(snapshot_hit_rows / len(rows), 4) if rows else 0.0,
+        "snapshot_miss_count_by_family": dict(sorted(snapshot_miss_by_family.items())),
+        "stale_cautious_use_count": stale_cautious_use_count,
+        "heavy_context_avoidance_count": heavy_context_avoidance_count,
+        "snapshot_hit_vs_miss_latency": {
+            "hit": _value_summary(snapshot_hit_latencies),
+            "miss": _value_summary(snapshot_miss_latencies),
+        },
+        "top_slow_rows_with_snapshot_misses": [
+            _compact_latency_row(row)
+            for row in sorted(
+                rows,
+                key=lambda item: float(item.get("total_latency_ms") or item.get("latency_ms") or 0.0),
+                reverse=True,
+            )
+            if isinstance(row.get("snapshot_miss_reason"), dict) and row.get("snapshot_miss_reason")
+        ][:10],
+        "top_route_families_benefiting_from_cache": dict(sorted(cache_benefit_by_route.items())),
+        "invalidation_events_count": invalidation_events_count,
+        "budget_exceeded_by_execution_mode": dict(sorted(budget_by_execution_mode.items())),
+        "budget_exceeded_count": sum(1 for row in rows if row.get("budget_exceeded")),
+        "budget_exceeded_continuing_count": sum(1 for row in rows if row.get("budget_exceeded_continuing")),
+        "hard_timeout_count": sum(1 for row in rows if row.get("hard_timeout") or row.get("process_killed")),
+        "provider_call_count": sum(int(row.get("provider_call_count") or 0) for row in rows),
+        "partial_response_count": sum(1 for row in rows if row.get("partial_response_returned")),
+        "async_initial_response_count": async_initial_response_count,
+        "progress_event_count": progress_event_count,
+        "job_required_count": job_required_count,
+        "task_required_count": task_required_count,
+        "event_progress_required_count": event_progress_required_count,
+        "converted_subsystem_route_count": converted_subsystem_route_count,
+        "conversion_count_by_route_family": dict(sorted(conversion_by_route.items())),
+        "expected_conversion_missing_count": expected_conversion_missing_count,
+        "implemented_handler_count": implemented_handler_count,
+        "handler_count_by_route_family": dict(sorted(handler_count_by_route.items())),
+        "missing_handler_count_by_reason": dict(sorted(missing_handler_by_reason.items())),
+        "conversion_success_count": conversion_success_count,
+        "conversion_expected_but_missing_count": expected_conversion_missing_count,
+        "unsafe_claim_count_by_handler": dict(sorted(unsafe_claim_by_handler.items())),
+        "p95_continuation_runtime_by_handler": {
+            handler: _percentile(values, 0.95)
+            for handler, values in sorted(continuation_runtime_by_handler.items())
+        },
+        "p95_inline_front_half_ms": _percentile(inline_front_half_values, 0.95),
+        "p95_worker_back_half_ms": _percentile(worker_back_half_values, 0.95),
+        "p95_continuation_queue_wait_ms": _percentile(continuation_queue_wait_values, 0.95),
+        "p95_continuation_run_ms": _percentile(continuation_run_values, 0.95),
+        "p95_continuation_total_ms": _percentile(continuation_total_values, 0.95),
+        "voice_first_audio_ms": _value_summary(voice_first_audio_values),
+        "voice_core_to_first_audio_ms": _value_summary(voice_core_to_first_audio_values),
+        "voice_streaming_enabled_count": voice_streaming_enabled_count,
+        "voice_streaming_fallback_count": voice_fallback_count,
+        "voice_prewarm_used_count": voice_prewarm_used_count,
+        "voice_partial_playback_count": voice_partial_playback_count,
+        "fail_fast_count": sum(1 for row in rows if row.get("fail_fast_reason")),
+        "heavy_context_loaded_count_by_route_family": dict(sorted(heavy_context_by_route.items())),
+        "provider_fallback_suppressed_count": sum(1 for row in rows if row.get("provider_fallback_suppressed_reason")),
+        "native_route_protection_count": sum(
+            1
+            for row in rows
+            if row.get("provider_fallback_suppressed_reason") == "native_route_triage"
+        ),
+        "top_10_slowest_rows": [
+            _compact_latency_row(row)
+            for row in sorted(
+                rows,
+                key=lambda item: float(item.get("total_latency_ms") or item.get("latency_ms") or 0.0),
+                reverse=True,
+            )[:10]
+        ],
+        "top_route_handler_offenders": _top_stage_offenders(rows, "route_handler_ms"),
+        "top_planner_offenders": _top_stage_offenders(rows, "planner_route_ms"),
+        "top_response_serialization_offenders": _top_stage_offenders(rows, "response_serialization_ms"),
+        "top_rows_by_queue_wait": [
+            _compact_latency_row(row)
+            for row in sorted(rows, key=lambda item: float(item.get("queue_wait_ms") or 0.0), reverse=True)
+            if float(row.get("queue_wait_ms") or 0.0) > 0
+        ][:10],
+        "top_rows_by_job_runtime": [
+            _compact_latency_row(row)
+            for row in sorted(rows, key=lambda item: float(item.get("job_run_ms") or 0.0), reverse=True)
+            if float(row.get("job_run_ms") or 0.0) > 0
+        ][:10],
+        "slowest_continuation_rows": [
+            _compact_latency_row(row)
+            for row in sorted(rows, key=lambda item: float(item.get("continuation_total_ms") or 0.0), reverse=True)
+            if row.get("subsystem_continuation_created")
+        ][:10],
+        "slowest_rows_by_handler": {
+            handler: [
+                _compact_latency_row(row)
+                for row in sorted(
+                    [
+                        item
+                        for item in rows
+                        if str(item.get("subsystem_continuation_handler") or item.get("subsystem_continuation_kind") or "") == handler
+                    ],
+                    key=lambda item: float(item.get("continuation_total_ms") or 0.0),
+                    reverse=True,
+                )[:10]
+            ]
+            for handler in sorted(continuation_runtime_by_handler)
+        },
+        "missing_conversion_rows": [
+            _compact_latency_row(row)
+            for row in rows
+            if row.get("async_conversion_expected") and not row.get("direct_subsystem_async_converted")
+        ][:10],
+        "unsafe_claim_rows": [
+            _compact_latency_row(row)
+            for row in rows
+            if row.get("subsystem_continuation_created")
+            and row.get("returned_before_subsystem_completion")
+            and str(row.get("result_state") or "").lower() in {"completed", "verified"}
+        ][:10],
+        "slow_planner_rows_with_triage": [
+            _compact_latency_row(row)
+            for row in sorted(rows, key=lambda item: float(item.get("planner_route_ms") or 0.0), reverse=True)
+            if float(row.get("route_triage_ms") or 0.0) > 0
+        ][:10],
+        "top_rows_where_triage_likely_helped": [
+            _compact_latency_row(row)
+            for row in sorted(rows, key=lambda item: int(item.get("planner_candidates_pruned_count") or 0), reverse=True)
+            if row.get("fast_path_used") or int(row.get("planner_candidates_pruned_count") or 0) > 0
+        ][:10],
+        "top_rows_where_triage_was_wrong_or_ambiguous": [
+            _compact_latency_row(row)
+            for row in rows
+            if row.get("fast_path_used")
+            and str(row.get("actual_route_family") or "") not in (row.get("likely_route_families") or [])
+        ][:10],
+        "top_slow_instant_routes": _top_mode_rows(rows, "instant"),
+        "top_slow_plan_first_routes": _top_mode_rows(rows, "plan_first"),
+        "top_slow_async_first_acknowledgements": _top_mode_rows(rows, "async_first", sort_field="first_feedback_ms"),
+        "sync_blocked_async_expected_rows": [
+            _compact_latency_row(row)
+            for row in rows
+            if row.get("async_expected")
+            and not row.get("async_continuation")
+            and float(row.get("total_latency_ms") or row.get("latency_ms") or 0.0) > 2500
+        ][:10],
+        "known_slow_lanes": dict(
+            sorted(
+                Counter(
+                    label
+                    for row in rows
+                    for label in row.get("known_lane_labels", [])
+                    if isinstance(label, str) and label
+                ).items()
+            )
+        ),
+        "l44_async_validation": build_l44_async_validation_report(rows),
+    }
+
+
+def build_l44_async_validation_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build the L4.4 audit view from already-sanitized Kraken rows."""
+    safe_rows = _l44_normalize_rows(rows)
+    tail_rows = classify_l44_tail_latency(safe_rows)
+    return {
+        "async_coverage_audit": _l44_async_coverage_audit(safe_rows),
+        "tail_latency_classification": {
+            "category_counts": dict(sorted(Counter(row["tail_category"] for row in tail_rows).items())),
+            "top_20_slow_rows_overall": tail_rows[:20],
+            "top_10_slow_rows_by_planner_time": _l44_top_by(safe_rows, "planner_route_ms"),
+            "top_10_slow_rows_by_route_handler_time": _l44_top_by(safe_rows, "route_handler_ms"),
+            "top_10_slow_rows_by_queue_wait": _l44_top_by(safe_rows, "queue_wait_ms"),
+            "top_10_slow_rows_by_continuation_runtime": _l44_top_by(safe_rows, "continuation_total_ms"),
+            "top_10_slow_rows_by_serialization": _l44_top_by(safe_rows, "response_serialization_ms"),
+            "top_10_missing_conversion_rows": [
+                item
+                for item in tail_rows
+                if item["tail_category"] in {"expected_async_missing", "handler_missing"}
+            ][:10],
+        },
+        "truth_clamp_validation": validate_l44_truth_clamps(safe_rows),
+        "scheduler_pressure_assessment": assess_l44_scheduler_pressure(safe_rows),
+    }
+
+
+def classify_l44_tail_latency(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = _l44_normalize_rows(rows)
+    classified: list[dict[str, Any]] = []
+    for row in rows:
+        compact = _compact_latency_row(row)
+        category = _l44_tail_category(row)
+        compact["tail_category"] = category
+        compact["recommended_fix"] = _l44_recommended_fix(category, row)
+        classified.append(compact)
+    return sorted(
+        classified,
+        key=lambda item: float(item.get("total_latency_ms") or 0.0),
+        reverse=True,
+    )
+
+
+def validate_l44_truth_clamps(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    rows = _l44_normalize_rows(rows)
+    unsafe_rows: list[dict[str, Any]] = []
+    by_type: Counter[str] = Counter()
+    by_handler: Counter[str] = Counter()
+    by_route: Counter[str] = Counter()
+    for row in rows:
+        issues = _l44_truth_issues(row)
+        if not issues:
+            continue
+        handler = str(row.get("subsystem_continuation_handler") or row.get("subsystem_continuation_kind") or "none")
+        route = str(row.get("actual_route_family") or row.get("expected_route_family") or "unknown")
+        for issue in issues:
+            by_type[issue] += 1
+            by_handler[handler] += 1
+            by_route[route] += 1
+        unsafe_rows.append(
+            {
+                **_compact_latency_row(row),
+                "unsafe_claim_types": issues,
+                "response_preview": _l44_response_text(row)[:220],
+            }
+        )
+    return {
+        "unsafe_claim_count": sum(by_type.values()),
+        "unsafe_row_count": len(unsafe_rows),
+        "unsafe_claim_count_by_type": dict(sorted(by_type.items())),
+        "unsafe_claim_count_by_handler": dict(sorted(by_handler.items())),
+        "unsafe_claim_count_by_route_family": dict(sorted(by_route.items())),
+        "unsafe_claim_examples": unsafe_rows[:20],
+    }
+
+
+def assess_l44_scheduler_pressure(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    rows = _l44_normalize_rows(rows)
+    queue_values = [float(row.get("queue_wait_ms") or row.get("continuation_queue_wait_ms") or 0.0) for row in rows]
+    run_values = [float(row.get("job_run_ms") or row.get("continuation_run_ms") or row.get("continuation_total_ms") or 0.0) for row in rows]
+    saturation_count = sum(1 for row in rows if float(row.get("worker_saturation_percent") or 0.0) >= 100.0)
+    starvation_count = sum(
+        1
+        for row in rows
+        if row.get("starvation_detected")
+        or (
+            int(row.get("interactive_jobs_waiting") or 0) > 0
+            and int(row.get("background_jobs_running") or 0) > 0
+        )
+    )
+    by_route: Counter[str] = Counter()
+    for row in rows:
+        if float(row.get("queue_wait_ms") or row.get("continuation_queue_wait_ms") or 0.0) > 500.0:
+            by_route[str(row.get("actual_route_family") or row.get("expected_route_family") or "unknown")] += 1
+    queue_p95 = _percentile(queue_values, 0.95)
+    run_p95 = _percentile(run_values, 0.95)
+    if starvation_count:
+        pressure = "high"
+        source = "background_starvation"
+        scope = "moderate"
+    elif queue_p95 >= 1000.0 or saturation_count >= 3:
+        pressure = "high"
+        source = "queue_wait"
+        scope = "moderate"
+    elif queue_p95 >= 250.0 or saturation_count:
+        pressure = "moderate"
+        source = "queue_wait"
+        scope = "light"
+    elif run_p95 >= 3000.0:
+        pressure = "moderate"
+        source = "handler_runtime"
+        scope = "light"
+    else:
+        pressure = "low"
+        source = "none"
+        scope = "none"
+    if source == "none" and run_p95 >= 1500.0:
+        pressure = "moderate"
+        source = "handler_runtime"
+        scope = "light"
+    return {
+        "scheduler_pressure": pressure,
+        "primary_pressure_source": source,
+        "recommended_l45_scope": scope,
+        "queue_wait_ms": _value_summary(queue_values),
+        "job_run_ms": _value_summary(run_values),
+        "queue_wait_p95": queue_p95,
+        "job_run_p95": run_p95,
+        "worker_saturation_count": saturation_count,
+        "starvation_warning_count": starvation_count,
+        "top_affected_route_families": dict(by_route.most_common(10)),
+    }
+
+
+def _l44_normalize_rows(rows: list[Any]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for row in rows:
+        if hasattr(row, "to_dict") and callable(row.to_dict):
+            normalized.append(dict(row.to_dict()))
+        elif isinstance(row, dict):
+            normalized.append(dict(row))
+    return normalized
+
+
+def _l44_async_coverage_audit(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    status_by_route: dict[str, dict[str, Any]] = {
+        route: {
+            "current_async_status": "inline_correct" if route in _L44_INLINE_CORRECT_ROUTES else "async_policy_exists",
+            "desired_status": desired,
+            "row_count": 0,
+            "converted_count": 0,
+            "missing_count": 0,
+            "notes": [],
+        }
+        for route, desired in sorted(_L44_ROUTE_DESIRED_STATUS.items())
+    }
+    status_by_handler: dict[str, dict[str, Any]] = {
+        handler: dict(metadata, row_count=0, missing_count=0, implemented_count=0)
+        for handler, metadata in sorted(_L44_EXPECTED_HANDLER_STATUS.items())
+    }
+    missing_reasons: Counter[str] = Counter()
+    implemented_handler_count = 0
+    continuation_triggered_count = 0
+    expected_not_triggered_count = 0
+    for row in rows:
+        route = str(row.get("actual_route_family") or row.get("expected_route_family") or "unknown")
+        route_entry = status_by_route.setdefault(
+            route,
+            {
+                "current_async_status": "unknown",
+                "desired_status": "unknown",
+                "row_count": 0,
+                "converted_count": 0,
+                "missing_count": 0,
+                "notes": [],
+            },
+        )
+        route_entry["row_count"] += 1
+        handler = str(row.get("subsystem_continuation_handler") or row.get("subsystem_continuation_kind") or "")
+        missing_reason = str(
+            row.get("subsystem_continuation_handler_missing_reason")
+            or row.get("async_conversion_missing_reason")
+            or ""
+        )
+        if row.get("subsystem_continuation_created") or row.get("direct_subsystem_async_converted"):
+            continuation_triggered_count += 1
+            route_entry["converted_count"] += 1
+            route_entry["current_async_status"] = "continuation_triggered_correctly"
+        if _l44_inferred_handler_implemented(row, handler):
+            implemented_handler_count += 1
+            route_entry["current_async_status"] = "continuation_handler_implemented"
+        if row.get("async_conversion_expected") and not row.get("direct_subsystem_async_converted"):
+            expected_not_triggered_count += 1
+            if not missing_reason:
+                route_entry["current_async_status"] = "continuation_expected_but_not_triggered"
+        if missing_reason:
+            missing_reasons[missing_reason] += 1
+            route_entry["missing_count"] += 1
+            route_entry["current_async_status"] = "continuation_handler_missing"
+        if route in _L44_INLINE_CORRECT_ROUTES and not row.get("async_conversion_expected"):
+            route_entry["current_async_status"] = "inline_correct"
+        if handler:
+            handler_entry = status_by_handler.setdefault(
+                handler,
+                {
+                    "route_family": route,
+                    "desired_status": "unknown",
+                    "current_async_status": "unknown",
+                    "row_count": 0,
+                    "missing_count": 0,
+                    "implemented_count": 0,
+                },
+            )
+            handler_entry["row_count"] += 1
+            if _l44_inferred_handler_implemented(row, handler):
+                handler_entry["current_async_status"] = "continuation_handler_implemented"
+                handler_entry["implemented_count"] += 1
+            elif missing_reason:
+                handler_entry["current_async_status"] = "continuation_handler_missing"
+                handler_entry["missing_reason"] = missing_reason
+                handler_entry["missing_count"] += 1
+    classification_table = [
+        {
+            "route_or_subsystem": route,
+            "current_async_status": data["current_async_status"],
+            "desired_status": data["desired_status"],
+            "row_count": data["row_count"],
+            "converted_count": data["converted_count"],
+            "missing_count": data["missing_count"],
+        }
+        for route, data in sorted(status_by_route.items())
+    ]
+    return {
+        "status_by_route": status_by_route,
+        "status_by_handler": status_by_handler,
+        "classification_table": classification_table,
+        "implemented_handler_count": implemented_handler_count,
+        "continuation_triggered_count": continuation_triggered_count,
+        "continuation_expected_but_not_triggered_count": expected_not_triggered_count,
+        "missing_handler_count_by_reason": dict(sorted(missing_reasons.items())),
+        "inline_correct_routes": sorted(_L44_INLINE_CORRECT_ROUTES),
+    }
+
+
+def _l44_tail_category(row: dict[str, Any]) -> str:
+    if row.get("hard_timeout") or row.get("process_killed") or str(row.get("failure_category") or "") == "hard_timeout":
+        return "harness_artifact"
+    if str(row.get("subsystem_continuation_handler_missing_reason") or ""):
+        return "handler_missing"
+    if row.get("async_conversion_expected") and not (row.get("async_continuation") or row.get("direct_subsystem_async_converted")):
+        return "expected_async_missing"
+    if float(row.get("queue_wait_ms") or row.get("continuation_queue_wait_ms") or 0.0) >= 500.0:
+        return "job_queue_wait_slow"
+    if row.get("subsystem_continuation_created") and float(row.get("continuation_total_ms") or row.get("subsystem_continuation_total_ms") or 0.0) >= 1000.0:
+        return "subsystem_continuation_runtime_slow"
+    if float(row.get("job_run_ms") or 0.0) >= 1000.0:
+        return "worker_runtime_slow"
+    if float(row.get("planner_route_ms") or 0.0) >= 1000.0 or str(row.get("longest_stage") or "") == "planner_route_ms":
+        return "planner_route_slow"
+    if float(row.get("route_handler_ms") or 0.0) >= 1000.0 or str(row.get("longest_stage") or "") == "route_handler_ms":
+        return "route_handler_slow"
+    if (
+        float(row.get("heavy_context_ms") or 0.0) >= 500.0
+        or (
+            str(row.get("longest_stage") or "") in {"memory_context_ms", "heavy_context_ms", "workspace_summary_ms"}
+            and float(row.get("longest_stage_ms") or 0.0) >= 500.0
+        )
+    ):
+        return "heavy_context_slow"
+    if (
+        isinstance(row.get("snapshot_miss_reason"), dict)
+        and row.get("snapshot_miss_reason")
+        and float(row.get("latency_ms") or row.get("total_latency_ms") or 0.0) >= 2500.0
+    ):
+        return "snapshot_miss_slow"
+    if row.get("provider_called") or float(row.get("provider_call_count") or 0.0) > 0:
+        return "provider_fallback_slow"
+    if float(row.get("response_serialization_ms") or 0.0) >= 500.0:
+        return "response_serialization_slow"
+    if float(row.get("event_collection_ms") or 0.0) >= 500.0:
+        return "event_collection_slow"
+    if float(row.get("response_json_bytes") or 0.0) > 1_000_000:
+        return "workspace_payload_large"
+    if row.get("fail_fast_reason") and float(row.get("latency_ms") or row.get("total_latency_ms") or 0.0) > 2500.0:
+        return "unsupported_route_waited_too_long"
+    return "truthful_blocked_but_slow" if str(row.get("result_state") or "") in {"blocked", "unsupported"} else "within_expected_band"
+
+
+def _l44_inferred_handler_implemented(row: dict[str, Any], handler: str) -> bool:
+    if row.get("subsystem_continuation_handler_implemented"):
+        return True
+    if not handler:
+        return False
+    metadata = _L44_EXPECTED_HANDLER_STATUS.get(handler)
+    if not metadata:
+        return False
+    if metadata.get("current_async_status") != "continuation_handler_implemented":
+        return False
+    return bool(row.get("subsystem_continuation_created") or row.get("direct_subsystem_async_converted"))
+
+
+def _l44_recommended_fix(category: str, row: dict[str, Any]) -> str:
+    if category == "planner_route_slow":
+        return "inspect route triage and planner candidate pruning"
+    if category == "route_handler_slow":
+        return "inspect synchronous route handler stage"
+    if category == "job_queue_wait_slow":
+        return "evaluate L4.5 worker scheduling and queue pressure"
+    if category in {"worker_runtime_slow", "subsystem_continuation_runtime_slow"}:
+        return "profile continuation handler runtime before scheduler redesign"
+    if category == "handler_missing":
+        return str(row.get("subsystem_continuation_handler_missing_reason") or "classify missing continuation handler")
+    if category == "expected_async_missing":
+        return str(row.get("async_conversion_missing_reason") or "check continuation trigger metadata")
+    if category == "harness_artifact":
+        return "keep separate from latency budget exceedance"
+    if category == "provider_fallback_slow":
+        return "confirm provider fallback was expected and disabled where native route owns request"
+    if category == "snapshot_miss_slow":
+        return "inspect snapshot freshness and miss reasons"
+    return "inspect row trace before changing behavior"
+
+
+def _l44_truth_issues(row: dict[str, Any]) -> list[str]:
+    text = _l44_response_text(row).lower()
+    route = str(row.get("actual_route_family") or row.get("expected_route_family") or "").lower()
+    handler = str(row.get("subsystem_continuation_handler") or row.get("subsystem_continuation_kind") or "").lower()
+    state = str(row.get("result_state") or row.get("actual_result_state") or "").lower()
+    issues: list[str] = []
+    if row.get("subsystem_continuation_created") and row.get("returned_before_subsystem_completion") and state in {"completed", "verified"}:
+        issues.append("initial_response_claimed_completion")
+    if route == "discord_relay" and "preview" in state and any(word in text for word in ("sent", "delivered", "posted")):
+        issues.append("preview_claimed_sent")
+    if route == "discord_relay" and ("attempt" in state or "attempted" in text) and any(word in text for word in ("delivered", "verified delivery")):
+        issues.append("dispatch_attempted_claimed_delivered")
+    if route == "software_control" and state in {"planning", "plan_ready", "queued"} and any(word in text for word in ("installed", "updated", "uninstalled")):
+        issues.append("software_plan_claimed_installed")
+    if route == "software_control" and state == "completed_unverified" and "verified" in text:
+        issues.append("completed_unverified_claimed_verified")
+    if route == "software_recovery" and any(word in text for word in ("fixed", "repaired", "resolved")):
+        issues.append("recovery_attempted_claimed_fixed")
+    if (route == "network" or "network.run_live_diagnosis" in handler) and any(word in text for word in ("repaired", "fixed", "resolved")):
+        issues.append("diagnosis_claimed_repair")
+    if route == "screen_awareness" and "verified" in text and int(row.get("continuation_verification_evidence_count") or 0) <= 0:
+        issues.append("screen_change_claimed_verified_without_evidence")
+    if state == "completed_unverified" and "verified" in text:
+        issues.append("completed_unverified_claimed_verified")
+    return list(dict.fromkeys(issues))
+
+
+def _l44_response_text(row: dict[str, Any]) -> str:
+    if row.get("ui_response") is not None:
+        return str(row.get("ui_response") or "")
+    observation = row.get("observation") if isinstance(row.get("observation"), dict) else {}
+    return str(observation.get("ui_response") or row.get("assistant_message") or row.get("response") or "")
+
+
+def _l44_top_by(rows: list[dict[str, Any]], field: str, *, limit: int = 10) -> list[dict[str, Any]]:
+    return [
+        {
+            **_compact_latency_row(row),
+            field: row.get(field),
+            "tail_category": _l44_tail_category(row),
+        }
+        for row in sorted(rows, key=lambda item: float(item.get(field) or 0.0), reverse=True)
+        if float(row.get(field) or 0.0) > 0.0
+    ][:limit]
+
+
+def _compact_latency_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "test_id": row.get("test_id"),
+        "prompt": row.get("prompt"),
+        "status": row.get("status"),
+        "expected_route_family": row.get("expected_route_family"),
+        "actual_route_family": row.get("actual_route_family"),
+        "result_state": row.get("result_state"),
+        "total_latency_ms": row.get("total_latency_ms") or row.get("latency_ms"),
+        "longest_stage": row.get("longest_stage"),
+        "longest_stage_ms": row.get("longest_stage_ms"),
+        "budget_label": row.get("budget_label"),
+        "budget_exceeded": row.get("budget_exceeded"),
+        "execution_mode": row.get("execution_mode"),
+        "partial_response_returned": row.get("partial_response_returned"),
+        "async_expected": row.get("async_expected"),
+        "first_feedback_ms": row.get("first_feedback_ms"),
+        "budget_exceeded_continuing": row.get("budget_exceeded_continuing"),
+        "fail_fast_reason": row.get("fail_fast_reason"),
+        "fast_path_used": row.get("fast_path_used"),
+        "route_triage_ms": row.get("route_triage_ms"),
+        "triage_confidence": row.get("triage_confidence"),
+        "triage_reason_codes": row.get("triage_reason_codes"),
+        "likely_route_families": row.get("likely_route_families"),
+        "skipped_route_families": row.get("skipped_route_families"),
+        "heavy_context_loaded": row.get("heavy_context_loaded"),
+        "heavy_context_reason": row.get("heavy_context_reason"),
+        "provider_fallback_suppressed_reason": row.get("provider_fallback_suppressed_reason"),
+        "planner_candidates_pruned_count": row.get("planner_candidates_pruned_count"),
+        "route_family_seams_evaluated": row.get("route_family_seams_evaluated"),
+        "route_family_seams_skipped": row.get("route_family_seams_skipped"),
+        "snapshots_checked": row.get("snapshots_checked"),
+        "snapshots_used": row.get("snapshots_used"),
+        "snapshots_refreshed": row.get("snapshots_refreshed"),
+        "snapshots_invalidated": row.get("snapshots_invalidated"),
+        "snapshot_freshness": row.get("snapshot_freshness"),
+        "snapshot_hot_path_hit": row.get("snapshot_hot_path_hit"),
+        "snapshot_miss_reason": row.get("snapshot_miss_reason"),
+        "snapshot_age_ms": row.get("snapshot_age_ms"),
+        "stale_snapshot_used_cautiously": row.get("stale_snapshot_used_cautiously"),
+        "heavy_context_avoided_by_snapshot": row.get("heavy_context_avoided_by_snapshot"),
+        "invalidation_count": row.get("invalidation_count"),
+        "freshness_warnings": row.get("freshness_warnings"),
+        "provider_called": row.get("provider_called"),
+        "job_count": row.get("job_count"),
+        "event_count": row.get("event_count"),
+        "async_continuation": row.get("async_continuation"),
+        "async_strategy": row.get("async_strategy"),
+        "async_initial_response_returned": row.get("async_initial_response_returned"),
+        "route_continuation_id": row.get("route_continuation_id"),
+        "route_progress_stage": row.get("route_progress_stage"),
+        "route_progress_status": row.get("route_progress_status"),
+        "progress_event_count": row.get("progress_event_count"),
+        "worker_lane": row.get("worker_lane"),
+        "worker_priority": row.get("worker_priority"),
+        "queue_depth_at_submit": row.get("queue_depth_at_submit"),
+        "queue_wait_ms": row.get("queue_wait_ms"),
+        "job_start_delay_ms": row.get("job_start_delay_ms"),
+        "job_run_ms": row.get("job_run_ms"),
+        "job_total_ms": row.get("job_total_ms"),
+        "worker_index": row.get("worker_index"),
+        "worker_capacity": row.get("worker_capacity"),
+        "workers_busy_at_submit": row.get("workers_busy_at_submit"),
+        "workers_idle_at_submit": row.get("workers_idle_at_submit"),
+        "worker_saturation_percent": row.get("worker_saturation_percent"),
+        "starvation_detected": row.get("starvation_detected"),
+        "interactive_jobs_waiting": row.get("interactive_jobs_waiting"),
+        "background_jobs_running": row.get("background_jobs_running"),
+        "background_job_count": row.get("background_job_count"),
+        "interactive_job_count": row.get("interactive_job_count"),
+        "scheduler_strategy": row.get("scheduler_strategy"),
+        "scheduler_pressure_state": row.get("scheduler_pressure_state"),
+        "scheduler_pressure_reasons": row.get("scheduler_pressure_reasons"),
+        "queue_wait_budget_ms": row.get("queue_wait_budget_ms"),
+        "queue_wait_budget_exceeded": row.get("queue_wait_budget_exceeded"),
+        "subsystem_cap_key": row.get("subsystem_cap_key"),
+        "subsystem_cap_limit": row.get("subsystem_cap_limit"),
+        "subsystem_cap_wait_ms": row.get("subsystem_cap_wait_ms"),
+        "retry_policy": row.get("retry_policy"),
+        "retry_count": row.get("retry_count"),
+        "cancellation_state": row.get("cancellation_state"),
+        "yield_state": row.get("yield_state"),
+        "restart_recovery_state": row.get("restart_recovery_state"),
+        "job_required": row.get("job_required"),
+        "task_required": row.get("task_required"),
+        "event_progress_required": row.get("event_progress_required"),
+        "subsystem_continuation_created": row.get("subsystem_continuation_created"),
+        "subsystem_continuation_id": row.get("subsystem_continuation_id"),
+        "subsystem_continuation_kind": row.get("subsystem_continuation_kind"),
+        "subsystem_continuation_stage": row.get("subsystem_continuation_stage"),
+        "subsystem_continuation_status": row.get("subsystem_continuation_status"),
+        "subsystem_continuation_worker_lane": row.get("subsystem_continuation_worker_lane"),
+        "returned_before_subsystem_completion": row.get("returned_before_subsystem_completion"),
+        "inline_front_half_ms": row.get("inline_front_half_ms"),
+        "worker_back_half_ms": row.get("worker_back_half_ms"),
+        "continuation_queue_wait_ms": row.get("continuation_queue_wait_ms"),
+        "continuation_run_ms": row.get("continuation_run_ms"),
+        "continuation_total_ms": row.get("continuation_total_ms"),
+        "continuation_progress_event_count": row.get("continuation_progress_event_count"),
+        "continuation_final_result_state": row.get("continuation_final_result_state"),
+        "continuation_verification_state": row.get("continuation_verification_state"),
+        "subsystem_continuation_handler": row.get("subsystem_continuation_handler"),
+        "subsystem_continuation_handler_implemented": row.get("subsystem_continuation_handler_implemented"),
+        "subsystem_continuation_handler_missing_reason": row.get("subsystem_continuation_handler_missing_reason"),
+        "continuation_progress_stages": row.get("continuation_progress_stages"),
+        "continuation_verification_required": row.get("continuation_verification_required"),
+        "continuation_verification_attempted": row.get("continuation_verification_attempted"),
+        "continuation_verification_evidence_count": row.get("continuation_verification_evidence_count"),
+        "continuation_result_limitations": row.get("continuation_result_limitations"),
+        "continuation_truth_clamps_applied": row.get("continuation_truth_clamps_applied"),
+        "direct_subsystem_async_converted": row.get("direct_subsystem_async_converted"),
+        "async_conversion_expected": row.get("async_conversion_expected"),
+        "async_conversion_missing_reason": row.get("async_conversion_missing_reason"),
+        "hard_timeout": row.get("hard_timeout"),
+        "failure_category": row.get("failure_category"),
+    }
+
+
+def _top_stage_offenders(rows: list[dict[str, Any]], stage_name: str) -> list[dict[str, Any]]:
+    return [
+        {
+            **_compact_latency_row(row),
+            stage_name: row.get(stage_name),
+        }
+        for row in sorted(
+            rows,
+            key=lambda item: float(item.get(stage_name) or 0.0),
+            reverse=True,
+        )[:10]
+        if float(row.get(stage_name) or 0.0) > 0
+    ]
+
+
+def _top_mode_rows(
+    rows: list[dict[str, Any]],
+    execution_mode: str,
+    *,
+    sort_field: str = "total_latency_ms",
+) -> list[dict[str, Any]]:
+    filtered = [
+        row
+        for row in rows
+        if str(row.get("execution_mode") or "") == execution_mode
+    ]
+    return [
+        _compact_latency_row(row)
+        for row in sorted(
+            filtered,
+            key=lambda item: float(item.get(sort_field) or item.get("latency_ms") or 0.0),
+            reverse=True,
+        )[:10]
+    ]
 
 
 def _top_unattributed(results: list[CommandEvalResult]) -> list[dict[str, Any]]:
@@ -458,13 +1556,15 @@ def _unattributed_repeated_case_variance(results: list[CommandEvalResult]) -> di
 def _value_summary(values: list[float], *, include_spread: bool = False) -> dict[str, Any]:
     values = sorted(values)
     if not values:
-        return {"count": 0, "min": None, "median": None, "p90": None, "p95": None, "max": None}
+        return {"count": 0, "min": None, "p50": None, "median": None, "p90": None, "p95": None, "p99": None, "max": None}
     payload: dict[str, Any] = {
         "count": len(values),
         "min": _percentile(values, 0.0),
+        "p50": _percentile(values, 0.5),
         "median": _percentile(values, 0.5),
         "p90": _percentile(values, 0.9),
         "p95": _percentile(values, 0.95),
+        "p99": _percentile(values, 0.99),
         "max": _percentile(values, 1.0),
     }
     if include_spread:

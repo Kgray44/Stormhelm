@@ -28,12 +28,23 @@ from stormhelm.core.voice.models import VoiceActivityEvent
 from stormhelm.core.voice.models import VoiceCaptureRequest
 from stormhelm.core.voice.models import VoiceCaptureResult
 from stormhelm.core.voice.models import VoiceCaptureSession
+from stormhelm.core.voice.models import VoiceLivePlaybackChunkResult
+from stormhelm.core.voice.models import VoiceLivePlaybackRequest
+from stormhelm.core.voice.models import VoiceLivePlaybackResult
+from stormhelm.core.voice.models import VoiceLivePlaybackSession
 from stormhelm.core.voice.models import VoicePlaybackRequest
+from stormhelm.core.voice.models import VoicePlaybackPrewarmRequest
+from stormhelm.core.voice.models import VoicePlaybackPrewarmResult
 from stormhelm.core.voice.models import VoicePlaybackResult
+from stormhelm.core.voice.models import VoiceProviderPrewarmRequest
+from stormhelm.core.voice.models import VoiceProviderPrewarmResult
 from stormhelm.core.voice.models import VoiceRealtimeSession
 from stormhelm.core.voice.models import VoiceRealtimeTranscriptEvent
 from stormhelm.core.voice.models import VoiceSpeechRequest
 from stormhelm.core.voice.models import VoiceSpeechSynthesisResult
+from stormhelm.core.voice.models import VoiceStreamingTTSChunk
+from stormhelm.core.voice.models import VoiceStreamingTTSRequest
+from stormhelm.core.voice.models import VoiceStreamingTTSResult
 from stormhelm.core.voice.models import VoiceTranscriptionResult
 from stormhelm.core.voice.models import VoiceVADSession
 from stormhelm.core.voice.models import VoiceWakeEvent
@@ -98,6 +109,16 @@ class TextToSpeechProvider(Protocol):
         | VoiceSpeechSynthesisResult
         | Awaitable[VoiceSpeechSynthesisResult]
     ): ...
+
+    def stream_speech(
+        self,
+        request: VoiceStreamingTTSRequest,
+    ) -> VoiceStreamingTTSResult | Awaitable[VoiceStreamingTTSResult]: ...
+
+    def prewarm_speech_provider(
+        self,
+        request: VoiceProviderPrewarmRequest,
+    ) -> VoiceProviderPrewarmResult: ...
 
 
 @runtime_checkable
@@ -1367,6 +1388,36 @@ class VoicePlaybackProvider(Protocol):
 
     def get_active_playback(self) -> VoicePlaybackResult | None: ...
 
+    def prewarm_playback(
+        self,
+        request: VoicePlaybackPrewarmRequest,
+    ) -> VoicePlaybackPrewarmResult: ...
+
+    def start_stream(
+        self,
+        request: VoiceLivePlaybackRequest,
+    ) -> VoiceLivePlaybackSession: ...
+
+    def feed_stream_chunk(
+        self,
+        playback_stream_id: str,
+        data: bytes,
+        *,
+        chunk_index: int | None = None,
+    ) -> VoiceLivePlaybackChunkResult: ...
+
+    def complete_stream(
+        self,
+        playback_stream_id: str,
+    ) -> VoiceLivePlaybackResult: ...
+
+    def cancel_stream(
+        self,
+        playback_stream_id: str | None = None,
+        *,
+        reason: str = "user_requested",
+    ) -> VoiceLivePlaybackResult: ...
+
 
 @dataclass(slots=True)
 class MockPlaybackProvider:
@@ -1380,6 +1431,9 @@ class MockPlaybackProvider:
     playback_latency_ms: int = 0
     playback_call_count: int = 0
     _active_playback: VoicePlaybackResult | None = field(
+        default=None, init=False, repr=False
+    )
+    _active_stream: VoiceLivePlaybackSession | None = field(
         default=None, init=False, repr=False
     )
 
@@ -1466,6 +1520,33 @@ class MockPlaybackProvider:
     ) -> VoicePlaybackResult:
         active = self._active_playback
         if active is None or (playback_id and playback_id != active.playback_id):
+            stream = self._active_stream
+            if stream is not None and (
+                playback_id is None or playback_id == stream.playback_stream_id
+            ):
+                cancelled = self.cancel_stream(
+                    stream.playback_stream_id, reason=reason
+                )
+                return VoicePlaybackResult(
+                    ok=cancelled.ok,
+                    playback_request_id=cancelled.playback_request_id,
+                    audio_output_id=None,
+                    provider=self.provider_name,
+                    device=cancelled.device,
+                    status=cancelled.status,
+                    playback_id=cancelled.playback_stream_id
+                    or f"voice-playback-{uuid4().hex[:12]}",
+                    session_id=cancelled.session_id,
+                    turn_id=cancelled.turn_id,
+                    started_at=cancelled.playback_started_at,
+                    stopped_at=cancelled.cancelled_at,
+                    error_code=cancelled.error_code,
+                    error_message=cancelled.error_message,
+                    output_metadata=cancelled.to_dict(),
+                    played_locally=cancelled.partial_playback,
+                    partial_playback=cancelled.partial_playback,
+                    user_heard_claimed=False,
+                )
             return VoicePlaybackResult(
                 ok=False,
                 playback_request_id=None,
@@ -1493,6 +1574,226 @@ class MockPlaybackProvider:
 
     def get_active_playback(self) -> VoicePlaybackResult | None:
         return self._active_playback
+
+    def prewarm_playback(
+        self, request: VoicePlaybackPrewarmRequest
+    ) -> VoicePlaybackPrewarmResult:
+        available = self.available and not self.blocked
+        return VoicePlaybackPrewarmResult(
+            ok=available,
+            request_id=request.request_id,
+            provider=self.provider_name,
+            device=request.device,
+            audio_format=request.audio_format,
+            status="prepared" if available else "unavailable",
+            playback_started=False,
+            stream_sink_prepared=available,
+            cancellation_ready=available,
+            prewarm_ms=0,
+            error_code=None if available else "provider_unavailable",
+            error_message=None
+            if available
+            else "Mock playback provider is unavailable.",
+            metadata={"mock": True, "raw_audio_present": False},
+        )
+
+    def start_stream(
+        self, request: VoiceLivePlaybackRequest
+    ) -> VoiceLivePlaybackSession:
+        if not request.allowed_to_play:
+            return VoiceLivePlaybackSession(
+                playback_stream_id=request.playback_stream_id,
+                playback_request_id=request.playback_request_id,
+                provider=self.provider_name,
+                device=request.device,
+                audio_format=request.audio_format,
+                status="blocked",
+                session_id=request.session_id,
+                turn_id=request.turn_id,
+                tts_stream_id=request.tts_stream_id,
+                speech_request_id=request.speech_request_id,
+                error_code=request.blocked_reason or "playback_blocked",
+                error_message=f"Playback stream blocked: {request.blocked_reason or 'playback_blocked'}.",
+                metadata={"mock": True, "raw_audio_present": False},
+            )
+        if not self.available or self.blocked:
+            reason = "provider_unavailable" if not self.available else "playback_blocked"
+            return VoiceLivePlaybackSession(
+                playback_stream_id=request.playback_stream_id,
+                playback_request_id=request.playback_request_id,
+                provider=self.provider_name,
+                device=request.device,
+                audio_format=request.audio_format,
+                status="unavailable" if not self.available else "blocked",
+                session_id=request.session_id,
+                turn_id=request.turn_id,
+                tts_stream_id=request.tts_stream_id,
+                speech_request_id=request.speech_request_id,
+                error_code=reason,
+                error_message=f"Mock playback stream unavailable: {reason}.",
+                metadata={"mock": True, "raw_audio_present": False},
+            )
+        session = VoiceLivePlaybackSession(
+            playback_stream_id=request.playback_stream_id,
+            playback_request_id=request.playback_request_id,
+            provider=self.provider_name,
+            device=request.device,
+            audio_format=request.audio_format,
+            status="started",
+            session_id=request.session_id,
+            turn_id=request.turn_id,
+            tts_stream_id=request.tts_stream_id,
+            speech_request_id=request.speech_request_id,
+            metadata={"mock": True, "raw_audio_present": False},
+        )
+        self._active_stream = session
+        return session
+
+    def feed_stream_chunk(
+        self,
+        playback_stream_id: str,
+        data: bytes,
+        *,
+        chunk_index: int | None = None,
+    ) -> VoiceLivePlaybackChunkResult:
+        active = self._active_stream
+        if active is None or active.playback_stream_id != playback_stream_id:
+            return VoiceLivePlaybackChunkResult(
+                ok=False,
+                playback_stream_id=playback_stream_id,
+                chunk_index=chunk_index or 0,
+                status="unavailable",
+                size_bytes=0,
+                error_code="no_active_playback_stream",
+                error_message="No active playback stream exists.",
+            )
+        payload = bytes(data or b"")
+        index = active.chunk_count if chunk_index is None else int(chunk_index)
+        now = utc_now_iso()
+        first_chunk_at = active.first_chunk_received_at or now
+        playback_started_at = active.playback_started_at or now
+        updated = replace(
+            active,
+            status="playing",
+            first_chunk_received_at=first_chunk_at,
+            playback_started_at=playback_started_at,
+            chunk_count=active.chunk_count + 1,
+            bytes_received=active.bytes_received + len(payload),
+        )
+        self._active_stream = updated
+        return VoiceLivePlaybackChunkResult(
+            ok=True,
+            playback_stream_id=playback_stream_id,
+            chunk_index=index,
+            status="playing",
+            size_bytes=len(payload),
+            first_chunk_received_at=first_chunk_at,
+            playback_started_at=playback_started_at,
+            playback_started=True,
+            metadata={"mock": True, "raw_audio_present": False},
+        )
+
+    def complete_stream(self, playback_stream_id: str) -> VoiceLivePlaybackResult:
+        active = self._active_stream
+        if active is None or active.playback_stream_id != playback_stream_id:
+            return self._stream_result(
+                None,
+                playback_stream_id=playback_stream_id,
+                ok=False,
+                status="unavailable",
+                error_code="no_active_playback_stream",
+                error_message="No active playback stream exists.",
+            )
+        self._active_stream = None
+        return self._stream_result(
+            active,
+            ok=True,
+            status="completed",
+            completed_at=utc_now_iso(),
+            partial_playback=False,
+        )
+
+    def cancel_stream(
+        self,
+        playback_stream_id: str | None = None,
+        *,
+        reason: str = "user_requested",
+    ) -> VoiceLivePlaybackResult:
+        active = self._active_stream
+        if active is None or (
+            playback_stream_id is not None
+            and active.playback_stream_id != playback_stream_id
+        ):
+            return self._stream_result(
+                None,
+                playback_stream_id=playback_stream_id,
+                ok=False,
+                status="unavailable",
+                error_code="no_active_playback_stream",
+                error_message="No active playback stream exists.",
+            )
+        self._active_stream = None
+        return self._stream_result(
+            active,
+            ok=True,
+            status="cancelled",
+            cancelled_at=utc_now_iso(),
+            partial_playback=active.chunk_count > 0,
+            metadata={"cancel_reason": reason},
+        )
+
+    def get_active_playback_stream(self) -> VoiceLivePlaybackSession | None:
+        return self._active_stream
+
+    def _stream_result(
+        self,
+        session: VoiceLivePlaybackSession | None,
+        *,
+        playback_stream_id: str | None = None,
+        ok: bool,
+        status: str,
+        completed_at: str | None = None,
+        cancelled_at: str | None = None,
+        partial_playback: bool = False,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> VoiceLivePlaybackResult:
+        return VoiceLivePlaybackResult(
+            ok=ok,
+            playback_stream_id=(
+                session.playback_stream_id if session is not None else playback_stream_id
+            ),
+            playback_request_id=session.playback_request_id if session is not None else None,
+            provider=self.provider_name,
+            device=session.device if session is not None else "default",
+            audio_format=session.audio_format if session is not None else "pcm",
+            status=status,
+            session_id=session.session_id if session is not None else None,
+            turn_id=session.turn_id if session is not None else None,
+            tts_stream_id=session.tts_stream_id if session is not None else None,
+            speech_request_id=session.speech_request_id if session is not None else None,
+            started_at=session.started_at if session is not None else None,
+            first_chunk_received_at=(
+                session.first_chunk_received_at if session is not None else None
+            ),
+            playback_started_at=(
+                session.playback_started_at if session is not None else None
+            ),
+            completed_at=completed_at,
+            cancelled_at=cancelled_at,
+            chunk_count=session.chunk_count if session is not None else 0,
+            bytes_received=session.bytes_received if session is not None else 0,
+            partial_playback=partial_playback,
+            error_code=error_code,
+            error_message=error_message,
+            metadata={
+                **dict(metadata or {}),
+                "mock": True,
+                "raw_audio_present": False,
+            },
+            user_heard_claimed=False,
+        )
 
     def _result(
         self,
@@ -1760,6 +2061,9 @@ class LocalPlaybackProvider:
     _active_playback: VoicePlaybackResult | None = field(
         default=None, init=False, repr=False
     )
+    _active_stream: VoiceLivePlaybackSession | None = field(
+        default=None, init=False, repr=False
+    )
     _active_temp_path: Path | None = field(default=None, init=False, repr=False)
     _active_thread: threading.Thread | None = field(default=None, init=False, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
@@ -1907,12 +2211,276 @@ class LocalPlaybackProvider:
         )
         with self._lock:
             self._active_playback = None
+            self._active_stream = None
             self._active_temp_path = None
         return stopped
 
     def get_active_playback(self) -> VoicePlaybackResult | None:
         with self._lock:
             return self._active_playback
+
+    def prewarm_playback(
+        self, request: VoicePlaybackPrewarmRequest
+    ) -> VoicePlaybackPrewarmResult:
+        start = time.perf_counter()
+        availability = self.get_availability()
+        ok = bool(availability.get("available"))
+        return VoicePlaybackPrewarmResult(
+            ok=ok,
+            request_id=request.request_id,
+            provider=self.provider_name,
+            device=request.device or self.config.playback.device,
+            audio_format=request.audio_format,
+            status="prepared" if ok else "unavailable",
+            playback_started=False,
+            stream_sink_prepared=ok,
+            cancellation_ready=ok,
+            prewarm_ms=_elapsed_ms(start),
+            error_code=None if ok else str(availability.get("unavailable_reason")),
+            error_message=None
+            if ok
+            else f"Local playback prewarm unavailable: {availability.get('unavailable_reason')}.",
+            metadata={"availability": availability, "raw_audio_present": False},
+        )
+
+    def start_stream(
+        self, request: VoiceLivePlaybackRequest
+    ) -> VoiceLivePlaybackSession:
+        availability = self.get_availability()
+        if not request.allowed_to_play:
+            return self._stream_session(
+                request,
+                status="blocked",
+                error_code=request.blocked_reason or "playback_blocked",
+                error_message=f"Playback stream blocked: {request.blocked_reason or 'playback_blocked'}.",
+            )
+        if request.audio_format not in {"pcm", "wav"}:
+            return self._stream_session(
+                request,
+                status="unsupported",
+                error_code="unsupported_live_format",
+                error_message=f"Live playback format is unsupported: {request.audio_format}.",
+            )
+        if not bool(availability.get("available")):
+            reason = str(availability.get("unavailable_reason") or "local_playback_unavailable")
+            return self._stream_session(
+                request,
+                status="unavailable",
+                error_code=reason,
+                error_message=f"Local playback stream unavailable: {reason}.",
+            )
+        if self.backend is None or not hasattr(self.backend, "start_stream"):
+            return self._stream_session(
+                request,
+                status="unsupported",
+                error_code="streaming_playback_backend_unsupported",
+                error_message="Local playback backend does not support live chunk playback.",
+            )
+        try:
+            payload = self.backend.start_stream(request=request)  # type: ignore[attr-defined]
+            payload = dict(payload or {})
+        except Exception as error:
+            return self._stream_session(
+                request,
+                status="failed",
+                error_code="local_stream_start_failed",
+                error_message=str(error),
+            )
+        session = self._stream_session(
+            request,
+            status=str(payload.get("status") or "started"),
+            metadata={"availability": availability, "backend": availability.get("backend")},
+        )
+        with self._lock:
+            self._active_stream = session
+            self._active_playback = VoicePlaybackResult(
+                ok=True,
+                playback_request_id=request.playback_request_id,
+                audio_output_id=None,
+                provider=self.provider_name,
+                device=request.device,
+                status="started",
+                playback_id=request.playback_stream_id,
+                session_id=request.session_id,
+                turn_id=request.turn_id,
+                started_at=session.started_at,
+                output_metadata=session.to_dict(),
+                played_locally=False,
+                user_heard_claimed=False,
+            )
+        return session
+
+    def feed_stream_chunk(
+        self,
+        playback_stream_id: str,
+        data: bytes,
+        *,
+        chunk_index: int | None = None,
+    ) -> VoiceLivePlaybackChunkResult:
+        payload = bytes(data or b"")
+        if self.backend is None or not hasattr(self.backend, "feed_stream_chunk"):
+            return VoiceLivePlaybackChunkResult(
+                ok=False,
+                playback_stream_id=playback_stream_id,
+                chunk_index=chunk_index or 0,
+                status="unsupported",
+                size_bytes=0,
+                error_code="streaming_playback_backend_unsupported",
+                error_message="Local playback backend does not support live chunk playback.",
+            )
+        try:
+            result = self.backend.feed_stream_chunk(  # type: ignore[attr-defined]
+                playback_stream_id, payload, chunk_index=chunk_index
+            )
+            result = dict(result or {})
+        except Exception as error:
+            return VoiceLivePlaybackChunkResult(
+                ok=False,
+                playback_stream_id=playback_stream_id,
+                chunk_index=chunk_index or 0,
+                status="failed",
+                size_bytes=0,
+                error_code="local_stream_chunk_failed",
+                error_message=str(error),
+            )
+        now = utc_now_iso()
+        chunk_result = VoiceLivePlaybackChunkResult(
+            ok=bool(result.get("ok", True)),
+            playback_stream_id=playback_stream_id,
+            chunk_index=chunk_index or int(result.get("chunk_index") or 0),
+            status=str(result.get("status") or "playing"),
+            size_bytes=len(payload),
+            first_chunk_received_at=str(result.get("first_chunk_received_at") or now),
+            playback_started_at=str(result.get("playback_started_at") or now),
+            playback_started=bool(result.get("playback_started", True)),
+            metadata={"raw_audio_present": False},
+        )
+        with self._lock:
+            active_stream = self._active_stream
+            if active_stream is not None and active_stream.playback_stream_id == playback_stream_id:
+                self._active_stream = replace(
+                    active_stream,
+                    status=chunk_result.status,
+                    first_chunk_received_at=active_stream.first_chunk_received_at
+                    or chunk_result.first_chunk_received_at,
+                    playback_started_at=active_stream.playback_started_at
+                    or chunk_result.playback_started_at,
+                    chunk_count=active_stream.chunk_count + 1,
+                    bytes_received=active_stream.bytes_received + len(payload),
+                )
+        return chunk_result
+
+    def complete_stream(self, playback_stream_id: str) -> VoiceLivePlaybackResult:
+        active = self._active_playback
+        active_stream = self._active_stream
+        metadata: dict[str, Any] = {}
+        if self.backend is not None and hasattr(self.backend, "complete_stream"):
+            try:
+                metadata = dict(self.backend.complete_stream(playback_stream_id) or {})  # type: ignore[attr-defined]
+            except Exception as error:
+                metadata = {"error_code": "local_stream_complete_failed", "error_message": str(error)}
+        with self._lock:
+            self._active_playback = None
+            self._active_stream = None
+        return VoiceLivePlaybackResult(
+            ok=not bool(metadata.get("error_code")),
+            playback_stream_id=playback_stream_id,
+            playback_request_id=active.playback_request_id if active else None,
+            provider=self.provider_name,
+            device=active.device if active else self.config.playback.device,
+            audio_format=str((active.output_metadata if active else {}).get("audio_format") or "pcm"),
+            status="failed" if metadata.get("error_code") else "completed",
+            session_id=active.session_id if active else None,
+            turn_id=active.turn_id if active else None,
+            started_at=active.started_at if active else None,
+            first_chunk_received_at=active_stream.first_chunk_received_at
+            if active_stream is not None
+            else None,
+            playback_started_at=active_stream.playback_started_at
+            if active_stream is not None
+            else None,
+            completed_at=utc_now_iso(),
+            chunk_count=active_stream.chunk_count if active_stream is not None else 0,
+            bytes_received=active_stream.bytes_received if active_stream is not None else 0,
+            error_code=metadata.get("error_code"),
+            error_message=metadata.get("error_message"),
+            metadata={**metadata, "raw_audio_present": False},
+            user_heard_claimed=False,
+        )
+
+    def cancel_stream(
+        self,
+        playback_stream_id: str | None = None,
+        *,
+        reason: str = "user_requested",
+    ) -> VoiceLivePlaybackResult:
+        active = self._active_playback
+        active_stream = self._active_stream
+        if self.backend is not None and hasattr(self.backend, "cancel_stream"):
+            try:
+                self.backend.cancel_stream(playback_stream_id, reason=reason)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        with self._lock:
+            self._active_playback = None
+            self._active_stream = None
+        return VoiceLivePlaybackResult(
+            ok=active is not None,
+            playback_stream_id=playback_stream_id or (active.playback_id if active else None),
+            playback_request_id=active.playback_request_id if active else None,
+            provider=self.provider_name,
+            device=active.device if active else self.config.playback.device,
+            audio_format=str((active.output_metadata if active else {}).get("audio_format") or "pcm"),
+            status="cancelled" if active is not None else "unavailable",
+            session_id=active.session_id if active else None,
+            turn_id=active.turn_id if active else None,
+            started_at=active.started_at if active else None,
+            first_chunk_received_at=active_stream.first_chunk_received_at
+            if active_stream is not None
+            else None,
+            playback_started_at=active_stream.playback_started_at
+            if active_stream is not None
+            else None,
+            cancelled_at=utc_now_iso(),
+            chunk_count=active_stream.chunk_count if active_stream is not None else 0,
+            bytes_received=active_stream.bytes_received if active_stream is not None else 0,
+            partial_playback=bool(
+                active_stream is not None and active_stream.chunk_count > 0
+            ),
+            error_code=None if active else "no_active_playback_stream",
+            error_message=None if active else "No active playback stream exists.",
+            metadata={"cancel_reason": reason, "raw_audio_present": False},
+            user_heard_claimed=False,
+        )
+
+    def get_active_playback_stream(self) -> VoiceLivePlaybackSession | None:
+        with self._lock:
+            return self._active_stream
+
+    def _stream_session(
+        self,
+        request: VoiceLivePlaybackRequest,
+        *,
+        status: str,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> VoiceLivePlaybackSession:
+        return VoiceLivePlaybackSession(
+            playback_stream_id=request.playback_stream_id,
+            playback_request_id=request.playback_request_id,
+            provider=self.provider_name,
+            device=request.device,
+            audio_format=request.audio_format,
+            status=status,
+            session_id=request.session_id,
+            turn_id=request.turn_id,
+            tts_stream_id=request.tts_stream_id,
+            speech_request_id=request.speech_request_id,
+            error_code=error_code,
+            error_message=error_message,
+            metadata=dict(metadata or {}),
+        )
 
     async def _play_foreground(
         self,
@@ -2061,6 +2629,56 @@ class LocalPlaybackProvider:
             error_message=error_message,
             output_metadata=output_metadata,
             played_locally=played_locally,
+            user_heard_claimed=False,
+        )
+
+    def _stream_result(
+        self,
+        session: VoiceLivePlaybackSession | None,
+        *,
+        playback_stream_id: str | None = None,
+        ok: bool,
+        status: str,
+        completed_at: str | None = None,
+        cancelled_at: str | None = None,
+        partial_playback: bool = False,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> VoiceLivePlaybackResult:
+        session_metadata = dict(session.metadata) if session is not None else {}
+        session_metadata.update(dict(metadata or {}))
+        return VoiceLivePlaybackResult(
+            ok=ok,
+            playback_stream_id=session.playback_stream_id
+            if session is not None
+            else playback_stream_id,
+            playback_request_id=session.playback_request_id
+            if session is not None
+            else None,
+            provider=self.provider_name,
+            device=session.device if session is not None else "default",
+            audio_format=session.audio_format if session is not None else "pcm",
+            status=status,
+            session_id=session.session_id if session is not None else None,
+            turn_id=session.turn_id if session is not None else None,
+            tts_stream_id=session.tts_stream_id if session is not None else None,
+            speech_request_id=session.speech_request_id if session is not None else None,
+            started_at=session.started_at if session is not None else None,
+            first_chunk_received_at=session.first_chunk_received_at
+            if session is not None
+            else None,
+            playback_started_at=session.playback_started_at
+            if session is not None
+            else None,
+            completed_at=completed_at,
+            cancelled_at=cancelled_at,
+            chunk_count=session.chunk_count if session is not None else 0,
+            bytes_received=session.bytes_received if session is not None else 0,
+            partial_playback=partial_playback,
+            error_code=error_code,
+            error_message=error_message,
+            metadata=session_metadata,
             user_heard_claimed=False,
         )
 
@@ -3397,6 +4015,10 @@ class MockVoiceProvider:
     tts_format: str = "mp3"
     tts_latency_ms: int = 0
     tts_call_count: int = 0
+    tts_stream_chunk_size: int = 4096
+    tts_stream_error_code: str | None = None
+    tts_stream_error_message: str | None = None
+    tts_stream_fail_after_chunks: int | None = None
     network_call_count: int = 0
 
     @property
@@ -3542,6 +4164,161 @@ class MockVoiceProvider:
             raw_provider_metadata={"mock": True},
             playable=False,
             persisted=False,
+        )
+
+    async def stream_speech(
+        self, request: VoiceStreamingTTSRequest
+    ) -> VoiceStreamingTTSResult:
+        speech_request = request.speech_request
+        self.tts_call_count += 1
+        if self.tts_stream_error_code and not self.tts_stream_fail_after_chunks:
+            return VoiceStreamingTTSResult(
+                ok=False,
+                tts_stream_id=request.tts_stream_id,
+                speech_request_id=speech_request.speech_request_id,
+                provider=self.provider_name,
+                model=speech_request.model or self.tts_model,
+                voice=speech_request.voice or self.tts_voice,
+                live_format=request.live_format,
+                artifact_format=request.artifact_format,
+                status="failed",
+                streaming_started=True,
+                streaming_completed=False,
+                error_code=self.tts_stream_error_code,
+                error_message=self.tts_stream_error_message
+                or self.tts_stream_error_code,
+                metadata={"mock": True, "raw_audio_present": False},
+            )
+        if self.tts_timeout:
+            return self._stream_failure(
+                request,
+                error_code="provider_timeout",
+                error_message="Mock streaming TTS provider timed out.",
+            )
+        if self.tts_error_code:
+            return self._stream_failure(
+                request,
+                error_code=self.tts_error_code,
+                error_message=self.tts_error_message or self.tts_error_code,
+            )
+        payload = bytes(self.tts_audio_bytes or b"")
+        chunk_size = max(1, int(self.tts_stream_chunk_size or len(payload) or 1))
+        chunks: list[VoiceStreamingTTSChunk] = []
+        started = time.perf_counter()
+        for index, offset in enumerate(range(0, len(payload), chunk_size)):
+            chunk_bytes = payload[offset : offset + chunk_size]
+            now = utc_now_iso()
+            chunk = VoiceStreamingTTSChunk(
+                tts_stream_id=request.tts_stream_id,
+                speech_request_id=speech_request.speech_request_id,
+                chunk_index=index,
+                size_bytes=len(chunk_bytes),
+                live_format=request.live_format,
+                provider=self.provider_name,
+                model=speech_request.model or self.tts_model,
+                voice=speech_request.voice or self.tts_voice,
+                session_id=speech_request.session_id,
+                turn_id=speech_request.turn_id,
+                received_at=now,
+                first_chunk=index == 0,
+                final_chunk=offset + chunk_size >= len(payload),
+                metadata={"mock": True, "raw_audio_present": False},
+                data=chunk_bytes,
+            )
+            chunks.append(chunk)
+            if (
+                self.tts_stream_fail_after_chunks is not None
+                and len(chunks) >= self.tts_stream_fail_after_chunks
+            ):
+                return VoiceStreamingTTSResult(
+                    ok=False,
+                    tts_stream_id=request.tts_stream_id,
+                    speech_request_id=speech_request.speech_request_id,
+                    provider=self.provider_name,
+                    model=speech_request.model or self.tts_model,
+                    voice=speech_request.voice or self.tts_voice,
+                    live_format=request.live_format,
+                    artifact_format=request.artifact_format,
+                    status="partial_failed",
+                    chunks=tuple(chunks),
+                    first_chunk_at=chunks[0].received_at if chunks else None,
+                    final_chunk_at=now,
+                    total_chunks=len(chunks),
+                    first_audio_byte_ms=_elapsed_ms(started),
+                    streaming_started=True,
+                    streaming_completed=False,
+                    partial_audio=bool(chunks),
+                    error_code=self.tts_stream_error_code or "stream_failed",
+                    error_message=self.tts_stream_error_message
+                    or self.tts_stream_error_code
+                    or "Mock streaming TTS failed after partial audio.",
+                    metadata={"mock": True, "raw_audio_present": False},
+                )
+        return VoiceStreamingTTSResult(
+            ok=True,
+            tts_stream_id=request.tts_stream_id,
+            speech_request_id=speech_request.speech_request_id,
+            provider=self.provider_name,
+            model=speech_request.model or self.tts_model,
+            voice=speech_request.voice or self.tts_voice,
+            live_format=request.live_format,
+            artifact_format=request.artifact_format,
+            status="completed",
+            chunks=tuple(chunks),
+            first_chunk_at=chunks[0].received_at if chunks else None,
+            final_chunk_at=chunks[-1].received_at if chunks else utc_now_iso(),
+            total_chunks=len(chunks),
+            first_audio_byte_ms=_elapsed_ms(started) if chunks else None,
+            streaming_started=True,
+            streaming_completed=True,
+            partial_audio=False,
+            metadata={"mock": True, "raw_audio_present": False},
+        )
+
+    def prewarm_speech_provider(
+        self, request: VoiceProviderPrewarmRequest
+    ) -> VoiceProviderPrewarmResult:
+        return VoiceProviderPrewarmResult(
+            ok=True,
+            request_id=request.request_id,
+            provider=self.provider_name,
+            status="prepared",
+            model=request.model or self.tts_model,
+            voice=request.voice or self.tts_voice,
+            live_format=request.live_format,
+            artifact_format=request.artifact_format,
+            api_key_present=False,
+            client_prepared=True,
+            request_shell_prepared=True,
+            tts_called=False,
+            network_called=False,
+            prewarm_ms=0,
+            metadata={"mock": True, "raw_audio_present": False},
+        )
+
+    def _stream_failure(
+        self,
+        request: VoiceStreamingTTSRequest,
+        *,
+        error_code: str,
+        error_message: str,
+    ) -> VoiceStreamingTTSResult:
+        speech_request = request.speech_request
+        return VoiceStreamingTTSResult(
+            ok=False,
+            tts_stream_id=request.tts_stream_id,
+            speech_request_id=speech_request.speech_request_id,
+            provider=self.provider_name,
+            model=speech_request.model or self.tts_model,
+            voice=speech_request.voice or self.tts_voice,
+            live_format=request.live_format,
+            artifact_format=request.artifact_format,
+            status="failed",
+            streaming_started=True,
+            streaming_completed=False,
+            error_code=error_code,
+            error_message=error_message,
+            metadata={"mock": True, "raw_audio_present": False},
         )
 
     def _transcription_failure(
@@ -3801,6 +4578,21 @@ class OpenAIVoiceProvider(OpenAIVoiceProviderStub):
     @property
     def tts_format(self) -> str:
         return str(self.config.openai.tts_format or "mp3").strip().lower() or "mp3"
+
+    @property
+    def tts_live_format(self) -> str:
+        return (
+            str(self.config.openai.tts_live_format or "pcm").strip().lower() or "pcm"
+        )
+
+    @property
+    def tts_artifact_format(self) -> str:
+        return (
+            str(self.config.openai.tts_artifact_format or self.tts_format)
+            .strip()
+            .lower()
+            or "mp3"
+        )
 
     async def transcribe_audio(
         self,
@@ -4091,6 +4883,152 @@ class OpenAIVoiceProvider(OpenAIVoiceProviderStub):
             raw_provider_metadata=dict(raw_provider_metadata or {}),
             playable=False,
             persisted=False,
+        )
+
+    async def stream_speech(
+        self, request: VoiceStreamingTTSRequest
+    ) -> VoiceStreamingTTSResult:
+        speech_request = request.speech_request
+        if not self.openai_config.enabled or not self.openai_config.api_key:
+            return self._stream_failure(
+                request,
+                error_code="provider_unavailable",
+                error_message="OpenAI TTS is unavailable because OpenAI is disabled or missing credentials.",
+            )
+        stream_request = replace(
+            speech_request,
+            format=request.live_format or self.tts_live_format,
+        )
+        start = time.perf_counter()
+        self.network_call_count += 1
+        try:
+            payload = await self._post_speech(stream_request)
+        except TimeoutError:
+            return self._stream_failure(
+                request,
+                error_code="provider_timeout",
+                error_message="OpenAI streaming TTS provider timed out.",
+                first_audio_byte_ms=_elapsed_ms(start),
+            )
+        except httpx.TimeoutException:
+            return self._stream_failure(
+                request,
+                error_code="provider_timeout",
+                error_message="OpenAI streaming TTS provider timed out.",
+                first_audio_byte_ms=_elapsed_ms(start),
+            )
+        except Exception as error:
+            return self._stream_failure(
+                request,
+                error_code="provider_error",
+                error_message=str(error),
+                first_audio_byte_ms=_elapsed_ms(start),
+            )
+        audio_bytes, provider_metadata = _speech_payload_to_bytes_and_metadata(payload)
+        if not audio_bytes:
+            return self._stream_failure(
+                request,
+                error_code="empty_audio_output",
+                error_message="OpenAI TTS returned no streaming audio bytes.",
+                first_audio_byte_ms=_elapsed_ms(start),
+                metadata=provider_metadata,
+            )
+        chunk_size = max(1, min(16384, len(audio_bytes)))
+        chunks: list[VoiceStreamingTTSChunk] = []
+        for index, offset in enumerate(range(0, len(audio_bytes), chunk_size)):
+            chunk_bytes = audio_bytes[offset : offset + chunk_size]
+            chunks.append(
+                VoiceStreamingTTSChunk(
+                    tts_stream_id=request.tts_stream_id,
+                    speech_request_id=speech_request.speech_request_id,
+                    chunk_index=index,
+                    size_bytes=len(chunk_bytes),
+                    live_format=request.live_format or self.tts_live_format,
+                    provider="openai",
+                    model=speech_request.model or self.tts_model,
+                    voice=speech_request.voice or self.tts_voice,
+                    session_id=speech_request.session_id,
+                    turn_id=speech_request.turn_id,
+                    first_chunk=index == 0,
+                    final_chunk=offset + chunk_size >= len(audio_bytes),
+                    metadata={"response_kind": "bytes", "raw_audio_present": False},
+                    data=chunk_bytes,
+                )
+            )
+        return VoiceStreamingTTSResult(
+            ok=True,
+            tts_stream_id=request.tts_stream_id,
+            speech_request_id=speech_request.speech_request_id,
+            provider="openai",
+            model=speech_request.model or self.tts_model,
+            voice=speech_request.voice or self.tts_voice,
+            live_format=request.live_format or self.tts_live_format,
+            artifact_format=request.artifact_format or self.tts_artifact_format,
+            status="completed",
+            chunks=tuple(chunks),
+            first_chunk_at=chunks[0].received_at if chunks else None,
+            final_chunk_at=chunks[-1].received_at if chunks else None,
+            total_chunks=len(chunks),
+            first_audio_byte_ms=_elapsed_ms(start) if chunks else None,
+            streaming_started=True,
+            streaming_completed=True,
+            metadata=provider_metadata,
+        )
+
+    def prewarm_speech_provider(
+        self, request: VoiceProviderPrewarmRequest
+    ) -> VoiceProviderPrewarmResult:
+        start = time.perf_counter()
+        api_key_present = bool(self.openai_config.api_key)
+        ok = bool(self.openai_config.enabled and api_key_present)
+        return VoiceProviderPrewarmResult(
+            ok=ok,
+            request_id=request.request_id,
+            provider="openai",
+            status="prepared" if ok else "unavailable",
+            model=request.model or self.tts_model,
+            voice=request.voice or self.tts_voice,
+            live_format=request.live_format or self.tts_live_format,
+            artifact_format=request.artifact_format or self.tts_artifact_format,
+            api_key_present=api_key_present,
+            client_prepared=ok,
+            request_shell_prepared=ok,
+            tts_called=False,
+            network_called=False,
+            prewarm_ms=_elapsed_ms(start),
+            error_code=None if ok else "provider_unavailable",
+            error_message=None
+            if ok
+            else "OpenAI TTS prewarm unavailable because OpenAI is disabled or missing credentials.",
+            metadata={"raw_audio_present": False, "secret_redacted": True},
+        )
+
+    def _stream_failure(
+        self,
+        request: VoiceStreamingTTSRequest,
+        *,
+        error_code: str,
+        error_message: str,
+        first_audio_byte_ms: int | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> VoiceStreamingTTSResult:
+        speech_request = request.speech_request
+        return VoiceStreamingTTSResult(
+            ok=False,
+            tts_stream_id=request.tts_stream_id,
+            speech_request_id=speech_request.speech_request_id,
+            provider="openai",
+            model=speech_request.model or self.tts_model,
+            voice=speech_request.voice or self.tts_voice,
+            live_format=request.live_format or self.tts_live_format,
+            artifact_format=request.artifact_format or self.tts_artifact_format,
+            status="failed",
+            first_audio_byte_ms=first_audio_byte_ms,
+            streaming_started=True,
+            streaming_completed=False,
+            error_code=error_code,
+            error_message=error_message,
+            metadata=dict(metadata or {}),
         )
 
 

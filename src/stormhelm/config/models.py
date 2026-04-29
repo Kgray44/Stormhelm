@@ -282,6 +282,10 @@ class VoiceOpenAIConfig:
     tts_model: str = "gpt-4o-mini-tts"
     tts_voice: str = "onyx"
     tts_format: str = "mp3"
+    stream_tts_outputs: bool = False
+    tts_live_format: str = "pcm"
+    tts_artifact_format: str = "mp3"
+    streaming_fallback_to_buffered: bool = True
     tts_speed: float = 1.0
     max_tts_chars: int = 600
     output_audio_dir: str | None = None
@@ -297,6 +301,9 @@ class VoicePlaybackConfig:
     device: str = "default"
     volume: float = 1.0
     allow_dev_playback: bool = False
+    streaming_enabled: bool = False
+    streaming_fallback_to_file: bool = True
+    prewarm_enabled: bool = True
     max_audio_bytes: int = 10_000_000
     max_duration_ms: int = 120_000
     delete_transient_after_playback: bool = True
@@ -556,6 +563,7 @@ class ToolEnablementConfig:
     saved_locations: bool = True
     save_location: bool = True
     weather_current: bool = True
+    subsystem_continuation: bool = True
     workspace_restore: bool = True
     workspace_assemble: bool = True
     workspace_save: bool = True

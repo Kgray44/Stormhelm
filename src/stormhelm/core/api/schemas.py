@@ -12,6 +12,7 @@ class ChatRequest(BaseModel):
     active_module: str = "chartroom"
     workspace_context: dict[str, Any] = Field(default_factory=dict)
     input_context: dict[str, Any] = Field(default_factory=dict)
+    response_profile: str = ""
 
 
 class NoteCreateRequest(BaseModel):

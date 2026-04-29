@@ -9,6 +9,7 @@ from stormhelm.config.models import OpenAIConfig
 from stormhelm.config.models import VoiceConfig
 from stormhelm.config.models import VoiceOpenAIConfig
 from stormhelm.config.models import VoicePlaybackConfig
+from stormhelm.core.latency import build_latency_trace
 from stormhelm.core.voice.models import VoiceAudioInput
 from stormhelm.core.voice.models import VoicePlaybackResult
 from stormhelm.core.voice.models import VoiceSpeechSynthesisResult
@@ -108,9 +109,27 @@ class VoiceLatencyBreakdown:
     tts_ms: int | None = None
     playback_start_ms: int | None = None
     realtime_response_gate_ms: int | None = None
+    core_result_to_tts_start_ms: int | None = None
+    tts_start_to_first_chunk_ms: int | None = None
+    first_chunk_to_playback_start_ms: int | None = None
+    core_result_to_first_audio_ms: int | None = None
+    request_to_first_audio_ms: int | None = None
+    streaming_enabled: bool = False
+    live_format: str | None = None
+    artifact_format: str | None = None
+    fallback_used: bool = False
+    prewarm_used: bool = False
+    prewarm_ms: int | None = None
+    playback_prewarmed: bool = False
+    provider_prewarmed: bool = False
+    first_audio_available: bool = False
+    first_audio_budget_exceeded: bool = False
+    partial_playback: bool = False
+    user_heard_claimed: bool = False
     total_ms: int = 0
     exceeded_budget: bool = False
     budget_label: str | None = None
+    stage_timings_ms: dict[str, int] = field(default_factory=dict)
 
     @classmethod
     def from_marks(
@@ -124,43 +143,150 @@ class VoiceLatencyBreakdown:
             total_ms = 0
         else:
             total_ms = max(0, int(max(marks.values()) - min(marks.values())))
+        stage_timings = {
+            key: value
+            for key, value in {
+                "wake_ms": _duration_between(marks, "wake", "ghost"),
+                "ghost_ms": _duration_between(marks, "wake", "ghost"),
+                "listen_window_ms": _duration_between(marks, "ghost", "listen_window"),
+                "capture_ms": _duration_between(marks, "capture_start", "capture_complete"),
+                "vad_ms": _duration_between(marks, "vad_speech_started", "vad_speech_stopped"),
+                "stt_ms": _duration_between(marks, "capture_complete", "stt_complete"),
+                "realtime_partial_ms": _duration_between(marks, "wake", "realtime_partial"),
+                "realtime_final_ms": _duration_between(marks, "realtime_partial", "realtime_final"),
+                "core_bridge_ms": _duration_between(marks, "stt_complete", "core_bridge_complete")
+                or _duration_between(marks, "realtime_final", "core_bridge_complete"),
+                "spoken_render_ms": _duration_between(marks, "core_bridge_complete", "spoken_render_complete"),
+                "tts_ms": _duration_between(marks, "spoken_render_complete", "tts_complete"),
+                "first_tts_chunk_received_ms": _duration_between(marks, "tts_started", "first_tts_chunk_received"),
+                "core_result_to_tts_start_ms": _duration_between(marks, "core_bridge_complete", "tts_started"),
+                "tts_start_to_first_chunk_ms": _duration_between(marks, "tts_started", "first_tts_chunk_received"),
+                "first_chunk_to_playback_start_ms": _duration_between(marks, "first_tts_chunk_received", "playback_started"),
+                "core_result_to_first_audio_ms": _duration_between(marks, "core_bridge_complete", "playback_started"),
+                "request_to_first_audio_ms": _duration_between(marks, "wake", "playback_started"),
+                "playback_requested_ms": _duration_between(marks, "tts_complete", "playback_requested"),
+                "playback_start_ms": _duration_between(marks, "tts_complete", "playback_started"),
+                "playback_completed_ms": _duration_between(marks, "playback_started", "playback_completed"),
+                "cleanup_completed_ms": _duration_between(marks, "playback_completed", "cleanup_completed"),
+                "realtime_response_gate_ms": _duration_between(marks, "playback_started", "realtime_response_gate_complete")
+                or _duration_between(marks, "core_bridge_complete", "realtime_response_gate_complete"),
+            }.items()
+            if value is not None
+        }
         return cls(
-            wake_ms=_duration_between(marks, "wake", "ghost"),
-            ghost_ms=_duration_between(marks, "wake", "ghost"),
-            listen_window_ms=_duration_between(marks, "ghost", "listen_window"),
-            capture_ms=_duration_between(marks, "capture_start", "capture_complete"),
-            vad_ms=_duration_between(marks, "vad_speech_started", "vad_speech_stopped"),
-            stt_ms=_duration_between(marks, "capture_complete", "stt_complete"),
-            realtime_partial_ms=_duration_between(marks, "wake", "realtime_partial"),
-            realtime_final_ms=_duration_between(
-                marks, "realtime_partial", "realtime_final"
+            wake_ms=stage_timings.get("wake_ms"),
+            ghost_ms=stage_timings.get("ghost_ms"),
+            listen_window_ms=stage_timings.get("listen_window_ms"),
+            capture_ms=stage_timings.get("capture_ms"),
+            vad_ms=stage_timings.get("vad_ms"),
+            stt_ms=stage_timings.get("stt_ms"),
+            realtime_partial_ms=stage_timings.get("realtime_partial_ms"),
+            realtime_final_ms=stage_timings.get("realtime_final_ms"),
+            core_bridge_ms=stage_timings.get("core_bridge_ms"),
+            spoken_render_ms=stage_timings.get("spoken_render_ms"),
+            tts_ms=stage_timings.get("tts_ms"),
+            playback_start_ms=stage_timings.get("playback_start_ms"),
+            realtime_response_gate_ms=stage_timings.get("realtime_response_gate_ms"),
+            core_result_to_tts_start_ms=stage_timings.get("core_result_to_tts_start_ms"),
+            tts_start_to_first_chunk_ms=stage_timings.get("tts_start_to_first_chunk_ms"),
+            first_chunk_to_playback_start_ms=stage_timings.get("first_chunk_to_playback_start_ms"),
+            core_result_to_first_audio_ms=stage_timings.get("core_result_to_first_audio_ms"),
+            request_to_first_audio_ms=stage_timings.get("request_to_first_audio_ms"),
+            streaming_enabled=bool(stage_timings.get("first_tts_chunk_received_ms") is not None),
+            live_format="pcm" if stage_timings.get("first_tts_chunk_received_ms") is not None else None,
+            artifact_format="mp3" if stage_timings.get("first_tts_chunk_received_ms") is not None else None,
+            first_audio_available=bool(
+                stage_timings.get("first_tts_chunk_received_ms") is not None
+                or stage_timings.get("playback_start_ms") is not None
             ),
-            core_bridge_ms=_duration_between(
-                marks, "stt_complete", "core_bridge_complete"
-            )
-            or _duration_between(marks, "realtime_final", "core_bridge_complete"),
-            spoken_render_ms=_duration_between(
-                marks, "core_bridge_complete", "spoken_render_complete"
+            first_audio_budget_exceeded=bool(
+                latency_budget_ms is not None
+                and stage_timings.get("request_to_first_audio_ms") is not None
+                and stage_timings["request_to_first_audio_ms"] > latency_budget_ms
             ),
-            tts_ms=_duration_between(marks, "spoken_render_complete", "tts_complete"),
-            playback_start_ms=_duration_between(
-                marks, "tts_complete", "playback_started"
-            ),
-            realtime_response_gate_ms=_duration_between(
-                marks, "playback_started", "realtime_response_gate_complete"
-            )
-            or _duration_between(
-                marks, "core_bridge_complete", "realtime_response_gate_complete"
-            ),
+            user_heard_claimed=False,
             total_ms=total_ms,
             exceeded_budget=bool(
                 latency_budget_ms is not None and total_ms > latency_budget_ms
             ),
             budget_label=budget_label,
+            stage_timings_ms=stage_timings,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["latency_summary"] = self.to_latency_summary()
+        return payload
+
+    def to_latency_summary(
+        self,
+        *,
+        request_id: str = "",
+        session_id: str = "",
+    ) -> dict[str, Any]:
+        budget_label = self.budget_label or "voice_hot_path"
+        trace = build_latency_trace(
+            stage_timings_ms={**self.stage_timings_ms, "total_latency_ms": self.total_ms},
+            request_id=request_id,
+            session_id=session_id,
+            surface_mode="voice",
+            active_module="voice",
+            route_family="voice_control",
+            subsystem="voice",
+            request_kind=budget_label,
+            total_ms=self.total_ms,
+            budget_label=budget_label
+            if budget_label in {"voice_hot_path", "ghost_interactive", "deck_work", "provider_fallback", "long_task", "background_job", "test_eval"}
+            else "voice_hot_path",
+            voice_involved=True,
+        )
+        summary = trace.to_summary_dict()
+        summary["budget_result"] = trace.budget_result().to_dict()
+        summary["stage_timings_ms"] = dict(self.stage_timings_ms)
+        summary["voice_involved"] = True
+        summary["execution_mode"] = "instant"
+        summary["first_visual_feedback_ms"] = self.ghost_ms
+        summary["target_first_audio_ms"] = trace.budget.target_first_audio_ms if trace.budget is not None else None
+        summary["first_audio_available"] = bool(
+            self.stage_timings_ms.get("first_tts_chunk_received_ms") is not None
+            or self.stage_timings_ms.get("playback_start_ms") is not None
+            or self.first_audio_available
+        )
+        summary["first_audio_budget_ms"] = trace.budget.target_first_audio_ms if trace.budget is not None else None
+        summary["core_result_to_tts_start_ms"] = self.core_result_to_tts_start_ms
+        summary["tts_start_to_first_chunk_ms"] = self.tts_start_to_first_chunk_ms
+        summary["first_chunk_to_playback_start_ms"] = self.first_chunk_to_playback_start_ms
+        summary["core_result_to_first_audio_ms"] = self.core_result_to_first_audio_ms
+        summary["request_to_first_audio_ms"] = self.request_to_first_audio_ms
+        summary["streaming_enabled"] = bool(self.streaming_enabled)
+        summary["live_format"] = self.live_format
+        summary["artifact_format"] = self.artifact_format
+        summary["fallback_used"] = bool(self.fallback_used)
+        summary["prewarm_used"] = bool(self.prewarm_used)
+        summary["prewarm_ms"] = self.prewarm_ms
+        summary["playback_prewarmed"] = bool(self.playback_prewarmed)
+        summary["provider_prewarmed"] = bool(self.provider_prewarmed)
+        summary["first_audio_budget_exceeded"] = bool(
+            self.first_audio_budget_exceeded
+            or (
+                trace.budget is not None
+                and trace.budget.target_first_audio_ms is not None
+                and self.request_to_first_audio_ms is not None
+                and self.request_to_first_audio_ms > trace.budget.target_first_audio_ms
+            )
+        )
+        summary["partial_playback"] = bool(self.partial_playback)
+        summary["user_heard_claimed"] = False
+        summary["core_result_budget_exceeded"] = bool(
+            trace.budget is not None
+            and trace.budget.target_core_result_ms is not None
+            and self.core_bridge_ms is not None
+            and self.core_bridge_ms > trace.budget.target_core_result_ms
+        )
+        summary["playback_user_heard_claimed"] = False
+        if self.budget_label and self.budget_label not in {"voice_hot_path", "ghost_interactive", "deck_work", "provider_fallback", "long_task", "background_job", "test_eval"}:
+            summary["scenario_budget_label"] = self.budget_label
+        return summary
 
 
 @dataclass(slots=True, frozen=True)

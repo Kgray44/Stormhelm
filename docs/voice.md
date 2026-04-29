@@ -16,8 +16,9 @@ Tests: `tests/test_voice_config.py`, `tests/test_voice_availability.py`, `tests/
 | Manual voice turns | Text treated as a voice-originated turn and sent through the core bridge. | Partly; voice is off by default but manual input config defaults true. | `src/stormhelm/core/voice/service.py`, `src/stormhelm/core/voice/bridge.py` | `tests/test_voice_manual_turn.py`, `tests/test_voice_core_bridge_contracts.py` |
 | Controlled audio STT | Bounded file/blob/fixture-style audio metadata can be transcribed through the configured provider path. | No | `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/voice/service.py` | `tests/test_voice_audio_turn.py`, `tests/test_voice_stt_provider.py` |
 | TTS artifact generation | Core-approved text or explicit safe test text can be rendered into a controlled speech artifact. | No | `src/stormhelm/core/voice/speech_renderer.py`, `src/stormhelm/core/voice/service.py` | `tests/test_voice_tts_provider.py`, `tests/test_voice_tts_from_turn_result.py` |
+| Streaming TTS output | Core-approved spoken text can optionally use a chunked TTS contract with redacted chunk metadata and first-audio timing. Streaming never starts from partial transcripts or unapproved filler. | No | `src/stormhelm/core/voice/models.py`, `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/voice/service.py` | `tests/test_latency_l5_voice_streaming_first_audio.py` |
 | Push-to-talk capture boundary | Explicit start/stop/cancel/submit actions exist. Local capture is separately gated. | No | `src/stormhelm/core/api/app.py`, `src/stormhelm/core/voice/service.py` | `tests/test_voice_capture_service.py`, `tests/test_voice_bridge_controls.py` |
-| Playback boundary | Playback requests and stop controls exist behind provider/config gates. Voice-LP1 adds a real Windows local playback provider for MP3/WAV output while preserving mock/unavailable paths. | No | `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/voice/service.py` | `tests/test_voice_playback_service.py`, `tests/test_voice_playback_provider.py` |
+| Playback boundary | Playback requests and stop controls exist behind provider/config gates. Voice-LP1 adds a real Windows local playback provider for MP3/WAV output while preserving mock/unavailable paths. L5 adds live stream/chunk contracts and prewarm status while keeping artifact persistence separate from live playback truth. | No | `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/voice/service.py` | `tests/test_voice_playback_service.py`, `tests/test_voice_playback_provider.py`, `tests/test_latency_l5_voice_streaming_first_audio.py` |
 | Interruption and barge-in hardening | Active playback can be stopped, spoken output muted, capture/listen windows cancelled, pending confirmations rejected, and cancellation/correction phrases routed safely without direct task cancellation. | No; controlled by explicit action or bounded voice context. | `src/stormhelm/core/voice/service.py`, `src/stormhelm/core/api/app.py`, `src/stormhelm/ui/voice_surface.py` | `tests/test_voice_interruption_service.py`, `tests/test_voice_interruption_bridge.py`, `tests/test_voice_barge_in_interruption.py` |
 | Wake word foundation | Wake config, provider contracts, mock wake events, wake sessions, readiness, diagnostics, and events exist without real wake listening. | No | `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/voice/service.py`, `src/stormhelm/core/api/app.py` | `tests/test_voice_wake_config.py`, `tests/test_voice_wake_service.py` |
 | Local wake provider boundary | A disabled-by-default `LocalWakeWordProvider` can wrap an optional local backend and report dependency/platform/device/permission state. | Only when explicitly enabled and the local backend is available. | `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/voice/service.py` | `tests/test_voice_local_wake_provider.py` |
@@ -52,7 +53,7 @@ Tests: `tests/test_voice_availability.py`, `tests/test_voice_events.py`, `tests/
 
 OpenAI may hear the words and speak the words. Stormhelm decides what the words mean.
 
-STT is a transcript provider. TTS is a speech rendering provider. Realtime in Voice-18 is a transcription bridge; Voice-19 adds speech-to-speech only as an audio surface behind the strict `stormhelm_core_request` bridge. None of these surfaces are command authority. OpenAI STT may convert bounded captured audio into transcript text, OpenAI Realtime may receive bounded active-session audio only after an explicit Realtime session starts, and OpenAI TTS or Realtime audio output may speak only Stormhelm-approved/gated text. Partial Realtime transcripts are provisional status only. Final Realtime command/action/system turns must go through Stormhelm Core, which owns routing, trust, approvals, task state, verification, and result-state truth. OpenAI must not decide command intent, route commands, execute tools, approve actions, verify outcomes, determine task state, or invent success/verification claims independent of Core.
+STT is a transcript provider. TTS is a speech rendering provider. Realtime in Voice-18 is a transcription bridge; Voice-19 adds speech-to-speech only as an audio surface behind the strict `stormhelm_core_request` bridge. None of these surfaces are command authority. OpenAI STT may convert bounded captured audio into transcript text, OpenAI Realtime may receive bounded active-session audio only after an explicit Realtime session starts, and OpenAI TTS or Realtime audio output may speak only Stormhelm-approved/gated text. Partial Realtime transcripts are provisional status only. Final Realtime command/action/system turns must go through Stormhelm Core, which owns routing, trust, approvals, task state, verification, and result-state truth. L5 streaming TTS still waits for Core-approved spoken text and `speak_allowed=true`; provider/playback prewarm prepares clients and sinks only, without sending final text, starting playback, routing commands, or granting authority. OpenAI must not decide command intent, route commands, execute tools, approve actions, verify outcomes, determine task state, or invent success/verification claims independent of Core.
 
 Sources: `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/voice/service.py`, `src/stormhelm/core/voice/bridge.py`
 Tests: `tests/test_voice_openai_boundary.py`
@@ -74,8 +75,8 @@ Useful fields to inspect:
 | manual input | Whether manual transcript turns are enabled. |
 | capture | Whether capture is enabled, active, blocked, or recently completed. |
 | transcription | Last STT provider/model/result/error state. |
-| speech synthesis | Last TTS request/result/artifact state. |
-| playback | Last playback request/result/error state. |
+| speech synthesis | Last TTS request/result/artifact state, streaming TTS status, live/artifact formats, provider prewarm state, fallback use, and first-audio timing. |
+| playback | Last playback request/result/error state, live stream status, playback prewarm state, partial-playback state, and stop-speaking availability. |
 | interruption | Last interruption request/classification/result, affected output/capture/listen/confirmation surfaces, Core-routed cancellation/correction flags, and invariants that voice did not cancel tasks or mutate Core results directly. |
 | wake | Wake config/readiness/provider/backend/device/session/event/Ghost presentation status. Local wake remains disabled unless explicitly configured and available. |
 | wake_ghost | Active/last wake-to-Ghost presentation state, including request/session IDs, phrase, timeout, and presentation-only truth flags. |
@@ -109,6 +110,22 @@ Supported runtime modes:
 The report is available in `voice.runtime_mode` and is also carried into Ghost/Deck payloads. `selected_mode` is the configured mode; `effective_mode` is what Stormhelm can actually evaluate after `voice.enabled`; `status` is `ready`, `degraded`, `blocked`, or `disabled`; `next_fix` is the most direct settings change.
 
 Artifact persistence is deliberately separate from live playback. `voice.openai.persist_tts_outputs=true` can keep a generated file for debugging, but it never satisfies output-only live speech. If output-only mode is selected and playback is disabled or unavailable, Stormhelm reports that it cannot speak live.
+
+Streaming TTS is also separate from artifact persistence. `voice.openai.stream_tts_outputs=true` asks the provider layer for chunks in `voice.openai.tts_live_format` such as `pcm`; `voice.openai.tts_artifact_format` remains the optional file/debug format. `voice.openai.streaming_fallback_to_buffered` and `voice.playback.streaming_fallback_to_file` make fallback explicit in status and latency metadata. Fallback must not hide the original streaming failure or create duplicate speech.
+
+First-audio metrics live in voice status and latency summaries:
+
+- `core_result_to_tts_start_ms`
+- `tts_start_to_first_chunk_ms`
+- `first_chunk_to_playback_start_ms`
+- `core_result_to_first_audio_ms`
+- `request_to_first_audio_ms`
+- `first_audio_available`
+- `first_audio_budget_exceeded`
+- `partial_playback`
+- `user_heard_claimed=false`
+
+Playback started means a playback provider accepted audio. It does not prove the user heard it and it does not change Core result state.
 
 Sources: `src/stormhelm/core/voice/service.py`, `src/stormhelm/core/voice/models.py`, `src/stormhelm/ui/voice_surface.py`
 Tests: `tests/test_voice_runtime_modes.py`, `tests/test_voice_readiness.py`, `tests/test_voice_ui_state_payload.py`

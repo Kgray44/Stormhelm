@@ -538,6 +538,20 @@ def _build_app_config(
             or "onyx",
             tts_format=str(voice_openai_data.get("tts_format", "mp3")).strip().lower()
             or "mp3",
+            stream_tts_outputs=bool(
+                voice_openai_data.get("stream_tts_outputs", False)
+            ),
+            tts_live_format=str(
+                voice_openai_data.get("tts_live_format", "pcm")
+            ).strip().lower()
+            or "pcm",
+            tts_artifact_format=str(
+                voice_openai_data.get("tts_artifact_format", "mp3")
+            ).strip().lower()
+            or "mp3",
+            streaming_fallback_to_buffered=bool(
+                voice_openai_data.get("streaming_fallback_to_buffered", True)
+            ),
             tts_speed=float(voice_openai_data.get("tts_speed", 1.0)),
             max_tts_chars=int(voice_openai_data.get("max_tts_chars", 600)),
             output_audio_dir=str(voice_openai_data.get("output_audio_dir", "")).strip()
@@ -562,6 +576,13 @@ def _build_app_config(
             allow_dev_playback=bool(
                 voice_playback_data.get("allow_dev_playback", False)
             ),
+            streaming_enabled=bool(
+                voice_playback_data.get("streaming_enabled", False)
+            ),
+            streaming_fallback_to_file=bool(
+                voice_playback_data.get("streaming_fallback_to_file", True)
+            ),
+            prewarm_enabled=bool(voice_playback_data.get("prewarm_enabled", True)),
             max_audio_bytes=int(voice_playback_data.get("max_audio_bytes", 10_000_000)),
             max_duration_ms=int(voice_playback_data.get("max_duration_ms", 120_000)),
             delete_transient_after_playback=bool(
@@ -972,6 +993,18 @@ def _apply_env_overrides(data: ConfigDict, env: Mapping[str, str]) -> ConfigDict
             "voice.playback.allow_dev_playback",
             _parse_bool,
         ),
+        "STORMHELM_VOICE_PLAYBACK_STREAMING_ENABLED": (
+            "voice.playback.streaming_enabled",
+            _parse_bool,
+        ),
+        "STORMHELM_VOICE_PLAYBACK_STREAMING_FALLBACK_TO_FILE": (
+            "voice.playback.streaming_fallback_to_file",
+            _parse_bool,
+        ),
+        "STORMHELM_VOICE_PLAYBACK_PREWARM_ENABLED": (
+            "voice.playback.prewarm_enabled",
+            _parse_bool,
+        ),
         "STORMHELM_VOICE_PLAYBACK_MAX_AUDIO_BYTES": (
             "voice.playback.max_audio_bytes",
             int,
@@ -1167,6 +1200,22 @@ def _apply_env_overrides(data: ConfigDict, env: Mapping[str, str]) -> ConfigDict
         "STORMHELM_VOICE_OPENAI_TTS_MODEL": ("voice.openai.tts_model", str),
         "STORMHELM_VOICE_OPENAI_TTS_VOICE": ("voice.openai.tts_voice", str),
         "STORMHELM_VOICE_OPENAI_TTS_FORMAT": ("voice.openai.tts_format", str),
+        "STORMHELM_VOICE_OPENAI_STREAM_TTS_OUTPUTS": (
+            "voice.openai.stream_tts_outputs",
+            _parse_bool,
+        ),
+        "STORMHELM_VOICE_OPENAI_TTS_LIVE_FORMAT": (
+            "voice.openai.tts_live_format",
+            str,
+        ),
+        "STORMHELM_VOICE_OPENAI_TTS_ARTIFACT_FORMAT": (
+            "voice.openai.tts_artifact_format",
+            str,
+        ),
+        "STORMHELM_VOICE_OPENAI_STREAMING_FALLBACK_TO_BUFFERED": (
+            "voice.openai.streaming_fallback_to_buffered",
+            _parse_bool,
+        ),
         "STORMHELM_VOICE_OPENAI_TTS_SPEED": ("voice.openai.tts_speed", float),
         "STORMHELM_VOICE_OPENAI_MAX_TTS_CHARS": ("voice.openai.max_tts_chars", int),
         "STORMHELM_VOICE_OPENAI_OUTPUT_AUDIO_DIR": (

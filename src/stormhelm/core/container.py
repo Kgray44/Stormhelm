@@ -40,6 +40,8 @@ from stormhelm.core.runtime_state import RuntimeBootstrapResult, clear_runtime_s
 from stormhelm.core.safety.policy import SafetyPolicy
 from stormhelm.core.screen_awareness import ScreenAwarenessSubsystem
 from stormhelm.core.screen_awareness import build_screen_awareness_subsystem
+from stormhelm.core.subsystem_continuations import SubsystemContinuationRunner
+from stormhelm.core.subsystem_continuations import default_subsystem_continuation_registry
 from stormhelm.core.system.probe import SystemProbe
 from stormhelm.core.tasks import DurableTaskService, TaskRepository
 from stormhelm.core.tools.base import ToolContext
@@ -79,6 +81,7 @@ class CoreContainer:
     voice: VoiceService
     task_service: DurableTaskService
     trust: TrustService
+    subsystem_continuations: SubsystemContinuationRunner
     lifecycle: LifecycleController
     network_monitor: NetworkMonitor | None = None
     runtime_bootstrap: RuntimeBootstrapResult | None = None
@@ -164,6 +167,7 @@ class CoreContainer:
 
     def status_snapshot(self) -> dict[str, Any]:
         jobs = self.jobs.list_jobs(limit=64)
+        worker_state = self.jobs.worker_status_snapshot()
         system_state = self._system_state_snapshot()
         recent_events = self.events.recent(limit=32)
         watch_state = self._watch_state_snapshot(jobs)
@@ -231,6 +235,7 @@ class CoreContainer:
             "install_root": str(self.config.runtime.install_root),
             "resource_root": str(self.config.runtime.resource_root),
             "max_workers": self.config.concurrency.max_workers,
+            "worker_state": worker_state,
             "tool_count": len(self.tool_registry.metadata()),
             "recent_jobs": len(jobs[:25]),
             "system_state": system_state,
@@ -355,7 +360,7 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
     )
     system_probe.attach_network_monitor(network_monitor)
     registry = ToolRegistry()
-    register_builtin_tools(registry)
+    register_builtin_tools(registry, include_internal=True)
     executor = ToolExecutor(registry, max_sync_workers=app_config.concurrency.max_workers)
     lifecycle = LifecycleController(app_config, events=events)
     provider = OpenAIResponsesProvider(app_config.openai) if app_config.openai.enabled else None
@@ -425,6 +430,10 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
         persona=persona,
         memory=memory,
     )
+    subsystem_continuations = SubsystemContinuationRunner(
+        registry=default_subsystem_continuation_registry(),
+        events=events,
+    )
     jobs = JobManager(
         config=app_config,
         executor=executor,
@@ -439,6 +448,11 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
             workspace_service=workspace_service,
             task_service=task_service,
             trust_service=trust,
+            continuation_runner=subsystem_continuations,
+            software_control=software_control,
+            software_recovery=software_recovery,
+            discord_relay=discord_relay,
+            screen_awareness=screen_awareness,
         ),
         tool_runs=tool_runs,
         events=events,
@@ -462,6 +476,7 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
         software_recovery=software_recovery,
         screen_awareness=screen_awareness,
         discord_relay=discord_relay,
+        subsystem_continuations=subsystem_continuations,
     )
     voice.attach_core_bridge(assistant)
     voice.attach_trust_service(trust)
@@ -488,6 +503,7 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
         voice=voice,
         task_service=task_service,
         trust=trust,
+        subsystem_continuations=subsystem_continuations,
         lifecycle=lifecycle,
         network_monitor=network_monitor,
     )

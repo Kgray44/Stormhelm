@@ -16,6 +16,7 @@ from stormhelm.core.adapters import AdapterRouteAssessment
 from stormhelm.core.adapters import default_adapter_contract_registry
 from stormhelm.core.calculations import CalculationsPlannerSeam
 from stormhelm.core.calculations import CalculationOutputMode
+from stormhelm.core.calculations import CalculationPlannerEvaluation
 from stormhelm.core.calculations import CalculationRouteDisposition
 from stormhelm.core.intelligence.language import normalize_phrase
 from stormhelm.core.orchestrator.browser_destinations import BrowserDestinationResolver
@@ -45,12 +46,15 @@ from stormhelm.core.orchestrator.route_context import RouteContextArbitrator
 from stormhelm.core.orchestrator.route_spine import MIGRATED_ROUTE_FAMILIES
 from stormhelm.core.orchestrator.route_spine import RouteSpine
 from stormhelm.core.orchestrator.route_spine import RouteSpineDecision
+from stormhelm.core.orchestrator.route_triage import RouteTriageResult
+from stormhelm.core.orchestrator.route_triage import route_triage_from_dict
 from stormhelm.core.orchestrator.router import ToolRequest
 from stormhelm.core.screen_awareness import ScreenAwarenessPlannerSeam
 from stormhelm.core.screen_awareness import ScreenIntentType
 from stormhelm.core.screen_awareness import ScreenPlannerEvaluation
 from stormhelm.core.screen_awareness import ScreenRouteDisposition
 from stormhelm.core.software_control import SoftwareControlPlannerSeam
+from stormhelm.core.software_control import SoftwarePlannerEvaluation
 from stormhelm.core.software_control import SoftwareRouteDisposition
 
 NOTE_EXTENSIONS = {".md", ".markdown", ".txt"}
@@ -251,6 +255,135 @@ class DeterministicPlanner:
         self._planner_v2 = PlannerV2()
         self._route_spine = RouteSpine()
 
+    def _route_triage_allows_seam(
+        self,
+        family: str,
+        *,
+        route_triage: RouteTriageResult | None,
+        selected_family: str | None = None,
+    ) -> bool:
+        if route_triage is None:
+            return True
+        if selected_family == family:
+            return True
+        if route_triage.confidence < 0.82:
+            return True
+        return family not in set(route_triage.excluded_route_families)
+
+    def _evaluate_route_family_seams(
+        self,
+        *,
+        routing_message: str,
+        normalized_text: str,
+        surface_mode: str,
+        active_module: str,
+        active_context: dict[str, Any],
+        active_request_state: dict[str, Any],
+        route_triage: RouteTriageResult | None,
+        selected_family: str | None,
+        debug: dict[str, Any],
+    ) -> tuple[CalculationPlannerEvaluation, SoftwarePlannerEvaluation, ScreenPlannerEvaluation]:
+        evaluated: list[str] = []
+        skipped: list[str] = []
+
+        if self._route_triage_allows_seam("calculations", route_triage=route_triage, selected_family=selected_family):
+            calculation_evaluation = self._calculations_seam.evaluate(
+                raw_text=routing_message,
+                normalized_text=normalized_text,
+                surface_mode=surface_mode,
+                active_module=active_module,
+                active_context=active_context,
+            )
+            evaluated.append("calculations")
+        else:
+            calculation_evaluation = self._skipped_calculation_evaluation()
+            skipped.append("calculations")
+        debug["calculations"] = calculation_evaluation.to_dict()
+
+        if self._route_triage_allows_seam("software_control", route_triage=route_triage, selected_family=selected_family):
+            software_control_evaluation = self._software_control_seam.evaluate(
+                raw_text=routing_message,
+                normalized_text=normalized_text,
+                surface_mode=surface_mode,
+                active_module=active_module,
+                active_request_state=active_request_state,
+                active_context=active_context,
+            )
+            evaluated.append("software_control")
+        else:
+            software_control_evaluation = self._skipped_software_control_evaluation()
+            skipped.append("software_control")
+        debug["software_control"] = software_control_evaluation.to_dict()
+
+        if self._route_triage_allows_seam("screen_awareness", route_triage=route_triage, selected_family=selected_family):
+            screen_awareness_evaluation = self._screen_awareness_seam.evaluate(
+                raw_text=routing_message,
+                normalized_text=normalized_text,
+                surface_mode=surface_mode,
+                active_module=active_module,
+                active_context=active_context,
+            )
+            evaluated.append("screen_awareness")
+        else:
+            screen_awareness_evaluation = self._skipped_screen_awareness_evaluation(
+                surface_mode=surface_mode,
+                active_module=active_module,
+            )
+            skipped.append("screen_awareness")
+        debug["screen_awareness"] = screen_awareness_evaluation.to_dict()
+
+        debug["route_family_seams_evaluated"] = evaluated
+        debug["route_family_seams_skipped"] = skipped
+        debug["planner_candidates_pruned_count"] = len(skipped)
+        if skipped and route_triage is not None and route_triage.likely_route_families:
+            debug["provider_fallback_suppressed_reason"] = (
+                "native_route_triage"
+                if route_triage.likely_route_families[0] != "generic_provider"
+                and not route_triage.provider_fallback_eligible
+                else ""
+            )
+        return calculation_evaluation, software_control_evaluation, screen_awareness_evaluation
+
+    def _skipped_calculation_evaluation(self) -> CalculationPlannerEvaluation:
+        config = getattr(self._calculations_seam, "config", CalculationsConfig())
+        return CalculationPlannerEvaluation(
+            candidate=False,
+            disposition=CalculationRouteDisposition.NOT_REQUESTED,
+            reasons=["skipped_by_route_triage"],
+            feature_enabled=bool(config.enabled),
+            planner_routing_enabled=bool(config.planner_routing_enabled),
+        )
+
+    def _skipped_software_control_evaluation(self) -> SoftwarePlannerEvaluation:
+        config = getattr(self._software_control_seam, "config", SoftwareControlConfig())
+        return SoftwarePlannerEvaluation(
+            candidate=False,
+            disposition=SoftwareRouteDisposition.NOT_REQUESTED,
+            feature_enabled=bool(config.enabled),
+            planner_routing_enabled=bool(config.planner_routing_enabled),
+            reasons=["skipped_by_route_triage"],
+        )
+
+    def _skipped_screen_awareness_evaluation(
+        self,
+        *,
+        surface_mode: str,
+        active_module: str,
+    ) -> ScreenPlannerEvaluation:
+        config = getattr(self._screen_awareness_seam, "config", ScreenAwarenessConfig())
+        return ScreenPlannerEvaluation(
+            candidate=False,
+            disposition=ScreenRouteDisposition.NOT_REQUESTED,
+            reasons=["skipped_by_route_triage"],
+            feature_enabled=bool(config.enabled),
+            planner_routing_enabled=bool(config.planner_routing_enabled),
+            input_signals={
+                "surface_mode": surface_mode,
+                "active_module": active_module,
+                "skipped_by_route_triage": True,
+            },
+        )
+
     def plan(
         self,
         message: str,
@@ -264,9 +397,11 @@ class DeterministicPlanner:
         recent_tool_results: list[dict[str, Any]] | None = None,
         learned_preferences: dict[str, dict[str, object]] | None = None,
         active_context: dict[str, Any] | None = None,
+        route_triage_result: RouteTriageResult | dict[str, Any] | None = None,
         available_tools: set[str] | None = None,
     ) -> PlannerDecision:
         normalized = self._normalize_command(message, surface_mode=surface_mode, active_module=active_module)
+        route_triage = route_triage_from_dict(route_triage_result)
         decomposition = self._decompose_request(
             normalized,
             active_context=active_context or {},
@@ -277,6 +412,8 @@ class DeterministicPlanner:
             "normalized_command": normalized.to_dict(),
             "request_decomposition": decomposition.to_dict(),
         }
+        if route_triage is not None:
+            debug["route_triage"] = route_triage.to_dict()
         if not normalized.normalized_text:
             return self._finalize_decision(
                 PlannerDecision(debug=debug),
@@ -337,31 +474,17 @@ class DeterministicPlanner:
             debug["legacy_fallback_used"] = False
 
             routing_message = normalized.raw_text or message
-            calculation_evaluation = self._calculations_seam.evaluate(
-                raw_text=routing_message,
+            calculation_evaluation, software_control_evaluation, screen_awareness_evaluation = self._evaluate_route_family_seams(
+                routing_message=routing_message,
                 normalized_text=normalized.normalized_text,
                 surface_mode=surface_mode,
                 active_module=active_module,
                 active_context=active_context or {},
-            )
-            debug["calculations"] = calculation_evaluation.to_dict()
-            software_control_evaluation = self._software_control_seam.evaluate(
-                raw_text=routing_message,
-                normalized_text=normalized.normalized_text,
-                surface_mode=surface_mode,
-                active_module=active_module,
                 active_request_state=active_request_state or {},
-                active_context=active_context or {},
+                route_triage=route_triage,
+                selected_family=str(route_spine_decision.winner.route_family or ""),
+                debug=debug,
             )
-            debug["software_control"] = software_control_evaluation.to_dict()
-            screen_awareness_evaluation = self._screen_awareness_seam.evaluate(
-                raw_text=routing_message,
-                normalized_text=normalized.normalized_text,
-                surface_mode=surface_mode,
-                active_module=active_module,
-                active_context=active_context or {},
-            )
-            debug["screen_awareness"] = screen_awareness_evaluation.to_dict()
             semantic = self._semantic_from_route_spine_decision(
                 route_spine_decision,
                 message=routing_message,
@@ -428,31 +551,17 @@ class DeterministicPlanner:
             debug["generic_provider_gate_reason"] = planner_v2_trace.route_decision.generic_provider_gate_reason
 
         routing_message = normalized.raw_text or message
-        calculation_evaluation = self._calculations_seam.evaluate(
-            raw_text=routing_message,
+        calculation_evaluation, software_control_evaluation, screen_awareness_evaluation = self._evaluate_route_family_seams(
+            routing_message=routing_message,
             normalized_text=normalized.normalized_text,
             surface_mode=surface_mode,
             active_module=active_module,
             active_context=active_context or {},
-        )
-        debug["calculations"] = calculation_evaluation.to_dict()
-        software_control_evaluation = self._software_control_seam.evaluate(
-            raw_text=routing_message,
-            normalized_text=normalized.normalized_text,
-            surface_mode=surface_mode,
-            active_module=active_module,
             active_request_state=active_request_state or {},
-            active_context=active_context or {},
+            route_triage=route_triage,
+            selected_family=str(route_spine_decision.winner.route_family or ""),
+            debug=debug,
         )
-        debug["software_control"] = software_control_evaluation.to_dict()
-        screen_awareness_evaluation = self._screen_awareness_seam.evaluate(
-            raw_text=routing_message,
-            normalized_text=normalized.normalized_text,
-            surface_mode=surface_mode,
-            active_module=active_module,
-            active_context=active_context or {},
-        )
-        debug["screen_awareness"] = screen_awareness_evaluation.to_dict()
         if route_spine_decision.authoritative and not planner_v2_deferred_to_legacy:
             semantic = self._semantic_from_route_spine_decision(
                 route_spine_decision,
@@ -2273,7 +2382,7 @@ class DeterministicPlanner:
                     slots=slots,
                     evidence_note="route_spine restored deictic window-control ownership from the deterministic control contract",
                 )
-            app_request = self._app_control_request(message, lower)
+            app_request = self._app_control_request(message, lower) if family != "software_control" else None
             if app_request is not None:
                 return self._merge_route_spine_proposal(
                     self._tool_proposal(
@@ -2344,8 +2453,8 @@ class DeterministicPlanner:
                     tool_name="resource_diagnosis",
                     tool_arguments={},
                     request_type_hint="deterministic_diagnostic_request",
-                    family="resource_diagnosis",
-                    subject="resource_diagnosis",
+                    family="resources",
+                    subject="resources",
                     requested_metric="bottleneck",
                     diagnostic_mode=True,
                     confidence=0.95,
@@ -2807,7 +2916,7 @@ class DeterministicPlanner:
         if family == "workspace_operations":
             source_case = str(decision.intent_frame.extracted_entities.get("source_case") or "").strip().lower()
             requested_tool = str(decision.intent_frame.extracted_entities.get("tool_name") or "").strip()
-            if requested_tool.startswith("workspace_"):
+            if requested_tool.startswith("workspace_") and requested_tool != "workspace_assemble":
                 tool_name = requested_tool
                 requested_action = tool_name.removeprefix("workspace_")
                 request_type_hint = "workspace_restore" if tool_name == "workspace_restore" else "direct_action"
@@ -2831,11 +2940,19 @@ class DeterministicPlanner:
                 tool_name = "workspace_clear"
                 requested_action = "clear"
                 request_type_hint = "direct_action"
+            elif self._looks_like_workspace_rename(lower):
+                tool_name = "workspace_rename"
+                requested_action = "rename"
+                request_type_hint = "direct_action"
+            elif self._looks_like_workspace_tag(lower):
+                tool_name = "workspace_tag"
+                requested_action = "tag"
+                request_type_hint = "direct_action"
             elif self._looks_like_workspace_list(lower):
                 tool_name = "workspace_list"
                 requested_action = "list"
                 request_type_hint = "direct_deterministic_fact"
-            elif self._looks_like_workspace_assemble(lower):
+            elif requested_tool == "workspace_assemble" or self._looks_like_workspace_assemble(lower):
                 tool_name = "workspace_assemble"
                 requested_action = "assemble"
                 request_type_hint = "workspace_assembly"
@@ -2847,7 +2964,26 @@ class DeterministicPlanner:
                 query_shape=QueryShape.WORKSPACE_REQUEST,
                 domain="workspace",
                 tool_name=tool_name,
-                tool_arguments={"query": message} if tool_name in {"workspace_restore", "workspace_assemble", "workspace_archive"} else {},
+                tool_arguments=(
+                    {"query": message}
+                    if tool_name in {"workspace_restore", "workspace_assemble", "workspace_archive"}
+                    else {
+                        "new_name": str(
+                            decision.intent_frame.extracted_entities.get("new_name")
+                            or self._extract_after_phrase(message, "to")
+                        ).strip()
+                    }
+                    if tool_name == "workspace_rename"
+                    else {
+                        "tags": (
+                            list(decision.intent_frame.extracted_entities.get("tags"))
+                            if isinstance(decision.intent_frame.extracted_entities.get("tags"), list)
+                            else self._extract_tags(message)
+                        )
+                    }
+                    if tool_name == "workspace_tag"
+                    else {}
+                ),
                 request_type_hint=request_type_hint,
                 family="workspace_operations",
                 subject=requested_action,
@@ -3503,15 +3639,17 @@ class DeterministicPlanner:
                 slots=slots,
             )
         if family == "resources":
-            if self._looks_like_resource_diagnosis(lower):
+            requested_tool = str(decision.intent_frame.extracted_entities.get("tool_name") or "").strip()
+            source_case = str(decision.intent_frame.extracted_entities.get("source_case") or "").strip().lower()
+            if requested_tool == "resource_diagnosis" or source_case == "resource_diagnosis" or self._looks_like_resource_diagnosis(lower):
                 return self._tool_proposal(
                     query_shape=QueryShape.DIAGNOSTIC_CAUSAL,
                     domain="system",
                     tool_name="resource_diagnosis",
                     tool_arguments={},
                     request_type_hint="deterministic_diagnostic_request",
-                    family="resource_diagnosis",
-                    subject="resource_diagnosis",
+                    family="resources",
+                    subject="resources",
                     requested_metric="bottleneck",
                     diagnostic_mode=True,
                     confidence=decision.winner.score or 0.95,
@@ -3573,15 +3711,23 @@ class DeterministicPlanner:
                 output_mode=ResponseMode.STATUS_SUMMARY.value,
                 slots=slots,
             )
-        if self._looks_like_power_diagnosis(lower):
+        requested_power_tool = str(decision.intent_frame.extracted_entities.get("tool_name") or "").strip()
+        power_source_case = str(decision.intent_frame.extracted_entities.get("source_case") or "").strip().lower()
+        selected = decision.intent_frame.extracted_entities.get("selected_context")
+        previous_power_parameters: dict[str, Any] = {}
+        if isinstance(selected, dict):
+            selected_value = selected.get("value")
+            if isinstance(selected_value, dict) and isinstance(selected_value.get("parameters"), dict):
+                previous_power_parameters = dict(selected_value.get("parameters") or {})
+        if requested_power_tool == "power_diagnosis" or power_source_case == "power_diagnosis" or self._looks_like_power_diagnosis(lower):
             return self._tool_proposal(
                 query_shape=QueryShape.DIAGNOSTIC_CAUSAL,
                 domain="power",
                 tool_name="power_diagnosis",
                 tool_arguments={},
                 request_type_hint="deterministic_diagnostic_request",
-                family="power_diagnosis",
-                subject="power_diagnosis",
+                family="power",
+                subject="power",
                 requested_metric="drain_rate",
                 diagnostic_mode=True,
                 confidence=decision.winner.score or 0.95,
@@ -3590,8 +3736,8 @@ class DeterministicPlanner:
                 output_mode=ResponseMode.DIAGNOSTIC_SUMMARY.value,
                 slots=slots,
             )
-        if self._looks_like_power_projection(lower, recent_family="power"):
-            metric, target_percent = self._power_projection_shape(lower, previous_parameters={})
+        if requested_power_tool == "power_projection" or power_source_case == "power_projection" or self._looks_like_power_projection(lower, recent_family="power"):
+            metric, target_percent = self._power_projection_shape(lower, previous_parameters=previous_power_parameters)
             return self._tool_proposal(
                 query_shape=QueryShape.FORECAST_REQUEST,
                 domain="power",
@@ -6420,10 +6566,10 @@ class DeterministicPlanner:
         )
 
     def _looks_like_workspace_rename(self, lower: str) -> bool:
-        return "rename this workspace to" in lower or "rename the workspace to" in lower
+        return bool(re.search(r"\brename\b.{0,40}\b(?:workspace|wrkspace)\b", lower))
 
     def _looks_like_workspace_tag(self, lower: str) -> bool:
-        return "tag this workspace" in lower or "tag the workspace" in lower
+        return bool(re.search(r"\btag\b.{0,40}\b(?:workspace|wrkspace)\b", lower))
 
     def _looks_like_workspace_list(self, lower: str) -> bool:
         if lower in {
@@ -6676,6 +6822,12 @@ class DeterministicPlanner:
 
     def _looks_like_resource_diagnosis(self, lower: str) -> bool:
         if "slowing" in lower and "down" in lower and any(token in lower for token in {"machine", "computer", "pc"}):
+            return True
+        if re.search(r"\b(?:computer|machine|pc|system)\b.{0,40}\b(?:sluggish|slow|laggy|bogged down|dragging)\b", lower):
+            return True
+        if re.search(r"\b(?:why|diagnos|troubleshoot|what'?s wrong)\b.{0,48}\b(?:computer|machine|pc|cpu|memory|ram|gpu|resources?)\b", lower):
+            return True
+        if re.search(r"\b(?:cpu|memory|ram|gpu|resources?)\b.{0,40}\b(?:bottleneck|pressure|spike|high|pegged|sluggish|slow)\b", lower):
             return True
         return any(
             phrase in lower
@@ -8816,15 +8968,16 @@ class DeterministicPlanner:
 
     def _extract_tags(self, message: str) -> list[str]:
         lower = message.lower()
-        for marker in ("tag this workspace", "tag the workspace"):
-            if marker not in lower:
-                continue
-            raw = message[lower.index(marker) + len(marker) :].strip(" .")
+        match = re.search(r"\btag\b.{0,28}\b(?:workspace|wrkspace)\b(?:\s+with)?\s+(?P<tags>.+)$", message, flags=re.IGNORECASE)
+        if match:
+            raw = str(match.group("tags") or "")
+            raw = re.sub(r"\s+(?:real\s+quick|quick\s+quick|without\s+.*|if\s+that\s+is\s+the\s+right\s+route.*)$", "", raw, flags=re.IGNORECASE)
+            raw = " ".join(raw.split()).strip(" .,:;!?\"'")
             if not raw:
                 return []
             if "," in raw:
                 return [part.strip() for part in raw.split(",") if part.strip()]
-            return [part.strip() for part in raw.split() if part.strip()]
+            return [raw]
         return []
 
     def _extract_workspace_list_query(self, message: str) -> str:

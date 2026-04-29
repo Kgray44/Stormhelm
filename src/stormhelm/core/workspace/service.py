@@ -438,11 +438,62 @@ class WorkspaceService:
         *,
         limit: int = WORKSPACE_DEFAULT_EMBEDDED_ITEM_LIMIT,
     ) -> dict[str, Any]:
+        if limit <= 0:
+            return self._workspace_reference_payload(workspace)
         payload = workspace.to_dict()
         self._cap_payload_list(payload, "references", "referencesSummary", limit=limit)
         self._cap_payload_list(payload, "findings", "findingsSummary", limit=limit)
         self._cap_payload_list(payload, "sessionNotes", "sessionNotesSummary", limit=limit)
         return payload
+
+    def _empty_workspace_list_summary(
+        self,
+        *,
+        total_count: int,
+        limit: int = 0,
+    ) -> dict[str, Any]:
+        return {
+            "total_count": max(0, int(total_count)),
+            "displayed_count": 0,
+            "truncated": max(0, int(total_count)) > 0,
+            "omitted_count": max(0, int(total_count)),
+            "limit": max(0, int(limit)),
+            "continuation_token": "offset:0" if total_count > 0 else "",
+        }
+
+    def _workspace_reference_payload(self, workspace: WorkspaceRecord) -> dict[str, Any]:
+        return {
+            "workspaceId": workspace.workspace_id,
+            "name": workspace.name,
+            "topic": workspace.topic,
+            "summary": workspace.summary,
+            "title": workspace.title,
+            "status": workspace.status,
+            "category": workspace.category,
+            "templateKey": workspace.template_key,
+            "templateSource": workspace.template_source,
+            "problemDomain": workspace.problem_domain,
+            "activeGoal": workspace.active_goal,
+            "currentTaskState": workspace.current_task_state,
+            "lastCompletedAction": workspace.last_completed_action,
+            "lastSurfaceMode": workspace.last_surface_mode,
+            "lastActiveModule": workspace.last_active_module,
+            "lastActiveSection": workspace.last_active_section,
+            "pendingNextSteps": list(workspace.pending_next_steps),
+            "whereLeftOff": workspace.where_left_off,
+            "pinned": workspace.pinned,
+            "archived": workspace.archived,
+            "archivedAt": workspace.archived_at,
+            "lastSnapshotAt": workspace.last_snapshot_at,
+            "tags": list(workspace.tags),
+            "createdAt": workspace.created_at,
+            "updatedAt": workspace.updated_at,
+            "lastOpenedAt": workspace.last_opened_at,
+            "referencesSummary": self._empty_workspace_list_summary(total_count=len(workspace.references)),
+            "findingsSummary": self._empty_workspace_list_summary(total_count=len(workspace.findings)),
+            "sessionNotesSummary": self._empty_workspace_list_summary(total_count=len(workspace.session_notes)),
+            "detailLoadDeferred": True,
+        }
 
     def _compact_continuity_payload(
         self,
@@ -776,7 +827,7 @@ class WorkspaceService:
             },
         )
 
-    def assemble_workspace(self, query: str, *, session_id: str) -> dict[str, Any]:
+    def assemble_workspace(self, query: str, *, session_id: str, compact: bool = False) -> dict[str, Any]:
         subspans = _empty_workspace_subspans()
         state_started = perf_counter()
         assembly_focus = self._resolve_assembly_focus(session_id=session_id, query=query)
@@ -785,6 +836,15 @@ class WorkspaceService:
         if not isinstance(workspace, WorkspaceRecord):
             workspace = self._ensure_workspace(topic)
         _add_workspace_subspan(subspans, "workspace_state_load_ms", state_started)
+        if compact:
+            return self._finalize_workspace_fast_summary(
+                workspace=workspace,
+                query=query,
+                session_id=session_id,
+                activity_type="assemble",
+                summary=self.persona.report(f"Started a compact workspace summary for {workspace.topic or workspace.name}."),
+                route_handler_subspans=subspans,
+            )
         template, template_source, template_confidence, template_reasons = self._resolve_template(
             query=query,
             topic=topic,
@@ -822,7 +882,7 @@ class WorkspaceService:
             route_handler_subspans=subspans,
         )
 
-    def restore_workspace(self, query: str, *, session_id: str) -> dict[str, Any]:
+    def restore_workspace(self, query: str, *, session_id: str, compact: bool = False) -> dict[str, Any]:
         selection = self._select_workspace_for_restore(query, session_id=session_id)
         ambiguous = selection.get("ambiguous") if isinstance(selection, dict) else None
         if isinstance(ambiguous, list) and len(ambiguous) >= 2:
@@ -838,9 +898,17 @@ class WorkspaceService:
             }
         workspace = selection.get("workspace") if isinstance(selection, dict) else None
         if workspace is None:
-            return self.assemble_workspace(query, session_id=session_id)
+            return self.assemble_workspace(query, session_id=session_id, compact=compact)
         if workspace.archived:
             workspace = self.repository.set_archived(workspace.workspace_id, False) or workspace
+        if compact:
+            return self._finalize_workspace_fast_summary(
+                workspace=workspace,
+                query=query,
+                session_id=session_id,
+                activity_type="restore",
+                summary=self.persona.report(f"Restored compact workspace bearings for {workspace.name}."),
+            )
         snapshot = self.repository.get_latest_snapshot(workspace.workspace_id)
         payload = snapshot.payload if snapshot is not None else {}
         template, template_source, template_confidence, template_reasons = self._resolve_template(
@@ -1152,6 +1220,79 @@ class WorkspaceService:
             },
         }
 
+    def active_workspace_summary_compact(self, session_id: str) -> dict[str, Any]:
+        posture = self.session_state.get_active_posture(session_id)
+        workspace = self._workspace_from_posture(session_id, posture)
+        if workspace is None:
+            return {}
+        items = self._normalize_item_list(posture.get("opened_items"))
+        active_item = posture.get("active_item") if isinstance(posture.get("active_item"), dict) else {}
+        if not active_item and items:
+            active_item = items[0]
+        pending_next_steps = self._normalize_string_list(posture.get("pending_next_steps") or workspace.pending_next_steps)
+        where_left_off = str(posture.get("where_left_off") or workspace.where_left_off)
+        likely_next = str(
+            posture.get("likely_next")
+            or self._likely_next_bearing(
+                pending_next_steps=pending_next_steps,
+                active_item=active_item,
+                opened_items=items,
+            )
+        )
+        bounded_items = self._bounded_workspace_items(items, limit=2)
+        bounded_references = self._bounded_workspace_items(
+            self._normalize_item_list(posture.get("references") or workspace.references),
+            limit=0,
+        )
+        workspace_payload = self._compact_workspace_payload(workspace, limit=0)
+        workspace_payload["pendingNextSteps"] = list(pending_next_steps)
+        workspace_payload["whereLeftOff"] = where_left_off
+        workspace_payload["summary"] = where_left_off or workspace.summary
+        workspace_payload["likelyNext"] = likely_next
+        workspace_payload["openedItemsSummary"] = bounded_items["summary"]
+        workspace_payload["referencesSummary"] = bounded_references["summary"]
+        workspace_payload["capabilities"] = (
+            dict(posture.get("capabilities")) if isinstance(posture.get("capabilities"), dict) else self._workspace_capabilities(
+                restore_saved_posture=bool(workspace.last_snapshot_at)
+            )
+        )
+        workspace_payload["detailLoadDeferred"] = True
+        workspace_payload["workspaceSummaryCompact"] = {
+            "workspaceId": workspace.workspace_id,
+            "name": workspace.name,
+            "topic": workspace.topic,
+            "openedItemCount": bounded_items["summary"]["total_count"],
+            "referenceCount": bounded_references["summary"]["total_count"],
+            "pendingNextStepCount": len(pending_next_steps),
+            "detailLoadDeferred": True,
+        }
+        return {
+            "workspace": workspace_payload,
+            "workspace_summary_compact": dict(workspace_payload["workspaceSummaryCompact"]),
+            "opened_items": bounded_items["items"],
+            "openedItemsSummary": bounded_items["summary"],
+            "active_item": self._compact_workspace_item(active_item),
+            "active_goal": str(posture.get("active_goal") or workspace.active_goal),
+            "current_task_state": str(posture.get("current_task_state") or workspace.current_task_state),
+            "last_completed_action": str(posture.get("last_completed_action") or workspace.last_completed_action),
+            "pending_next_steps": pending_next_steps,
+            "where_left_off": where_left_off,
+            "likely_next": likely_next,
+            "references": bounded_references["items"],
+            "referencesSummary": bounded_references["summary"],
+            "detail_load_deferred": True,
+            "action": {
+                "type": "workspace_restore",
+                "target": "deck",
+                "module": str(posture.get("active_module", "chartroom")),
+                "section": str(posture.get("section", "overview")),
+                "workspace": workspace_payload,
+                "items": bounded_items["items"],
+                "active_item_id": str(self._compact_workspace_item(active_item).get("itemId", "")) if active_item else "",
+                "detail_load_deferred": True,
+            },
+        }
+
     def link_material_into_active_workspace(
         self,
         *,
@@ -1291,7 +1432,7 @@ class WorkspaceService:
             },
         }
 
-    def save_workspace(self, *, session_id: str) -> dict[str, Any]:
+    def save_workspace(self, *, session_id: str, compact: bool = False) -> dict[str, Any]:
         subspans = _empty_workspace_subspans()
         state_started = perf_counter()
         posture = self.session_state.get_active_posture(session_id)
@@ -1328,18 +1469,30 @@ class WorkspaceService:
             f"Saved {workspace.name} and secured the current bearing, opened items, and next steps."
         )
         snapshot_payload = snapshot.to_dict()
-        snapshot_payload["payload"] = self._compact_snapshot_payload(snapshot.payload)
+        snapshot_payload["payload"] = (
+            {
+                "workspaceId": workspace.workspace_id,
+                "workspaceName": workspace.name,
+                "detailLoadDeferred": True,
+                "openedItemsSummary": self._bounded_workspace_items(posture.get("opened_items"), limit=0)["summary"],
+            }
+            if compact
+            else self._compact_snapshot_payload(snapshot.payload)
+        )
         response = {
             "summary": summary,
-            "workspace": self._workspace_view_payload(workspace),
+            "workspace": self._compact_workspace_payload(workspace, limit=0) if compact else self._workspace_view_payload(workspace),
             "snapshot": snapshot_payload,
+            "detail_load_deferred": bool(compact),
         }
+        if compact:
+            response["workspace"]["detailLoadDeferred"] = True
         _add_workspace_subspan(subspans, "workspace_dto_build_ms", dto_started)
         response["payloadGuardrails"] = self._payload_guardrail_metadata(response)
         response["debug"] = {"route_handler_subspans": subspans}
         return response
 
-    def archive_workspace(self, *, session_id: str, query: str | None = None) -> dict[str, Any]:
+    def archive_workspace(self, *, session_id: str, query: str | None = None, compact: bool = False) -> dict[str, Any]:
         selection = self._select_workspace_for_restore(query or "current workspace", session_id=session_id)
         workspace = selection.get("workspace") if isinstance(selection, dict) else None
         if workspace is None:
@@ -1360,9 +1513,12 @@ class WorkspaceService:
             self.session_state.set_active_workspace_id(session_id, None)
             self.session_state.clear_active_posture(session_id)
         summary = self.persona.confirmation(f"Archived {archived.name} and struck it from the active watch.")
-        return {"summary": summary, "workspace": self._workspace_view_payload(archived)}
+        payload = self._compact_workspace_payload(archived, limit=0) if compact else self._workspace_view_payload(archived)
+        if compact:
+            payload["detailLoadDeferred"] = True
+        return {"summary": summary, "workspace": payload, "detail_load_deferred": bool(compact)}
 
-    def rename_workspace(self, *, session_id: str, new_name: str) -> dict[str, Any]:
+    def rename_workspace(self, *, session_id: str, new_name: str, compact: bool = False) -> dict[str, Any]:
         subspans = _empty_workspace_subspans()
         state_started = perf_counter()
         workspace = self._workspace_from_posture(session_id, self.session_state.get_active_posture(session_id))
@@ -1375,17 +1531,22 @@ class WorkspaceService:
         dto_started = perf_counter()
         posture = self.session_state.get_active_posture(session_id)
         if posture:
-            posture["workspace"] = self._workspace_view_payload(renamed)
+            posture["workspace"] = self._compact_workspace_payload(renamed, limit=0) if compact else self._workspace_view_payload(renamed)
+            if compact and isinstance(posture["workspace"], dict):
+                posture["workspace"]["detailLoadDeferred"] = True
             self.session_state.set_active_posture(session_id, posture)
         response = {
             "summary": self.persona.confirmation(f"Renamed the active workspace to {renamed.name}."),
-            "workspace": self._workspace_view_payload(renamed),
+            "workspace": self._compact_workspace_payload(renamed, limit=0) if compact else self._workspace_view_payload(renamed),
+            "detail_load_deferred": bool(compact),
         }
+        if compact:
+            response["workspace"]["detailLoadDeferred"] = True
         _add_workspace_subspan(subspans, "workspace_dto_build_ms", dto_started)
         response["debug"] = {"route_handler_subspans": subspans}
         return response
 
-    def tag_workspace(self, *, session_id: str, tags: list[str]) -> dict[str, Any]:
+    def tag_workspace(self, *, session_id: str, tags: list[str], compact: bool = False) -> dict[str, Any]:
         subspans = _empty_workspace_subspans()
         state_started = perf_counter()
         workspace = self._workspace_from_posture(session_id, self.session_state.get_active_posture(session_id))
@@ -1398,14 +1559,19 @@ class WorkspaceService:
         dto_started = perf_counter()
         posture = self.session_state.get_active_posture(session_id)
         if posture:
-            posture["workspace"] = self._workspace_view_payload(tagged)
+            posture["workspace"] = self._compact_workspace_payload(tagged, limit=0) if compact else self._workspace_view_payload(tagged)
+            if compact and isinstance(posture["workspace"], dict):
+                posture["workspace"]["detailLoadDeferred"] = True
             self.session_state.set_active_posture(session_id, posture)
         response = {
             "summary": self.persona.confirmation(
                 f"Tagged {tagged.name} with {', '.join(tagged.tags) if tagged.tags else 'no additional bearings'}."
             ),
-            "workspace": self._workspace_view_payload(tagged),
+            "workspace": self._compact_workspace_payload(tagged, limit=0) if compact else self._workspace_view_payload(tagged),
+            "detail_load_deferred": bool(compact),
         }
+        if compact:
+            response["workspace"]["detailLoadDeferred"] = True
         _add_workspace_subspan(subspans, "workspace_dto_build_ms", dto_started)
         response["debug"] = {"route_handler_subspans": subspans}
         return response
@@ -1418,6 +1584,7 @@ class WorkspaceService:
         include_archived: bool = False,
         archived_only: bool = False,
         limit: int = 8,
+        compact: bool = False,
     ) -> dict[str, Any]:
         del session_id
         items = (
@@ -1429,10 +1596,18 @@ class WorkspaceService:
             "summary": self.persona.report(
                 f"Holding {len(items)} {'archived ' if archived_only else ''}workspace bearing{'s' if len(items) != 1 else ''}."
             ),
-            "workspaces": [item.to_dict() for item in items],
+            "workspaces": [self._compact_workspace_payload(item, limit=0) if compact else item.to_dict() for item in items],
+            "detail_load_deferred": bool(compact),
+            "workspace_summary_compact": {
+                "total_count": len(items),
+                "displayed_count": len(items),
+                "archived_only": archived_only,
+                "include_archived": include_archived,
+                "detailLoadDeferred": bool(compact),
+            },
         }
 
-    def where_we_left_off(self, *, session_id: str) -> dict[str, Any]:
+    def where_we_left_off(self, *, session_id: str, compact: bool = False) -> dict[str, Any]:
         posture = self.session_state.get_active_posture(session_id)
         workspace = self._workspace_from_posture(session_id, posture)
         if workspace is None:
@@ -1446,19 +1621,23 @@ class WorkspaceService:
                 pending_next_steps=self._normalize_string_list(posture.get("pending_next_steps") or workspace.pending_next_steps),
                 active_item=posture.get("active_item") if isinstance(posture.get("active_item"), dict) else {},
             )
-        memory_context = self._workspace_memory_context(
+        memory_context = {} if compact else self._workspace_memory_context(
             workspace,
             session_id=session_id,
             query=where_left_off,
         )
+        workspace_payload = self._compact_workspace_payload(workspace, limit=0) if compact else self._workspace_view_payload(workspace)
+        if compact:
+            workspace_payload["detailLoadDeferred"] = True
         return {
             "summary": self.persona.report(where_left_off),
-            "workspace": self._workspace_view_payload(workspace),
+            "workspace": workspace_payload,
             "next_steps": self._normalize_string_list(posture.get("pending_next_steps") or workspace.pending_next_steps),
             "memory": memory_context,
+            "detail_load_deferred": bool(compact),
         }
 
-    def next_steps(self, *, session_id: str) -> dict[str, Any]:
+    def next_steps(self, *, session_id: str, compact: bool = False) -> dict[str, Any]:
         posture = self.session_state.get_active_posture(session_id)
         workspace = self._workspace_from_posture(session_id, posture)
         if workspace is None:
@@ -1470,18 +1649,22 @@ class WorkspaceService:
                 posture.get("active_item") if isinstance(posture.get("active_item"), dict) else {},
                 posture.get("opened_items") if isinstance(posture.get("opened_items"), list) else [],
             )
-        memory_context = self._workspace_memory_context(
+        memory_context = {} if compact else self._workspace_memory_context(
             workspace,
             session_id=session_id,
             query=" ".join(next_steps[:3]) or workspace.where_left_off or workspace.summary,
         )
+        workspace_payload = self._compact_workspace_payload(workspace, limit=0) if compact else self._workspace_view_payload(workspace)
+        if compact:
+            workspace_payload["detailLoadDeferred"] = True
         return {
             "summary": self.persona.report(
                 f"Next bearings for {workspace.name}: " + "; ".join(next_steps[:3]) if next_steps else f"{workspace.name} is clear of pending next steps."
             ),
-            "workspace": self._workspace_view_payload(workspace),
+            "workspace": workspace_payload,
             "next_steps": next_steps,
             "memory": memory_context,
+            "detail_load_deferred": bool(compact),
         }
 
     def link_note_to_active_workspace(self, *, session_id: str, note_id: str, workspace_id: str = "") -> None:
@@ -2851,6 +3034,81 @@ class WorkspaceService:
                 "micro_response": self._workspace_micro_response(activity_type, plan.template, query),
                 "full_response": summary,
             },
+        }
+
+    def _finalize_workspace_fast_summary(
+        self,
+        *,
+        workspace: WorkspaceRecord,
+        query: str,
+        session_id: str,
+        activity_type: str,
+        summary: str,
+        route_handler_subspans: dict[str, float] | None = None,
+    ) -> dict[str, Any]:
+        subspans = dict(route_handler_subspans or _empty_workspace_subspans())
+        dto_started = perf_counter()
+        pending_next_steps = self._normalize_string_list(workspace.pending_next_steps)
+        where_left_off = workspace.where_left_off or workspace.summary or query
+        active_goal = workspace.active_goal or workspace.summary or query
+        active_item: dict[str, Any] = {}
+        workspace_payload = self._compact_workspace_payload(workspace, limit=0)
+        workspace_payload["likelyNext"] = pending_next_steps[0] if pending_next_steps else ""
+        workspace_payload["whereLeftOff"] = where_left_off
+        workspace_payload["pendingNextSteps"] = pending_next_steps
+        workspace_payload["capabilities"] = self._workspace_capabilities(
+            restore_saved_posture=bool(workspace.last_snapshot_at)
+        )
+        workspace_payload["payloadGuardrails"] = self._payload_guardrail_metadata(workspace_payload)
+        posture = {
+            "workspace": workspace_payload,
+            "surface_mode": "ghost",
+            "active_module": workspace.last_active_module or "chartroom",
+            "section": workspace.last_active_section or "overview",
+            "opened_items": [],
+            "active_item": active_item,
+            "active_goal": active_goal,
+            "current_task_state": workspace.current_task_state or query,
+            "last_completed_action": f"{activity_type.capitalize()} compact workspace summary.",
+            "pending_next_steps": pending_next_steps,
+            "where_left_off": where_left_off,
+            "likely_next": pending_next_steps[0] if pending_next_steps else "",
+            "references": [],
+            "findings": [],
+            "session_notes": [],
+            "detail_load_deferred": True,
+        }
+        self.session_state.set_active_workspace_id(session_id, workspace.workspace_id)
+        self.session_state.set_active_posture(session_id, posture)
+        compact_summary = self.active_workspace_summary_compact(session_id)
+        _add_workspace_subspan(subspans, "workspace_dto_build_ms", dto_started)
+        event_started = perf_counter()
+        self.repository.record_activity(
+            workspace_id=workspace.workspace_id,
+            session_id=session_id,
+            activity_type=activity_type,
+            description=f"{activity_type.capitalize()} compact workspace summary for {workspace.name}.",
+            payload={"query": query, "detail_load_deferred": True},
+        )
+        _add_workspace_subspan(subspans, "workspace_event_emit_ms", event_started)
+        workspace_payload = compact_summary.get("workspace") if isinstance(compact_summary.get("workspace"), dict) else {}
+        items = compact_summary.get("opened_items") if isinstance(compact_summary.get("opened_items"), list) else []
+        action = compact_summary.get("action") if isinstance(compact_summary.get("action"), dict) else {}
+        action = {
+            **action,
+            "bearing_title": "Workspace summary ready",
+            "micro_response": "Prepared the compact workspace summary.",
+            "full_response": summary,
+            "detail_load_deferred": True,
+        }
+        return {
+            "summary": summary,
+            "workspace": workspace_payload,
+            "workspace_summary_compact": compact_summary.get("workspace_summary_compact", {}),
+            "items": items,
+            "detail_load_deferred": True,
+            "debug": {"route_handler_subspans": subspans},
+            "action": action,
         }
 
     def _workspace_bearing_title(

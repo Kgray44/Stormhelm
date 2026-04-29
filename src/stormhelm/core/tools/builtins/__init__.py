@@ -10,6 +10,7 @@ from stormhelm.core.tools.builtins.operational_diagnostics import (
     StorageDiagnosisTool,
 )
 from stormhelm.core.tools.builtins.shell_stub import ShellCommandStubTool
+from stormhelm.core.tools.builtins.subsystem_continuation import SubsystemContinuationTool
 from stormhelm.core.tools.builtins.system_info import SystemInfoTool
 from stormhelm.core.tools.builtins.system_state import (
     ActiveAppsTool,
@@ -65,12 +66,14 @@ from stormhelm.core.tools.builtins.workspace_actions import (
 )
 
 
-def register_builtin_tools(registry) -> None:
+def register_builtin_tools(registry, *, include_internal: bool = False) -> None:
     registry.register(ClockTool())
     registry.register(SystemInfoTool())
     registry.register(FileReaderTool())
     registry.register(NotesWriteTool())
     registry.register(EchoTool())
+    if include_internal:
+        registry.register(SubsystemContinuationTool())
     registry.register(BrowserContextTool())
     registry.register(ActivitySummaryTool())
     registry.register(ShellCommandStubTool())

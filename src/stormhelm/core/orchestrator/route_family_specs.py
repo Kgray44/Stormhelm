@@ -188,7 +188,14 @@ def default_route_family_specs() -> dict[str, RouteFamilySpec]:
             negative=("workspace design theory",),
             near=("what is a workspace", "workspace philosophy"),
             missing="clarify when target workspace is ambiguous",
-            tools=("workspace_restore", "workspace_assemble", "workspace_save", "workspace_list"),
+            tools=(
+                "workspace_restore",
+                "workspace_assemble",
+                "workspace_save",
+                "workspace_list",
+                "workspace_rename",
+                "workspace_tag",
+            ),
         ),
         _spec(
             "routine",
@@ -458,7 +465,7 @@ def default_route_family_specs() -> dict[str, RouteFamilySpec]:
             negative=("human resources", "study resources"),
             near=("what resources should I read",),
             missing="not usually required",
-            tools=("resource_status",),
+            tools=("resource_status", "resource_diagnosis"),
         ),
         _spec(
             "time",

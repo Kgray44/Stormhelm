@@ -7,6 +7,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from stormhelm.core.latency import build_latency_trace
+
 
 def json_ready(value: Any) -> Any:
     if isinstance(value, Path):
@@ -119,6 +121,9 @@ class CoreObservation:
     response_active_request_state: dict[str, Any] = field(default_factory=dict)
     snapshot_active_request_state: dict[str, Any] = field(default_factory=dict)
     stage_timings_ms: dict[str, float] = field(default_factory=dict)
+    latency_trace: dict[str, Any] = field(default_factory=dict)
+    latency_summary: dict[str, Any] = field(default_factory=dict)
+    budget_result: dict[str, Any] = field(default_factory=dict)
     response_json_bytes: int = 0
     event_count: int = 0
     job_count: int = 0
@@ -193,6 +198,22 @@ class CommandEvalResult:
         )
         approval_state = _approval_state(self.observation.tool_results, self.observation.approval_observed)
         stage_timings = _stage_timings(self.observation, self.artifact_flush_ms)
+        latency_trace = _latency_trace_for_observation(
+            observation=self.observation,
+            stage_timings=stage_timings,
+            provider_called=provider_called,
+            ai_usage=ai_usage,
+        )
+        latency_summary = (
+            dict(self.observation.latency_summary)
+            if self.observation.latency_summary
+            else latency_trace.to_summary_dict()
+        )
+        budget_result = (
+            dict(self.observation.budget_result)
+            if self.observation.budget_result
+            else latency_trace.budget_result().to_dict()
+        )
         historical_blocker_labels = _historical_blocker_labels(
             case_id=self.case.case_id,
             actual_route_family=self.observation.actual_route_family,
@@ -346,6 +367,281 @@ class CommandEvalResult:
             "external_action_performed": external_action_performed,
             "latency_ms": self.observation.latency_ms,
             **stage_timings,
+            "latency_trace": (
+                dict(self.observation.latency_trace)
+                if self.observation.latency_trace
+                else latency_trace.to_dict()
+            ),
+            "latency_summary": latency_summary,
+            "budget_result": budget_result,
+            "longest_stage": str(latency_summary.get("longest_stage") or ""),
+            "longest_stage_ms": float(latency_summary.get("longest_stage_ms") or 0.0),
+            "budget_label": str(
+                budget_result.get("budget_label")
+                or latency_summary.get("budget_label")
+                or ""
+            ),
+            "budget_target_ms": float(
+                budget_result.get("target_ms")
+                or latency_summary.get("budget_target_ms")
+                or 0.0
+            ),
+            "budget_soft_ceiling_ms": float(
+                budget_result.get("soft_ceiling_ms")
+                or latency_summary.get("budget_soft_ceiling_ms")
+                or 0.0
+            ),
+            "budget_hard_ceiling_ms": (
+                float(
+                    budget_result.get("hard_ceiling_ms")
+                    or latency_summary.get("budget_hard_ceiling_ms")
+                    or 0.0
+                )
+                if (
+                    budget_result.get("hard_ceiling_ms")
+                    or latency_summary.get("budget_hard_ceiling_ms")
+                )
+                else None
+            ),
+            "budget_exceeded": bool(
+                budget_result.get("budget_exceeded")
+                or latency_summary.get("budget_exceeded")
+            ),
+            "hard_ceiling_exceeded": bool(
+                budget_result.get("hard_ceiling_exceeded")
+                or latency_summary.get("hard_ceiling_exceeded")
+            ),
+            "execution_mode": str(latency_summary.get("execution_mode") or ""),
+            "partial_response_returned": bool(latency_summary.get("partial_response_returned")),
+            "async_expected": bool(
+                latency_summary.get("async_expected")
+                or budget_result.get("async_continuation_expected")
+            ),
+            "first_feedback_ms": (
+                float(latency_summary.get("first_feedback_ms") or 0.0)
+                if latency_summary.get("first_feedback_ms") is not None
+                else None
+            ),
+            "budget_exceeded_continuing": bool(latency_summary.get("budget_exceeded_continuing")),
+            "fail_fast_reason": str(latency_summary.get("fail_fast_reason") or ""),
+            "fast_path_used": bool(latency_summary.get("fast_path_used")),
+            "route_triage_ms": float(latency_summary.get("route_triage_ms") or stage_timings.get("route_triage_ms") or 0.0),
+            "triage_confidence": float(latency_summary.get("triage_confidence") or 0.0),
+            "triage_reason_codes": list(latency_summary.get("triage_reason_codes") or []),
+            "likely_route_families": list(latency_summary.get("likely_route_families") or []),
+            "skipped_route_families": list(latency_summary.get("skipped_route_families") or []),
+            "heavy_context_loaded": bool(latency_summary.get("heavy_context_loaded")),
+            "heavy_context_reason": str(latency_summary.get("heavy_context_reason") or ""),
+            "provider_fallback_suppressed_reason": str(latency_summary.get("provider_fallback_suppressed_reason") or ""),
+            "planner_candidates_pruned_count": int(latency_summary.get("planner_candidates_pruned_count") or 0),
+            "route_family_seams_evaluated": list(latency_summary.get("route_family_seams_evaluated") or []),
+            "route_family_seams_skipped": list(latency_summary.get("route_family_seams_skipped") or []),
+            "snapshots_checked": list(latency_summary.get("snapshots_checked") or []),
+            "snapshots_used": list(latency_summary.get("snapshots_used") or []),
+            "snapshots_refreshed": list(latency_summary.get("snapshots_refreshed") or []),
+            "snapshots_invalidated": list(latency_summary.get("snapshots_invalidated") or []),
+            "snapshot_hot_path_hit": bool(latency_summary.get("snapshot_hot_path_hit")),
+            "snapshot_miss_reason": dict(latency_summary.get("snapshot_miss_reason") or {}),
+            "snapshot_age_ms": dict(latency_summary.get("snapshot_age_ms") or {}),
+            "snapshot_freshness": dict(latency_summary.get("snapshot_freshness") or {}),
+            "stale_snapshot_used_cautiously": bool(latency_summary.get("stale_snapshot_used_cautiously")),
+            "heavy_context_avoided_by_snapshot": bool(latency_summary.get("heavy_context_avoided_by_snapshot")),
+            "invalidation_count": int(latency_summary.get("invalidation_count") or 0),
+            "freshness_warnings": list(latency_summary.get("freshness_warnings") or []),
+            "async_continuation": bool(latency_summary.get("async_continuation")),
+            "async_strategy": str(latency_summary.get("async_strategy") or ""),
+            "async_initial_response_returned": bool(
+                latency_summary.get("async_initial_response_returned")
+                or stage_timings.get("async_initial_response_returned")
+            ),
+            "route_continuation_id": str(latency_summary.get("route_continuation_id") or ""),
+            "route_progress_stage": str(latency_summary.get("route_progress_stage") or ""),
+            "route_progress_status": str(latency_summary.get("route_progress_status") or ""),
+            "progress_event_count": int(
+                latency_summary.get("progress_event_count")
+                or stage_timings.get("progress_event_count")
+                or 0
+            ),
+            "worker_lane": str(latency_summary.get("worker_lane") or ""),
+            "worker_priority": str(latency_summary.get("worker_priority") or ""),
+            "queue_depth_at_submit": int(latency_summary.get("queue_depth_at_submit") or 0),
+            "queue_wait_ms": float(latency_summary.get("queue_wait_ms") or 0.0),
+            "job_start_delay_ms": float(latency_summary.get("job_start_delay_ms") or 0.0),
+            "job_run_ms": float(latency_summary.get("job_run_ms") or 0.0),
+            "job_total_ms": float(latency_summary.get("job_total_ms") or 0.0),
+            "worker_index": (
+                int(latency_summary.get("worker_index") or 0)
+                if latency_summary.get("worker_index") is not None
+                else None
+            ),
+            "worker_capacity": int(latency_summary.get("worker_capacity") or 0),
+            "workers_busy_at_submit": int(latency_summary.get("workers_busy_at_submit") or 0),
+            "workers_idle_at_submit": int(latency_summary.get("workers_idle_at_submit") or 0),
+            "worker_saturation_percent": float(latency_summary.get("worker_saturation_percent") or 0.0),
+            "starvation_detected": bool(latency_summary.get("starvation_detected")),
+            "interactive_jobs_waiting": int(latency_summary.get("interactive_jobs_waiting") or 0),
+            "background_jobs_running": int(latency_summary.get("background_jobs_running") or 0),
+            "background_job_count": int(latency_summary.get("background_job_count") or 0),
+            "interactive_job_count": int(latency_summary.get("interactive_job_count") or 0),
+            "scheduler_strategy": str(latency_summary.get("scheduler_strategy") or ""),
+            "scheduler_pressure_state": str(latency_summary.get("scheduler_pressure_state") or ""),
+            "scheduler_pressure_reasons": list(latency_summary.get("scheduler_pressure_reasons") or []),
+            "protected_interactive_capacity": int(latency_summary.get("protected_interactive_capacity") or 0),
+            "background_capacity_limit": int(latency_summary.get("background_capacity_limit") or 0),
+            "protected_capacity_wait_reason": str(latency_summary.get("protected_capacity_wait_reason") or ""),
+            "queue_wait_budget_ms": (
+                float(latency_summary.get("queue_wait_budget_ms") or 0.0)
+                if latency_summary.get("queue_wait_budget_ms") is not None
+                else None
+            ),
+            "queue_wait_budget_exceeded": bool(latency_summary.get("queue_wait_budget_exceeded")),
+            "subsystem_cap_key": str(latency_summary.get("subsystem_cap_key") or ""),
+            "subsystem_cap_limit": (
+                int(latency_summary.get("subsystem_cap_limit") or 0)
+                if latency_summary.get("subsystem_cap_limit") is not None
+                else None
+            ),
+            "subsystem_cap_wait_ms": float(latency_summary.get("subsystem_cap_wait_ms") or 0.0),
+            "retry_policy": str(latency_summary.get("retry_policy") or ""),
+            "retry_count": int(latency_summary.get("retry_count") or 0),
+            "retry_max_attempts": int(latency_summary.get("retry_max_attempts") or 0),
+            "retry_backoff_ms": float(latency_summary.get("retry_backoff_ms") or 0.0),
+            "retry_last_error": str(latency_summary.get("retry_last_error") or ""),
+            "attempt_count": int(latency_summary.get("attempt_count") or 0),
+            "cancellation_state": str(latency_summary.get("cancellation_state") or ""),
+            "yield_state": str(latency_summary.get("yield_state") or ""),
+            "restart_recovery_state": str(latency_summary.get("restart_recovery_state") or ""),
+            "job_required": bool(latency_summary.get("job_required") or stage_timings.get("job_required")),
+            "task_required": bool(latency_summary.get("task_required") or stage_timings.get("task_required")),
+            "event_progress_required": bool(
+                latency_summary.get("event_progress_required")
+                or stage_timings.get("event_progress_required")
+            ),
+            "subsystem_continuation_created": bool(
+                latency_summary.get("subsystem_continuation_created")
+                or stage_timings.get("subsystem_continuation_created")
+            ),
+            "subsystem_continuation_id": str(latency_summary.get("subsystem_continuation_id") or ""),
+            "subsystem_continuation_kind": str(latency_summary.get("subsystem_continuation_kind") or ""),
+            "subsystem_continuation_stage": str(latency_summary.get("subsystem_continuation_stage") or ""),
+            "subsystem_continuation_status": str(latency_summary.get("subsystem_continuation_status") or ""),
+            "subsystem_continuation_worker_lane": str(
+                latency_summary.get("subsystem_continuation_worker_lane") or ""
+            ),
+            "returned_before_subsystem_completion": bool(
+                latency_summary.get("returned_before_subsystem_completion")
+                or stage_timings.get("returned_before_subsystem_completion")
+            ),
+            "inline_front_half_ms": float(
+                latency_summary.get("inline_front_half_ms")
+                or stage_timings.get("inline_front_half_ms")
+                or 0.0
+            ),
+            "worker_back_half_ms": float(latency_summary.get("worker_back_half_ms") or 0.0),
+            "continuation_queue_wait_ms": float(
+                latency_summary.get("subsystem_continuation_queue_wait_ms")
+                or latency_summary.get("continuation_queue_wait_ms")
+                or 0.0
+            ),
+            "continuation_run_ms": float(
+                latency_summary.get("subsystem_continuation_run_ms")
+                or latency_summary.get("continuation_run_ms")
+                or 0.0
+            ),
+            "continuation_total_ms": float(
+                latency_summary.get("subsystem_continuation_total_ms")
+                or latency_summary.get("continuation_total_ms")
+                or 0.0
+            ),
+            "continuation_progress_event_count": int(
+                latency_summary.get("subsystem_continuation_progress_event_count")
+                or latency_summary.get("continuation_progress_event_count")
+                or 0
+            ),
+            "continuation_final_result_state": str(
+                latency_summary.get("subsystem_continuation_final_result_state")
+                or latency_summary.get("continuation_final_result_state")
+                or ""
+            ),
+            "continuation_verification_state": str(
+                latency_summary.get("subsystem_continuation_verification_state")
+                or latency_summary.get("continuation_verification_state")
+                or ""
+            ),
+            "subsystem_continuation_handler": str(
+                latency_summary.get("subsystem_continuation_handler") or ""
+            ),
+            "subsystem_continuation_handler_implemented": bool(
+                latency_summary.get("subsystem_continuation_handler_implemented")
+            ),
+            "subsystem_continuation_handler_missing_reason": str(
+                latency_summary.get("subsystem_continuation_handler_missing_reason") or ""
+            ),
+            "continuation_progress_stages": list(latency_summary.get("continuation_progress_stages") or []),
+            "continuation_verification_required": bool(latency_summary.get("continuation_verification_required")),
+            "continuation_verification_attempted": bool(latency_summary.get("continuation_verification_attempted")),
+            "continuation_verification_evidence_count": int(
+                latency_summary.get("continuation_verification_evidence_count") or 0
+            ),
+            "continuation_result_limitations": list(latency_summary.get("continuation_result_limitations") or []),
+            "continuation_truth_clamps_applied": list(latency_summary.get("continuation_truth_clamps_applied") or []),
+            "direct_subsystem_async_converted": bool(
+                latency_summary.get("direct_subsystem_async_converted")
+                or stage_timings.get("direct_subsystem_async_converted")
+            ),
+            "async_conversion_expected": bool(
+                latency_summary.get("async_conversion_expected")
+                or stage_timings.get("async_conversion_expected")
+            ),
+            "async_conversion_missing_reason": str(
+                latency_summary.get("async_conversion_missing_reason") or ""
+            ),
+            "voice_streaming_tts_enabled": bool(
+                latency_summary.get("voice_streaming_tts_enabled")
+                or latency_summary.get("streaming_enabled")
+            ),
+            "voice_first_audio_ms": float(
+                latency_summary.get("voice_first_audio_ms")
+                or latency_summary.get("request_to_first_audio_ms")
+                or 0.0
+            ),
+            "voice_core_to_first_audio_ms": float(
+                latency_summary.get("voice_core_to_first_audio_ms")
+                or latency_summary.get("core_result_to_first_audio_ms")
+                or 0.0
+            ),
+            "voice_tts_first_chunk_ms": float(
+                latency_summary.get("voice_tts_first_chunk_ms")
+                or latency_summary.get("tts_start_to_first_chunk_ms")
+                or 0.0
+            ),
+            "voice_playback_start_ms": float(
+                latency_summary.get("voice_playback_start_ms")
+                or latency_summary.get("first_chunk_to_playback_start_ms")
+                or 0.0
+            ),
+            "voice_live_format": str(
+                latency_summary.get("voice_live_format")
+                or latency_summary.get("live_format")
+                or ""
+            ),
+            "voice_streaming_fallback_used": bool(
+                latency_summary.get("voice_streaming_fallback_used")
+                or latency_summary.get("fallback_used")
+            ),
+            "voice_prewarm_used": bool(
+                latency_summary.get("voice_prewarm_used")
+                or latency_summary.get("prewarm_used")
+            ),
+            "voice_partial_playback": bool(
+                latency_summary.get("voice_partial_playback")
+                or latency_summary.get("partial_playback")
+            ),
+            "hard_timeout": bool(
+                self.observation.process_killed
+                or str(self.observation.status).strip().lower()
+                in {"hard_timeout", "timeout", "process_killed"}
+            ),
             "process_killed": self.observation.process_killed,
             "child_pid": self.observation.child_pid,
             "hard_timeout_seconds": self.observation.timeout_seconds,
@@ -475,6 +771,9 @@ def command_eval_result_from_dict(payload: dict[str, Any]) -> CommandEvalResult:
             or {}
         ),
         stage_timings_ms=dict(observation_payload.get("stage_timings_ms") or _stage_timings_from_payload(payload)),
+        latency_trace=dict(observation_payload.get("latency_trace") or payload.get("latency_trace") or {}),
+        latency_summary=dict(observation_payload.get("latency_summary") or payload.get("latency_summary") or {}),
+        budget_result=dict(observation_payload.get("budget_result") or payload.get("budget_result") or {}),
         response_json_bytes=int(observation_payload.get("response_json_bytes") or payload.get("response_json_bytes") or 0),
         event_count=int(observation_payload.get("event_count") or payload.get("event_count") or 0),
         job_count=int(observation_payload.get("job_count") or payload.get("job_count") or 0),
@@ -531,14 +830,43 @@ STAGE_LATENCY_FIELDS = (
     "session_create_or_load_ms",
     "history_context_ms",
     "memory_context_ms",
+    "minimal_context_ms",
+    "route_triage_ms",
+    "snapshot_lookup_ms",
+    "heavy_context_ms",
     "planner_route_ms",
     "route_handler_ms",
+    "provider_call_ms",
+    "provider_fallback_ms",
+    "workspace_summary_ms",
+    "workspace_detail_ms",
     "tool_planning_ms",
+    "dry_run_plan_ms",
     "dry_run_executor_ms",
+    "status_snapshot_ms",
+    "active_request_state_ms",
     "event_collection_ms",
+    "snapshot_ms",
     "job_collection_ms",
+    "event_job_snapshot_ms",
     "db_write_ms",
+    "response_compose_ms",
     "response_serialization_ms",
+    "payload_compaction_ms",
+    "memoized_summary_hits",
+    "detail_load_deferred",
+    "heavy_context_loaded",
+    "fast_path_used",
+    "planner_candidates_pruned_count",
+    "snapshot_hot_path_hit",
+    "heavy_context_avoided_by_snapshot",
+    "invalidation_count",
+    "inline_front_half_ms",
+    "worker_back_half_ms",
+    "subsystem_continuation_created",
+    "direct_subsystem_async_converted",
+    "returned_before_subsystem_completion",
+    "async_conversion_expected",
     "asgi_request_receive_ms",
     "endpoint_dispatch_ms",
     "endpoint_return_to_asgi_ms",
@@ -561,14 +889,28 @@ def _stage_timings(observation: CoreObservation, artifact_flush_ms: float = 0.0)
         "session_create_or_load_ms",
         "history_context_ms",
         "memory_context_ms",
+        "minimal_context_ms",
+        "route_triage_ms",
+        "heavy_context_ms",
         "planner_route_ms",
         "route_handler_ms",
+        "provider_call_ms",
+        "provider_fallback_ms",
+        "workspace_summary_ms",
+        "workspace_detail_ms",
         "tool_planning_ms",
+        "dry_run_plan_ms",
         "dry_run_executor_ms",
+        "status_snapshot_ms",
+        "active_request_state_ms",
         "event_collection_ms",
+        "snapshot_ms",
         "job_collection_ms",
+        "event_job_snapshot_ms",
         "db_write_ms",
+        "response_compose_ms",
         "response_serialization_ms",
+        "payload_compaction_ms",
         "artifact_flush_ms",
     )
     timings["unattributed_latency_ms"] = round(
@@ -584,6 +926,69 @@ def _stage_timings_from_payload(payload: dict[str, Any]) -> dict[str, float]:
         for field in STAGE_LATENCY_FIELDS
         if field in payload
     }
+
+
+def _latency_trace_for_observation(
+    *,
+    observation: CoreObservation,
+    stage_timings: dict[str, float],
+    provider_called: bool,
+    ai_usage: dict[str, Any],
+):
+    if observation.latency_trace:
+        existing = dict(observation.latency_trace)
+        return build_latency_trace(
+            metadata={
+                "latency_trace": existing,
+                "latency_summary": observation.latency_summary,
+                "budget_result": observation.budget_result,
+                "route_state": observation.route_state,
+                "planner_debug": observation.planner_debug,
+                "planner_obedience": observation.planner_obedience,
+            },
+            stage_timings_ms=stage_timings,
+            trace_id=str(existing.get("trace_id") or ""),
+            request_id=str(existing.get("request_id") or ""),
+            session_id=observation.session_id,
+            route_family=observation.actual_route_family or None,
+            subsystem=observation.actual_subsystem or None,
+            provider_called=provider_called,
+            openai_called=bool(ai_usage.get("openai_called")),
+            llm_called=bool(ai_usage.get("llm_called")),
+            embedding_called=bool(ai_usage.get("embedding_called")),
+            job_count=observation.job_count,
+            event_count=observation.event_count,
+            async_continuation=_observation_async_continuation(observation),
+        )
+    return build_latency_trace(
+        metadata={
+            "route_state": observation.route_state,
+            "planner_debug": observation.planner_debug,
+            "planner_obedience": observation.planner_obedience,
+        },
+        stage_timings_ms=stage_timings,
+        request_id=observation.case_id,
+        session_id=observation.session_id,
+        surface_mode="ghost",
+        route_family=observation.actual_route_family or None,
+        subsystem=observation.actual_subsystem or None,
+        total_ms=observation.latency_ms,
+        provider_called=provider_called,
+        openai_called=bool(ai_usage.get("openai_called")),
+        llm_called=bool(ai_usage.get("llm_called")),
+        embedding_called=bool(ai_usage.get("embedding_called")),
+        job_count=observation.job_count,
+        event_count=observation.event_count,
+        async_continuation=_observation_async_continuation(observation),
+    )
+
+
+def _observation_async_continuation(observation: CoreObservation) -> bool:
+    return any(
+        str(state or "").strip().lower()
+        not in {"", "completed", "failed", "cancelled", "canceled"}
+        for state in observation.job_states
+    )
 
 
 def _route_candidates(route_state: dict[str, Any]) -> list[dict[str, Any]]:

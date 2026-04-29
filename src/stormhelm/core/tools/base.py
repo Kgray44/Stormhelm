@@ -15,6 +15,7 @@ from stormhelm.core.safety.policy import SafetyPolicy
 from stormhelm.shared.result import ExecutionMode, SafetyClassification, ToolResult
 
 if TYPE_CHECKING:
+    from stormhelm.core.subsystem_continuations import SubsystemContinuationRunner
     from stormhelm.core.system.probe import SystemProbe
     from stormhelm.core.tasks.service import DurableTaskService
     from stormhelm.core.trust.service import TrustService
@@ -36,6 +37,11 @@ class ToolContext:
     workspace_service: WorkspaceService | None = None
     task_service: DurableTaskService | None = None
     trust_service: TrustService | None = None
+    continuation_runner: SubsystemContinuationRunner | None = None
+    software_control: Any | None = None
+    software_recovery: Any | None = None
+    discord_relay: Any | None = None
+    screen_awareness: Any | None = None
     progress_callback: Callable[[dict[str, Any]], None] | None = None
     cancellation_requested: asyncio.Event = field(default_factory=asyncio.Event)
 

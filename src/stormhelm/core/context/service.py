@@ -32,8 +32,9 @@ class ActiveContextService:
         active_request_state: dict[str, Any] | None,
         recent_tool_results: list[dict[str, Any]] | None,
         input_context: dict[str, Any] | None,
+        existing_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        existing = self.snapshot(session_id)
+        existing = dict(existing_context) if isinstance(existing_context, dict) else self.snapshot(session_id)
         workspace_context = workspace_context or {}
         active_posture = active_posture or {}
         active_request_state = active_request_state or {}

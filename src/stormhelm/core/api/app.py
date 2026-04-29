@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from time import perf_counter
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 from stormhelm.config.models import AppConfig
 from stormhelm.core.api.schemas import (
@@ -30,6 +30,9 @@ from stormhelm.core.api.schemas import (
     VoiceWakeControlRequest,
 )
 from stormhelm.core.container import CoreContainer, build_container
+from stormhelm.core.latency import attach_latency_metadata
+from stormhelm.core.latency import build_partial_response_posture
+from stormhelm.core.latency import classify_route_latency_policy
 from stormhelm.core.voice import VoiceInterruptionRequest
 from stormhelm.core.voice import VoiceSpokenConfirmationRequest
 from stormhelm.core.lifecycle import ShellPresenceUpdate
@@ -197,7 +200,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         return current.status_snapshot()
 
     @app.post("/chat/send")
-    async def send_chat(payload: ChatRequest, request: Request) -> dict[str, object]:
+    async def send_chat(payload: ChatRequest, request: Request) -> Response:
         current = _current_container(request)
         endpoint_started = perf_counter()
         result = await current.assistant.handle_message(
@@ -207,6 +210,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             active_module=payload.active_module,
             workspace_context=payload.workspace_context,
             input_context=payload.input_context,
+            response_profile=payload.response_profile,
         )
         endpoint_dispatch_ms = round((perf_counter() - endpoint_started) * 1000, 3)
         return_started = perf_counter()
@@ -231,6 +235,10 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             stage_timings["endpoint_return_to_asgi_ms"] = round(
                 (perf_counter() - return_started) * 1000, 3
             )
+            stage_timings["total_latency_ms"] = round(
+                endpoint_dispatch_ms + stage_timings["endpoint_return_to_asgi_ms"],
+                3,
+            )
             metadata["stage_timings_ms"] = stage_timings
             metadata["api_timings_ms"] = {
                 "asgi_request_receive_ms": 0.0,
@@ -240,6 +248,19 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 ],
                 "server_response_write_ms": 0.0,
             }
+            attach_latency_metadata(
+                metadata,
+                stage_timings_ms=stage_timings,
+                request_id=(
+                    metadata.get("latency_trace", {}).get("request_id")
+                    if isinstance(metadata.get("latency_trace"), dict)
+                    else None
+                ),
+                session_id=payload.session_id,
+                surface_mode=payload.surface_mode,
+                active_module=payload.active_module,
+                job_count=len(result.get("jobs") or []) if isinstance(result.get("jobs"), list) else None,
+            )
         if isinstance(result, dict):
             _schedule_assistant_voice_output(
                 current,
@@ -248,7 +269,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 surface_mode=payload.surface_mode,
                 active_module=payload.active_module,
             )
-        return result
+        return _compact_json_response(result)
 
     @app.get("/chat/history")
     def chat_history(
@@ -300,6 +321,10 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     def _encode_sse(event_name: str, payload: dict[str, object]) -> str:
         return f"event: {event_name}\ndata: {json.dumps(payload, separators=(',', ':'), default=str)}\n\n"
+
+    def _compact_json_response(payload: object) -> Response:
+        body = json.dumps(payload, separators=(",", ":"), default=str).encode("utf-8")
+        return Response(content=body, media_type="application/json")
 
     @app.get("/events/stream")
     async def stream_events(
@@ -554,13 +579,81 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         action: str, result: object, current: CoreContainer
     ) -> dict[str, object]:
         result_payload = result.to_dict() if hasattr(result, "to_dict") else result
+        normalized_result = (
+            result_payload
+            if isinstance(result_payload, dict)
+            else {"ok": False, "status": "failed"}
+        )
+        voice_status = current.voice.status_snapshot()
+        fail_fast_reason = _voice_fail_fast_reason(action, normalized_result, voice_status)
+        result_state = str(
+            normalized_result.get("status")
+            or normalized_result.get("state")
+            or ("blocked" if fail_fast_reason else "completed_unverified")
+        )
+        policy = classify_route_latency_policy(
+            route_family="voice_control",
+            subsystem="voice",
+            request_kind=action,
+            surface_mode="voice",
+            result_state=result_state,
+            fail_fast_reason=fail_fast_reason,
+        )
+        partial_response = build_partial_response_posture(
+            route_family="voice_control",
+            subsystem="voice",
+            assistant_message=str(
+                normalized_result.get("message")
+                or normalized_result.get("error_message")
+                or ""
+            ),
+            result_state=result_state,
+            verification_state="unverified",
+            latency_trace_id="",
+            policy=policy,
+            budget_exceeded=False,
+            async_continuation=False,
+            continue_reason=fail_fast_reason,
+        )
         return {
             "action": action,
-            "result": result_payload
-            if isinstance(result_payload, dict)
-            else {"ok": False, "status": "failed"},
-            "voice": current.voice.status_snapshot(),
+            "result": normalized_result,
+            "voice": voice_status,
+            "latency_policy": policy.to_dict(),
+            "budget_result": policy.budget.evaluate(0).to_dict(),
+            "execution_mode": policy.execution_mode.value,
+            "partial_response": partial_response,
+            "partial_response_returned": bool(partial_response.get("partial_response_returned")),
+            "async_expected": bool(policy.async_expected),
+            "fail_fast_reason": fail_fast_reason,
         }
+
+    def _voice_fail_fast_reason(
+        action: str, result_payload: dict[str, object], voice_status: dict[str, object]
+    ) -> str:
+        status = str(result_payload.get("status") or result_payload.get("state") or "").lower()
+        ok = result_payload.get("ok")
+        if ok is True and status not in {"blocked", "failed", "unavailable"}:
+            return ""
+        action_key = action.lower()
+        if any(part in action_key for part in ("playback", "speaking", "spoken", "output")):
+            playback = voice_status.get("playback") if isinstance(voice_status.get("playback"), dict) else {}
+            if playback and playback.get("enabled") is False:
+                return "playback_disabled"
+            if playback and playback.get("available") is False:
+                return str(playback.get("unavailable_reason") or "playback_unavailable")
+        provider = voice_status.get("provider") if isinstance(voice_status.get("provider"), dict) else {}
+        availability = provider.get("availability") if isinstance(provider.get("availability"), dict) else {}
+        if availability and availability.get("available") is False:
+            return str(availability.get("unavailable_reason") or "voice_unavailable")
+        if status in {"blocked", "failed", "unavailable"}:
+            return str(
+                result_payload.get("error_code")
+                or result_payload.get("unavailable_reason")
+                or result_payload.get("reason")
+                or "voice_unavailable"
+            )
+        return ""
 
     @app.get("/voice/readiness")
     async def voice_readiness(request: Request) -> dict[str, object]:
@@ -1035,8 +1128,35 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         job_limit: int = 50,
         note_limit: int = 50,
         history_limit: int = 100,
+        compact: bool = False,
     ) -> dict[str, object]:
         current = _current_container(request)
+        if compact:
+            return {
+                "snapshot_profile": "command_eval_compact",
+                "session_id": session_id,
+                "health": {"ok": True},
+                "active_request_state": current.assistant.session_state.get_active_request_state(
+                    session_id
+                ),
+                "recent_context_resolutions": current.assistant.session_state.get_recent_context_resolutions(
+                    session_id
+                ),
+                "active_workspace": {
+                    "workspace_id": current.assistant.session_state.get_active_workspace_id(
+                        session_id
+                    )
+                    or "",
+                    "summary_omitted": True,
+                    "omitted_reason": "command_eval_compact_snapshot",
+                    "detail_load_deferred": True,
+                },
+                "active_task": {
+                    "session_id": session_id,
+                    "summary_omitted": True,
+                    "omitted_reason": "command_eval_compact_snapshot",
+                },
+            }
         return {
             "health": _health_payload(request),
             "status": current.status_snapshot(),
