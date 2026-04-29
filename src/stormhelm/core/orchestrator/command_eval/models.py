@@ -620,6 +620,24 @@ class CommandEvalResult:
                 or latency_summary.get("first_chunk_to_playback_start_ms")
                 or 0.0
             ),
+            "voice_streaming_transport_kind": str(
+                latency_summary.get("voice_streaming_transport_kind")
+                or latency_summary.get("streaming_transport_kind")
+                or ""
+            ),
+            "voice_first_chunk_before_complete": bool(
+                latency_summary.get("voice_first_chunk_before_complete")
+                or latency_summary.get("first_chunk_before_complete")
+            ),
+            "voice_stream_used_by_normal_path": bool(
+                latency_summary.get("voice_stream_used_by_normal_path")
+                or latency_summary.get("stream_used_by_normal_path")
+            ),
+            "voice_streaming_miss_reason": str(
+                latency_summary.get("voice_streaming_miss_reason")
+                or latency_summary.get("streaming_miss_reason")
+                or ""
+            ),
             "voice_live_format": str(
                 latency_summary.get("voice_live_format")
                 or latency_summary.get("live_format")
@@ -636,6 +654,40 @@ class CommandEvalResult:
             "voice_partial_playback": bool(
                 latency_summary.get("voice_partial_playback")
                 or latency_summary.get("partial_playback")
+            ),
+            "voice_anchor_state": str(latency_summary.get("voice_anchor_state") or ""),
+            "voice_speaking_visual_active": bool(
+                latency_summary.get("voice_speaking_visual_active")
+                or latency_summary.get("speaking_visual_active")
+            ),
+            "voice_audio_reactive_source": str(
+                latency_summary.get("voice_audio_reactive_source")
+                or latency_summary.get("audio_reactive_source")
+                or ""
+            ),
+            "voice_audio_reactive_available": bool(
+                latency_summary.get("voice_audio_reactive_available")
+                or latency_summary.get("audio_reactive_available")
+            ),
+            "voice_anchor_motion_intensity": float(
+                latency_summary.get("voice_anchor_motion_intensity")
+                or latency_summary.get("motion_intensity")
+                or 0.0
+            ),
+            "voice_anchor_audio_level": float(
+                latency_summary.get("voice_anchor_audio_level")
+                or latency_summary.get("smoothed_output_level")
+                or latency_summary.get("output_level_rms")
+                or 0.0
+            ),
+            "voice_visualizer_update_hz": int(
+                latency_summary.get("voice_visualizer_update_hz")
+                or latency_summary.get("visualizer_update_hz")
+                or 0
+            ),
+            "voice_anchor_user_heard_claimed": bool(
+                latency_summary.get("voice_anchor_user_heard_claimed")
+                or latency_summary.get("user_heard_claimed")
             ),
             "hard_timeout": bool(
                 self.observation.process_killed

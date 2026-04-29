@@ -7,11 +7,22 @@ Item {
     signal requestGhost()
 
     property string assistantState: "idle"
+    property var voiceState: ({})
+    property string anchorState: "idle"
+    property bool speakingActive: false
+    property real motionIntensity: 0.12
+    property real audioLevel: 0
+    property real smoothedAudioLevel: audioLevel
+    property bool audioReactiveAvailable: false
+    property string audioReactiveSource: "unavailable"
+    property string statusLabel: ""
+    readonly property string idleLoopMode: "continuous_time"
     property string shellMode: "ghost"
     property real phase: 0
     property real orbit: 0
     property real shimmer: 0
     property real variance: 0
+    property real _lastMotionTick: 0
     property real adaptiveGlowBoost: 0.06
     property real adaptiveAnchorGlowBoost: 0.08
     property real adaptiveAnchorStrokeBoost: 0.12
@@ -26,25 +37,53 @@ Item {
     property real visualAdaptiveAnchorBackdropOpacity: adaptiveAnchorBackdropOpacity
     property real visualAdaptiveTone: adaptiveTone
     property real visualAdaptiveLabelContrast: adaptiveLabelContrast
-    property color displayAccentColor: root.accentForState(root.assistantState)
-    property real displayAmplitude: root.amplitudeForState(root.assistantState)
+    property color displayAccentColor: root.accentForState(root.visualState())
+    property real displayAmplitude: root.amplitudeForState(root.visualState())
+
+    function visualState() {
+        return root.anchorState && root.anchorState.length > 0 ? root.anchorState : root.assistantState
+    }
 
     function amplitudeForState(state) {
-        return state === "listening" ? 0.12
-             : state === "thinking" ? 0.08
-             : state === "acting" ? 0.14
-             : state === "speaking" ? 0.16
-             : state === "warning" ? 0.05
-             : 0.035
+        var base = state === "wake_detected" ? 0.10
+                 : state === "listening" ? 0.14
+                 : state === "transcribing" ? 0.10
+                 : state === "thinking" ? 0.08
+                 : state === "confirmation_required" ? 0.11
+                 : state === "preparing_speech" ? 0.09
+                 : state === "speaking" ? 0.12 + Math.min(0.11, root.smoothedAudioLevel * 0.16)
+                 : state === "continuing_task" ? 0.06
+                 : state === "acting" ? 0.14
+                 : state === "interrupted" || state === "muted" ? 0.018
+                 : state === "blocked" || state === "error" || state === "warning" ? 0.05
+                 : state === "dormant" ? 0.018
+                 : 0.035
+        return Math.max(base, Math.min(0.23, root.motionIntensity * 0.22))
     }
 
     function accentForState(state) {
         return state === "acting" ? "#c09a60"
+             : state === "wake_detected" ? "#9fd9f0"
              : state === "listening" ? "#8dded8"
+             : state === "transcribing" ? "#9bd7c6"
              : state === "thinking" ? "#8cc9e2"
+             : state === "confirmation_required" ? "#d3bd78"
+             : state === "preparing_speech" ? "#9fd2ec"
              : state === "speaking" ? "#a8e7f3"
-             : state === "warning" ? "#c7925c"
+             : state === "interrupted" || state === "muted" ? "#8da3b0"
+             : state === "blocked" || state === "error" || state === "warning" ? "#c7925c"
              : "#6baec7"
+    }
+
+    function motionSpeedForState(state) {
+        return state === "speaking" ? 3.7 + Math.min(2.2, root.smoothedAudioLevel * 3.0)
+             : state === "listening" ? 2.6
+             : state === "transcribing" ? 2.2
+             : state === "thinking" ? 1.7
+             : state === "preparing_speech" ? 1.9
+             : state === "wake_detected" ? 2.4
+             : state === "interrupted" || state === "muted" ? 0.75
+             : 1.15
     }
 
     function rgba(colorValue, alphaValue) {
@@ -69,40 +108,26 @@ Item {
         return Qt.lighter(root.toneColor(baseColor), 1 + boost)
     }
 
-    NumberAnimation on phase {
-        from: 0
-        to: Math.PI * 2
-        loops: Animation.Infinite
-        duration: assistantState === "speaking" ? 1800
-                 : assistantState === "acting" ? 2200
-                 : assistantState === "listening" ? 2500
-                 : assistantState === "thinking" ? 3600
-                 : assistantState === "warning" ? 4200
-                 : 5200
-    }
-
-    NumberAnimation on orbit {
-        from: 0
-        to: Math.PI * 2
-        loops: Animation.Infinite
-        duration: assistantState === "acting" ? 7200
-                 : assistantState === "thinking" ? 10400
-                 : assistantState === "warning" ? 8200
-                 : 16000
-    }
-
-    NumberAnimation on shimmer {
-        from: 0
-        to: Math.PI * 2
-        loops: Animation.Infinite
-        duration: 9100
-    }
-
-    NumberAnimation on variance {
-        from: 0
-        to: Math.PI * 2
-        loops: Animation.Infinite
-        duration: 6700
+    Timer {
+        id: motionClock
+        interval: 33
+        repeat: true
+        running: true
+        onTriggered: {
+            var now = Date.now() / 1000.0
+            if (root._lastMotionTick <= 0) {
+                root._lastMotionTick = now
+                return
+            }
+            var delta = Math.min(0.08, Math.max(0.0, now - root._lastMotionTick))
+            root._lastMotionTick = now
+            var speed = root.motionSpeedForState(root.visualState())
+            root.phase += delta * speed
+            root.orbit += delta * (0.38 + root.motionIntensity * 0.24)
+            root.shimmer += delta * (0.58 + root.motionIntensity * 0.22)
+            root.variance += delta * (0.74 + root.motionIntensity * 0.18)
+            coreCanvas.requestPaint()
+        }
     }
 
     Behavior on displayAccentColor {
@@ -158,7 +183,10 @@ Item {
             var outerR = Math.min(width, height) * 0.45
             var irisR = outerR * 0.75
             var heartR = outerR * 0.33
-            var pulse = 1 + Math.sin(root.phase) * root.displayAmplitude
+            var voiceVisualState = root.visualState()
+            var safeAudioLevel = Math.max(0, Math.min(1, root.smoothedAudioLevel || root.audioLevel || 0))
+            var speakingBoost = root.speakingActive ? (0.1 + safeAudioLevel * 0.22) : 0
+            var pulse = 1 + Math.sin(root.phase) * (root.displayAmplitude + speakingBoost)
             var subtle = 1 + Math.sin(root.variance) * 0.03
             var accent = root.displayAccentColor
             var deckMode = root.shellMode === "deck"
@@ -300,17 +328,23 @@ Item {
             drawTicks(outerR * 1.02, 0.22 + root.visualAdaptiveAnchorStrokeBoost * 0.16)
             drawCompassArms(outerR, 0.24 + root.visualAdaptiveAnchorStrokeBoost * 0.18)
 
-            if (root.assistantState === "listening" || root.assistantState === "speaking") {
+            if (voiceVisualState === "listening" || voiceVisualState === "speaking") {
                 circleStroke(outerR * (0.52 + pulse * 0.16), 1.4, 0.18)
                 circleStroke(outerR * (0.64 + pulse * 0.12), 1.1, 0.12)
             }
 
-            if (root.assistantState === "thinking") {
+            if (root.speakingActive) {
+                circleStroke(outerR * (0.46 + safeAudioLevel * 0.16 + Math.sin(root.phase * 1.4) * 0.025), 1.1 + safeAudioLevel * 2.4, 0.12 + safeAudioLevel * 0.24)
+                circleStroke(outerR * (0.68 + safeAudioLevel * 0.1 + Math.sin(root.phase * 1.1 + 0.9) * 0.02), 0.9 + safeAudioLevel * 1.6, 0.08 + safeAudioLevel * 0.16)
+                ringSegment(outerR * (0.78 + safeAudioLevel * 0.08), root.phase * 0.8, root.phase * 0.8 + Math.PI * (0.26 + safeAudioLevel * 0.22), 1.6 + safeAudioLevel * 1.8, 0.16 + safeAudioLevel * 0.22)
+            }
+
+            if (voiceVisualState === "thinking") {
                 ringSegment(outerR * 0.46, root.orbit * 1.4, root.orbit * 1.4 + Math.PI * 0.44, 2.4, 0.34)
                 ringSegment(outerR * 0.38, root.orbit * 0.9 + Math.PI, root.orbit * 0.9 + Math.PI * 1.26, 1.8, 0.2)
             }
 
-            if (root.assistantState === "acting") {
+            if (voiceVisualState === "acting" || voiceVisualState === "continuing_task") {
                 for (var traceIndex = -1; traceIndex <= 1; ++traceIndex) {
                     var traceAngle = Math.PI * 0.5 + traceIndex * 0.24 + Math.sin(root.phase + traceIndex) * 0.03
                     ctx.beginPath()
@@ -322,7 +356,7 @@ Item {
                 }
             }
 
-            if (root.assistantState === "warning") {
+            if (voiceVisualState === "warning" || voiceVisualState === "blocked" || voiceVisualState === "error" || voiceVisualState === "confirmation_required") {
                 ringSegment(outerR * 0.88, 0.14, 0.94, 2.2, 0.34)
                 ringSegment(outerR * 0.88, 2.28, 3.02, 2.2, 0.34)
             }
@@ -337,10 +371,26 @@ Item {
     onShimmerChanged: coreCanvas.requestPaint()
     onVarianceChanged: coreCanvas.requestPaint()
     onAssistantStateChanged: {
-        root.displayAccentColor = root.accentForState(root.assistantState)
-        root.displayAmplitude = root.amplitudeForState(root.assistantState)
+        root.displayAccentColor = root.accentForState(root.visualState())
+        root.displayAmplitude = root.amplitudeForState(root.visualState())
         coreCanvas.requestPaint()
     }
+    onAnchorStateChanged: {
+        root.displayAccentColor = root.accentForState(root.visualState())
+        root.displayAmplitude = root.amplitudeForState(root.visualState())
+        coreCanvas.requestPaint()
+    }
+    onSpeakingActiveChanged: coreCanvas.requestPaint()
+    onMotionIntensityChanged: {
+        root.displayAmplitude = root.amplitudeForState(root.visualState())
+        coreCanvas.requestPaint()
+    }
+    onAudioLevelChanged: coreCanvas.requestPaint()
+    onSmoothedAudioLevelChanged: {
+        root.displayAmplitude = root.amplitudeForState(root.visualState())
+        coreCanvas.requestPaint()
+    }
+    onAudioReactiveAvailableChanged: coreCanvas.requestPaint()
     onShellModeChanged: coreCanvas.requestPaint()
     onDisplayAccentColorChanged: coreCanvas.requestPaint()
     onDisplayAmplitudeChanged: coreCanvas.requestPaint()
@@ -353,8 +403,9 @@ Item {
     onVisualAdaptiveLabelContrastChanged: coreCanvas.requestPaint()
 
     Component.onCompleted: {
-        root.displayAccentColor = root.accentForState(root.assistantState)
-        root.displayAmplitude = root.amplitudeForState(root.assistantState)
+        root._lastMotionTick = Date.now() / 1000.0
+        root.displayAccentColor = root.accentForState(root.visualState())
+        root.displayAmplitude = root.amplitudeForState(root.visualState())
         coreCanvas.requestPaint()
     }
 
@@ -362,11 +413,20 @@ Item {
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottom: parent.bottom
         anchors.bottomMargin: -28
-        text: root.assistantState === "idle" ? "Holding"
-             : root.assistantState === "listening" ? "Listening"
-             : root.assistantState === "thinking" ? "Thinking"
-             : root.assistantState === "acting" ? "Acting"
-             : root.assistantState === "speaking" ? "Speaking"
+        text: root.statusLabel && root.statusLabel.length > 0 ? root.statusLabel
+             : root.visualState() === "dormant" ? "Dormant"
+             : root.visualState() === "idle" ? "Holding"
+             : root.visualState() === "wake_detected" ? "Wake"
+             : root.visualState() === "listening" ? "Listening"
+             : root.visualState() === "transcribing" ? "Transcribing"
+             : root.visualState() === "thinking" ? "Thinking"
+             : root.visualState() === "confirmation_required" ? "Confirm"
+             : root.visualState() === "preparing_speech" ? "Preparing"
+             : root.visualState() === "continuing_task" ? "Continuing"
+             : root.visualState() === "acting" ? "Acting"
+             : root.visualState() === "speaking" ? "Speaking"
+             : root.visualState() === "muted" ? "Muted"
+             : root.visualState() === "interrupted" ? "Interrupted"
              : "Warning"
         color: root.contrastColor("#c7dbe5", root.visualAdaptiveLabelContrast * 0.3)
         font.family: "Bahnschrift SemiCondensed"

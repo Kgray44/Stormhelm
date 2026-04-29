@@ -16,7 +16,8 @@ Tests: `tests/test_voice_config.py`, `tests/test_voice_availability.py`, `tests/
 | Manual voice turns | Text treated as a voice-originated turn and sent through the core bridge. | Partly; voice is off by default but manual input config defaults true. | `src/stormhelm/core/voice/service.py`, `src/stormhelm/core/voice/bridge.py` | `tests/test_voice_manual_turn.py`, `tests/test_voice_core_bridge_contracts.py` |
 | Controlled audio STT | Bounded file/blob/fixture-style audio metadata can be transcribed through the configured provider path. | No | `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/voice/service.py` | `tests/test_voice_audio_turn.py`, `tests/test_voice_stt_provider.py` |
 | TTS artifact generation | Core-approved text or explicit safe test text can be rendered into a controlled speech artifact. | No | `src/stormhelm/core/voice/speech_renderer.py`, `src/stormhelm/core/voice/service.py` | `tests/test_voice_tts_provider.py`, `tests/test_voice_tts_from_turn_result.py` |
-| Streaming TTS output | Core-approved spoken text can optionally use a chunked TTS contract with redacted chunk metadata and first-audio timing. Streaming never starts from partial transcripts or unapproved filler. | No | `src/stormhelm/core/voice/models.py`, `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/voice/service.py` | `tests/test_latency_l5_voice_streaming_first_audio.py` |
+| Streaming TTS output | Core-approved spoken text can optionally use a chunked TTS contract with redacted chunk metadata and first-audio timing. L5.1 wires normal `/chat/send` assistant voice output and capture play-response through streaming when streaming TTS and streaming playback are enabled. Streaming never starts from partial transcripts or unapproved filler. | No | `src/stormhelm/core/voice/models.py`, `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/voice/service.py` | `tests/test_latency_l5_voice_streaming_first_audio.py`, `tests/test_latency_l51_voice_streaming_reality.py` |
+| Voice anchor visual state | Backend status exposes a `voice_anchor` payload for Ghost motion: dormant, idle, wake detected, listening, transcribing, thinking, confirmation required, preparing speech, speaking, interrupted, muted, continuing task, blocked, and error. Audio-reactive motion is labeled by source and never carries raw audio. | No | `src/stormhelm/core/voice/visualizer.py`, `src/stormhelm/core/voice/service.py`, `src/stormhelm/ui/voice_surface.py`, `assets/qml/components/VoiceCore.qml` | `tests/test_latency_l52_voice_anchor_motion.py`, `tests/test_qml_shell.py` |
 | Push-to-talk capture boundary | Explicit start/stop/cancel/submit actions exist. Local capture is separately gated. | No | `src/stormhelm/core/api/app.py`, `src/stormhelm/core/voice/service.py` | `tests/test_voice_capture_service.py`, `tests/test_voice_bridge_controls.py` |
 | Playback boundary | Playback requests and stop controls exist behind provider/config gates. Voice-LP1 adds a real Windows local playback provider for MP3/WAV output while preserving mock/unavailable paths. L5 adds live stream/chunk contracts and prewarm status while keeping artifact persistence separate from live playback truth. | No | `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/voice/service.py` | `tests/test_voice_playback_service.py`, `tests/test_voice_playback_provider.py`, `tests/test_latency_l5_voice_streaming_first_audio.py` |
 | Interruption and barge-in hardening | Active playback can be stopped, spoken output muted, capture/listen windows cancelled, pending confirmations rejected, and cancellation/correction phrases routed safely without direct task cancellation. | No; controlled by explicit action or bounded voice context. | `src/stormhelm/core/voice/service.py`, `src/stormhelm/core/api/app.py`, `src/stormhelm/ui/voice_surface.py` | `tests/test_voice_interruption_service.py`, `tests/test_voice_interruption_bridge.py`, `tests/test_voice_barge_in_interruption.py` |
@@ -45,6 +46,9 @@ Tests: `tests/test_voice_config.py`, `tests/test_voice_availability.py`, `tests/
 | OpenAI Realtime direct actions or direct Core task cancellation | Not implemented and not allowed. Voice-19 exposes only `stormhelm_core_request`; cancellation/correction still routes through Core/task/trust. |
 | Voice provider executing tools directly | Not allowed by design. |
 | Proof that the user heard audio | Not claimed; playback result is only provider/action state. |
+| Live OpenAI network smoke proof | Not run by default. L5.1 implements and unit-tests the true HTTP stream path with injected transport, while buffered helpers are explicitly labeled `buffered_chunk_projection`. |
+| Wake-loop streaming output | Deferred. Manual/chat and capture play-response paths are wired; wake-loop playback still needs a narrower pass before changing that broader seam. |
+| Proven real local live playback streaming | Deferred to a device validation pass. Mock live playback and backend hooks exist; unsupported backends report typed unsupported state. |
 
 Sources: `src/stormhelm/core/voice/availability.py`, `src/stormhelm/core/voice/service.py`, `docs/voice-0-foundation.md`
 Tests: `tests/test_voice_availability.py`, `tests/test_voice_events.py`, `tests/test_voice_state.py`
@@ -111,7 +115,7 @@ The report is available in `voice.runtime_mode` and is also carried into Ghost/D
 
 Artifact persistence is deliberately separate from live playback. `voice.openai.persist_tts_outputs=true` can keep a generated file for debugging, but it never satisfies output-only live speech. If output-only mode is selected and playback is disabled or unavailable, Stormhelm reports that it cannot speak live.
 
-Streaming TTS is also separate from artifact persistence. `voice.openai.stream_tts_outputs=true` asks the provider layer for chunks in `voice.openai.tts_live_format` such as `pcm`; `voice.openai.tts_artifact_format` remains the optional file/debug format. `voice.openai.streaming_fallback_to_buffered` and `voice.playback.streaming_fallback_to_file` make fallback explicit in status and latency metadata. Fallback must not hide the original streaming failure or create duplicate speech.
+Streaming TTS is also separate from artifact persistence. `voice.openai.stream_tts_outputs=true` asks the provider layer for chunks in `voice.openai.tts_live_format` such as `pcm`; `voice.openai.tts_artifact_format` remains the optional file/debug format. L5.1 selects `VoiceService.stream_core_approved_spoken_text` for normal `/chat/send` assistant voice output and capture play-response when both streaming TTS and streaming playback are enabled. OpenAI provider output is labeled `true_http_stream` for the HTTP streaming path and `buffered_chunk_projection` when a buffered helper is chunked for compatibility. `voice.openai.streaming_fallback_to_buffered` and `voice.playback.streaming_fallback_to_file` make fallback explicit in status and latency metadata. Fallback must not hide the original streaming failure or create duplicate speech.
 
 First-audio metrics live in voice status and latency summaries:
 
@@ -125,10 +129,35 @@ First-audio metrics live in voice status and latency summaries:
 - `partial_playback`
 - `user_heard_claimed=false`
 
+L5.1 adds transport and normal-path proof fields:
+
+- `streaming_transport_kind` / `voice_streaming_transport_kind`
+- `first_chunk_before_complete`
+- `voice_stream_used_by_normal_path`
+- `voice_streaming_miss_reason`
+- `streaming_tts_status`
+- `live_playback_status`
+
+L5.2 adds a backend-owned visual contract for the Ghost voice anchor:
+
+- `voice_anchor.state` is one of `dormant`, `idle`, `wake_detected`, `listening`, `transcribing`, `thinking`, `confirmation_required`, `preparing_speech`, `speaking`, `interrupted`, `muted`, `continuing_task`, `blocked`, or `error`.
+- `speaking_visual_active=true` only follows output/playback/first-audio evidence. `preparing_speech` is not speaking.
+- `audio_reactive_source` is one of `playback_output_envelope`, `streaming_chunk_envelope`, `precomputed_artifact_envelope`, `synthetic_fallback_envelope`, or `unavailable`.
+- `synthetic_fallback_envelope` is allowed for useful motion, but it is labeled and `audio_reactive_available=false`.
+- `user_heard_claimed=false` remains part of the payload. Anchor motion is not completion, verification, command authority, or proof the user heard audio.
+
 Playback started means a playback provider accepted audio. It does not prove the user heard it and it does not change Core result state.
 
-Sources: `src/stormhelm/core/voice/service.py`, `src/stormhelm/core/voice/models.py`, `src/stormhelm/ui/voice_surface.py`
-Tests: `tests/test_voice_runtime_modes.py`, `tests/test_voice_readiness.py`, `tests/test_voice_ui_state_payload.py`
+For a deterministic no-sound first-audio smoke, run:
+
+```powershell
+python scripts\voice_first_audio_smoke.py --mode mock-stream --output-dir .artifacts\voice-first-audio-smoke
+```
+
+The smoke writes `voice_first_audio_smoke_summary.json`, `voice_first_audio_smoke_events.jsonl`, and `voice_first_audio_smoke_report.md` with sanitized timing rows and no audio bytes. `--mode openai-stream` and `--mode local-playback` are opt-in live/device checks and report skipped unless the required environment gates are set.
+
+Sources: `src/stormhelm/core/voice/service.py`, `src/stormhelm/core/voice/models.py`, `src/stormhelm/core/voice/visualizer.py`, `src/stormhelm/ui/voice_surface.py`, `assets/qml/components/VoiceCore.qml`
+Tests: `tests/test_voice_runtime_modes.py`, `tests/test_voice_readiness.py`, `tests/test_voice_ui_state_payload.py`, `tests/test_latency_l51_voice_streaming_reality.py`, `tests/test_latency_l52_voice_anchor_motion.py`
 
 ## Enable For Development
 

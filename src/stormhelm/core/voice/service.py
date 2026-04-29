@@ -102,6 +102,9 @@ from stormhelm.core.voice.state import VoiceState
 from stormhelm.core.voice.state import VoiceStateController
 from stormhelm.core.voice.state import VoiceStateSnapshot
 from stormhelm.core.voice.state import VoiceTransitionError
+from stormhelm.core.voice.visualizer import VoiceAudioEnvelope
+from stormhelm.core.voice.visualizer import build_voice_anchor_payload
+from stormhelm.core.voice.visualizer import compute_voice_audio_envelope
 from stormhelm.shared.time import utc_now_iso
 
 
@@ -266,6 +269,9 @@ class VoiceService:
         default=None, init=False
     )
     last_first_audio_latency: VoiceFirstAudioLatency | None = field(
+        default=None, init=False
+    )
+    last_voice_output_envelope: VoiceAudioEnvelope | None = field(
         default=None, init=False
     )
     last_capture_request: VoiceCaptureRequest | None = field(default=None, init=False)
@@ -4609,6 +4615,43 @@ class VoiceService:
 
         synthesis = None
         playback = None
+        streaming_output = None
+        streaming_requested = bool(
+            play_response
+            and self.config.openai.stream_tts_outputs
+            and self.config.playback.streaming_enabled
+        )
+        if streaming_requested:
+            streaming_output = await self.stream_turn_response(
+                turn_result,
+                metadata={
+                    "capture_turn_play_response": True,
+                    "audio_voice_stream_response": True,
+                },
+                source="core_spoken_summary",
+            )
+            if not streaming_output.ok:
+                stopped_stage = (
+                    "playback"
+                    if streaming_output.playback_result is not None
+                    else "tts"
+                )
+                return VoiceCaptureTurnResult(
+                    capture_result=capture_result,
+                    voice_turn_result=turn_result,
+                    streaming_output_result=streaming_output,
+                    final_status="playback_failed"
+                    if stopped_stage == "playback"
+                    else "speech_synthesis_failed",
+                    error_code=streaming_output.error_code,
+                    stopped_stage=stopped_stage,
+                )
+            return VoiceCaptureTurnResult(
+                capture_result=capture_result,
+                voice_turn_result=turn_result,
+                streaming_output_result=streaming_output,
+                final_status="completed",
+            )
         if synthesize_response:
             synthesis = await self.synthesize_turn_response(turn_result)
             if not synthesis.ok:
@@ -4640,6 +4683,67 @@ class VoiceService:
             synthesis_result=synthesis,
             playback_result=playback,
             final_status="completed",
+        )
+
+    async def stream_turn_response(
+        self,
+        turn_result: VoiceTurnResult,
+        *,
+        session_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        source: str = "core_spoken_summary",
+    ) -> VoiceStreamingSpeechOutputResult:
+        spoken_response = turn_result.spoken_response
+        if spoken_response is None and turn_result.core_result is not None:
+            spoken_response = self.speech_renderer.render(
+                SpokenResponseRequest(
+                    source_result_state=turn_result.core_result.result_state,
+                    spoken_summary=turn_result.core_result.spoken_summary,
+                    visual_text=turn_result.core_result.visual_summary,
+                    speak_allowed=turn_result.core_result.speak_allowed,
+                    spoken_responses_enabled=self.config.spoken_responses_enabled,
+                )
+            )
+        active_session_id = session_id or (
+            turn_result.turn.session_id if turn_result.turn is not None else None
+        )
+        turn_id = turn_result.turn.turn_id if turn_result.turn is not None else None
+        core_result = turn_result.core_result
+        result_state = core_result.result_state if core_result is not None else None
+        persona_mode = (
+            turn_result.turn.interaction_mode
+            if turn_result.turn is not None
+            else "ghost"
+        )
+        stream_metadata = {
+            **dict(metadata or {}),
+            "core_result": core_result.to_dict() if core_result is not None else None,
+            "voice_stream_used_by_normal_path": True,
+        }
+        if spoken_response is None or not spoken_response.should_speak:
+            return await self.stream_core_approved_spoken_text(
+                "",
+                speak_allowed=False,
+                session_id=active_session_id,
+                turn_id=turn_id,
+                source=source,
+                persona_mode=persona_mode,
+                result_state_source=result_state,
+                metadata={
+                    **stream_metadata,
+                    "streaming_miss_reason": "spoken_response_not_allowed",
+                },
+            )
+        return await self.stream_core_approved_spoken_text(
+            spoken_response.spoken_text,
+            speak_allowed=bool(core_result and core_result.speak_allowed),
+            session_id=active_session_id,
+            turn_id=turn_id,
+            source=source,
+            persona_mode=persona_mode,
+            speech_length_hint=spoken_response.speech_length_hint,
+            result_state_source=result_state or spoken_response.source_result_state,
+            metadata=stream_metadata,
         )
 
     async def submit_audio_voice_turn(
@@ -5506,6 +5610,14 @@ class VoiceService:
         request_started_ms: int | float | None = None,
         core_result_completed_ms: int | float | None = None,
     ) -> VoiceStreamingSpeechOutputResult:
+        input_metadata = dict(metadata or {})
+        normal_path_stream = bool(
+            input_metadata.get("voice_stream_used_by_normal_path")
+            or input_metadata.get("assistant_response_voice_output")
+            or input_metadata.get("capture_turn_play_response")
+            or input_metadata.get("manual_voice_stream_response")
+            or input_metadata.get("audio_voice_stream_response")
+        )
         speech_request = self._build_speech_request(
             text=text,
             source=source,
@@ -5514,7 +5626,7 @@ class VoiceService:
             session_id=session_id,
             turn_id=turn_id,
             result_state_source=result_state_source,
-            metadata={**dict(metadata or {}), "core_result_id": core_result_id},
+            metadata={**input_metadata, "core_result_id": core_result_id},
             allowed_to_synthesize=speak_allowed,
             blocked_reason=None if speak_allowed else "speak_not_allowed",
         )
@@ -5563,6 +5675,8 @@ class VoiceService:
             playback_result = await self.play_speech_output(synthesis)
             latency = VoiceFirstAudioLatency(
                 streaming_enabled=False,
+                streaming_transport_kind="buffered_fallback",
+                first_chunk_before_complete=False,
                 live_format=self._tts_live_format_name(),
                 artifact_format=self._tts_artifact_format_name(),
                 fallback_used=True,
@@ -5581,6 +5695,8 @@ class VoiceService:
                     and self.last_provider_prewarm_result.ok
                 ),
                 first_audio_available=bool(playback_result.ok),
+                voice_stream_used_by_normal_path=normal_path_stream,
+                streaming_miss_reason="streaming_tts_disabled",
                 user_heard_claimed=False,
             )
             self.last_first_audio_latency = latency
@@ -5592,6 +5708,10 @@ class VoiceService:
                 turn_id=turn_id,
                 streaming_enabled=False,
                 first_audio_available=bool(playback_result.ok),
+                streaming_transport_kind="buffered_fallback",
+                first_chunk_before_complete=False,
+                stream_used_by_normal_path=normal_path_stream,
+                streaming_miss_reason="streaming_tts_disabled",
                 buffered_synthesis_result=synthesis,
                 latency=latency,
                 fallback_used=True,
@@ -5638,14 +5758,23 @@ class VoiceService:
                 live_format=streaming_request.live_format,
                 artifact_format=streaming_request.artifact_format,
                 status="unavailable",
+                streaming_transport_kind="unsupported",
+                first_chunk_before_complete=False,
                 error_code="streaming_tts_unsupported",
                 error_message="Voice provider does not implement streaming TTS.",
             )
         else:
             tts_result = operation(streaming_request)
-            if inspect.isawaitable(tts_result):
-                tts_result = await tts_result
+        if inspect.isawaitable(tts_result):
+            tts_result = await tts_result
         self.last_streaming_tts_result = tts_result
+        if tts_result.chunks:
+            first_chunk = tts_result.chunks[0]
+            self._remember_voice_output_envelope(
+                first_chunk.data,
+                audio_format=first_chunk.live_format or tts_result.live_format,
+                source="streaming_chunk_envelope",
+            )
 
         first_chunk_delta = tts_result.first_audio_byte_ms
         first_chunk_ms = (
@@ -5663,6 +5792,9 @@ class VoiceService:
             latency = VoiceFirstAudioLatency(
                 core_result_to_tts_start_ms=0,
                 streaming_enabled=True,
+                streaming_transport_kind=tts_result.streaming_transport_kind,
+                first_chunk_before_complete=tts_result.first_chunk_before_complete,
+                stream_complete_ms=tts_result.stream_complete_ms,
                 live_format=streaming_request.live_format,
                 artifact_format=streaming_request.artifact_format,
                 fallback_used=True,
@@ -5681,6 +5813,9 @@ class VoiceService:
                     and self.last_provider_prewarm_result.ok
                 ),
                 first_audio_available=bool(buffered_playback.ok),
+                voice_stream_used_by_normal_path=normal_path_stream,
+                streaming_miss_reason=tts_result.error_code
+                or "streaming_failed_before_first_audio",
                 user_heard_claimed=False,
             )
             self.last_first_audio_latency = latency
@@ -5712,6 +5847,11 @@ class VoiceService:
                 turn_id=turn_id,
                 streaming_enabled=True,
                 first_audio_available=bool(buffered_playback.ok),
+                streaming_transport_kind=tts_result.streaming_transport_kind,
+                first_chunk_before_complete=tts_result.first_chunk_before_complete,
+                stream_used_by_normal_path=normal_path_stream,
+                streaming_miss_reason=tts_result.error_code
+                or "streaming_failed_before_first_audio",
                 tts_result=replace(tts_result, fallback_used=True),
                 buffered_synthesis_result=synthesis,
                 buffered_playback_result=buffered_playback,
@@ -5792,6 +5932,13 @@ class VoiceService:
                             live_session.playback_stream_id,
                             chunk.data or b"",
                             chunk_index=chunk.chunk_index,
+                        )
+                        self._remember_voice_output_envelope(
+                            chunk.data,
+                            audio_format=chunk.live_format,
+                            source="playback_output_envelope"
+                            if chunk_result.ok
+                            else "streaming_chunk_envelope",
                         )
                         if playback_started_ms is None and chunk_result.playback_started:
                             playback_started_ms = (first_chunk_ms or tts_started_ms) + int(
@@ -5935,6 +6082,10 @@ class VoiceService:
                 else None
             ),
             streaming_enabled=True,
+            streaming_transport_kind=tts_result.streaming_transport_kind,
+            first_chunk_before_complete=tts_result.first_chunk_before_complete,
+            stream_complete_ms=tts_result.stream_complete_ms,
+            playback_complete_ms=None,
             live_format=streaming_request.live_format,
             artifact_format=streaming_request.artifact_format,
             fallback_used=bool(tts_result.fallback_used),
@@ -5960,6 +6111,7 @@ class VoiceService:
                 live_result is not None
                 and (live_result.partial_playback or live_result.status == "cancelled")
             ),
+            voice_stream_used_by_normal_path=normal_path_stream,
             user_heard_claimed=False,
         )
         self.last_first_audio_latency = latency
@@ -5996,6 +6148,13 @@ class VoiceService:
             turn_id=turn_id,
             streaming_enabled=True,
             first_audio_available=first_audio_available,
+            streaming_transport_kind=tts_result.streaming_transport_kind,
+            first_chunk_before_complete=tts_result.first_chunk_before_complete,
+            stream_used_by_normal_path=normal_path_stream,
+            streaming_miss_reason=""
+            if first_audio_available
+            else (live_result.error_code if live_result is not None else tts_result.error_code)
+            or "first_audio_unavailable",
             tts_result=tts_result,
             playback_result=live_result,
             latency=latency,
@@ -8075,7 +8234,7 @@ class VoiceService:
         wake_supervised_loop = self._wake_supervised_loop_status_snapshot()
         realtime_status = self._realtime_status_snapshot()
         runtime_mode = dict(readiness.get("runtime_mode") or {})
-        return {
+        snapshot = {
             "phase": "voice0",
             "current_phase": "voice5",
             "operator_readiness_phase": "voice7",
@@ -8317,6 +8476,28 @@ class VoiceService:
                 "semantic_vad": "not_implemented",
             },
         }
+        envelope = (
+            self.last_voice_output_envelope.to_dict()
+            if self.last_voice_output_envelope is not None
+            else None
+        )
+        if envelope is not None:
+            snapshot["voice_output_envelope"] = envelope
+        voice_anchor = build_voice_anchor_payload(snapshot)
+        snapshot["voice_anchor"] = voice_anchor
+        snapshot["voice_anchor_state"] = voice_anchor.get("state")
+        snapshot["speaking_visual_active"] = voice_anchor.get("speaking_visual_active")
+        snapshot["voice_motion_intensity"] = voice_anchor.get("motion_intensity")
+        snapshot["voice_audio_reactive_source"] = voice_anchor.get(
+            "audio_reactive_source"
+        )
+        snapshot["voice_audio_reactive_available"] = voice_anchor.get(
+            "audio_reactive_available"
+        )
+        snapshot["voice_smoothed_output_level"] = voice_anchor.get(
+            "smoothed_output_level"
+        )
+        return snapshot
 
     def _build_speech_request(
         self,
@@ -10087,6 +10268,8 @@ class VoiceService:
     ) -> VoiceStreamingSpeechOutputResult:
         latency = VoiceFirstAudioLatency(
             streaming_enabled=bool(self.config.openai.stream_tts_outputs),
+            streaming_transport_kind="blocked",
+            first_chunk_before_complete=False,
             live_format=self._tts_live_format_name(),
             artifact_format=self._tts_artifact_format_name(),
             fallback_used=False,
@@ -10104,6 +10287,7 @@ class VoiceService:
                 self.last_provider_prewarm_result and self.last_provider_prewarm_result.ok
             ),
             first_audio_available=False,
+            streaming_miss_reason=error_code,
             user_heard_claimed=False,
         )
         self.last_first_audio_latency = latency
@@ -10115,6 +10299,9 @@ class VoiceService:
             turn_id=request.turn_id,
             streaming_enabled=bool(self.config.openai.stream_tts_outputs),
             first_audio_available=False,
+            streaming_transport_kind="blocked",
+            first_chunk_before_complete=False,
+            streaming_miss_reason=error_code,
             latency=latency,
             error_code=error_code,
             error_message=error_message,
@@ -10126,6 +10313,18 @@ class VoiceService:
     ) -> VoiceSpeechSynthesisResult:
         self.last_speech_request = result.speech_request
         self.last_synthesis_result = result
+        audio_output = result.audio_output
+        if (
+            result.ok
+            and audio_output is not None
+            and audio_output.data
+            and str(audio_output.format or "").strip().lower() in {"pcm", "wav"}
+        ):
+            self._remember_voice_output_envelope(
+                audio_output.data,
+                audio_format=audio_output.format,
+                source="precomputed_artifact_envelope",
+            )
         if result.error_code:
             self.last_error = {
                 "code": result.error_code,
@@ -11428,6 +11627,26 @@ class VoiceService:
             "no_audio_playback": True,
         }
 
+    def _remember_voice_output_envelope(
+        self,
+        audio: bytes | bytearray | memoryview | None,
+        *,
+        audio_format: str,
+        source: str,
+    ) -> VoiceAudioEnvelope | None:
+        if not audio:
+            return self.last_voice_output_envelope
+        try:
+            self.last_voice_output_envelope = compute_voice_audio_envelope(
+                audio,
+                audio_format=audio_format,
+                source=source,
+                previous=self.last_voice_output_envelope,
+            )
+        except Exception:
+            return self.last_voice_output_envelope
+        return self.last_voice_output_envelope
+
     def _tts_status_snapshot(self) -> dict[str, Any]:
         request = self.last_speech_request
         synthesis = self.last_synthesis_result
@@ -11440,6 +11659,14 @@ class VoiceService:
         streaming = self.last_streaming_tts_result
         first_audio = self.last_first_audio_latency
         provider_prewarm = self.last_provider_prewarm_result
+        envelope = self.last_voice_output_envelope
+        streaming_transport_kind = (
+            streaming.streaming_transport_kind
+            if streaming is not None
+            else first_audio.streaming_transport_kind
+            if first_audio is not None
+            else ""
+        )
         return {
             "enabled": bool(
                 self.config.enabled
@@ -11458,7 +11685,10 @@ class VoiceService:
             "format": synthesis.format
             if synthesis is not None
             else self._tts_format_name(),
+            "streaming_tts_enabled": bool(self.config.openai.stream_tts_outputs),
             "streaming_enabled": bool(self.config.openai.stream_tts_outputs),
+            "streaming_transport_kind": streaming_transport_kind or None,
+            "streaming_tts_status": streaming.status if streaming is not None else None,
             "tts_streaming_active": bool(
                 streaming is not None
                 and streaming.streaming_started
@@ -11469,6 +11699,14 @@ class VoiceService:
             "artifact_format": self._tts_artifact_format_name(),
             "last_tts_stream_id": streaming.tts_stream_id if streaming is not None else None,
             "last_stream_status": streaming.status if streaming is not None else None,
+            "first_chunk_before_complete": bool(
+                streaming and streaming.first_chunk_before_complete
+            ),
+            "bytes_total_summary_only": int(
+                streaming.bytes_total_summary_only
+                if streaming is not None
+                else 0
+            ),
             "provider_prewarmed": bool(provider_prewarm and provider_prewarm.ok),
             "prewarm_used": bool(self.last_voice_output_prewarm_result is not None),
             "fallback_used": bool(first_audio and first_audio.fallback_used),
@@ -11481,9 +11719,25 @@ class VoiceService:
             "first_audio_available": bool(
                 first_audio is not None and first_audio.first_audio_available
             ),
+            "first_audio_ms": (
+                first_audio.request_to_first_audio_ms
+                if first_audio is not None
+                else None
+            ),
             "first_audio_latency": first_audio.to_dict()
             if first_audio is not None
             else None,
+            "voice_output_envelope": envelope.to_dict()
+            if envelope is not None
+            and envelope.source in {"streaming_chunk_envelope", "precomputed_artifact_envelope"}
+            else None,
+            "voice_stream_used_by_normal_path": bool(
+                first_audio and first_audio.voice_stream_used_by_normal_path
+            ),
+            "last_streaming_error": {
+                "code": streaming.error_code if streaming is not None else None,
+                "message": streaming.error_message if streaming is not None else None,
+            },
             "last_speech_request_id": request.speech_request_id
             if request is not None
             else None,
@@ -11538,7 +11792,17 @@ class VoiceService:
         live_result = self.last_live_playback_result
         playback_prewarm = self.last_playback_prewarm_result
         first_audio = self.last_first_audio_latency
+        envelope = self.last_voice_output_envelope
         availability = self._playback_provider_availability()
+        live_playback_supported = bool(
+            self.config.playback.enabled
+            and self.config.playback.streaming_enabled
+            and availability.get("available")
+            and callable(getattr(self.playback_provider, "start_stream", None))
+            and callable(getattr(self.playback_provider, "feed_stream_chunk", None))
+        )
+        if live_result is not None and live_result.status == "unsupported":
+            live_playback_supported = False
         return {
             "enabled": self.config.playback.enabled,
             "provider": result.provider
@@ -11579,6 +11843,16 @@ class VoiceService:
             else None,
             "playback_stopped_at": result.stopped_at if result is not None else None,
             "played_locally": bool(result and result.played_locally),
+            "live_playback_enabled": bool(self.config.playback.streaming_enabled),
+            "live_playback_supported": live_playback_supported,
+            "live_playback_status": (
+                live_result.status if live_result is not None else None
+            ),
+            "unsupported_reason": (
+                live_result.error_code
+                if live_result is not None and live_result.status == "unsupported"
+                else None
+            ),
             "streaming_enabled": bool(self.config.playback.streaming_enabled),
             "playback_streaming_active": bool(
                 active_stream is not None
@@ -11611,6 +11885,15 @@ class VoiceService:
             "first_audio_started": bool(
                 first_audio is not None and first_audio.first_audio_available
             ),
+            "first_audio_ms": (
+                first_audio.request_to_first_audio_ms
+                if first_audio is not None
+                else None
+            ),
+            "voice_output_envelope": envelope.to_dict()
+            if envelope is not None
+            and envelope.source in {"playback_output_envelope", "streaming_chunk_envelope"}
+            else None,
             "partial_playback": bool(
                 (result is not None and result.partial_playback)
                 or (live_result is not None and live_result.partial_playback)

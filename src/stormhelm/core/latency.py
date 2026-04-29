@@ -327,10 +327,22 @@ class LatencyTrace:
     voice_core_to_first_audio_ms: float = 0.0
     voice_tts_first_chunk_ms: float = 0.0
     voice_playback_start_ms: float = 0.0
+    voice_streaming_transport_kind: str = ""
+    voice_first_chunk_before_complete: bool = False
+    voice_stream_used_by_normal_path: bool = False
+    voice_streaming_miss_reason: str = ""
     voice_live_format: str = ""
     voice_streaming_fallback_used: bool = False
     voice_prewarm_used: bool = False
     voice_partial_playback: bool = False
+    voice_anchor_state: str = ""
+    voice_speaking_visual_active: bool = False
+    voice_audio_reactive_source: str = ""
+    voice_audio_reactive_available: bool = False
+    voice_anchor_motion_intensity: float = 0.0
+    voice_anchor_audio_level: float = 0.0
+    voice_visualizer_update_hz: int = 0
+    voice_anchor_user_heard_claimed: bool = False
     warnings: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -510,10 +522,28 @@ class LatencyTrace:
             "voice_core_to_first_audio_ms": _safe_float(self.voice_core_to_first_audio_ms),
             "voice_tts_first_chunk_ms": _safe_float(self.voice_tts_first_chunk_ms),
             "voice_playback_start_ms": _safe_float(self.voice_playback_start_ms),
+            "voice_streaming_transport_kind": self.voice_streaming_transport_kind,
+            "voice_first_chunk_before_complete": bool(self.voice_first_chunk_before_complete),
+            "voice_stream_used_by_normal_path": bool(self.voice_stream_used_by_normal_path),
+            "voice_streaming_miss_reason": self.voice_streaming_miss_reason,
             "voice_live_format": self.voice_live_format,
             "voice_streaming_fallback_used": bool(self.voice_streaming_fallback_used),
             "voice_prewarm_used": bool(self.voice_prewarm_used),
             "voice_partial_playback": bool(self.voice_partial_playback),
+            "voice_anchor_state": self.voice_anchor_state,
+            "voice_speaking_visual_active": bool(self.voice_speaking_visual_active),
+            "voice_audio_reactive_source": self.voice_audio_reactive_source,
+            "voice_audio_reactive_available": bool(
+                self.voice_audio_reactive_available
+            ),
+            "voice_anchor_motion_intensity": _safe_float(
+                self.voice_anchor_motion_intensity
+            ),
+            "voice_anchor_audio_level": _safe_float(self.voice_anchor_audio_level),
+            "voice_visualizer_update_hz": int(self.voice_visualizer_update_hz or 0),
+            "voice_anchor_user_heard_claimed": bool(
+                self.voice_anchor_user_heard_claimed
+            ),
             "provider_called": bool(self.provider_called),
             "openai_called": bool(self.openai_called),
             "llm_called": bool(self.llm_called),
@@ -1199,10 +1229,28 @@ def build_latency_trace(
         voice_core_to_first_audio_ms=l5_voice_trace["voice_core_to_first_audio_ms"],
         voice_tts_first_chunk_ms=l5_voice_trace["voice_tts_first_chunk_ms"],
         voice_playback_start_ms=l5_voice_trace["voice_playback_start_ms"],
+        voice_streaming_transport_kind=l5_voice_trace["voice_streaming_transport_kind"],
+        voice_first_chunk_before_complete=l5_voice_trace["voice_first_chunk_before_complete"],
+        voice_stream_used_by_normal_path=l5_voice_trace["voice_stream_used_by_normal_path"],
+        voice_streaming_miss_reason=l5_voice_trace["voice_streaming_miss_reason"],
         voice_live_format=l5_voice_trace["voice_live_format"],
         voice_streaming_fallback_used=l5_voice_trace["voice_streaming_fallback_used"],
         voice_prewarm_used=l5_voice_trace["voice_prewarm_used"],
         voice_partial_playback=l5_voice_trace["voice_partial_playback"],
+        voice_anchor_state=l5_voice_trace["voice_anchor_state"],
+        voice_speaking_visual_active=l5_voice_trace["voice_speaking_visual_active"],
+        voice_audio_reactive_source=l5_voice_trace["voice_audio_reactive_source"],
+        voice_audio_reactive_available=l5_voice_trace[
+            "voice_audio_reactive_available"
+        ],
+        voice_anchor_motion_intensity=l5_voice_trace[
+            "voice_anchor_motion_intensity"
+        ],
+        voice_anchor_audio_level=l5_voice_trace["voice_anchor_audio_level"],
+        voice_visualizer_update_hz=l5_voice_trace["voice_visualizer_update_hz"],
+        voice_anchor_user_heard_claimed=l5_voice_trace[
+            "voice_anchor_user_heard_claimed"
+        ],
         warnings=[
             str(item)
             for item in (
@@ -1428,10 +1476,28 @@ def attach_latency_metadata(
     metadata["voice_core_to_first_audio_ms"] = _safe_float(trace.voice_core_to_first_audio_ms)
     metadata["voice_tts_first_chunk_ms"] = _safe_float(trace.voice_tts_first_chunk_ms)
     metadata["voice_playback_start_ms"] = _safe_float(trace.voice_playback_start_ms)
+    metadata["voice_streaming_transport_kind"] = trace.voice_streaming_transport_kind
+    metadata["voice_first_chunk_before_complete"] = bool(trace.voice_first_chunk_before_complete)
+    metadata["voice_stream_used_by_normal_path"] = bool(trace.voice_stream_used_by_normal_path)
+    metadata["voice_streaming_miss_reason"] = trace.voice_streaming_miss_reason
     metadata["voice_live_format"] = trace.voice_live_format
     metadata["voice_streaming_fallback_used"] = bool(trace.voice_streaming_fallback_used)
     metadata["voice_prewarm_used"] = bool(trace.voice_prewarm_used)
     metadata["voice_partial_playback"] = bool(trace.voice_partial_playback)
+    metadata["voice_anchor_state"] = trace.voice_anchor_state
+    metadata["voice_speaking_visual_active"] = bool(trace.voice_speaking_visual_active)
+    metadata["voice_audio_reactive_source"] = trace.voice_audio_reactive_source
+    metadata["voice_audio_reactive_available"] = bool(
+        trace.voice_audio_reactive_available
+    )
+    metadata["voice_anchor_motion_intensity"] = _safe_float(
+        trace.voice_anchor_motion_intensity
+    )
+    metadata["voice_anchor_audio_level"] = _safe_float(trace.voice_anchor_audio_level)
+    metadata["voice_visualizer_update_hz"] = int(trace.voice_visualizer_update_hz or 0)
+    metadata["voice_anchor_user_heard_claimed"] = bool(
+        trace.voice_anchor_user_heard_claimed
+    )
     if trace.async_route_handle:
         metadata["async_route_handle"] = safe_latency_value(trace.async_route_handle)
     if trace.route_progress_state:
@@ -2121,12 +2187,23 @@ def _l5_voice_trace_metadata(
         if isinstance(metadata.get("voice_first_audio"), dict)
         else {}
     )
+    voice_anchor = (
+        metadata.get("voice_anchor")
+        if isinstance(metadata.get("voice_anchor"), dict)
+        else voice_debug.get("voice_anchor")
+        if isinstance(voice_debug.get("voice_anchor"), dict)
+        else existing_trace.get("voice_anchor")
+        if isinstance(existing_trace.get("voice_anchor"), dict)
+        else {}
+    )
 
     def selected(key: str) -> Any:
         if key in metadata:
             return metadata.get(key)
         if key in voice_debug:
             return voice_debug.get(key)
+        if key in voice_anchor:
+            return voice_anchor.get(key)
         if key in timings:
             return timings.get(key)
         return existing_trace.get(key)
@@ -2153,6 +2230,24 @@ def _l5_voice_trace_metadata(
             selected("voice_playback_start_ms")
             or selected("first_chunk_to_playback_start_ms")
         ),
+        "voice_streaming_transport_kind": str(
+            selected("voice_streaming_transport_kind")
+            or selected("streaming_transport_kind")
+            or ""
+        ),
+        "voice_first_chunk_before_complete": _truthy_value(
+            selected("voice_first_chunk_before_complete")
+            or selected("first_chunk_before_complete")
+        ),
+        "voice_stream_used_by_normal_path": _truthy_value(
+            selected("voice_stream_used_by_normal_path")
+            or selected("stream_used_by_normal_path")
+        ),
+        "voice_streaming_miss_reason": str(
+            selected("voice_streaming_miss_reason")
+            or selected("streaming_miss_reason")
+            or ""
+        ),
         "voice_live_format": str(
             selected("voice_live_format") or selected("live_format") or ""
         ),
@@ -2165,6 +2260,43 @@ def _l5_voice_trace_metadata(
         ),
         "voice_partial_playback": _truthy_value(
             selected("voice_partial_playback") or selected("partial_playback")
+        ),
+        "voice_anchor_state": str(
+            selected("voice_anchor_state") or voice_anchor.get("state") or ""
+        ),
+        "voice_speaking_visual_active": _truthy_value(
+            selected("voice_speaking_visual_active")
+            or selected("speaking_visual_active")
+        ),
+        "voice_audio_reactive_source": str(
+            selected("voice_audio_reactive_source")
+            or selected("audio_reactive_source")
+            or ""
+        ),
+        "voice_audio_reactive_available": _truthy_value(
+            selected("voice_audio_reactive_available")
+            or selected("audio_reactive_available")
+        ),
+        "voice_anchor_motion_intensity": _safe_float(
+            selected("voice_anchor_motion_intensity")
+            or selected("motion_intensity")
+        ),
+        "voice_anchor_audio_level": _safe_float(
+            selected("voice_anchor_audio_level")
+            or selected("smoothed_output_level")
+            or selected("output_level_rms")
+        ),
+        "voice_visualizer_update_hz": int(
+            _safe_float(
+                selected("voice_visualizer_update_hz")
+                or selected("visualizer_update_hz")
+                or selected("update_hz")
+            )
+            or 0
+        ),
+        "voice_anchor_user_heard_claimed": _truthy_value(
+            selected("voice_anchor_user_heard_claimed")
+            or selected("user_heard_claimed")
         ),
     }
 

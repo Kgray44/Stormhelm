@@ -628,6 +628,13 @@ class VoiceStreamingTTSResult:
     final_chunk_at: str | None = None
     total_chunks: int = 0
     first_audio_byte_ms: int | None = None
+    streaming_transport_kind: str = "unknown"
+    first_chunk_before_complete: bool = False
+    stream_start_monotonic_ms: int | None = None
+    first_chunk_monotonic_ms: int | None = None
+    stream_complete_monotonic_ms: int | None = None
+    stream_complete_ms: int | None = None
+    bytes_total_summary_only: int = 0
     streaming_started: bool = False
     streaming_completed: bool = False
     streaming_cancelled: bool = False
@@ -654,6 +661,13 @@ class VoiceStreamingTTSResult:
             "final_chunk_at": self.final_chunk_at,
             "total_chunks": self.total_chunks,
             "first_audio_byte_ms": self.first_audio_byte_ms,
+            "streaming_transport_kind": self.streaming_transport_kind,
+            "first_chunk_before_complete": bool(self.first_chunk_before_complete),
+            "stream_start_monotonic_ms": self.stream_start_monotonic_ms,
+            "first_chunk_monotonic_ms": self.first_chunk_monotonic_ms,
+            "stream_complete_monotonic_ms": self.stream_complete_monotonic_ms,
+            "stream_complete_ms": self.stream_complete_ms,
+            "bytes_total_summary_only": int(self.bytes_total_summary_only or 0),
             "streaming_started": self.streaming_started,
             "streaming_completed": self.streaming_completed,
             "streaming_cancelled": self.streaming_cancelled,
@@ -1043,6 +1057,10 @@ class VoiceFirstAudioLatency:
     core_result_to_first_audio_ms: int | None = None
     request_to_first_audio_ms: int | None = None
     streaming_enabled: bool = False
+    streaming_transport_kind: str = ""
+    first_chunk_before_complete: bool = False
+    stream_complete_ms: int | None = None
+    playback_complete_ms: int | None = None
     live_format: str | None = None
     artifact_format: str | None = None
     fallback_used: bool = False
@@ -1053,6 +1071,8 @@ class VoiceFirstAudioLatency:
     first_audio_available: bool = False
     first_audio_budget_exceeded: bool = False
     partial_playback: bool = False
+    voice_stream_used_by_normal_path: bool = False
+    streaming_miss_reason: str = ""
     user_heard_claimed: bool = False
 
     def to_dict(self) -> dict[str, Any]:
@@ -1063,6 +1083,10 @@ class VoiceFirstAudioLatency:
             "core_result_to_first_audio_ms": self.core_result_to_first_audio_ms,
             "request_to_first_audio_ms": self.request_to_first_audio_ms,
             "streaming_enabled": self.streaming_enabled,
+            "streaming_transport_kind": self.streaming_transport_kind,
+            "first_chunk_before_complete": bool(self.first_chunk_before_complete),
+            "stream_complete_ms": self.stream_complete_ms,
+            "playback_complete_ms": self.playback_complete_ms,
             "live_format": self.live_format,
             "artifact_format": self.artifact_format,
             "fallback_used": self.fallback_used,
@@ -1073,6 +1097,10 @@ class VoiceFirstAudioLatency:
             "first_audio_available": self.first_audio_available,
             "first_audio_budget_exceeded": self.first_audio_budget_exceeded,
             "partial_playback": self.partial_playback,
+            "voice_stream_used_by_normal_path": bool(
+                self.voice_stream_used_by_normal_path
+            ),
+            "streaming_miss_reason": self.streaming_miss_reason,
             "user_heard_claimed": False,
         }
 
@@ -1086,6 +1114,10 @@ class VoiceStreamingSpeechOutputResult:
     turn_id: str | None = None
     streaming_enabled: bool = False
     first_audio_available: bool = False
+    streaming_transport_kind: str = ""
+    first_chunk_before_complete: bool = False
+    stream_used_by_normal_path: bool = False
+    streaming_miss_reason: str = ""
     tts_result: VoiceStreamingTTSResult | None = None
     playback_result: VoiceLivePlaybackResult | None = None
     buffered_synthesis_result: VoiceSpeechSynthesisResult | None = None
@@ -1109,6 +1141,10 @@ class VoiceStreamingSpeechOutputResult:
             "turn_id": self.turn_id,
             "streaming_enabled": self.streaming_enabled,
             "first_audio_available": self.first_audio_available,
+            "streaming_transport_kind": self.streaming_transport_kind,
+            "first_chunk_before_complete": bool(self.first_chunk_before_complete),
+            "stream_used_by_normal_path": bool(self.stream_used_by_normal_path),
+            "streaming_miss_reason": self.streaming_miss_reason,
             "tts_result": self.tts_result.to_dict()
             if self.tts_result is not None
             else None,
@@ -1923,6 +1959,7 @@ class VoiceCaptureTurnResult:
     voice_turn_result: VoiceTurnResult | None = None
     synthesis_result: VoiceSpeechSynthesisResult | None = None
     playback_result: VoicePlaybackResult | None = None
+    streaming_output_result: VoiceStreamingSpeechOutputResult | None = None
     final_status: str = "not_started"
     error_code: str | None = None
     stopped_stage: str | None = None
@@ -1940,6 +1977,9 @@ class VoiceCaptureTurnResult:
             else None,
             "playback_result": self.playback_result.to_dict()
             if self.playback_result is not None
+            else None,
+            "streaming_output_result": self.streaming_output_result.to_dict()
+            if self.streaming_output_result is not None
             else None,
             "final_status": self.final_status,
             "error_code": self.error_code,

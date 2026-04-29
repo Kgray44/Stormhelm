@@ -488,6 +488,11 @@ def _format_kraken_latency_report(report: dict[str, Any]) -> str:
         f"- voice_first_audio_ms: {report.get('voice_first_audio_ms', {})}",
         f"- voice_core_to_first_audio_ms: {report.get('voice_core_to_first_audio_ms', {})}",
         f"- voice_streaming_enabled_count: {report.get('voice_streaming_enabled_count', 0)}",
+        f"- voice_streaming_transport_kind_counts: {report.get('voice_streaming_transport_kind_counts', {})}",
+        f"- voice_streaming_path_used_count: {report.get('voice_streaming_path_used_count', 0)}",
+        f"- voice_buffered_projection_count: {report.get('voice_buffered_projection_count', 0)}",
+        f"- normal_path_streaming_miss_count: {report.get('normal_path_streaming_miss_count', 0)}",
+        f"- voice_first_chunk_before_complete_count: {report.get('voice_first_chunk_before_complete_count', 0)}",
         f"- voice_streaming_fallback_count: {report.get('voice_streaming_fallback_count', 0)}",
         f"- voice_prewarm_used_count: {report.get('voice_prewarm_used_count', 0)}",
         f"- voice_partial_playback_count: {report.get('voice_partial_playback_count', 0)}",
@@ -624,7 +629,10 @@ def _stage_latency_summary(results: list[CommandEvalResult]) -> dict[str, dict[s
 
 
 def _kraken_latency_report(results: list[CommandEvalResult]) -> dict[str, Any]:
-    rows = [result.to_dict() for result in results]
+    rows = [
+        result.to_dict() if hasattr(result, "to_dict") else dict(result)
+        for result in results
+    ]
     total_values = [float(row.get("total_latency_ms") or row.get("latency_ms") or 0.0) for row in rows]
     by_route: dict[str, list[float]] = defaultdict(list)
     by_longest_stage: dict[str, list[float]] = defaultdict(list)
@@ -684,6 +692,11 @@ def _kraken_latency_report(results: list[CommandEvalResult]) -> dict[str, Any]:
     voice_first_audio_values: list[float] = []
     voice_core_to_first_audio_values: list[float] = []
     voice_streaming_enabled_count = 0
+    voice_transport_counts: Counter[str] = Counter()
+    voice_streaming_path_used_count = 0
+    voice_buffered_projection_count = 0
+    normal_path_streaming_miss_count = 0
+    voice_first_chunk_before_complete_count = 0
     voice_fallback_count = 0
     voice_prewarm_used_count = 0
     voice_partial_playback_count = 0
@@ -772,6 +785,19 @@ def _kraken_latency_report(results: list[CommandEvalResult]) -> dict[str, Any]:
             expected_conversion_missing_count += 1
         if row.get("voice_streaming_tts_enabled"):
             voice_streaming_enabled_count += 1
+        voice_transport = str(row.get("voice_streaming_transport_kind") or "")
+        if voice_transport:
+            voice_transport_counts[voice_transport] += 1
+        if row.get("voice_stream_used_by_normal_path"):
+            voice_streaming_path_used_count += 1
+        elif row.get("voice_streaming_tts_enabled") and str(
+            row.get("route_family") or row.get("actual_route_family") or ""
+        ) == "voice_control":
+            normal_path_streaming_miss_count += 1
+        if voice_transport == "buffered_chunk_projection":
+            voice_buffered_projection_count += 1
+        if row.get("voice_first_chunk_before_complete"):
+            voice_first_chunk_before_complete_count += 1
         voice_first_audio = float(row.get("voice_first_audio_ms") or 0.0)
         if voice_first_audio > 0:
             voice_first_audio_values.append(voice_first_audio)
@@ -900,6 +926,11 @@ def _kraken_latency_report(results: list[CommandEvalResult]) -> dict[str, Any]:
         "voice_first_audio_ms": _value_summary(voice_first_audio_values),
         "voice_core_to_first_audio_ms": _value_summary(voice_core_to_first_audio_values),
         "voice_streaming_enabled_count": voice_streaming_enabled_count,
+        "voice_streaming_transport_kind_counts": dict(sorted(voice_transport_counts.items())),
+        "voice_streaming_path_used_count": voice_streaming_path_used_count,
+        "voice_buffered_projection_count": voice_buffered_projection_count,
+        "normal_path_streaming_miss_count": normal_path_streaming_miss_count,
+        "voice_first_chunk_before_complete_count": voice_first_chunk_before_complete_count,
         "voice_streaming_fallback_count": voice_fallback_count,
         "voice_prewarm_used_count": voice_prewarm_used_count,
         "voice_partial_playback_count": voice_partial_playback_count,
@@ -1484,6 +1515,14 @@ def _compact_latency_row(row: dict[str, Any]) -> dict[str, Any]:
         "direct_subsystem_async_converted": row.get("direct_subsystem_async_converted"),
         "async_conversion_expected": row.get("async_conversion_expected"),
         "async_conversion_missing_reason": row.get("async_conversion_missing_reason"),
+        "voice_anchor_state": row.get("voice_anchor_state"),
+        "voice_speaking_visual_active": row.get("voice_speaking_visual_active"),
+        "voice_audio_reactive_source": row.get("voice_audio_reactive_source"),
+        "voice_audio_reactive_available": row.get("voice_audio_reactive_available"),
+        "voice_anchor_motion_intensity": row.get("voice_anchor_motion_intensity"),
+        "voice_anchor_audio_level": row.get("voice_anchor_audio_level"),
+        "voice_visualizer_update_hz": row.get("voice_visualizer_update_hz"),
+        "voice_anchor_user_heard_claimed": row.get("voice_anchor_user_heard_claimed"),
         "hard_timeout": row.get("hard_timeout"),
         "failure_category": row.get("failure_category"),
     }

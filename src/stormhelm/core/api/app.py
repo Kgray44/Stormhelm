@@ -130,6 +130,10 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         if not text:
             return
 
+        streaming_requested = bool(
+            current.voice.config.openai.stream_tts_outputs
+            and current.voice.config.playback.streaming_enabled
+        )
         assistant_message = result.get("assistant_message")
         metadata = (
             assistant_message.get("metadata")
@@ -143,11 +147,44 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 "source": "assistant_response",
                 "mode": current.voice.config.mode,
                 "playback_requested": True,
+                "streaming_requested": streaming_requested,
+                "output_mode": "streaming" if streaming_requested else "buffered",
+                "completion_claimed": False,
+                "verification_claimed": False,
                 "user_heard_claimed": False,
             }
 
         async def _run_voice_output() -> None:
             try:
+                prewarm = getattr(current.voice, "prewarm_voice_output", None)
+                if (
+                    callable(prewarm)
+                    and current.voice.config.playback.prewarm_enabled
+                    and current.voice.config.spoken_responses_enabled
+                ):
+                    prewarm(
+                        session_id=session_id,
+                        metadata={
+                            "source": "assistant_response",
+                            "assistant_response_voice_output": True,
+                        },
+                    )
+                if streaming_requested and callable(
+                    getattr(current.voice, "stream_core_approved_spoken_text", None)
+                ):
+                    await current.voice.stream_core_approved_spoken_text(
+                        text,
+                        speak_allowed=True,
+                        source="assistant_response",
+                        persona_mode=surface_mode or "ghost",
+                        session_id=session_id,
+                        metadata={
+                            "active_module": active_module,
+                            "assistant_response_voice_output": True,
+                            "voice_stream_used_by_normal_path": True,
+                        },
+                    )
+                    return
                 synthesis = await current.voice.synthesize_speech_text(
                     text,
                     source="assistant_response",

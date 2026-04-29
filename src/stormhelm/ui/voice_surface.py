@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from stormhelm.core.voice.visualizer import build_voice_anchor_payload
+
 
 _RAW_AUDIO_KEYS = {
     "audio_bytes",
@@ -270,12 +272,40 @@ def build_voice_ui_state(status: dict[str, Any] | None) -> dict[str, Any]:
         confirmation=confirmation,
         realtime=realtime,
     )
+    voice_anchor = build_voice_anchor_payload(voice)
+    anchor_truth_flags = {
+        "user_heard_claimed": False,
+        "playback_started_does_not_mean_user_heard": True,
+        "speaking_visual_is_not_completion": True,
+        "speaking_visual_is_not_verification": True,
+    }
 
     return {
         "voice_available": voice_available,
         "voice_state": voice_state or ("dormant" if voice_available else "unavailable"),
         "voice_current_phase": current_phase,
         "voice_core_state": core_state,
+        "voice_anchor": voice_anchor,
+        "voice_anchor_state": voice_anchor.get("state", "idle"),
+        "speaking_visual_active": bool(
+            voice_anchor.get("speaking_visual_active", False)
+        ),
+        "voice_motion_intensity": voice_anchor.get("motion_intensity", 0.0),
+        "voice_audio_level": voice_anchor.get("output_level_rms", 0.0),
+        "voice_output_level_peak": voice_anchor.get("output_level_peak", 0.0),
+        "voice_smoothed_output_level": voice_anchor.get("smoothed_output_level", 0.0),
+        "voice_speech_energy": voice_anchor.get("speech_energy", 0.0),
+        "voice_audio_reactive_available": bool(
+            voice_anchor.get("audio_reactive_available", False)
+        ),
+        "voice_audio_reactive_source": voice_anchor.get(
+            "audio_reactive_source", "unavailable"
+        ),
+        "voice_visualizer_update_hz": voice_anchor.get("visualizer_update_hz", 30),
+        "voice_visualizer_last_update_at": voice_anchor.get(
+            "visualizer_last_update_at"
+        ),
+        "voice_anchor_truth_flags": anchor_truth_flags,
         "provider_name": _text(
             availability.get("provider_name")
             or provider.get("name")

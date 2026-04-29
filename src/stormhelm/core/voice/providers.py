@@ -6,8 +6,10 @@ import tempfile
 import threading
 import time
 import wave
+from collections.abc import AsyncIterable
 from collections.abc import Awaitable
 from collections.abc import Callable
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -4182,6 +4184,12 @@ class MockVoiceProvider:
                 live_format=request.live_format,
                 artifact_format=request.artifact_format,
                 status="failed",
+                streaming_transport_kind="mock_stream",
+                first_chunk_before_complete=False,
+                stream_start_monotonic_ms=0,
+                stream_complete_monotonic_ms=0,
+                stream_complete_ms=0,
+                bytes_total_summary_only=0,
                 streaming_started=True,
                 streaming_completed=False,
                 error_code=self.tts_stream_error_code,
@@ -4222,6 +4230,7 @@ class MockVoiceProvider:
                 received_at=now,
                 first_chunk=index == 0,
                 final_chunk=offset + chunk_size >= len(payload),
+                duration_ms=_elapsed_ms(started),
                 metadata={"mock": True, "raw_audio_present": False},
                 data=chunk_bytes,
             )
@@ -4245,6 +4254,15 @@ class MockVoiceProvider:
                     final_chunk_at=now,
                     total_chunks=len(chunks),
                     first_audio_byte_ms=_elapsed_ms(started),
+                    streaming_transport_kind="mock_stream",
+                    first_chunk_before_complete=True,
+                    stream_start_monotonic_ms=0,
+                    first_chunk_monotonic_ms=chunks[0].duration_ms
+                    if chunks
+                    else None,
+                    stream_complete_monotonic_ms=_elapsed_ms(started),
+                    stream_complete_ms=_elapsed_ms(started),
+                    bytes_total_summary_only=sum(chunk.size_bytes for chunk in chunks),
                     streaming_started=True,
                     streaming_completed=False,
                     partial_audio=bool(chunks),
@@ -4269,6 +4287,13 @@ class MockVoiceProvider:
             final_chunk_at=chunks[-1].received_at if chunks else utc_now_iso(),
             total_chunks=len(chunks),
             first_audio_byte_ms=_elapsed_ms(started) if chunks else None,
+            streaming_transport_kind="mock_stream",
+            first_chunk_before_complete=bool(chunks),
+            stream_start_monotonic_ms=0,
+            first_chunk_monotonic_ms=chunks[0].duration_ms if chunks else None,
+            stream_complete_monotonic_ms=_elapsed_ms(started),
+            stream_complete_ms=_elapsed_ms(started),
+            bytes_total_summary_only=sum(chunk.size_bytes for chunk in chunks),
             streaming_started=True,
             streaming_completed=True,
             partial_audio=False,
@@ -4314,6 +4339,12 @@ class MockVoiceProvider:
             live_format=request.live_format,
             artifact_format=request.artifact_format,
             status="failed",
+            streaming_transport_kind="mock_stream",
+            first_chunk_before_complete=False,
+            stream_start_monotonic_ms=0,
+            stream_complete_monotonic_ms=0,
+            stream_complete_ms=0,
+            bytes_total_summary_only=0,
             streaming_started=True,
             streaming_completed=False,
             error_code=error_code,
@@ -4555,11 +4586,17 @@ PostSpeech = Callable[
     bytes | dict[str, Any] | Awaitable[bytes | dict[str, Any]],
 ]
 
+PostSpeechStream = Callable[
+    ...,
+    Iterable[bytes] | AsyncIterable[bytes] | Awaitable[Iterable[bytes] | AsyncIterable[bytes]],
+]
+
 
 @dataclass(slots=True)
 class OpenAIVoiceProvider(OpenAIVoiceProviderStub):
     post_transcription: PostTranscription | None = None
     post_speech: PostSpeech | None = None
+    post_speech_stream: PostSpeechStream | None = None
 
     @property
     def stt_model(self) -> str:
@@ -4807,6 +4844,24 @@ class OpenAIVoiceProvider(OpenAIVoiceProviderStub):
         )
 
     async def _post_speech(self, request: VoiceSpeechRequest) -> bytes | dict[str, Any]:
+        url, headers, body, timeout = self._speech_http_request(request)
+
+        if self.post_speech is not None:
+            result = self.post_speech(
+                url=url, headers=headers, json=body, timeout=timeout
+            )
+            if hasattr(result, "__await__"):
+                return await result  # type: ignore[no-any-return]
+            return result
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(url, headers=headers, json=body)
+            response.raise_for_status()
+            return response.content
+
+    def _speech_http_request(
+        self, request: VoiceSpeechRequest
+    ) -> tuple[str, dict[str, str], dict[str, object], float]:
         body: dict[str, object] = {
             "model": request.model or self.tts_model,
             "input": request.text,
@@ -4822,19 +4877,34 @@ class OpenAIVoiceProvider(OpenAIVoiceProviderStub):
             "Authorization": f"Bearer {self.openai_config.api_key}",
             "Content-Type": "application/json",
         }
+        return url, headers, body, timeout
 
-        if self.post_speech is not None:
-            result = self.post_speech(
+    async def _post_speech_stream(
+        self, request: VoiceSpeechRequest
+    ) -> AsyncIterable[bytes]:
+        url, headers, body, timeout = self._speech_http_request(request)
+        if self.post_speech_stream is not None:
+            stream = self.post_speech_stream(
                 url=url, headers=headers, json=body, timeout=timeout
             )
-            if hasattr(result, "__await__"):
-                return await result  # type: ignore[no-any-return]
-            return result
+            if hasattr(stream, "__await__"):
+                stream = await stream  # type: ignore[assignment]
+            if hasattr(stream, "__aiter__"):
+                async for chunk in stream:  # type: ignore[union-attr]
+                    if chunk:
+                        yield bytes(chunk)
+            else:
+                for chunk in stream:  # type: ignore[union-attr]
+                    if chunk:
+                        yield bytes(chunk)
+            return
 
         async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(url, headers=headers, json=body)
-            response.raise_for_status()
-            return response.content
+            async with client.stream("POST", url, headers=headers, json=body) as response:
+                response.raise_for_status()
+                async for chunk in response.aiter_bytes():
+                    if chunk:
+                        yield bytes(chunk)
 
     def _build_tts_audio_output(
         self, request: VoiceSpeechRequest, audio_bytes: bytes
@@ -4901,6 +4971,138 @@ class OpenAIVoiceProvider(OpenAIVoiceProviderStub):
         )
         start = time.perf_counter()
         self.network_call_count += 1
+        if self.post_speech is not None and self.post_speech_stream is None:
+            return await self._stream_speech_buffered_projection(
+                request,
+                stream_request,
+                start,
+            )
+        chunks: list[VoiceStreamingTTSChunk] = []
+        bytes_total = 0
+        try:
+            async for chunk_bytes in self._post_speech_stream(stream_request):
+                bytes_total += len(chunk_bytes)
+                index = len(chunks)
+                elapsed = _elapsed_ms(start)
+                chunks.append(
+                    VoiceStreamingTTSChunk(
+                        tts_stream_id=request.tts_stream_id,
+                        speech_request_id=speech_request.speech_request_id,
+                        chunk_index=index,
+                        size_bytes=len(chunk_bytes),
+                        live_format=request.live_format or self.tts_live_format,
+                        provider="openai",
+                        model=speech_request.model or self.tts_model,
+                        voice=speech_request.voice or self.tts_voice,
+                        session_id=speech_request.session_id,
+                        turn_id=speech_request.turn_id,
+                        first_chunk=index == 0,
+                        final_chunk=False,
+                        duration_ms=elapsed,
+                        metadata={
+                            "response_kind": "stream_bytes",
+                            "raw_audio_present": False,
+                        },
+                        data=chunk_bytes,
+                    )
+                )
+        except TimeoutError:
+            return self._stream_failure(
+                request,
+                error_code="provider_timeout",
+                error_message="OpenAI streaming TTS provider timed out.",
+                streaming_transport_kind="true_http_stream",
+            )
+        except httpx.TimeoutException:
+            return self._stream_failure(
+                request,
+                error_code="provider_timeout",
+                error_message="OpenAI streaming TTS provider timed out.",
+                streaming_transport_kind="true_http_stream",
+            )
+        except Exception as error:
+            if chunks:
+                stream_complete_ms = _elapsed_ms(start)
+                chunks[-1] = replace(chunks[-1], final_chunk=True)
+                return VoiceStreamingTTSResult(
+                    ok=False,
+                    tts_stream_id=request.tts_stream_id,
+                    speech_request_id=speech_request.speech_request_id,
+                    provider="openai",
+                    model=speech_request.model or self.tts_model,
+                    voice=speech_request.voice or self.tts_voice,
+                    live_format=request.live_format or self.tts_live_format,
+                    artifact_format=request.artifact_format or self.tts_artifact_format,
+                    status="partial_failed",
+                    chunks=tuple(chunks),
+                    first_chunk_at=chunks[0].received_at,
+                    final_chunk_at=chunks[-1].received_at,
+                    total_chunks=len(chunks),
+                    first_audio_byte_ms=chunks[0].duration_ms,
+                    streaming_transport_kind="true_http_stream",
+                    first_chunk_before_complete=True,
+                    stream_start_monotonic_ms=0,
+                    first_chunk_monotonic_ms=chunks[0].duration_ms,
+                    stream_complete_monotonic_ms=stream_complete_ms,
+                    stream_complete_ms=stream_complete_ms,
+                    bytes_total_summary_only=bytes_total,
+                    streaming_started=True,
+                    streaming_completed=False,
+                    partial_audio=True,
+                    error_code="provider_error",
+                    error_message=str(error),
+                    metadata={"raw_audio_present": False},
+                )
+            return self._stream_failure(
+                request,
+                error_code="provider_error",
+                error_message=str(error),
+                streaming_transport_kind="true_http_stream",
+            )
+        if not chunks:
+            return self._stream_failure(
+                request,
+                error_code="empty_audio_output",
+                error_message="OpenAI TTS returned no streaming audio bytes.",
+                streaming_transport_kind="true_http_stream",
+            )
+        stream_complete_ms = _elapsed_ms(start)
+        chunks[-1] = replace(chunks[-1], final_chunk=True)
+        first_chunk_ms = chunks[0].duration_ms
+        return VoiceStreamingTTSResult(
+            ok=True,
+            tts_stream_id=request.tts_stream_id,
+            speech_request_id=speech_request.speech_request_id,
+            provider="openai",
+            model=speech_request.model or self.tts_model,
+            voice=speech_request.voice or self.tts_voice,
+            live_format=request.live_format or self.tts_live_format,
+            artifact_format=request.artifact_format or self.tts_artifact_format,
+            status="completed",
+            chunks=tuple(chunks),
+            first_chunk_at=chunks[0].received_at,
+            final_chunk_at=chunks[-1].received_at,
+            total_chunks=len(chunks),
+            first_audio_byte_ms=first_chunk_ms,
+            streaming_transport_kind="true_http_stream",
+            first_chunk_before_complete=True,
+            stream_start_monotonic_ms=0,
+            first_chunk_monotonic_ms=first_chunk_ms,
+            stream_complete_monotonic_ms=stream_complete_ms,
+            stream_complete_ms=stream_complete_ms,
+            bytes_total_summary_only=bytes_total,
+            streaming_started=True,
+            streaming_completed=True,
+            metadata={"raw_audio_present": False},
+        )
+
+    async def _stream_speech_buffered_projection(
+        self,
+        request: VoiceStreamingTTSRequest,
+        stream_request: VoiceSpeechRequest,
+        start: float,
+    ) -> VoiceStreamingTTSResult:
+        speech_request = request.speech_request
         try:
             payload = await self._post_speech(stream_request)
         except TimeoutError:
@@ -4908,21 +5110,21 @@ class OpenAIVoiceProvider(OpenAIVoiceProviderStub):
                 request,
                 error_code="provider_timeout",
                 error_message="OpenAI streaming TTS provider timed out.",
-                first_audio_byte_ms=_elapsed_ms(start),
+                streaming_transport_kind="buffered_chunk_projection",
             )
         except httpx.TimeoutException:
             return self._stream_failure(
                 request,
                 error_code="provider_timeout",
                 error_message="OpenAI streaming TTS provider timed out.",
-                first_audio_byte_ms=_elapsed_ms(start),
+                streaming_transport_kind="buffered_chunk_projection",
             )
         except Exception as error:
             return self._stream_failure(
                 request,
                 error_code="provider_error",
                 error_message=str(error),
-                first_audio_byte_ms=_elapsed_ms(start),
+                streaming_transport_kind="buffered_chunk_projection",
             )
         audio_bytes, provider_metadata = _speech_payload_to_bytes_and_metadata(payload)
         if not audio_bytes:
@@ -4930,9 +5132,10 @@ class OpenAIVoiceProvider(OpenAIVoiceProviderStub):
                 request,
                 error_code="empty_audio_output",
                 error_message="OpenAI TTS returned no streaming audio bytes.",
-                first_audio_byte_ms=_elapsed_ms(start),
                 metadata=provider_metadata,
+                streaming_transport_kind="buffered_chunk_projection",
             )
+        stream_complete_ms = _elapsed_ms(start)
         chunk_size = max(1, min(16384, len(audio_bytes)))
         chunks: list[VoiceStreamingTTSChunk] = []
         for index, offset in enumerate(range(0, len(audio_bytes), chunk_size)):
@@ -4951,7 +5154,11 @@ class OpenAIVoiceProvider(OpenAIVoiceProviderStub):
                     turn_id=speech_request.turn_id,
                     first_chunk=index == 0,
                     final_chunk=offset + chunk_size >= len(audio_bytes),
-                    metadata={"response_kind": "bytes", "raw_audio_present": False},
+                    duration_ms=stream_complete_ms,
+                    metadata={
+                        "response_kind": "buffered_projection",
+                        "raw_audio_present": False,
+                    },
                     data=chunk_bytes,
                 )
             )
@@ -4969,7 +5176,14 @@ class OpenAIVoiceProvider(OpenAIVoiceProviderStub):
             first_chunk_at=chunks[0].received_at if chunks else None,
             final_chunk_at=chunks[-1].received_at if chunks else None,
             total_chunks=len(chunks),
-            first_audio_byte_ms=_elapsed_ms(start) if chunks else None,
+            first_audio_byte_ms=stream_complete_ms if chunks else None,
+            streaming_transport_kind="buffered_chunk_projection",
+            first_chunk_before_complete=False,
+            stream_start_monotonic_ms=0,
+            first_chunk_monotonic_ms=stream_complete_ms if chunks else None,
+            stream_complete_monotonic_ms=stream_complete_ms,
+            stream_complete_ms=stream_complete_ms,
+            bytes_total_summary_only=len(audio_bytes),
             streaming_started=True,
             streaming_completed=True,
             metadata=provider_metadata,
@@ -5011,6 +5225,7 @@ class OpenAIVoiceProvider(OpenAIVoiceProviderStub):
         error_message: str,
         first_audio_byte_ms: int | None = None,
         metadata: dict[str, Any] | None = None,
+        streaming_transport_kind: str = "unknown",
     ) -> VoiceStreamingTTSResult:
         speech_request = request.speech_request
         return VoiceStreamingTTSResult(
@@ -5024,6 +5239,12 @@ class OpenAIVoiceProvider(OpenAIVoiceProviderStub):
             artifact_format=request.artifact_format or self.tts_artifact_format,
             status="failed",
             first_audio_byte_ms=first_audio_byte_ms,
+            streaming_transport_kind=streaming_transport_kind,
+            first_chunk_before_complete=False,
+            stream_start_monotonic_ms=0,
+            stream_complete_monotonic_ms=first_audio_byte_ms,
+            stream_complete_ms=first_audio_byte_ms,
+            bytes_total_summary_only=0,
             streaming_started=True,
             streaming_completed=False,
             error_code=error_code,

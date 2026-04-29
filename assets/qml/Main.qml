@@ -289,6 +289,15 @@ ApplicationWindow {
             opacity: root.mix(0.0, 1.0, root.ghostRevealProgress)
             scale: root.mix(0.988, 1.0, root.ghostRevealProgress)
             assistantState: bridge ? bridge.assistantState : "idle"
+            voiceState: bridge ? bridge.voiceState : ({})
+            anchorState: bridge ? (bridge.voiceState.voice_anchor_state || "idle") : "idle"
+            speakingActive: bridge ? !!bridge.voiceState.speaking_visual_active : false
+            motionIntensity: bridge ? Number(bridge.voiceState.voice_motion_intensity || 0.12) : 0.12
+            audioLevel: bridge ? Number(bridge.voiceState.voice_smoothed_output_level || 0) : 0
+            smoothedAudioLevel: bridge ? Number(bridge.voiceState.voice_smoothed_output_level || 0) : 0
+            audioReactiveAvailable: bridge ? !!bridge.voiceState.voice_audio_reactive_available : false
+            audioReactiveSource: bridge ? (bridge.voiceState.voice_audio_reactive_source || "unavailable") : "unavailable"
+            statusLabel: bridge ? ((bridge.voiceState.voice_anchor && bridge.voiceState.voice_anchor.state_label) || "") : ""
             shellMode: bridge ? bridge.mode : "ghost"
             adaptiveGlowBoost: root.ghostMode ? root.ghostStyleNumber("glowBoost", 0.06) : 0
             adaptiveAnchorGlowBoost: root.ghostMode ? root.ghostStyleNumber("anchorGlowBoost", 0.08) : 0

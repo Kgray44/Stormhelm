@@ -1,4 +1,4 @@
-# Latency Tracing L0/L1/L2/L3/L4/L4.1/L4.2/L4.3/L4.5/L5
+# Latency Tracing L0/L1/L2/L3/L4/L4.1/L4.2/L4.3/L4.5/L5/L5A/L5.1/L5.2
 
 Stormhelm latency tracing is the shared observability contract for core
 requests, route handling, voice evaluation, and command/Kraken evaluation rows.
@@ -31,7 +31,16 @@ policy, cancellation state, and restart/interruption state are now reported.
 L5 adds voice first-audio observability for the live speech path: streaming TTS
 state, live playback stream state, prewarm use, fallback use, partial playback,
 and Core-result-to-first-audio timing are projected into the same trace and
-Kraken surfaces.
+Kraken surfaces. L5.1 wires normal `/chat/send` assistant voice output and
+capture play-response into the Core-approved streaming path when streaming TTS
+and streaming playback are enabled, and labels true HTTP streaming versus
+buffered chunk projection honestly.
+L5A audits which latency pipes are live, partial, scaffolded, policy-only, or
+future-deferred. It is not a behavior phase; it labels integration reality so
+later work does not mistake installed contracts for product behavior.
+L5.2 adds backend-owned voice anchor visual state and safe output-envelope
+metadata. QML renders state and motion from status payloads; it does not infer
+command truth locally, inspect raw audio, or claim the user heard playback.
 
 Fast route triage is advisory. It does not execute tools, approve actions,
 verify results, mutate trust/session state, or replace the deterministic planner.
@@ -106,9 +115,15 @@ status. L1 rows also include `execution_mode`, `partial_response_returned`,
 `attempt_count`, `cancellation_state`, `yield_state`, and
 `restart_recovery_state`. L5 rows add `voice_streaming_tts_enabled`,
 `voice_first_audio_ms`, `voice_core_to_first_audio_ms`,
-`voice_tts_first_chunk_ms`, `voice_playback_start_ms`, `voice_live_format`,
-`voice_streaming_fallback_used`, `voice_prewarm_used`, and
-`voice_partial_playback`.
+`voice_tts_first_chunk_ms`, `voice_playback_start_ms`,
+`voice_streaming_transport_kind`, `voice_first_chunk_before_complete`,
+`voice_stream_used_by_normal_path`, `voice_streaming_miss_reason`,
+`voice_live_format`, `voice_streaming_fallback_used`, `voice_prewarm_used`,
+and `voice_partial_playback`. L5.2 rows add `voice_anchor_state`,
+`voice_speaking_visual_active`, `voice_audio_reactive_source`,
+`voice_audio_reactive_available`, `voice_anchor_motion_intensity`,
+`voice_anchor_audio_level`, `voice_visualizer_update_hz`, and
+`voice_anchor_user_heard_claimed`.
 
 Voice release/evaluation latency still exposes `VoiceLatencyBreakdown`, with a
 compatible `latency_summary` projection for comparing voice stages against core
@@ -188,8 +203,15 @@ L5 records voice first-audio fields:
 - `first_chunk_to_playback_start_ms`: time from first chunk receipt to live playback start.
 - `core_result_to_first_audio_ms`: time from Core-approved text to playback start.
 - `request_to_first_audio_ms` / `voice_first_audio_ms`: total request-to-first-audio timing when available.
-- `streaming_enabled`, `live_format`, `artifact_format`, `fallback_used`, and `prewarm_used`: live-output posture.
+- `streaming_enabled`, `streaming_transport_kind`, `first_chunk_before_complete`, `live_format`, `artifact_format`, `fallback_used`, and `prewarm_used`: live-output posture.
+- `voice_stream_used_by_normal_path`: normal assistant/capture voice output used the streaming service path rather than legacy buffered synthesize/playback.
+- `voice_streaming_miss_reason`: why a voice row did not use streaming when streaming was expected or configured.
 - `partial_playback`: audio began but the stream did not complete.
+- `voice_anchor_state`: backend-owned visual state for the Ghost/voice anchor.
+- `voice_audio_reactive_source`: `playback_output_envelope`, `streaming_chunk_envelope`, `precomputed_artifact_envelope`, `synthetic_fallback_envelope`, or `unavailable`.
+- `voice_audio_reactive_available`: true only for playback, streaming chunk, or precomputed envelope sources; synthetic fallback is labeled and not counted as real audio-reactive output.
+- `voice_speaking_visual_active`: speaking motion is active. This is not completion, verification, or proof the user heard audio.
+- `voice_anchor_motion_intensity`, `voice_anchor_audio_level`, and `voice_visualizer_update_hz`: bounded QML visualizer controls.
 
 Playback started or completed is playback-provider state only. It is not proof
 that the user heard the audio and it is not command/task completion.
@@ -197,6 +219,33 @@ that the user heard the audio and it is not command/task completion.
 Aggregate boundary fields such as `total_latency_ms`, `http_boundary_ms`, and
 `endpoint_dispatch_ms` remain visible but are not treated as the "longest stage"
 because they wrap other work.
+
+## L5A Integration Audit
+
+The repo-derived inventory lives in
+`stormhelm.core.latency_integration_audit.build_latency_integration_audit()`,
+with the human report at [latency-integration-audit.md](latency-integration-audit.md).
+
+Current audit labels that matter for future work:
+
+- L0 tracing, L2 route triage, worker lane/timing, inline fast-path protection,
+  workspace assemble continuation, L4.4 reporting, priority scheduler/caps,
+  streaming TTS contracts, normal assistant voice-output streaming, and voice
+  first-audio metrics are live and used.
+- Partial response posture, snapshot policy breadth, snapshot invalidation,
+  async route progress contracts, most L4.3 continuation handlers,
+  retry/yield/cancel cooperation, true OpenAI provider smoke proof, local live
+  playback hooks, and UI rendering depth are partial.
+- Background refresh is a hook, not broad refresh coverage.
+- `screen_awareness.verify_change` is policy-known but handler-missing.
+- Broad software execute continuation is policy-known and deferred until the
+  trust/side-effect front half is proofed.
+- True OpenAI HTTP streaming code is present and unit-tested with injected
+  transport, but live OpenAI/network and real-device playback proof remain
+  opt-in validation work.
+
+These labels are product-truth boundaries. A field may exist in traces or
+reports before the corresponding behavior is normal-path live.
 
 ## Budgets
 
@@ -756,6 +805,21 @@ Use these fields to decide whether further scheduler cleanup is needed before
 moving to L5 voice work. Scheduler pressure is operational evidence; it is not a
 route correctness failure by itself.
 
+L5/L5.1 adds voice streaming and first-audio aggregates:
+
+- first-audio p50/p90/p95/max when voice rows carry `voice_first_audio_ms`
+- transport counts by `voice_streaming_transport_kind`
+- `voice_streaming_path_used_count` for normal assistant/capture voice paths
+- `voice_buffered_projection_count` for buffered helper output labeled as chunk projection
+- `normal_path_streaming_miss_count` for voice rows that had streaming enabled but did not use the normal streaming path
+- fallback, prewarm, and partial-playback counts from the L5 fields
+- L5.2 rows expose anchor state and audio-reactive source labels so reports can separate real playback envelope, streaming chunk envelope, precomputed artifact envelope, synthetic fallback, and unavailable visualizer state.
+
+These fields are evidence, not authority. A first audio timestamp is not task
+completion, playback is not proof the user heard audio, and buffered projection
+must not be presented as true streaming. Synthetic anchor motion must not be
+presented as real audio reactivity.
+
 Use this report to pick the next optimization target. Keep routing correctness,
 truthfulness, and latency as separate axes.
 
@@ -765,12 +829,12 @@ Latency payloads are bounded and scrubbed. They must not contain API keys,
 authorization headers, token-like values, raw audio, generated audio bytes, or
 large payload bodies.
 
-## Deferred To L5+
+## Deferred To L6+
 
 L4.5 intentionally does not implement a full planner rewrite, broad subsystem
 async conversion, durable cross-process scheduler redesign, speculative
 execution, durable semantic memory redesign, persistent screenshot/audio cache,
-streaming TTS, playback backend replacement, Realtime warmup/reuse,
+live provider/device smoke proof, playback backend replacement, Realtime warmup/reuse,
 provider-first fuzzy routing, trust/approval weakening, verification weakening,
 frontend-owned cache truth, fake job completion, fake verification, stale
 context masquerading as current truth, cloud/distributed scheduling, screen
