@@ -18,6 +18,15 @@ class RouteExecutionMode(str, Enum):
     CLARIFICATION = "clarification"
 
 
+class RouteLatencyPosture(str, Enum):
+    INSTANT = "instant"
+    CACHED_FAST = "cached_fast"
+    BOUNDED_LIVE = "bounded_live"
+    ASYNC_CONTINUATION = "async_continuation"
+    CLARIFICATION = "clarification"
+    UNSUPPORTED = "unsupported"
+
+
 LATENCY_COUNTER_KEYS = {
     "memoized_summary_hits",
     "context_cache_hits",
@@ -68,12 +77,18 @@ LATENCY_AGGREGATE_KEYS = {
     "core_result_to_tts_start_ms",
     "tts_start_to_first_chunk_ms",
     "first_chunk_to_playback_start_ms",
+    "first_chunk_to_sink_accept_ms",
     "core_result_to_first_audio_ms",
+    "core_result_to_first_output_start_ms",
     "request_to_first_audio_ms",
+    "first_output_start_ms",
+    "null_sink_first_accept_ms",
     "voice_first_audio_ms",
     "voice_core_to_first_audio_ms",
     "voice_tts_first_chunk_ms",
     "voice_playback_start_ms",
+    "voice_first_output_start_ms",
+    "voice_null_sink_first_accept_ms",
 }
 
 SENSITIVE_KEY_PARTS = (
@@ -147,6 +162,323 @@ class LatencyBudgetResult:
 
     def to_dict(self) -> dict[str, Any]:
         return _json_ready(asdict(self))
+
+
+@dataclass(frozen=True, slots=True)
+class RouteFamilyLatencyContract:
+    route_family: str
+    latency_posture: RouteLatencyPosture
+    hot_path_budget_ms: float
+    live_probe_budget_ms: float = 0.0
+    cache_family: str = ""
+    cache_ttl_ms: float = 0.0
+    stale_allowed: bool = False
+    async_continuation_allowed: bool = False
+    worker_lane: str = "interactive"
+    detail_profile_required: str = ""
+    verification_required: bool = False
+    no_fake_data_rule: str = "No fabricated values; return unsupported, cached, or deferred state when data is unavailable."
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["latency_posture"] = self.latency_posture.value
+        return _json_ready(payload)
+
+
+def _route_contract(
+    route_family: str,
+    latency_posture: RouteLatencyPosture,
+    hot_path_budget_ms: float,
+    *,
+    live_probe_budget_ms: float = 0.0,
+    cache_family: str = "",
+    cache_ttl_ms: float = 0.0,
+    stale_allowed: bool = False,
+    async_continuation_allowed: bool = False,
+    worker_lane: str = "interactive",
+    detail_profile_required: str = "",
+    verification_required: bool = False,
+    no_fake_data_rule: str = "",
+) -> RouteFamilyLatencyContract:
+    return RouteFamilyLatencyContract(
+        route_family=route_family,
+        latency_posture=latency_posture,
+        hot_path_budget_ms=hot_path_budget_ms,
+        live_probe_budget_ms=live_probe_budget_ms,
+        cache_family=cache_family,
+        cache_ttl_ms=cache_ttl_ms,
+        stale_allowed=stale_allowed,
+        async_continuation_allowed=async_continuation_allowed,
+        worker_lane=worker_lane,
+        detail_profile_required=detail_profile_required,
+        verification_required=verification_required,
+        no_fake_data_rule=no_fake_data_rule
+        or "No fabricated values; return unsupported, cached, or deferred state when data is unavailable.",
+    )
+
+
+ROUTE_FAMILY_LATENCY_CONTRACTS: dict[str, RouteFamilyLatencyContract] = {
+    "calculations": _route_contract("calculations", RouteLatencyPosture.INSTANT, 250.0),
+    "browser_destination": _route_contract("browser_destination", RouteLatencyPosture.INSTANT, 250.0),
+    "time": _route_contract("time", RouteLatencyPosture.INSTANT, 250.0),
+    "weather": _route_contract(
+        "weather",
+        RouteLatencyPosture.BOUNDED_LIVE,
+        1500.0,
+        live_probe_budget_ms=750.0,
+        cache_family="weather",
+        cache_ttl_ms=600_000.0,
+        stale_allowed=True,
+        async_continuation_allowed=True,
+        worker_lane="background_refresh",
+    ),
+    "location": _route_contract(
+        "location",
+        RouteLatencyPosture.CACHED_FAST,
+        500.0,
+        live_probe_budget_ms=250.0,
+        cache_family="location",
+        cache_ttl_ms=600_000.0,
+        stale_allowed=True,
+        async_continuation_allowed=True,
+        worker_lane="background_refresh",
+    ),
+    "power": _route_contract(
+        "power",
+        RouteLatencyPosture.CACHED_FAST,
+        500.0,
+        live_probe_budget_ms=150.0,
+        cache_family="system_power",
+        cache_ttl_ms=30_000.0,
+        stale_allowed=True,
+        async_continuation_allowed=True,
+        worker_lane="background_refresh",
+    ),
+    "network": _route_contract(
+        "network",
+        RouteLatencyPosture.CACHED_FAST,
+        500.0,
+        live_probe_budget_ms=150.0,
+        cache_family="system_network",
+        cache_ttl_ms=30_000.0,
+        stale_allowed=True,
+        async_continuation_allowed=True,
+        worker_lane="background_refresh",
+    ),
+    "resources": _route_contract(
+        "resources",
+        RouteLatencyPosture.CACHED_FAST,
+        500.0,
+        live_probe_budget_ms=150.0,
+        cache_family="system_resources",
+        cache_ttl_ms=30_000.0,
+        stale_allowed=True,
+        async_continuation_allowed=True,
+        worker_lane="background_refresh",
+    ),
+    "storage": _route_contract(
+        "storage",
+        RouteLatencyPosture.CACHED_FAST,
+        500.0,
+        live_probe_budget_ms=150.0,
+        cache_family="system_storage",
+        cache_ttl_ms=30_000.0,
+        stale_allowed=True,
+        async_continuation_allowed=True,
+        worker_lane="background_refresh",
+    ),
+    "machine": _route_contract(
+        "machine",
+        RouteLatencyPosture.CACHED_FAST,
+        500.0,
+        cache_family="machine_status",
+        cache_ttl_ms=60_000.0,
+        stale_allowed=True,
+    ),
+    "hardware_telemetry": _route_contract(
+        "hardware_telemetry",
+        RouteLatencyPosture.ASYNC_CONTINUATION,
+        500.0,
+        live_probe_budget_ms=150.0,
+        cache_family="hardware_telemetry",
+        cache_ttl_ms=30_000.0,
+        stale_allowed=True,
+        async_continuation_allowed=True,
+        worker_lane="background_refresh",
+        detail_profile_required="deck_detail",
+    ),
+    "workspace_operations": _route_contract(
+        "workspace_operations",
+        RouteLatencyPosture.ASYNC_CONTINUATION,
+        750.0,
+        cache_family="workspace_summary",
+        cache_ttl_ms=120_000.0,
+        stale_allowed=True,
+        async_continuation_allowed=True,
+        worker_lane="normal",
+        detail_profile_required="deck_summary",
+    ),
+    "task_continuity": _route_contract(
+        "task_continuity",
+        RouteLatencyPosture.CACHED_FAST,
+        500.0,
+        cache_family="task_continuity",
+        cache_ttl_ms=120_000.0,
+        stale_allowed=True,
+        async_continuation_allowed=True,
+        worker_lane="background_refresh",
+    ),
+    "file_operation": _route_contract(
+        "file_operation",
+        RouteLatencyPosture.ASYNC_CONTINUATION,
+        500.0,
+        async_continuation_allowed=True,
+        worker_lane="normal",
+        verification_required=True,
+        detail_profile_required="deck_summary",
+    ),
+    "desktop_search": _route_contract(
+        "desktop_search",
+        RouteLatencyPosture.ASYNC_CONTINUATION,
+        500.0,
+        cache_family="desktop_search",
+        cache_ttl_ms=120_000.0,
+        stale_allowed=True,
+        async_continuation_allowed=True,
+        worker_lane="normal",
+        detail_profile_required="deck_summary",
+    ),
+    "app_control": _route_contract(
+        "app_control",
+        RouteLatencyPosture.BOUNDED_LIVE,
+        750.0,
+        live_probe_budget_ms=500.0,
+        async_continuation_allowed=True,
+        verification_required=True,
+    ),
+    "window_control": _route_contract(
+        "window_control",
+        RouteLatencyPosture.BOUNDED_LIVE,
+        750.0,
+        live_probe_budget_ms=500.0,
+        async_continuation_allowed=True,
+        verification_required=True,
+    ),
+    "system_control": _route_contract(
+        "system_control",
+        RouteLatencyPosture.BOUNDED_LIVE,
+        750.0,
+        live_probe_budget_ms=500.0,
+        async_continuation_allowed=True,
+        verification_required=True,
+    ),
+    "software_control": _route_contract(
+        "software_control",
+        RouteLatencyPosture.ASYNC_CONTINUATION,
+        750.0,
+        async_continuation_allowed=True,
+        worker_lane="normal",
+        verification_required=True,
+        detail_profile_required="deck_summary",
+    ),
+    "software_recovery": _route_contract(
+        "software_recovery",
+        RouteLatencyPosture.ASYNC_CONTINUATION,
+        750.0,
+        async_continuation_allowed=True,
+        worker_lane="normal",
+        verification_required=True,
+        detail_profile_required="deck_summary",
+    ),
+    "discord_relay": _route_contract(
+        "discord_relay",
+        RouteLatencyPosture.ASYNC_CONTINUATION,
+        500.0,
+        async_continuation_allowed=True,
+        worker_lane="normal",
+        verification_required=True,
+    ),
+    "screen_awareness": _route_contract(
+        "screen_awareness",
+        RouteLatencyPosture.CLARIFICATION,
+        500.0,
+        cache_family="screen_awareness",
+        cache_ttl_ms=5_000.0,
+        stale_allowed=True,
+        async_continuation_allowed=True,
+        worker_lane="normal",
+        verification_required=True,
+        no_fake_data_rule="Never impersonate pixels or clipboard-only evidence as live screen data.",
+    ),
+    "trust_approvals": _route_contract(
+        "trust_approvals",
+        RouteLatencyPosture.INSTANT,
+        250.0,
+        verification_required=True,
+    ),
+    "voice_control": _route_contract("voice_control", RouteLatencyPosture.INSTANT, 250.0),
+    "generic_provider": _route_contract(
+        "generic_provider",
+        RouteLatencyPosture.ASYNC_CONTINUATION,
+        1500.0,
+        live_probe_budget_ms=1000.0,
+        async_continuation_allowed=True,
+        worker_lane="normal",
+        no_fake_data_rule="Provider fallback cannot claim native status data or invent unavailable facts.",
+    ),
+    "unsupported": _route_contract(
+        "unsupported",
+        RouteLatencyPosture.UNSUPPORTED,
+        250.0,
+        no_fake_data_rule="Return unsupported state instead of fabricating capability or data.",
+    ),
+    "context_clarification": _route_contract(
+        "context_clarification",
+        RouteLatencyPosture.CLARIFICATION,
+        250.0,
+    ),
+    "semantic_memory": _route_contract(
+        "semantic_memory",
+        RouteLatencyPosture.ASYNC_CONTINUATION,
+        750.0,
+        cache_family="semantic_memory",
+        cache_ttl_ms=120_000.0,
+        stale_allowed=True,
+        async_continuation_allowed=True,
+        worker_lane="normal",
+    ),
+}
+
+_ROUTE_FAMILY_CONTRACT_ALIASES = {
+    "clock": "time",
+    "native_unsupported": "unsupported",
+    "clarification": "context_clarification",
+    "file": "file_operation",
+    "files": "file_operation",
+    "provider": "generic_provider",
+    "provider_fallback": "generic_provider",
+    "recent_files": "task_continuity",
+    "resource": "resources",
+    "system": "machine",
+    "system_overview": "machine",
+    "tool_execution": "unsupported",
+    "terminal": "unsupported",
+    "shell_command": "unsupported",
+}
+
+
+def get_route_latency_contract(route_family: str | None) -> RouteFamilyLatencyContract:
+    family = str(route_family or "unsupported").strip().lower() or "unsupported"
+    family = _ROUTE_FAMILY_CONTRACT_ALIASES.get(family, family)
+    return ROUTE_FAMILY_LATENCY_CONTRACTS.get(
+        family,
+        _route_contract(
+            family,
+            RouteLatencyPosture.UNSUPPORTED,
+            250.0,
+            no_fake_data_rule="Unknown route family has no live hot-path authority.",
+        ),
+    )
 
 
 @dataclass(slots=True)
@@ -327,10 +659,22 @@ class LatencyTrace:
     voice_core_to_first_audio_ms: float = 0.0
     voice_tts_first_chunk_ms: float = 0.0
     voice_playback_start_ms: float = 0.0
+    voice_first_chunk_to_sink_accept_ms: float = 0.0
+    voice_first_output_start_ms: float = 0.0
+    voice_null_sink_first_accept_ms: float = 0.0
     voice_streaming_transport_kind: str = ""
+    voice_sink_kind: str = ""
     voice_first_chunk_before_complete: bool = False
     voice_stream_used_by_normal_path: bool = False
     voice_streaming_miss_reason: str = ""
+    voice_live_openai_voice_smoke_run: bool = False
+    voice_live_openai_first_chunk_ms: float = 0.0
+    voice_wake_loop_streaming_output_used: bool = False
+    voice_wake_loop_streaming_miss_reason: str = ""
+    voice_realtime_deferred_to_l6: bool = False
+    voice_realtime_session_creation_attempted: bool = False
+    voice_raw_audio_logged: bool = False
+    voice_user_heard_claimed: bool = False
     voice_live_format: str = ""
     voice_streaming_fallback_used: bool = False
     voice_prewarm_used: bool = False
@@ -387,6 +731,16 @@ class LatencyTrace:
     def to_summary_dict(self) -> dict[str, Any]:
         budget = self.budget or LatencyBudget.for_label(None)
         result = self.budget_result()
+        policy = classify_route_latency_policy(
+            route_family=self.route_family,
+            subsystem=self.subsystem,
+            request_kind=self.request_kind,
+            execution_plan_type=self.execution_plan_type,
+            surface_mode=self.surface_mode,
+            active_module=self.active_module,
+            result_state=self.result_state,
+            fail_fast_reason=self.fail_fast_reason,
+        )
         return {
             "trace_id": self.trace_id,
             "request_id": self.request_id,
@@ -405,6 +759,14 @@ class LatencyTrace:
             "hard_ceiling_exceeded": result.hard_ceiling_exceeded,
             "longest_stage": self.longest_stage,
             "longest_stage_ms": self.longest_stage_ms,
+            "latency_posture": _coerce_latency_posture(policy.latency_posture).value,
+            "hot_path_budget_ms": policy.hot_path_budget_ms,
+            "live_probe_budget_ms": policy.live_probe_budget_ms,
+            "cache_family": policy.cache_family,
+            "cache_ttl_ms": policy.cache_ttl_ms,
+            "stale_allowed": bool(policy.stale_allowed),
+            "async_continuation_allowed": bool(policy.async_continuation_allowed),
+            "no_fake_data_rule": policy.no_fake_data_rule,
             "execution_mode": self.execution_mode,
             "async_expected": bool(self.async_expected),
             "first_feedback_ms": self.first_feedback_ms,
@@ -522,10 +884,37 @@ class LatencyTrace:
             "voice_core_to_first_audio_ms": _safe_float(self.voice_core_to_first_audio_ms),
             "voice_tts_first_chunk_ms": _safe_float(self.voice_tts_first_chunk_ms),
             "voice_playback_start_ms": _safe_float(self.voice_playback_start_ms),
+            "voice_first_chunk_to_sink_accept_ms": _safe_float(
+                self.voice_first_chunk_to_sink_accept_ms
+            ),
+            "voice_first_output_start_ms": _safe_float(
+                self.voice_first_output_start_ms
+            ),
+            "voice_null_sink_first_accept_ms": _safe_float(
+                self.voice_null_sink_first_accept_ms
+            ),
             "voice_streaming_transport_kind": self.voice_streaming_transport_kind,
+            "voice_sink_kind": self.voice_sink_kind,
             "voice_first_chunk_before_complete": bool(self.voice_first_chunk_before_complete),
             "voice_stream_used_by_normal_path": bool(self.voice_stream_used_by_normal_path),
             "voice_streaming_miss_reason": self.voice_streaming_miss_reason,
+            "voice_live_openai_voice_smoke_run": bool(
+                self.voice_live_openai_voice_smoke_run
+            ),
+            "voice_live_openai_first_chunk_ms": _safe_float(
+                self.voice_live_openai_first_chunk_ms
+            ),
+            "voice_wake_loop_streaming_output_used": bool(
+                self.voice_wake_loop_streaming_output_used
+            ),
+            "voice_wake_loop_streaming_miss_reason": (
+                self.voice_wake_loop_streaming_miss_reason
+            ),
+            "voice_realtime_deferred_to_l6": bool(self.voice_realtime_deferred_to_l6),
+            "voice_realtime_session_creation_attempted": bool(
+                self.voice_realtime_session_creation_attempted
+            ),
+            "voice_user_heard_claimed": bool(self.voice_user_heard_claimed),
             "voice_live_format": self.voice_live_format,
             "voice_streaming_fallback_used": bool(self.voice_streaming_fallback_used),
             "voice_prewarm_used": bool(self.voice_prewarm_used),
@@ -602,10 +991,67 @@ class RouteLatencyPolicy:
     async_expected: bool = False
     partial_response_allowed: bool = False
     fail_fast_reason: str = ""
+    latency_posture: RouteLatencyPosture | str | None = None
+    hot_path_budget_ms: float | None = None
+    live_probe_budget_ms: float | None = None
+    cache_family: str = ""
+    cache_ttl_ms: float | None = None
+    stale_allowed: bool | None = None
+    async_continuation_allowed: bool | None = None
+    worker_lane: str = ""
+    detail_profile_required: str = ""
+    verification_required: bool | None = None
+    no_fake_data_rule: str = ""
+
+    def __post_init__(self) -> None:
+        contract = get_route_latency_contract(self.route_family)
+        posture = _coerce_latency_posture(self.latency_posture, fallback=contract.latency_posture)
+        if self.execution_mode == RouteExecutionMode.UNSUPPORTED:
+            posture = RouteLatencyPosture.UNSUPPORTED
+        elif self.execution_mode == RouteExecutionMode.CLARIFICATION:
+            posture = RouteLatencyPosture.CLARIFICATION
+        elif self.execution_mode == RouteExecutionMode.ASYNC_FIRST:
+            posture = RouteLatencyPosture.ASYNC_CONTINUATION
+        object.__setattr__(self, "latency_posture", posture)
+        if self.hot_path_budget_ms is None:
+            object.__setattr__(self, "hot_path_budget_ms", contract.hot_path_budget_ms)
+        if self.live_probe_budget_ms is None:
+            object.__setattr__(self, "live_probe_budget_ms", contract.live_probe_budget_ms)
+        if not self.cache_family:
+            object.__setattr__(self, "cache_family", contract.cache_family)
+        if self.cache_ttl_ms is None:
+            object.__setattr__(self, "cache_ttl_ms", contract.cache_ttl_ms)
+        if self.stale_allowed is None:
+            object.__setattr__(self, "stale_allowed", contract.stale_allowed)
+        if self.async_continuation_allowed is None:
+            object.__setattr__(
+                self,
+                "async_continuation_allowed",
+                contract.async_continuation_allowed or self.async_expected,
+            )
+        if not self.worker_lane:
+            object.__setattr__(self, "worker_lane", contract.worker_lane)
+        if not self.detail_profile_required:
+            object.__setattr__(self, "detail_profile_required", contract.detail_profile_required)
+        if self.verification_required is None:
+            object.__setattr__(self, "verification_required", contract.verification_required)
+        if not self.no_fake_data_rule:
+            object.__setattr__(self, "no_fake_data_rule", contract.no_fake_data_rule)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "route_family": self.route_family,
+            "latency_posture": _coerce_latency_posture(self.latency_posture).value,
+            "hot_path_budget_ms": self.hot_path_budget_ms,
+            "live_probe_budget_ms": self.live_probe_budget_ms,
+            "cache_family": self.cache_family,
+            "cache_ttl_ms": self.cache_ttl_ms,
+            "stale_allowed": bool(self.stale_allowed),
+            "async_continuation_allowed": bool(self.async_continuation_allowed),
+            "worker_lane": self.worker_lane,
+            "detail_profile_required": self.detail_profile_required,
+            "verification_required": bool(self.verification_required),
+            "no_fake_data_rule": self.no_fake_data_rule,
             "budget": self.budget.to_dict(),
             "budget_label": self.budget.label,
             "execution_mode": self.execution_mode.value,
@@ -613,6 +1059,21 @@ class RouteLatencyPolicy:
             "partial_response_allowed": self.partial_response_allowed,
             "fail_fast_reason": self.fail_fast_reason,
         }
+
+
+def _coerce_latency_posture(
+    value: RouteLatencyPosture | str | None,
+    *,
+    fallback: RouteLatencyPosture = RouteLatencyPosture.UNSUPPORTED,
+) -> RouteLatencyPosture:
+    if isinstance(value, RouteLatencyPosture):
+        return value
+    if value is None or value == "":
+        return fallback
+    try:
+        return RouteLatencyPosture(str(value).strip())
+    except ValueError:
+        return fallback
 
 
 @dataclass(frozen=True, slots=True)
@@ -821,7 +1282,7 @@ def classify_route_latency_policy(
             execution_mode=RouteExecutionMode.PROVIDER_WAIT,
             partial_response_allowed=True,
         )
-    if family in {"calculations", "browser_destination", "trust_approvals"}:
+    if family in {"calculations", "browser_destination", "time", "trust_approvals"}:
         return RouteLatencyPolicy(
             route_family=family,
             budget=LatencyBudget.for_label("ghost_interactive"),
@@ -894,8 +1355,9 @@ def classify_route_latency_policy(
         if any(marker in f"{kind} {plan}" for marker in ("assemble", "restore", "deep", "scan", "index")):
             return RouteLatencyPolicy(
                 route_family=family,
-                budget=LatencyBudget.for_label("deck_work"),
-                execution_mode=RouteExecutionMode.PLAN_FIRST,
+                budget=LatencyBudget.for_label("long_task"),
+                execution_mode=RouteExecutionMode.ASYNC_FIRST,
+                async_expected=True,
                 partial_response_allowed=True,
             )
         return RouteLatencyPolicy(
@@ -903,12 +1365,21 @@ def classify_route_latency_policy(
             budget=LatencyBudget.for_label("ghost_interactive"),
             execution_mode=RouteExecutionMode.INSTANT,
         )
+    if family in {"desktop_search", "file_operation", "hardware_telemetry"}:
+        return RouteLatencyPolicy(
+            route_family=family,
+            budget=LatencyBudget.for_label("long_task"),
+            execution_mode=RouteExecutionMode.ASYNC_FIRST,
+            async_expected=True,
+            partial_response_allowed=True,
+        )
     if family in {"network", "machine", "system_control", "storage", "power", "resources"}:
         live_probe = any(marker in f"{kind} {plan} {subsystem_key}" for marker in ("probe", "diagnostic", "scan", "live"))
         return RouteLatencyPolicy(
             route_family=family,
-            budget=LatencyBudget.for_label("deck_work" if live_probe else "ghost_interactive"),
-            execution_mode=RouteExecutionMode.PLAN_FIRST if live_probe else RouteExecutionMode.INSTANT,
+            budget=LatencyBudget.for_label("long_task" if live_probe else "ghost_interactive"),
+            execution_mode=RouteExecutionMode.ASYNC_FIRST if live_probe else RouteExecutionMode.INSTANT,
+            async_expected=live_probe,
             partial_response_allowed=live_probe,
         )
     if family in {"terminal", "shell_command"}:
@@ -1229,10 +1700,36 @@ def build_latency_trace(
         voice_core_to_first_audio_ms=l5_voice_trace["voice_core_to_first_audio_ms"],
         voice_tts_first_chunk_ms=l5_voice_trace["voice_tts_first_chunk_ms"],
         voice_playback_start_ms=l5_voice_trace["voice_playback_start_ms"],
+        voice_first_chunk_to_sink_accept_ms=l5_voice_trace[
+            "voice_first_chunk_to_sink_accept_ms"
+        ],
+        voice_first_output_start_ms=l5_voice_trace["voice_first_output_start_ms"],
+        voice_null_sink_first_accept_ms=l5_voice_trace[
+            "voice_null_sink_first_accept_ms"
+        ],
         voice_streaming_transport_kind=l5_voice_trace["voice_streaming_transport_kind"],
+        voice_sink_kind=l5_voice_trace["voice_sink_kind"],
         voice_first_chunk_before_complete=l5_voice_trace["voice_first_chunk_before_complete"],
         voice_stream_used_by_normal_path=l5_voice_trace["voice_stream_used_by_normal_path"],
         voice_streaming_miss_reason=l5_voice_trace["voice_streaming_miss_reason"],
+        voice_live_openai_voice_smoke_run=l5_voice_trace[
+            "voice_live_openai_voice_smoke_run"
+        ],
+        voice_live_openai_first_chunk_ms=l5_voice_trace[
+            "voice_live_openai_first_chunk_ms"
+        ],
+        voice_wake_loop_streaming_output_used=l5_voice_trace[
+            "voice_wake_loop_streaming_output_used"
+        ],
+        voice_wake_loop_streaming_miss_reason=l5_voice_trace[
+            "voice_wake_loop_streaming_miss_reason"
+        ],
+        voice_realtime_deferred_to_l6=l5_voice_trace["voice_realtime_deferred_to_l6"],
+        voice_realtime_session_creation_attempted=l5_voice_trace[
+            "voice_realtime_session_creation_attempted"
+        ],
+        voice_raw_audio_logged=l5_voice_trace["voice_raw_audio_logged"],
+        voice_user_heard_claimed=l5_voice_trace["voice_user_heard_claimed"],
         voice_live_format=l5_voice_trace["voice_live_format"],
         voice_streaming_fallback_used=l5_voice_trace["voice_streaming_fallback_used"],
         voice_prewarm_used=l5_voice_trace["voice_prewarm_used"],
@@ -1476,10 +1973,39 @@ def attach_latency_metadata(
     metadata["voice_core_to_first_audio_ms"] = _safe_float(trace.voice_core_to_first_audio_ms)
     metadata["voice_tts_first_chunk_ms"] = _safe_float(trace.voice_tts_first_chunk_ms)
     metadata["voice_playback_start_ms"] = _safe_float(trace.voice_playback_start_ms)
+    metadata["voice_first_chunk_to_sink_accept_ms"] = _safe_float(
+        trace.voice_first_chunk_to_sink_accept_ms
+    )
+    metadata["voice_first_output_start_ms"] = _safe_float(
+        trace.voice_first_output_start_ms
+    )
+    metadata["voice_null_sink_first_accept_ms"] = _safe_float(
+        trace.voice_null_sink_first_accept_ms
+    )
     metadata["voice_streaming_transport_kind"] = trace.voice_streaming_transport_kind
+    metadata["voice_sink_kind"] = trace.voice_sink_kind
     metadata["voice_first_chunk_before_complete"] = bool(trace.voice_first_chunk_before_complete)
     metadata["voice_stream_used_by_normal_path"] = bool(trace.voice_stream_used_by_normal_path)
     metadata["voice_streaming_miss_reason"] = trace.voice_streaming_miss_reason
+    metadata["voice_live_openai_voice_smoke_run"] = bool(
+        trace.voice_live_openai_voice_smoke_run
+    )
+    metadata["voice_live_openai_first_chunk_ms"] = _safe_float(
+        trace.voice_live_openai_first_chunk_ms
+    )
+    metadata["voice_wake_loop_streaming_output_used"] = bool(
+        trace.voice_wake_loop_streaming_output_used
+    )
+    metadata["voice_wake_loop_streaming_miss_reason"] = (
+        trace.voice_wake_loop_streaming_miss_reason
+    )
+    metadata["voice_realtime_deferred_to_l6"] = bool(
+        trace.voice_realtime_deferred_to_l6
+    )
+    metadata["voice_realtime_session_creation_attempted"] = bool(
+        trace.voice_realtime_session_creation_attempted
+    )
+    metadata["voice_user_heard_claimed"] = bool(trace.voice_user_heard_claimed)
     metadata["voice_live_format"] = trace.voice_live_format
     metadata["voice_streaming_fallback_used"] = bool(trace.voice_streaming_fallback_used)
     metadata["voice_prewarm_used"] = bool(trace.voice_prewarm_used)
@@ -1637,8 +2163,8 @@ def safe_latency_value(value: Any, *, depth: int = 0) -> Any:
     if isinstance(value, dict):
         sanitized: dict[str, Any] = {}
         for index, (key, item) in enumerate(value.items()):
-            if index >= 160:
-                sanitized["<truncated_keys>"] = len(value) - 160
+            if index >= 240:
+                sanitized["<truncated_keys>"] = len(value) - 240
                 break
             key_text = str(key)
             if _unsafe_key(key_text):
@@ -2230,11 +2756,26 @@ def _l5_voice_trace_metadata(
             selected("voice_playback_start_ms")
             or selected("first_chunk_to_playback_start_ms")
         ),
+        "voice_first_chunk_to_sink_accept_ms": _safe_float(
+            selected("voice_first_chunk_to_sink_accept_ms")
+            or selected("first_chunk_to_sink_accept_ms")
+            or selected("first_chunk_to_playback_start_ms")
+        ),
+        "voice_first_output_start_ms": _safe_float(
+            selected("voice_first_output_start_ms")
+            or selected("first_output_start_ms")
+            or selected("request_to_first_audio_ms")
+        ),
+        "voice_null_sink_first_accept_ms": _safe_float(
+            selected("voice_null_sink_first_accept_ms")
+            or selected("null_sink_first_accept_ms")
+        ),
         "voice_streaming_transport_kind": str(
             selected("voice_streaming_transport_kind")
             or selected("streaming_transport_kind")
             or ""
         ),
+        "voice_sink_kind": str(selected("voice_sink_kind") or selected("sink_kind") or ""),
         "voice_first_chunk_before_complete": _truthy_value(
             selected("voice_first_chunk_before_complete")
             or selected("first_chunk_before_complete")
@@ -2247,6 +2788,37 @@ def _l5_voice_trace_metadata(
             selected("voice_streaming_miss_reason")
             or selected("streaming_miss_reason")
             or ""
+        ),
+        "voice_live_openai_voice_smoke_run": _truthy_value(
+            selected("voice_live_openai_voice_smoke_run")
+            or selected("live_openai_voice_smoke_run")
+        ),
+        "voice_live_openai_first_chunk_ms": _safe_float(
+            selected("voice_live_openai_first_chunk_ms")
+            or selected("live_openai_first_chunk_ms")
+        ),
+        "voice_wake_loop_streaming_output_used": _truthy_value(
+            selected("voice_wake_loop_streaming_output_used")
+            or selected("wake_loop_streaming_output_used")
+        ),
+        "voice_wake_loop_streaming_miss_reason": str(
+            selected("voice_wake_loop_streaming_miss_reason")
+            or selected("wake_loop_streaming_miss_reason")
+            or ""
+        ),
+        "voice_realtime_deferred_to_l6": _truthy_value(
+            selected("voice_realtime_deferred_to_l6")
+            or selected("realtime_deferred_to_l6")
+        ),
+        "voice_realtime_session_creation_attempted": _truthy_value(
+            selected("voice_realtime_session_creation_attempted")
+            or selected("realtime_session_creation_attempted")
+        ),
+        "voice_raw_audio_logged": _truthy_value(
+            selected("voice_raw_audio_logged") or selected("raw_audio_logged")
+        ),
+        "voice_user_heard_claimed": _truthy_value(
+            selected("voice_user_heard_claimed") or selected("user_heard_claimed")
         ),
         "voice_live_format": str(
             selected("voice_live_format") or selected("live_format") or ""

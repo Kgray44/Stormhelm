@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from typing import Callable
+from urllib.parse import quote
 
 from PySide6 import QtCore, QtNetwork
 
@@ -146,17 +147,19 @@ class CoreApiClient(QtCore.QObject):
         self,
         *,
         session_id: str = "default",
+        profile: str = "ghost_light",
         event_since_id: int = 0,
-        event_limit: int = 100,
-        job_limit: int = 50,
-        note_limit: int = 50,
-        history_limit: int = 100,
+        event_limit: int = 12,
+        job_limit: int = 8,
+        note_limit: int = 0,
+        history_limit: int = 12,
     ) -> None:
         self._send_json(
             "GET",
             (
                 "/snapshot"
-                f"?session_id={session_id}"
+                f"?session_id={quote(str(session_id or 'default'))}"
+                f"&profile={quote(str(profile or 'ghost_light'))}"
                 f"&event_since_id={event_since_id}"
                 f"&event_limit={event_limit}"
                 f"&job_limit={job_limit}"
@@ -176,7 +179,15 @@ class CoreApiClient(QtCore.QObject):
         active_module: str = "chartroom",
         workspace_context: dict[str, object] | None = None,
         input_context: dict[str, object] | None = None,
+        response_profile: str | None = None,
     ) -> None:
+        resolved_profile = response_profile
+        if resolved_profile is None:
+            resolved_profile = (
+                "ghost_compact"
+                if str(surface_mode or "").strip().lower() == "ghost"
+                else "deck_summary"
+            )
         self._send_json(
             "POST",
             "/chat/send",
@@ -187,6 +198,7 @@ class CoreApiClient(QtCore.QObject):
                 "active_module": active_module,
                 "workspace_context": workspace_context or {},
                 "input_context": input_context or {},
+                "response_profile": resolved_profile,
             },
             self.chat_received.emit,
         )
@@ -277,6 +289,16 @@ class CoreApiClient(QtCore.QObject):
         self._send_json(
             "POST",
             "/voice/capture/turn",
+            payload or {},
+            self.voice_action_received.emit,
+        )
+
+    def listen_and_submit_voice_turn(
+        self, payload: dict[str, object] | None = None
+    ) -> None:
+        self._send_json(
+            "POST",
+            "/voice/capture/listen-turn",
             payload or {},
             self.voice_action_received.emit,
         )
@@ -376,7 +398,10 @@ class CoreApiClient(QtCore.QObject):
         reply.deleteLater()
 
     def _open_event_stream(self, *, cursor: int | None) -> None:
-        query = f"?session_id={self._stream_requested_session_id}"
+        query = (
+            f"?session_id={self._stream_requested_session_id}"
+            "&replay_limit=8&heartbeat_seconds=1"
+        )
         if cursor is not None:
             query += f"&cursor={max(0, int(cursor))}"
         request = QtNetwork.QNetworkRequest(

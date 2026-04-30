@@ -15,6 +15,7 @@ from stormhelm.core.latency import classify_route_latency_policy
 
 _ALL_NATIVE_ROUTE_FAMILIES = (
     "calculations",
+    "web_retrieval",
     "browser_destination",
     "software_control",
     "discord_relay",
@@ -34,6 +35,7 @@ _ALL_NATIVE_ROUTE_FAMILIES = (
 _SEAM_ROUTE_FAMILIES = ("calculations", "software_control", "screen_awareness")
 _NATIVE_PROTECTED_FAMILIES = {
     "calculations",
+    "web_retrieval",
     "browser_destination",
     "software_control",
     "discord_relay",
@@ -101,6 +103,10 @@ _SYSTEM_RE = re.compile(
 )
 _OPEN_ENDED_RE = re.compile(r"\b(?:explain|brainstorm|write|summarize|research|draft)\b", re.IGNORECASE)
 _DEICTIC_RE = re.compile(r"\b(?:this|that|it|same one|those|these|do that again|send it|open that)\b", re.IGNORECASE)
+_WEB_RETRIEVAL_RE = re.compile(
+    r"\b(?:read|summarize|inspect|extract|render|compare|parse|cdp|renderer)\b.*\b(?:https?://|www\.|[a-z0-9-]+\.[a-z]{2,})",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,6 +237,13 @@ class FastRouteClassifier:
             query_shape_hint = "calculation_follow_up"
             needs_recent = True
             needs_active_state = True
+
+        if not likely and _is_web_retrieval(raw, normalized):
+            likely = ["web_retrieval"]
+            reason_codes.append("web_retrieval_public_url")
+            confidence = 0.94
+            query_shape_hint = "web_retrieval_request"
+            route_hints["destination_kind"] = "public_url"
 
         if not likely and _is_browser_destination(raw, normalized):
             likely = ["browser_destination"]
@@ -411,10 +424,25 @@ def _has_pending_approval(active_request_state: dict[str, Any]) -> bool:
 
 
 def _is_browser_destination(raw: str, normalized: str) -> bool:
-    del raw
+    if _is_web_retrieval(raw, normalized):
+        return False
     if _URL_RE.search(normalized) or _DOMAIN_RE.search(normalized):
         return True
     return normalized.startswith(("open ", "bring up ", "go to ", "search for ", "search "))
+
+
+def _is_web_retrieval(raw: str, normalized: str) -> bool:
+    if not (_URL_RE.search(raw) or _DOMAIN_RE.search(raw) or _URL_RE.search(normalized) or _DOMAIN_RE.search(normalized)):
+        return False
+    if re.search(r"\b(?:open|launch|go to|navigate|bring up|pull up)\b", normalized) and not re.search(
+        r"\b(?:read|summarize|inspect|extract|render|compare|text|links?|html|source|content)\b",
+        normalized,
+    ):
+        return False
+    return bool(
+        _WEB_RETRIEVAL_RE.search(raw)
+        or re.search(r"\b(?:read|summarize|inspect|extract|render|compare|text|links?|html|source|content|dom\s+text|network\s+summary|cdp|browser\s+renderer)\b", normalized)
+    )
 
 
 def _looks_like_software_control(normalized: str) -> bool:
@@ -468,7 +496,7 @@ def _safe_to_short_circuit(
         return False
     if needs_deictic_context or needs_workspace_context or needs_recent_tool_results or needs_semantic_memory or needs_screen_context:
         return False
-    return likely[0] in {"calculations", "browser_destination", "software_control", "voice_control", "trust_approvals"}
+    return likely[0] in {"calculations", "web_retrieval", "browser_destination", "software_control", "voice_control", "trust_approvals"}
 
 
 def _excluded_families(likely: list[str], confidence: float, safe_to_short_circuit: bool) -> tuple[str, ...]:

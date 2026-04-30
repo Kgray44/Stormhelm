@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 
 _ROUTE_LABELS = {
     "discord_relay": "Discord Relay",
+    "web_retrieval": "Web Evidence",
     "software_control": "Software Control",
     "software_recovery": "Software Recovery",
     "screen_awareness": "Visual Context",
@@ -19,6 +21,14 @@ _RESULT_LABELS = {
     "ready_after_approval": "Ready After Approval",
     "attempted": "Attempted",
     "verified": "Verified",
+    "extracted": "Extracted",
+    "partial": "Partial",
+    "fallback_available": "Fallback Available",
+    "fallback_used": "Fallback Used",
+    "provider_unavailable": "Provider Unavailable",
+    "timeout": "Timed Out",
+    "unsupported": "Unsupported",
+    "failed": "Failed",
     "unresolved": "Unresolved",
     "blocked": "Blocked",
     "recovery_in_progress": "Recovery In Progress",
@@ -53,6 +63,7 @@ _SOURCE_LABELS = {
 }
 _STATION_IDS = {
     "discord_relay": "relay-station",
+    "web_retrieval": "web-evidence-station",
     "software_control": "software-control-station",
     "software_recovery": "software-recovery-station",
     "screen_awareness": "screen-awareness-station",
@@ -63,6 +74,7 @@ _STATION_IDS = {
 }
 _STATION_TITLES = {
     "discord_relay": "Relay Station",
+    "web_retrieval": "Web Evidence",
     "software_control": "Software Control",
     "software_recovery": "Software Recovery",
     "screen_awareness": "Screen Awareness",
@@ -84,6 +96,14 @@ _RESULT_TONES = {
     "ready_after_approval": "attention",
     "attempted": "steady",
     "verified": "live",
+    "extracted": "live",
+    "partial": "attention",
+    "fallback_available": "attention",
+    "fallback_used": "attention",
+    "provider_unavailable": "warning",
+    "timeout": "warning",
+    "unsupported": "warning",
+    "failed": "warning",
     "unresolved": "warning",
     "blocked": "warning",
     "recovery_in_progress": "attention",
@@ -91,6 +111,95 @@ _RESULT_TONES = {
 }
 _STALE_TOKENS = {"stale", "expired", "invalid", "invalidated", "superseded", "replaced", "revoked"}
 _ROUTE_INSPECTOR_SUMMARY = "Backend-owned route, provenance, and trace state."
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _mapping_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, Mapping)]
+
+
+def _number(value: Any) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _screen_awareness_state(value: Any) -> dict[str, Any]:
+    screen = _mapping(value)
+    policy = _mapping(screen.get("policy")) or _mapping(screen.get("policy_state"))
+    trace = _mapping(screen.get("trace"))
+    if not trace:
+        hardening = _mapping(screen.get("hardening"))
+        trace = _mapping(hardening.get("latest_trace"))
+    duration = _number(trace.get("durationMs") if "durationMs" in trace else trace.get("total_duration_ms"))
+    return {
+        "present": bool(screen or policy or trace),
+        "phase": _text(screen.get("phase")),
+        "policy": {"action_policy_mode": _text(policy.get("action_policy_mode"))},
+        "trace": {"durationMs": duration, "summary": _text(trace.get("summary")) or _text(policy.get("summary"))},
+    }
+
+
+def _continuity_state(value: Any) -> dict[str, Any]:
+    continuity = _mapping(value)
+    return {
+        "present": bool(continuity.get("present", False)),
+        "summary": _text(continuity.get("summary")),
+        "stale_reason": _text(continuity.get("stale_reason")),
+        "tone": _text(continuity.get("tone")) or "steady",
+        "posture": _text(continuity.get("posture")),
+        "freshness": _text(continuity.get("freshness")),
+        "task": _text(continuity.get("task")),
+        "state": _text(continuity.get("state")),
+        "active_step": _text(continuity.get("active_step")),
+        "next_label": _text(continuity.get("next_label")),
+        "next_detail": _text(continuity.get("next_detail")),
+        "blocker": _text(continuity.get("blocker")),
+    }
+
+
+def _memory_state(value: Any) -> dict[str, Any]:
+    memory = _mapping(value)
+    contributors = [_text(item) for item in memory.get("contributors") or [] if _text(item)]
+    return {
+        "present": bool(memory.get("present", False)),
+        "count": _text(memory.get("count")) or "Support memory",
+        "contributors": contributors,
+    }
+
+
+def _runtime_state(value: Any) -> dict[str, Any]:
+    runtime = _mapping(value)
+    watch = _mapping(runtime.get("watch"))
+    lifecycle = _mapping(runtime.get("lifecycle"))
+    screen = _screen_awareness_state(runtime.get("screenAwareness"))
+    return {
+        "present": bool(runtime.get("present", False)),
+        "headline": _text(runtime.get("headline")) or "Live",
+        "tone": _text(runtime.get("tone")) or "steady",
+        "watch": {
+            "present": bool(watch.get("present", False)),
+            "health": _text(watch.get("health")) or "Not reported",
+            "queue": _text(watch.get("queue")),
+            "failures": _text(watch.get("failures")),
+            "tool": _text(watch.get("tool")) or "Not reported",
+        },
+        "lifecycle": {
+            "present": bool(lifecycle.get("present", False)),
+            "state": _text(lifecycle.get("state")) or "Steady",
+            "hold": _text(lifecycle.get("hold")) or "No lifecycle hold",
+            "cleanup": _text(lifecycle.get("cleanup")),
+        },
+        "screenAwareness": screen,
+    }
 
 
 def build_command_surface_model(
@@ -102,8 +211,8 @@ def build_command_surface_model(
     status: dict[str, Any] | None,
     workspace_focus: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    request = dict(active_request_state or {})
-    latest = dict(latest_message or {})
+    request = _mapping(active_request_state)
+    latest = _mapping(latest_message)
     metadata = latest.get("metadata") if isinstance(latest.get("metadata"), dict) else {}
     route_state = metadata.get("route_state") if isinstance(metadata.get("route_state"), dict) else {}
     winner = route_state.get("winner") if isinstance(route_state.get("winner"), dict) else {}
@@ -111,10 +220,10 @@ def build_command_surface_model(
     decomposition = route_state.get("decomposition") if isinstance(route_state.get("decomposition"), dict) else {}
     parameters = request.get("parameters") if isinstance(request.get("parameters"), dict) else {}
     trust = request.get("trust") if isinstance(request.get("trust"), dict) else {}
-    task = dict(active_task or {})
-    status_payload = dict(status or {})
-    recent = [dict(item) for item in recent_context_resolutions or [] if isinstance(item, dict)]
-    workspace = dict(workspace_focus or {})
+    task = _mapping(active_task)
+    status_payload = _mapping(status)
+    recent = _mapping_list(recent_context_resolutions)
+    workspace = _mapping(workspace_focus)
 
     if not request and not route_state:
         return _empty_surface()
@@ -168,6 +277,14 @@ def _stations(
     invalidations: list[dict[str, str]],
     base_actions: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    parameters = _mapping(parameters)
+    trust = _mapping(trust)
+    deictic = _mapping(deictic)
+    continuity = _continuity_state(continuity)
+    memory = _memory_state(memory)
+    runtime = _runtime_state(runtime)
+    invalidations = _mapping_list(invalidations)
+    base_actions = _mapping_list(base_actions)
     ctx = {
         "family": family,
         "subtitle": subtitle,
@@ -185,18 +302,26 @@ def _stations(
         "base_actions": base_actions,
     }
     stations: list[dict[str, Any]] = []
+    if family == "web_retrieval":
+        stations.append(_web_evidence_station(ctx))
     if family == "discord_relay":
         preview = parameters.get("pending_preview") if isinstance(parameters.get("pending_preview"), dict) else {}
         payload = preview.get("payload") if isinstance(preview.get("payload"), dict) else {}
-        stations.append(_station("discord_relay", ctx, chips=[_chip("State", status_label, _tone(result_state)), _chip("Payload", _payload(_text(payload.get("kind")) or _text(parameters.get("payload_hint"))))], sections=[_section("Relay Preview", [_entry("Destination", _text(preview.get("destination", {}).get("label")) or _text(parameters.get("destination_alias")) or "Relay"), _entry("Payload", _payload(_text(payload.get("kind")) or _text(parameters.get("payload_hint"))), _text(payload.get("summary")) or _text(payload.get("preview_text"))), _entry("Binding", _source(_text(deictic.get("selected_source"))), _text(deictic.get("source_summary")))])], invalidations=_filter_invalidations(invalidations, {"Preview", "Binding", "Continuity"}), actions=_station_actions("discord_relay", ctx, True)))
+        destination = _mapping(preview.get("destination"))
+        stations.append(_station("discord_relay", ctx, chips=[_chip("State", status_label, _tone(result_state)), _chip("Payload", _payload(_text(payload.get("kind")) or _text(parameters.get("payload_hint"))))], sections=[_section("Relay Preview", [_entry("Destination", _text(destination.get("label")) or _text(parameters.get("destination_alias")) or "Relay"), _entry("Payload", _payload(_text(payload.get("kind")) or _text(parameters.get("payload_hint"))), _text(payload.get("summary")) or _text(payload.get("preview_text"))), _entry("Binding", _source(_text(deictic.get("selected_source"))), _text(deictic.get("source_summary")))])], invalidations=_filter_invalidations(invalidations, {"Preview", "Binding", "Continuity"}), actions=_station_actions("discord_relay", ctx, True)))
     elif family in {"software_control", "software_recovery"}:
         operation = _title(_text(parameters.get("operation_type")) or "software")
         target = _title(_text(parameters.get("target_name")) or _text(subject))
         route = _title(_text(parameters.get("selected_source_route")) or "native")
         stations.append(_station(family, ctx, chips=[_chip("State", status_label, _tone(result_state)), _chip("Operation", f"{operation} {target}".strip()), _chip("Route", route)], sections=[_section("Software Route", [_entry("Operation", f"{operation} {target}".strip()), _entry("Request Stage", _stage(_text(parameters.get("request_stage")))), _entry("Recovery Route", route), _entry("Verification", status_label, _text(parameters.get("recovery_summary")) or body)])], invalidations=_filter_invalidations(invalidations, {"Recovery", "Binding", "Approval"}), actions=_station_actions(family, ctx, True)))
     elif family == "screen_awareness":
-        screen = runtime["screenAwareness"]
-        stations.append(_station("screen_awareness", ctx, chips=[_chip("State", status_label, _tone(result_state)), _chip("Phase", _text(screen.get("phase")) or "Active")], sections=[_section("Screen Route", [_entry("Policy", _title(_text(screen.get("policy", {}).get("action_policy_mode")) or "confirm_before_act")), _entry("Binding", _text(deictic.get("selected_target", {}).get("label")) or "Current screen target", _text(deictic.get("source_summary"))), _entry("Trace", f"{screen.get('trace', {}).get('durationMs', 0):.1f} ms" if screen.get("trace", {}).get("durationMs") else "", _text(screen.get("trace", {}).get("summary")))])], invalidations=_filter_invalidations(invalidations, {"Binding"}), actions=_station_actions("screen_awareness", ctx, True)))
+        screen = _screen_awareness_state(runtime.get("screenAwareness"))
+        policy = _mapping(screen.get("policy"))
+        trace = _mapping(screen.get("trace"))
+        selected_target = _mapping(deictic.get("selected_target"))
+        duration = _number(trace.get("durationMs"))
+        trace_value = f"{duration:.1f} ms" if duration else ""
+        stations.append(_station("screen_awareness", ctx, chips=[_chip("State", status_label, _tone(result_state)), _chip("Phase", _text(screen.get("phase")) or "Active")], sections=[_section("Screen Route", [_entry("Policy", _title(_text(policy.get("action_policy_mode")) or "confirm_before_act")), _entry("Binding", _text(selected_target.get("label")) or "Current screen target", _text(deictic.get("source_summary")) or "Screen-awareness state is partial."), _entry("Trace", trace_value, _text(trace.get("summary")) or "No screen trace summary is available.")])], invalidations=_filter_invalidations(invalidations, {"Binding"}), actions=_station_actions("screen_awareness", ctx, True)))
     trust_state = _text(trust.get("approval_state")).lower()
     if trust and trust_state not in {"approved_for_task", "approved_for_session", "approved_once", "allowed", "not_required"}:
         scopes = ", ".join(_title(scope) for scope in trust.get("available_scopes") or [] if _text(scope))
@@ -225,6 +350,90 @@ def _stations(
     return deduped[:3]
 
 
+def _web_evidence_station(ctx: dict[str, Any]) -> dict[str, Any]:
+    parameters = ctx["parameters"]
+    bundle = parameters.get("evidence_bundle") if isinstance(parameters.get("evidence_bundle"), dict) else {}
+    trace = parameters.get("trace") if isinstance(parameters.get("trace"), dict) else {}
+    if not trace and isinstance(bundle.get("trace"), dict):
+        trace = bundle.get("trace")
+    pages = bundle.get("pages") if isinstance(bundle.get("pages"), list) else []
+    page = pages[0] if pages and isinstance(pages[0], dict) else {}
+    provider_chain = bundle.get("provider_chain") if isinstance(bundle.get("provider_chain"), list) else []
+    provider = (
+        _text(page.get("provider"))
+        or _text(trace.get("selected_provider"))
+        or next((_text(item) for item in provider_chain if _text(item)), "")
+        or "provider"
+    )
+    status = _text(page.get("status")) or _text(bundle.get("result_state")) or ctx["result_state"]
+    text_chars = _text(page.get("text_chars")) or _text(bundle.get("text_chars")) or "0"
+    links = _text(page.get("link_count")) or _text(bundle.get("link_count")) or "0"
+    elapsed = _text(page.get("elapsed_ms"))
+    title = _text(page.get("title"))
+    load_state = _text(page.get("load_state"))
+    network = page.get("network_summary") if isinstance(page.get("network_summary"), dict) else {}
+    console = page.get("console_summary") if isinstance(page.get("console_summary"), dict) else {}
+    network_requests = _text(network.get("request_count"))
+    network_failures = _text(network.get("failed_count"))
+    console_errors = _text(console.get("error_count"))
+    claim_ceiling = _text(bundle.get("claim_ceiling")) or _text(trace.get("claim_ceiling")) or "rendered_page_evidence"
+    fallback_used = bool(bundle.get("fallback_used") or trace.get("fallback_used"))
+    fallback_reason = _text(trace.get("fallback_reason"))
+    fallback_outcome = _text(trace.get("fallback_outcome"))
+    attempted = trace.get("attempted_providers") if isinstance(trace.get("attempted_providers"), list) else provider_chain
+    attempted_label = ", ".join(_title(_text(item)) for item in attempted if _text(item))
+    limitation_values: list[str] = []
+    for source in (bundle.get("limitations"), page.get("limitations")):
+        if isinstance(source, list):
+            limitation_values.extend(_text(item) for item in source if _text(item))
+    limitation_detail = "Public page evidence only. I did not verify the source's claims independently, and this is not the user's visible screen."
+    if limitation_values:
+        limitation_detail = f"{limitation_detail} " + ", ".join(_web_limit_label(item) for item in limitation_values[:4])
+    link_preview: list[str] = []
+    raw_links = page.get("links") if isinstance(page.get("links"), list) else []
+    for link in raw_links:
+        if isinstance(link, dict):
+            label = _text(link.get("text")) or _text(link.get("url"))
+            if label:
+                link_preview.append(label)
+    return _station(
+        "web_retrieval",
+        ctx,
+        chips=[
+            _chip("Provider", _title(provider)),
+            _chip("State", _title(status), _tone(ctx["result_state"])),
+            _chip("Claim", _title(claim_ceiling)),
+        ],
+        sections=[
+            _section(
+                "Rendered Page Evidence",
+                [
+                    _entry("URL", _text(page.get("final_url")) or _text(page.get("requested_url")) or ctx["subject"]),
+                    _entry("Provider", _title(provider)),
+                    _entry("Status", _title(status)),
+                    _entry("Title", title),
+                    _entry("Load State", _title(load_state)),
+                    _entry("Text", text_chars, "characters extracted"),
+                    _entry("Links", links, ", ".join(link_preview[:3])),
+                    _entry(
+                        "Network",
+                        f"{network_requests} requests" if network_requests else "",
+                        f"{network_failures} failed" if network_failures else "",
+                    ),
+                    _entry("Console", f"{console_errors} errors" if console_errors else ""),
+                    _entry("Elapsed", f"{elapsed} ms" if elapsed else ""),
+                    _entry("Attempted Providers", attempted_label),
+                    _entry("Fallback", "Used" if fallback_used else "No", f"{fallback_reason} -> {fallback_outcome}" if fallback_used else ""),
+                    _entry("Claim Ceiling", _title(claim_ceiling)),
+                    _entry("Limitations", "Public page evidence", limitation_detail),
+                ],
+            )
+        ],
+        invalidations=[],
+        actions=_station_actions("web_retrieval", ctx, False),
+    )
+
+
 def _station(station_key: str, ctx: dict[str, Any], *, chips: list[dict[str, str]], sections: list[dict[str, Any]], invalidations: list[dict[str, str]], actions: list[dict[str, Any]]) -> dict[str, Any]:
     return {"stationId": _STATION_IDS[station_key], "stationFamily": station_key, "eyebrow": _route_label(station_key), "title": _STATION_TITLES[station_key], "subtitle": ctx["subtitle"], "summary": ctx["body"], "body": ctx["body"], "statusLabel": ctx["status_label"], "resultState": ctx["result_state"], "chips": chips, "sections": sections, "invalidations": invalidations, "actions": actions}
 
@@ -245,7 +454,7 @@ def _station_actions(station_family: str, ctx: dict[str, Any], include_base: boo
 
 
 def _reveal_actions(stations: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    labels = {"trust": "Show Trust", "task_continuity": "Show Continuity", "watch_runtime": "Show Runtime", "memory": "Show Memory"}
+    labels = {"web_retrieval": "Show Evidence", "trust": "Show Trust", "task_continuity": "Show Continuity", "watch_runtime": "Show Runtime", "memory": "Show Memory"}
     return _dedupe([{"label": labels[family], "category": "reveal", "localAction": f"open_panel:{station['stationId']}", "authority": "local_presentational"} for station in stations if (family := str(station.get("stationFamily") or "")) in labels])
 
 
@@ -373,13 +582,23 @@ def _runtime(status: dict[str, Any]) -> dict[str, Any]:
     active_jobs = int(watch.get("active_jobs") or 0)
     queued_jobs = int(watch.get("queued_jobs") or 0)
     recent_failures = int(watch.get("recent_failures") or 0)
+    screen_state = _screen_awareness_state(
+        {
+            "phase": screen.get("phase"),
+            "policy": policy,
+            "trace": {
+                "durationMs": latest_trace.get("total_duration_ms"),
+                "summary": policy.get("summary"),
+            },
+        }
+    )
     return {
         "present": bool(active_jobs or queued_jobs or recent_failures or _text(bootstrap.get("lifecycle_hold_reason")) or screen),
         "headline": "Degraded" if recent_failures else "Live",
         "tone": "warning" if recent_failures else "steady",
         "watch": {"present": bool(active_jobs or queued_jobs or recent_failures or _text(watch.get("health")) or _text(watch.get("current_tool"))), "health": _title(_text(watch.get("health")) or ("degraded" if recent_failures else "steady")), "queue": f"{active_jobs} active / {queued_jobs} queued", "failures": str(recent_failures), "tool": _title(_text(watch.get("current_tool")) or "Not reported")},
         "lifecycle": {"present": bool(_text(bootstrap.get("lifecycle_hold_reason")) or _text(cleanup.get("operator_summary"))), "state": _title(_text(bootstrap.get("state")) or "steady"), "hold": _text(bootstrap.get("lifecycle_hold_reason")) or "No lifecycle hold", "cleanup": _text(cleanup.get("operator_summary"))},
-        "screenAwareness": {"phase": _title(_text(screen.get("phase"))), "policy": {"action_policy_mode": _text(policy.get("action_policy_mode"))}, "trace": {"durationMs": float(latest_trace.get("total_duration_ms") or 0.0), "summary": _text(policy.get("summary"))}},
+        "screenAwareness": {"phase": _title(_text(screen_state.get("phase"))), "policy": screen_state["policy"], "trace": screen_state["trace"]},
     }
 
 
@@ -425,9 +644,11 @@ def _result_state(stage: str, trust: dict[str, Any], winner: dict[str, Any], par
     raw = (_text(parameters.get("result_state")) or winner_status or approval_state).lower()
     if raw == "verified":
         return "verified"
+    if raw in {"extracted", "partial", "fallback_available", "fallback_used", "provider_unavailable", "timeout", "unsupported", "blocked", "failed"}:
+        return raw
     if raw in {"attempted", "completed", "dispatch", "dispatched"}:
         return "attempted"
-    if raw in {"failed", "uncertain", "unknown"}:
+    if raw in {"uncertain", "unknown"}:
         return "unresolved"
     if raw in _STALE_TOKENS:
         return "stale"
@@ -508,6 +729,16 @@ def _section(title: str, entries: list[dict[str, str]]) -> dict[str, Any]:
 
 def _entry(primary: str, secondary: str, detail: str = "") -> dict[str, str]:
     return {"primary": primary, "secondary": secondary, "detail": detail}
+
+
+def _web_limit_label(value: str) -> str:
+    key = _text(value).lower()
+    labels = {
+        "not_truth_verified": "No independent truth check",
+        "not_user_visible_screen": "Not the visible screen",
+        "no_user_visible_screen_claim": "No visible-screen claim",
+    }
+    return labels.get(key, _title(value))
 
 
 def _filter_invalidations(entries: list[dict[str, str]], allowed: set[str]) -> list[dict[str, str]]:

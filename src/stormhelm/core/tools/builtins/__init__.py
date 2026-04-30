@@ -64,6 +64,7 @@ from stormhelm.core.tools.builtins.workspace_actions import (
     ExternalOpenFileTool,
     ExternalOpenUrlTool,
 )
+from stormhelm.core.tools.builtins.web_retrieval import WebRetrievalFetchTool
 
 
 def register_builtin_tools(registry, *, include_internal: bool = False) -> None:
@@ -123,3 +124,4 @@ def register_builtin_tools(registry, *, include_internal: bool = False) -> None:
     registry.register(WorkspaceListTool())
     registry.register(WorkspaceWhereLeftOffTool())
     registry.register(WorkspaceNextStepsTool())
+    registry.register(WebRetrievalFetchTool())

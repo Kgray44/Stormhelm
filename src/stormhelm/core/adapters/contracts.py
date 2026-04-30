@@ -9,6 +9,7 @@ from typing import Any, Callable
 class TrustTier(StrEnum):
     PASSIVE = "passive"
     BOUNDED_LOCAL = "bounded_local"
+    LOCAL_NETWORK = "local_network"
     LOCAL_MUTATION = "local_mutation"
     EXTERNAL_DISPATCH = "external_dispatch"
     PRIVILEGED_LOCAL = "privileged_local"
@@ -565,8 +566,28 @@ def _resolve_system_control(arguments: dict[str, Any]) -> str | None:
     return None
 
 
+def _resolve_app_or_window_control(arguments: dict[str, Any]) -> str | None:
+    action = str(arguments.get("action") or "").strip().lower()
+    if action in {"close", "quit"}:
+        return "app.desktop_graceful_close"
+    return "app.desktop_control"
+
+
 def _supports_system_control_contract_route(arguments: dict[str, Any]) -> bool:
     return _resolve_system_control(arguments) is not None
+
+
+def _resolve_web_retrieval(arguments: dict[str, Any]) -> str | None:
+    provider = str(
+        arguments.get("provider")
+        or arguments.get("preferred_provider")
+        or arguments.get("selected_provider")
+        or ""
+    ).strip().lower()
+    intent = str(arguments.get("intent") or "").strip().lower()
+    if provider in {"obscura_cdp", "obscura.cdp", "cdp"} or intent.startswith("cdp_"):
+        return "web_retrieval.obscura.cdp"
+    return "web_retrieval.obscura.cli"
 
 
 @lru_cache(maxsize=1)
@@ -772,7 +793,14 @@ def default_adapter_contract_registry() -> AdapterContractRegistry:
             family="app",
             description="Issues typed Windows app/window control requests and reports only the level of acknowledgement the OS returned.",
             observation_modes=["window_match", "process_match"],
-            action_modes=["launch", "focus", "minimize", "maximize", "restore", "close", "quit", "restart"],
+            action_modes=[
+                "launch",
+                "focus",
+                "minimize",
+                "maximize",
+                "restore",
+                "restart",
+            ],
             artifact_modes=["system_action_result"],
             preview_modes=[],
             safety_posture=["typed_actions", "backend_owned", "truthful_limits"],
@@ -876,17 +904,216 @@ def default_adapter_contract_registry() -> AdapterContractRegistry:
             offline_behavior="partial",
         )
     )
+    registry.register_contract(
+        AdapterContract(
+            adapter_id="app.desktop_graceful_close",
+            display_name="Desktop Graceful Close Adapter",
+            family="app",
+            description="Sends a Windows graceful close request to a matched top-level window and verifies the close result before claiming closure.",
+            observation_modes=["window_match", "process_match", "post_close_window_check", "confirmation_prompt_detection"],
+            action_modes=["graceful_close", "close", "quit", "force_close_requires_approval"],
+            artifact_modes=["system_action_result", "close_trace"],
+            preview_modes=[],
+            safety_posture=["typed_actions", "backend_owned", "truthful_limits", "no_default_force_close"],
+            failure_posture=[
+                "explicit_match_failure",
+                "explicit_reason_codes",
+                "confirmation_required",
+                "force_close_requires_approval",
+            ],
+            trust_tier=TrustTier.LOCAL_MUTATION,
+            approval=ApprovalDescriptor(required=True, suggested_scope="task", available_scopes=["once", "task", "session"]),
+            verification=VerificationDescriptor(
+                posture="close_request_with_postcheck",
+                max_claimable_outcome=ClaimOutcome.VERIFIED,
+                evidence=["window resolution", "OS action response", "post-close window/process check"],
+            ),
+            rollback=RollbackDescriptor(supported=False, posture="none"),
+            planner_tags=["app", "desktop_control", "graceful_close"],
+            local_first=True,
+            external_side_effects=False,
+            offline_behavior="full",
+        )
+    )
+    registry.register_contract(
+        AdapterContract(
+            adapter_id="web_retrieval.obscura.cli",
+            display_name="Obscura Web Renderer",
+            family="web_retrieval",
+            description=(
+                "Runs the optional Obscura CLI against public URLs and returns bounded "
+                "rendered-page evidence without truth or visible-screen claims."
+            ),
+            observation_modes=[
+                "public_url_validation",
+                "provider_readiness",
+                "rendered_page_output",
+            ],
+            action_modes=[
+                "fetch_public_url",
+                "render_javascript",
+                "extract_text",
+                "extract_links",
+                "extract_html",
+            ],
+            artifact_modes=[
+                "rendered_page_evidence",
+                "text_excerpt",
+                "link_list",
+                "bounded_html",
+            ],
+            preview_modes=["evidence_preview"],
+            safety_posture=[
+                "backend_owned",
+                "public_web_only",
+                "external_network",
+                "local_subprocess",
+                "no_logged_in_context",
+                "no_forms_or_clicks",
+                "no_truth_verification",
+                "no_user_visible_screen_claim",
+                "bounded_output",
+                "credentials_redacted",
+            ],
+            failure_posture=[
+                "binary_missing_explicit",
+                "timeout_explicit",
+                "partial_extraction_explicit",
+                "fallback_explicit",
+            ],
+            trust_tier=TrustTier.EXTERNAL_DISPATCH,
+            approval=ApprovalDescriptor(required=False, preview_allowed=True),
+            verification=VerificationDescriptor(
+                posture="rendered_page_evidence_only",
+                max_claimable_outcome=ClaimOutcome.OBSERVED,
+                evidence=["provider process result", "extracted page text and link counts"],
+                notes=["Does not verify truth or the user's visible screen."],
+            ),
+            rollback=RollbackDescriptor(supported=False, posture="none"),
+            planner_tags=[
+                "web_retrieval",
+                "obscura",
+                "public_web",
+                "rendered_page_evidence",
+            ],
+            local_first=False,
+            external_side_effects=False,
+            offline_behavior="partial",
+        )
+    )
+    registry.register_contract(
+        AdapterContract(
+            adapter_id="web_retrieval.obscura.cdp",
+            display_name="Obscura CDP Renderer",
+            family="web_retrieval",
+            description=(
+                "Starts a bounded local Obscura CDP session for public-page inspection "
+                "and returns headless page evidence without browser actions, login context, "
+                "truth verification, or visible-screen claims."
+            ),
+            observation_modes=[
+                "public_url_validation",
+                "provider_readiness",
+                "local_cdp_endpoint_probe",
+                "headless_page_inspection",
+            ],
+            action_modes=[
+                "web.cdp.start_local_session",
+                "web.cdp.navigate_public_url",
+                "web.cdp.extract_title",
+                "web.cdp.extract_current_url",
+                "web.cdp.extract_dom_text",
+                "web.cdp.extract_links",
+                "web.cdp.extract_html_excerpt",
+                "web.cdp.network_summary",
+            ],
+            artifact_modes=[
+                "headless_cdp_page_evidence",
+                "dom_text_excerpt",
+                "link_list",
+                "bounded_html_excerpt",
+                "network_summary",
+                "console_summary",
+            ],
+            preview_modes=["evidence_preview"],
+            safety_posture=[
+                "backend_owned",
+                "localhost_bind_only",
+                "public_web_only",
+                "external_network",
+                "local_subprocess",
+                "no_logged_in_context",
+                "no_cookies",
+                "no_input_domain",
+                "no_forms_or_clicks",
+                "no_playwright_control",
+                "no_truth_verification",
+                "no_user_visible_screen_claim",
+                "bounded_output",
+                "credentials_redacted",
+            ],
+            failure_posture=[
+                "binary_missing_explicit",
+                "startup_timeout_explicit",
+                "endpoint_probe_failure_explicit",
+                "redirect_block_explicit",
+                "cleanup_explicit",
+            ],
+            trust_tier=TrustTier.LOCAL_NETWORK,
+            approval=ApprovalDescriptor(required=False, preview_allowed=True),
+            verification=VerificationDescriptor(
+                posture="headless_cdp_page_evidence_only",
+                max_claimable_outcome=ClaimOutcome.OBSERVED,
+                evidence=[
+                    "local CDP session lifecycle",
+                    "page title/final URL",
+                    "DOM text and link counts",
+                    "bounded network/console summaries",
+                ],
+                notes=[
+                    "Does not verify truth.",
+                    "Does not observe the user's visible screen.",
+                    "Does not click, type, submit forms, read cookies, or reuse logged-in context.",
+                ],
+            ),
+            rollback=RollbackDescriptor(supported=False, posture="stop_local_session"),
+            planner_tags=[
+                "web_retrieval",
+                "obscura",
+                "cdp",
+                "headless_cdp_page_evidence",
+                "public_web",
+            ],
+            local_first=True,
+            external_side_effects=False,
+            offline_behavior="partial",
+        )
+    )
     registry.bind_tool("deck_open_url", ["browser.deck"])
     registry.bind_tool("external_open_url", ["browser.external", "settings.system_uri"], resolver=_resolve_external_open_url)
     registry.bind_tool("deck_open_file", ["file.deck"])
     registry.bind_tool("external_open_file", ["file.external"])
     registry.bind_tool("file_operation", ["file.operation"])
-    registry.bind_tool("app_control", ["app.desktop_control"])
+    registry.bind_tool(
+        "app_control",
+        ["app.desktop_control", "app.desktop_graceful_close"],
+        resolver=_resolve_app_or_window_control,
+    )
+    registry.bind_tool(
+        "window_control",
+        ["app.desktop_control", "app.desktop_graceful_close"],
+        resolver=_resolve_app_or_window_control,
+    )
     registry.bind_tool("shell_command", ["terminal.shell_stub"])
     registry.bind_tool(
         "system_control",
         ["settings.system_page"],
         resolver=_resolve_system_control,
         applies=_supports_system_control_contract_route,
+    )
+    registry.bind_tool(
+        "web_retrieval_fetch",
+        ["web_retrieval.obscura.cli", "web_retrieval.obscura.cdp"],
+        resolver=_resolve_web_retrieval,
     )
     return registry

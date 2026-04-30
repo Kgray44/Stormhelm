@@ -96,6 +96,30 @@ class NetworkMonitor:
         telemetry["assessment"] = self._analyzer.analyze(telemetry)
         return telemetry
 
+    def snapshot_cached(self) -> dict[str, Any]:
+        with self._lock:
+            samples = list(self._history)
+            events = list(self._event_log)
+            diagnostic_until = self._diagnostic_until
+            last_sample_at = self._last_sample_at
+        telemetry = self._summarize(samples, events, diagnostic_until=diagnostic_until, last_sample_at=last_sample_at)
+        telemetry["assessment"] = self._analyzer.analyze(telemetry)
+        age_ms = round(max(time.monotonic() - last_sample_at, 0.0) * 1000, 3) if last_sample_at else None
+        if age_ms is None:
+            freshness_state = "missing"
+        elif age_ms <= self._normal_interval_seconds * 1000:
+            freshness_state = "fresh"
+        else:
+            freshness_state = "stale"
+        telemetry["system_resource_cache_hit"] = last_sample_at > 0
+        telemetry["system_resource_cache_age_ms"] = age_ms
+        telemetry["system_resource_freshness_state"] = freshness_state
+        telemetry["system_probe_deferred"] = False
+        telemetry["system_live_refresh_job_id"] = ""
+        telemetry.setdefault("monitoring", {})["system_resource_freshness_state"] = freshness_state
+        telemetry["monitoring"]["system_probe_deferred"] = False
+        return telemetry
+
     def _run(self) -> None:
         while not self._stop_event.is_set():
             mode = "diagnostic" if self._diagnostic_active() else "idle"

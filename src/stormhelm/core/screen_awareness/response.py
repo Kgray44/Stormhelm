@@ -15,7 +15,15 @@ from stormhelm.core.screen_awareness.models import ScreenResponse
 from stormhelm.core.screen_awareness.observation import best_live_visible_text
 from stormhelm.core.screen_awareness.observation import best_visible_text
 from stormhelm.core.screen_awareness.observation import has_clipboard_only_signal
+from stormhelm.core.screen_awareness.observation import has_focus_only_signal
 from stormhelm.core.screen_awareness.observation import has_live_screen_signal
+from stormhelm.core.screen_awareness.observation import has_screen_capture_signal
+from stormhelm.core.screen_awareness.observation import has_screen_content_signal
+from stormhelm.core.screen_awareness.visual_capture import source_labels_for_observation
+
+
+_CONTENT_POWER_REQUEST_TYPES = {"translation_request", "entity_query", "overlay_request", "notification_query"}
+
 
 def _preview(text: str | None, *, limit: int = 120) -> str:
     cleaned = " ".join(str(text or "").split()).strip()
@@ -34,6 +42,142 @@ def _first_sentence(text: str) -> str:
         if index != -1:
             stop = min(stop, index + 1)
     return cleaned[:stop].strip() or cleaned
+
+
+def _screen_capture_status(observation: Any) -> dict[str, Any]:
+    if observation is None:
+        return {
+            "enabled": False,
+            "attempted": False,
+            "captured": False,
+            "reason": "observation_unavailable",
+            "raw_screenshot_logged": False,
+            "image_retained": False,
+        }
+    status = getattr(observation, "visual_metadata", {}).get("screen_capture") if isinstance(getattr(observation, "visual_metadata", {}), dict) else None
+    if isinstance(status, dict):
+        return dict(status)
+    return {
+        "enabled": False,
+        "attempted": False,
+        "captured": False,
+        "reason": "not_requested",
+        "raw_screenshot_logged": False,
+        "image_retained": False,
+    }
+
+
+def _visual_source_sentence(observation: Any) -> str:
+    status = _screen_capture_status(observation)
+    if not status.get("captured"):
+        return ""
+    captured_at = str(status.get("captured_at") or "").strip()
+    scope = str(status.get("scope") or "active_window").replace("_", " ")
+    if captured_at:
+        return f"Screenshot captured at {captured_at} from {scope}. "
+    return f"Screenshot captured from {scope}. "
+
+
+def _int_value(value: Any) -> int:
+    if isinstance(value, int):
+        return value
+    try:
+        return int(str(value or "").strip())
+    except ValueError:
+        return 0
+
+
+def _active_display_label(observation: Any) -> str:
+    if observation is None:
+        return ""
+    monitor_metadata = getattr(observation, "monitor_metadata", {})
+    focus_metadata = getattr(observation, "focus_metadata", {})
+    index = 0
+    if isinstance(monitor_metadata, dict):
+        index = _int_value(monitor_metadata.get("index") or monitor_metadata.get("monitor_index"))
+    if index <= 0 and isinstance(focus_metadata, dict):
+        index = _int_value(focus_metadata.get("monitor_index"))
+    if index > 0:
+        return f"Display {index}"
+    if isinstance(monitor_metadata, dict):
+        return str(monitor_metadata.get("device_name") or "").strip()
+    return ""
+
+
+def _focused_metadata_label(observation: Any) -> str:
+    if observation is None:
+        return ""
+    focus_metadata = getattr(observation, "focus_metadata", {})
+    if not isinstance(focus_metadata, dict):
+        return str(getattr(observation, "app_identity", "") or "").strip()
+    return str(focus_metadata.get("window_title") or getattr(observation, "app_identity", "") or "").strip()
+
+
+def _metadata_context_sentence(observation: Any) -> str:
+    display = _active_display_label(observation)
+    focused = _focused_metadata_label(observation)
+    parts: list[str] = []
+    if display:
+        parts.append(f"I can see that the active window is on {display}.")
+    if focused:
+        parts.append(f"Focused window metadata says {focused}.")
+    return " ".join(parts)
+
+
+def _metadata_only_screen_text(observation: Any, *, capture_state: str) -> str:
+    context = _metadata_context_sentence(observation)
+    if context:
+        context = f" {context}"
+    return (
+        "Observed: I only have window/display metadata right now."
+        f"{context} {capture_state} "
+        "This is a low-confidence bearing. "
+        "Inference: I cannot honestly describe the screen contents until visual capture is available."
+    )
+
+
+def _evidence_kind(analysis: ScreenAnalysisResult) -> str:
+    observation = analysis.observation
+    if observation is None:
+        return "none"
+    if has_screen_content_signal(observation) or has_screen_capture_signal(observation):
+        return "visual_content"
+    if has_clipboard_only_signal(observation):
+        return "clipboard_hint"
+    if observation.focus_metadata:
+        return "window_metadata"
+    if observation.monitor_metadata or observation.window_metadata.get("monitors"):
+        return "display_metadata"
+    if observation.clipboard_text:
+        return "clipboard_hint"
+    return "none"
+
+
+def _power_result_has_specific_evidence(analysis: ScreenAnalysisResult) -> bool:
+    power = analysis.power_features_result
+    if power is None:
+        return False
+    request_type = power.request_type.value
+    if request_type == "translation_request":
+        return bool(power.translations)
+    if request_type == "entity_query":
+        return power.extracted_entities is not None and bool(power.extracted_entities.entities)
+    if request_type == "overlay_request":
+        return bool(power.overlay_instructions)
+    if request_type == "notification_query":
+        return bool(power.notification_events)
+    return True
+
+
+def _has_specific_content_power_evidence(analysis: ScreenAnalysisResult) -> bool:
+    power = analysis.power_features_result
+    return bool(
+        power is not None
+        and power.request_type.value in _CONTENT_POWER_REQUEST_TYPES
+        and _power_result_has_specific_evidence(analysis)
+    )
+
+
 def _explain_error(error_text: str) -> str:
     lowered = error_text.lower()
     if "nameerror" in lowered:
@@ -528,6 +672,17 @@ class ScreenResponseComposer:
         limitation_codes = {limitation.code for limitation in analysis.limitations}
         grounding = analysis.grounding_result
 
+        if ScreenLimitationCode.SENSITIVE_CONTENT_RESTRICTED in limitation_codes:
+            title = ""
+            if observation is not None:
+                title = str(observation.focus_metadata.get("window_title") or observation.app_identity or "").strip()
+            title_note = f" The available focused window metadata is {title}." if title else ""
+            text = (
+                "Observed: the focused surface appears sensitive, so I did not capture a screenshot or inspect pixels. "
+                f"{title_note} Inference: I can only speak from restricted metadata unless you explicitly move to a safe surface."
+            )
+            return self._response("Screen Bearings", text, analysis)
+
         if ScreenLimitationCode.OBSERVATION_UNAVAILABLE in limitation_codes:
             clipboard_text = _preview(observation.clipboard_text) if observation is not None else ""
             if observation is not None and has_clipboard_only_signal(observation) and clipboard_text:
@@ -542,6 +697,38 @@ class ScreenResponseComposer:
                     "Observed: there was no focused window, selected text, or grounded workspace surface I could trust. "
                     "Inference: I can't safely describe the visible state from this signal."
                 )
+            return self._response("Screen Bearings", text, analysis)
+
+        if (
+            intent in {
+                ScreenIntentType.INSPECT_VISIBLE_STATE,
+                ScreenIntentType.EXPLAIN_VISIBLE_CONTENT,
+                ScreenIntentType.SOLVE_VISIBLE_PROBLEM,
+            }
+            and _evidence_kind(analysis) in {"window_metadata", "display_metadata"}
+            and ScreenLimitationCode.SCREEN_CAPTURE_DISABLED in limitation_codes
+            and not _has_specific_content_power_evidence(analysis)
+        ):
+            text = _metadata_only_screen_text(
+                observation,
+                capture_state="Screen capture is disabled, so no real pixel, OCR, or provider-vision evidence is available.",
+            )
+            return self._response("Screen Bearings", text, analysis)
+
+        if (
+            intent in {
+                ScreenIntentType.INSPECT_VISIBLE_STATE,
+                ScreenIntentType.EXPLAIN_VISIBLE_CONTENT,
+                ScreenIntentType.SOLVE_VISIBLE_PROBLEM,
+            }
+            and _evidence_kind(analysis) in {"window_metadata", "display_metadata"}
+            and ScreenLimitationCode.SCREEN_CAPTURE_UNAVAILABLE in limitation_codes
+            and not _has_specific_content_power_evidence(analysis)
+        ):
+            text = _metadata_only_screen_text(
+                observation,
+                capture_state="Visual capture was requested but unavailable or failed, so no real pixel, OCR, or provider-vision evidence is available.",
+            )
             return self._response("Screen Bearings", text, analysis)
 
         brain = analysis.brain_integration_result
@@ -633,7 +820,10 @@ class ScreenResponseComposer:
                     "Inference: that workspace map is limited to the windows and monitors I can currently observe."
                 )
                 return self._response("Power Bearings", text, analysis)
-            if power.explanation_summary:
+            if (
+                power.explanation_summary
+                and (power.request_type.value not in _CONTENT_POWER_REQUEST_TYPES or _power_result_has_specific_evidence(analysis))
+            ):
                 return self._response("Power Bearings", f"Observed: {power.explanation_summary}", analysis)
 
         workflow = analysis.workflow_learning_result
@@ -1015,12 +1205,38 @@ class ScreenResponseComposer:
                 )
                 return self._response("Visible Solution", text, analysis)
 
+        if ScreenLimitationCode.SCREEN_CAPTURE_DISABLED in limitation_codes:
+            text = _metadata_only_screen_text(
+                observation,
+                capture_state="Screen capture is disabled, so no real pixel, OCR, or provider-vision evidence is available.",
+            )
+            return self._response("Screen Bearings", text, analysis)
+
+        if ScreenLimitationCode.SCREEN_CAPTURE_UNAVAILABLE in limitation_codes:
+            text = _metadata_only_screen_text(
+                observation,
+                capture_state="Visual capture was requested but unavailable or failed, so no real pixel, OCR, or provider-vision evidence is available.",
+            )
+            return self._response("Screen Bearings", text, analysis)
+
+        if (
+            ScreenLimitationCode.LOW_CONFIDENCE in limitation_codes
+            and _evidence_kind(analysis) in {"window_metadata", "display_metadata"}
+        ):
+            text = _metadata_only_screen_text(
+                observation,
+                capture_state="The current bearing did not provide readable visual content.",
+            )
+            return self._response("Screen Bearings", text, analysis)
+
         if current_context is not None and interpretation is not None:
             observed = current_context.summary or "The current screen context is partially available."
             inference = interpretation.likely_task or interpretation.visible_purpose or "The visible state is only partially grounded."
-            text = f"Observed: {observed} Inference: this most likely reflects {inference}."
+            text = f"Observed: {_visual_source_sentence(observation)}{observed} Inference: this most likely reflects {inference}."
             if ScreenLimitationCode.LOW_CONFIDENCE in limitation_codes:
                 text += " The bearing is low-confidence because the visible signal is incomplete."
+            elif observation is not None and observation.visual_text and observation.visual_metadata.get("visual_confidence_score", 1.0) < 0.55:
+                text += " The OCR or vision result is low-confidence, so treat the text as tentative."
             return self._response("Screen Bearings", text, analysis)
 
         text = (
@@ -1030,6 +1246,7 @@ class ScreenResponseComposer:
         return self._response("Screen Bearings", text, analysis)
 
     def _response(self, bearing_title: str, text: str, analysis: ScreenAnalysisResult) -> ScreenResponse:
+        evidence_kind = _evidence_kind(analysis)
         return ScreenResponse(
             analysis=analysis,
             assistant_response=text,
@@ -1037,14 +1254,17 @@ class ScreenResponseComposer:
                 "bearing_title": bearing_title,
                 "micro_response": _first_sentence(text),
                 "full_response": text,
+                "evidence_kind": evidence_kind,
             },
             telemetry={
                 "observation": {
                     "attempted": analysis.observation is not None,
+                    "evidence_kind": evidence_kind,
                     "source_types_used": [
                         source.value
                         for source in (analysis.observation.source_types_used if analysis.observation is not None else [])
                     ],
+                    "source_labels": source_labels_for_observation(analysis.observation),
                     "sensitivity": analysis.observation.sensitivity.value if analysis.observation is not None else "unknown",
                     "live_signal_available": (
                         has_live_screen_signal(analysis.observation)
@@ -1061,6 +1281,19 @@ class ScreenResponseComposer:
                         if analysis.observation is not None
                         else None
                     ),
+                    "visual_text_available": bool(analysis.observation.visual_text) if analysis.observation is not None else False,
+                    "visual_text_source": (
+                        analysis.observation.visual_metadata.get("visual_text_source")
+                        if analysis.observation is not None
+                        else None
+                    ),
+                    "confidence_label": analysis.confidence.level.value,
+                    "focus_only": (
+                        has_focus_only_signal(analysis.observation)
+                        if analysis.observation is not None
+                        else False
+                    ),
+                    "screen_capture": _screen_capture_status(analysis.observation),
                 },
                 "interpretation": {
                     "likely_environment": analysis.interpretation.likely_environment if analysis.interpretation is not None else None,

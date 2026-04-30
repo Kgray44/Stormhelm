@@ -47,7 +47,7 @@ _SPANISH_TRANSLATIONS = {
     "error": "Error",
 }
 
-_MONITOR_HINTS = ("display", "monitor", "screen")
+_MONITOR_HINTS = ("display", "monitor")
 _ACCESSIBILITY_HINTS = ("keyboard", "focus", "focused", "accessible", "accessibility", "tab to")
 _OVERLAY_HINTS = ("highlight", "overlay", "mark", "point out", "show me where")
 _TRANSLATION_HINTS = ("translate", "translation", "what does this say")

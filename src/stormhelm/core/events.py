@@ -22,6 +22,7 @@ class EventFamily(str, Enum):
     NETWORK = "network"
     SCREEN_AWARENESS = "screen_awareness"
     DISCORD_RELAY = "discord_relay"
+    WEB_RETRIEVAL = "web_retrieval"
     VOICE = "voice"
     LIFECYCLE = "lifecycle"
 
@@ -488,7 +489,7 @@ class EventBuffer:
             return "direct_system_fact"
         if subsystem in {"assistant", "planner"}:
             return "operator_summary"
-        if subsystem in {"judgment", "screen_awareness", "discord_relay", "network", "voice"}:
+        if subsystem in {"judgment", "screen_awareness", "discord_relay", "web_retrieval", "network", "voice"}:
             return "subsystem_interpretation"
         return "heuristic_status"
 
@@ -520,6 +521,7 @@ class EventBuffer:
             EventFamily.VERIFICATION.value,
             EventFamily.SCREEN_AWARENESS.value,
             EventFamily.DISCORD_RELAY.value,
+            EventFamily.WEB_RETRIEVAL.value,
             EventFamily.VOICE.value,
             EventFamily.WORKSPACE.value,
         }:
@@ -571,6 +573,7 @@ class EventBuffer:
             "calculations": EventFamily.VERIFICATION,
             "screen_awareness": EventFamily.SCREEN_AWARENESS,
             "discord_relay": EventFamily.DISCORD_RELAY,
+            "web_retrieval": EventFamily.WEB_RETRIEVAL,
             "voice": EventFamily.VOICE,
             "workspace": EventFamily.WORKSPACE,
             "api": EventFamily.WORKSPACE,
@@ -643,6 +646,12 @@ class EventBuffer:
             if payload.get("preview"):
                 return "discord_relay.preview_ready"
             return "discord_relay.updated"
+
+        if event_family == EventFamily.WEB_RETRIEVAL.value:
+            state = str(payload.get("status") or payload.get("state") or "").strip().lower()
+            if state:
+                return f"web_retrieval.{state}"
+            return "web_retrieval.updated"
 
         if event_family == EventFamily.VOICE.value:
             state = str(payload.get("state") or "").strip().lower()

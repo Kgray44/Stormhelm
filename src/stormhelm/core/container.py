@@ -168,7 +168,7 @@ class CoreContainer:
     def status_snapshot(self) -> dict[str, Any]:
         jobs = self.jobs.list_jobs(limit=64)
         worker_state = self.jobs.worker_status_snapshot()
-        system_state = self._system_state_snapshot()
+        system_state = self._status_system_state_snapshot()
         recent_events = self.events.recent(limit=32)
         watch_state = self._watch_state_snapshot(jobs)
         systems_interpretation = self.operational_awareness.build_systems_interpretation(system_state).to_dict()
@@ -194,11 +194,11 @@ class CoreContainer:
         )
         provider_state = self._provider_state_snapshot()
         tool_state = self._tool_state_snapshot()
-        active_task = self.task_service.active_task_summary("default")
+        active_task = self._status_active_task_summary("default")
         memory_state = self.memory.status_snapshot()
         event_stream_state = self.events.state_snapshot()
         lifecycle_state = self.lifecycle.status_snapshot()
-        active_workspace = self.assistant.workspace_service.active_workspace_summary("default")
+        active_workspace = self._status_active_workspace_summary("default")
         bridge_authority = build_bridge_authority_snapshot(
             calculations=calculations_state,
             software_control=software_control_state,
@@ -259,6 +259,137 @@ class CoreContainer:
             "lifecycle": lifecycle_state,
         }
 
+    def status_snapshot_fast(self, session_id: str = "default") -> dict[str, Any]:
+        """Return the UI heartbeat state without assembling heavy diagnostics."""
+
+        sections_ms: dict[str, float] = {}
+
+        def _timed(section: str, factory: Any) -> Any:
+            started = monotonic()
+            value = factory()
+            sections_ms[section] = round((monotonic() - started) * 1000, 3)
+            return value
+
+        active_session_id = str(session_id or "default").strip() or "default"
+        jobs = _timed("jobs", lambda: self.jobs.list_jobs(limit=8))
+        worker_state = _timed("worker_state", self.jobs.worker_status_snapshot)
+        system_state = _timed("system_state", self._status_system_state_snapshot)
+        voice_snapshot = getattr(self.voice, "status_snapshot_fast", None)
+        voice_state = _timed(
+            "voice",
+            lambda: voice_snapshot()
+            if callable(voice_snapshot)
+            else self.voice.status_snapshot(),
+        )
+        lifecycle_state = _timed(
+            "lifecycle",
+            lambda: self._hot_path_compact_value(
+                self.lifecycle.status_snapshot(),
+                max_depth=3,
+                list_limit=6,
+                text_limit=400,
+            ),
+        )
+        event_stream_state = _timed("event_stream", self.events.state_snapshot)
+        provider_state = _timed("provider_state", self._provider_state_snapshot)
+        tool_count = _timed("tool_count", self._tool_count_fast)
+        trust_state = _timed(
+            "trust",
+            lambda: self._hot_path_compact_value(
+                self.trust.status_snapshot(
+                    session_id=active_session_id,
+                    active_task_id="",
+                ),
+                max_depth=3,
+                list_limit=6,
+                text_limit=400,
+            ),
+        )
+        calculations_state = _timed("calculations", self.calculations.status_snapshot)
+        software_control_state = _timed("software_control", self.software_control.status_snapshot)
+        software_recovery_state = _timed("software_recovery", self.software_recovery.status_snapshot)
+        screen_awareness_state = _timed("screen_awareness", self.screen_awareness.status_snapshot)
+        discord_relay_state = _timed("discord_relay", self.discord_relay.status_snapshot)
+        watch_state = _timed("watch_state", lambda: self._watch_state_snapshot(jobs))
+        return {
+            "status_profile": "fast_status",
+            "status_sections_ms": sections_ms,
+            "status_deferred_sections": [
+                "bridge_authority",
+                "tool_state",
+                "memory",
+                "workspace",
+                "active_task",
+                "active_request_state",
+                "recent_context_resolutions",
+                "system_detail",
+                "weather_detail",
+                "deck_detail",
+            ],
+            "detail_load_deferred": True,
+            "deferred_reason": "runtime_hot_path_avoids_heavy_status_diagnostics",
+            "app_name": self.config.app_name,
+            "version": self.config.version,
+            "version_label": self.config.version_label,
+            "protocol_version": self.config.protocol_version,
+            "release_channel": self.config.release_channel,
+            "environment": self.config.environment,
+            "debug": self.config.debug,
+            "api_base_url": self.config.api_base_url,
+            "data_dir": str(self.config.storage.data_dir),
+            "database_path": str(self.database.effective_path),
+            "logs_dir": str(self.config.storage.logs_dir),
+            "state_dir": str(self.config.storage.state_dir),
+            "runtime_mode": self.config.runtime.mode,
+            "install_root": str(self.config.runtime.install_root),
+            "resource_root": str(self.config.runtime.resource_root),
+            "max_workers": self.config.concurrency.max_workers,
+            "worker_state": worker_state,
+            "tool_count": tool_count,
+            "recent_jobs": len(jobs),
+            "recent_jobs_summary": {
+                "total_returned": len(jobs),
+                "limit": 8,
+                "detail_load_deferred": True,
+                "states": [
+                    str(job.get("status") or job.get("state") or "")
+                    for job in jobs
+                    if isinstance(job, dict)
+                ],
+            },
+            "system_state": system_state,
+            "calculations": calculations_state,
+            "software_control": software_control_state,
+            "software_recovery": software_recovery_state,
+            "screen_awareness": screen_awareness_state,
+            "discord_relay": discord_relay_state,
+            "voice": voice_state,
+            "trust": trust_state,
+            "provider_state": provider_state,
+            "watch_state": watch_state,
+            "active_task": {
+                "session_id": active_session_id,
+                "summary_omitted": True,
+                "detail_load_deferred": True,
+                "omitted_reason": "status_hot_path_avoids_task_state_reads",
+            },
+            "active_workspace": {
+                "workspace_id": "",
+                "summary_omitted": True,
+                "detail_load_deferred": True,
+                "omitted_reason": "status_hot_path_avoids_workspace_state_reads",
+            },
+            "active_request_state": {
+                "summary_omitted": True,
+                "detail_load_deferred": True,
+                "omitted_reason": "status_hot_path_avoids_request_state_reads",
+            },
+            "recent_context_resolutions": [],
+            "event_stream": event_stream_state,
+            "first_run": bool(self.runtime_bootstrap and self.runtime_bootstrap.first_run),
+            "lifecycle": lifecycle_state,
+        }
+
     def _system_state_snapshot(self) -> dict[str, Any]:
         now = monotonic()
         if self._system_state_cache is not None and (now - self._system_state_cached_at) < 15.0:
@@ -277,6 +408,127 @@ class CoreContainer:
         self._system_state_cache = snapshot
         self._system_state_cached_at = completed_at
         return snapshot
+
+    def _status_system_state_snapshot(self) -> dict[str, Any]:
+        now = monotonic()
+        if self._system_state_cache is not None and (now - self._system_state_cached_at) < 15.0:
+            return dict(self._system_state_cache)
+        if type(self.system_probe) is not SystemProbe:
+            return self._system_state_snapshot()
+        machine = self.system_probe.machine_status()
+        return {
+            "status_profile": "fast_status",
+            "detail_load_deferred": True,
+            "deferred_reason": "status_hot_path_avoids_live_system_probes",
+            "machine": machine,
+            "power": {
+                "available": False,
+                "detail_load_deferred": True,
+                "deferred_reason": "status_hot_path_avoids_live_power_probe",
+            },
+            "resources": {
+                "cpu": {
+                    "name": str(machine.get("processor") or ""),
+                    "cores": 0,
+                    "logical_processors": 0,
+                },
+                "memory": {
+                    "total_bytes": 0,
+                    "used_bytes": 0,
+                    "free_bytes": 0,
+                    "detail_load_deferred": True,
+                },
+                "gpu": [],
+                "detail_load_deferred": True,
+            },
+            "hardware": {
+                "capabilities": {"helper_reachable": False},
+                "freshness": {
+                    "sampling_tier": "status_fast",
+                    "detail_load_deferred": True,
+                },
+            },
+            "storage": {
+                "drives": [],
+                "detail_load_deferred": True,
+            },
+            "network": {
+                "hostname": "",
+                "interfaces": [],
+                "monitoring": {},
+                "quality": {},
+                "dns": {},
+                "throughput": {},
+                "events": [],
+                "trend_points": [],
+                "providers": {},
+                "source_debug": {"detail_load_deferred": True},
+                "assessment": {},
+                "detail_load_deferred": True,
+            },
+            "location": {
+                "resolved": False,
+                "mode": "status_fast",
+                "source": "deferred",
+                "reason": "status_hot_path_avoids_live_location_probe",
+            },
+        }
+
+    def _status_active_task_summary(self, session_id: str) -> dict[str, Any]:
+        active_task_id = self.assistant.session_state.get_active_task_id(session_id)
+        if not active_task_id:
+            return {}
+        return {
+            "session_id": session_id,
+            "taskId": str(active_task_id),
+            "task_id": str(active_task_id),
+            "detailLoadDeferred": True,
+            "detail_load_deferred": True,
+            "summary_omitted": True,
+            "omitted_reason": "status_hot_path_avoids_task_continuity_load",
+        }
+
+    def _status_active_workspace_summary(self, session_id: str) -> dict[str, Any]:
+        operation = getattr(
+            self.assistant.workspace_service,
+            "active_workspace_summary_compact",
+            None,
+        )
+        if callable(operation):
+            return operation(session_id)
+        workspace_id = self.assistant.session_state.get_active_workspace_id(session_id)
+        if not workspace_id:
+            return {}
+        return {
+            "workspace": {
+                "workspaceId": str(workspace_id),
+                "detailLoadDeferred": True,
+            },
+            "detail_load_deferred": True,
+            "summary_omitted": True,
+            "omitted_reason": "status_hot_path_avoids_workspace_context_load",
+        }
+
+    def _status_active_workspace_light(self, session_id: str) -> dict[str, Any]:
+        workspace_id = self.assistant.session_state.get_active_workspace_id(session_id)
+        if not workspace_id:
+            return {
+                "workspace_id": "",
+                "detail_load_deferred": True,
+                "summary_omitted": True,
+                "omitted_reason": "status_hot_path_no_active_workspace",
+            }
+        return {
+            "workspace_id": str(workspace_id),
+            "workspace": {
+                "workspaceId": str(workspace_id),
+                "detailLoadDeferred": True,
+            },
+            "detailLoadDeferred": True,
+            "detail_load_deferred": True,
+            "summary_omitted": True,
+            "omitted_reason": "status_hot_path_avoids_workspace_context_load",
+        }
 
     def _provider_state_snapshot(self) -> dict[str, Any]:
         return {
@@ -326,6 +578,77 @@ class CoreContainer:
             "contract_bound_tools": contract_bound_tools,
             "adapter_contract_binding_modes": dict(contract_registry_snapshot.get("tool_binding_modes") or {}),
         }
+
+    def _tool_count_fast(self) -> int:
+        tools = getattr(self.tool_registry, "_tools", None)
+        if isinstance(tools, dict):
+            return len(tools)
+        try:
+            return len(self.tool_registry.metadata())
+        except Exception:
+            return 0
+
+    def _hot_path_compact_value(
+        self,
+        value: Any,
+        *,
+        max_depth: int = 3,
+        list_limit: int = 8,
+        text_limit: int = 500,
+    ) -> Any:
+        if max_depth <= 0:
+            if isinstance(value, dict):
+                return {
+                    "summary_omitted": True,
+                    "detail_load_deferred": True,
+                    "omitted_reason": "status_hot_path_depth_limit",
+                    "key_count": len(value),
+                }
+            if isinstance(value, list):
+                return {
+                    "summary_omitted": True,
+                    "detail_load_deferred": True,
+                    "omitted_reason": "status_hot_path_depth_limit",
+                    "total_count": len(value),
+                }
+            return self._hot_path_scalar(value, text_limit=text_limit)
+        if isinstance(value, dict):
+            return {
+                str(key): self._hot_path_compact_value(
+                    item,
+                    max_depth=max_depth - 1,
+                    list_limit=list_limit,
+                    text_limit=text_limit,
+                )
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            items = [
+                self._hot_path_compact_value(
+                    item,
+                    max_depth=max_depth - 1,
+                    list_limit=list_limit,
+                    text_limit=text_limit,
+                )
+                for item in value[:list_limit]
+            ]
+            if len(value) > list_limit:
+                items.append(
+                    {
+                        "summary_omitted": True,
+                        "detail_load_deferred": True,
+                        "omitted_count": len(value) - list_limit,
+                    }
+                )
+            return items
+        return self._hot_path_scalar(value, text_limit=text_limit)
+
+    def _hot_path_scalar(self, value: Any, *, text_limit: int) -> Any:
+        if isinstance(value, str) and len(value) > text_limit:
+            return value[:text_limit].rstrip() + "..."
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return str(value)[:text_limit]
 
     def _watch_state_snapshot(self, jobs: list[dict[str, Any]]) -> dict[str, Any]:
         snapshot = self.operational_awareness.build_watch_snapshot(

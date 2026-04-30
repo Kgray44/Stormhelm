@@ -13,10 +13,35 @@ Item {
     property real motionIntensity: 0.12
     property real audioLevel: 0
     property real smoothedAudioLevel: audioLevel
+    property real visualDriveLevel: 0
+    property real visualDrivePeak: visualDriveLevel
+    property real centerBlobDrive: visualDriveLevel
+    property real centerBlobScaleDrive: centerBlobDrive
+    property real backendCenterBlobScale: 1.0
+    property real outerSpeakingMotion: 0
+    property real forceAudioDriveLevel: -1
+    property string forceAnchorState: ""
+    property bool showAnchorDebugValues: false
+    property real idleBaseMotion: 0.035
+    property real speakingBaseMotion: 0.025
+    property real audioReactiveGain: 0.78
+    property real audioReactiveFloor: 0.06
+    property real audioReactivePeakBoost: 0.18
+    property int dampingReleaseMs: 75
     property bool audioReactiveAvailable: false
     property string audioReactiveSource: "unavailable"
     property string statusLabel: ""
     readonly property string idleLoopMode: "continuous_time"
+    readonly property real centerBlobDriveLevel: Math.max(0, Math.min(1, root.forceAudioDriveLevel >= 0 ? root.forceAudioDriveLevel : root.centerBlobScaleDrive))
+    readonly property real audioDriveLevel: root.centerBlobDriveLevel
+    readonly property real centerBlobScale: root.forceAudioDriveLevel >= 0
+            ? 1.0 + root.centerBlobDriveLevel * 0.32
+            : Math.max(1.0, root.backendCenterBlobScale > 0 ? root.backendCenterBlobScale : 1.0 + root.centerBlobDriveLevel * 0.32)
+    readonly property real centerBlobLift: 0
+    readonly property real centerBlobGlow: 0.38 + root.centerBlobDriveLevel * 0.38
+    readonly property real centerBlobWobble: root.speakingActive ? 0 : root.displayAmplitude * 0.26
+    readonly property real outerRingCarrierAmplitude: root.speakingActive ? Math.min(0.08, root.speakingBaseMotion + Math.max(0, root.outerSpeakingMotion) * 0.28) : 0
+    readonly property real audioReactiveLayerShare: root.audioReactiveGain / Math.max(0.001, root.audioReactiveGain + root.speakingBaseMotion)
     property string shellMode: "ghost"
     property real phase: 0
     property real orbit: 0
@@ -41,24 +66,30 @@ Item {
     property real displayAmplitude: root.amplitudeForState(root.visualState())
 
     function visualState() {
+        if (root.forceAnchorState && root.forceAnchorState.length > 0) {
+            return root.forceAnchorState
+        }
         return root.anchorState && root.anchorState.length > 0 ? root.anchorState : root.assistantState
     }
 
     function amplitudeForState(state) {
+        var outerDrive = root.speakingActive ? Math.max(0, Math.min(1, root.outerSpeakingMotion)) : 0
         var base = state === "wake_detected" ? 0.10
                  : state === "listening" ? 0.14
                  : state === "transcribing" ? 0.10
                  : state === "thinking" ? 0.08
                  : state === "confirmation_required" ? 0.11
                  : state === "preparing_speech" ? 0.09
-                 : state === "speaking" ? 0.12 + Math.min(0.11, root.smoothedAudioLevel * 0.16)
+                 : state === "speaking" ? Math.min(0.28, root.speakingBaseMotion + outerDrive * 0.26)
                  : state === "continuing_task" ? 0.06
                  : state === "acting" ? 0.14
                  : state === "interrupted" || state === "muted" ? 0.018
                  : state === "blocked" || state === "error" || state === "warning" ? 0.05
                  : state === "dormant" ? 0.018
-                 : 0.035
-        return Math.max(base, Math.min(0.23, root.motionIntensity * 0.22))
+                 : root.idleBaseMotion
+        var motionContribution = state === "speaking" ? Math.min(0.28, outerDrive * 0.25)
+                                                        : Math.min(0.31, root.motionIntensity * 0.3)
+        return Math.max(base, motionContribution)
     }
 
     function accentForState(state) {
@@ -76,7 +107,7 @@ Item {
     }
 
     function motionSpeedForState(state) {
-        return state === "speaking" ? 3.7 + Math.min(2.2, root.smoothedAudioLevel * 3.0)
+        return state === "speaking" ? 2.2 + Math.min(6.2, root.audioDriveLevel * 6.8)
              : state === "listening" ? 2.6
              : state === "transcribing" ? 2.2
              : state === "thinking" ? 1.7
@@ -122,10 +153,11 @@ Item {
             var delta = Math.min(0.08, Math.max(0.0, now - root._lastMotionTick))
             root._lastMotionTick = now
             var speed = root.motionSpeedForState(root.visualState())
+            var drive = root.audioDriveLevel
             root.phase += delta * speed
-            root.orbit += delta * (0.38 + root.motionIntensity * 0.24)
-            root.shimmer += delta * (0.58 + root.motionIntensity * 0.22)
-            root.variance += delta * (0.74 + root.motionIntensity * 0.18)
+            root.orbit += delta * (0.34 + root.motionIntensity * 0.12 + drive * 0.34)
+            root.shimmer += delta * (0.5 + root.motionIntensity * 0.12 + drive * 0.42)
+            root.variance += delta * (0.62 + root.motionIntensity * 0.1 + drive * 0.46)
             coreCanvas.requestPaint()
         }
     }
@@ -135,7 +167,7 @@ Item {
     }
 
     Behavior on displayAmplitude {
-        NumberAnimation { duration: 320; easing.type: Easing.InOutQuad }
+        NumberAnimation { duration: root.speakingActive ? 70 : root.dampingReleaseMs; easing.type: Easing.OutCubic }
     }
 
     onAdaptiveGlowBoostChanged: root.visualAdaptiveGlowBoost = root.adaptiveGlowBoost
@@ -184,9 +216,16 @@ Item {
             var irisR = outerR * 0.75
             var heartR = outerR * 0.33
             var voiceVisualState = root.visualState()
-            var safeAudioLevel = Math.max(0, Math.min(1, root.smoothedAudioLevel || root.audioLevel || 0))
-            var speakingBoost = root.speakingActive ? (0.1 + safeAudioLevel * 0.22) : 0
-            var pulse = 1 + Math.sin(root.phase) * (root.displayAmplitude + speakingBoost)
+            var safeAudioLevel = root.centerBlobDriveLevel
+            var reactiveDrive = root.speakingActive ? safeAudioLevel : 0
+            var outerDrive = root.speakingActive ? Math.max(root.outerSpeakingMotion, reactiveDrive) : 0
+            var reactivePeak = Math.max(reactiveDrive, Math.min(1, root.visualDrivePeak || reactiveDrive))
+            var outerPulse = 1 + Math.sin(root.phase) * (root.displayAmplitude + root.outerRingCarrierAmplitude + reactiveDrive * 0.22)
+            var centerScale = root.speakingActive
+                    ? root.centerBlobScale
+                    : 1 + Math.sin(root.phase) * root.displayAmplitude * 0.45
+            var centerLift = root.speakingActive ? -outerR * root.centerBlobLift : 0
+            var centerGlow = root.speakingActive ? root.centerBlobGlow : 0.38 + root.displayAmplitude * 0.72
             var subtle = 1 + Math.sin(root.variance) * 0.03
             var accent = root.displayAccentColor
             var deckMode = root.shellMode === "deck"
@@ -282,13 +321,14 @@ Item {
                 ctx.stroke()
             }
 
-            function drawHeart(radius, alpha, wobble) {
+            function drawHeart(radius, alpha, wobble, yOffset) {
+                var heartCy = cy + (yOffset || 0)
                 ctx.beginPath()
                 for (var i = 0; i <= 48; ++i) {
                     var angle = (Math.PI * 2 / 48) * i
                     var offset = 1 + Math.sin(root.phase * 1.8 + angle * 3.1) * wobble
                     var x = cx + Math.cos(angle) * radius * offset
-                    var y = cy + Math.sin(angle) * radius * offset
+                    var y = heartCy + Math.sin(angle) * radius * offset
                     if (i === 0) {
                         ctx.moveTo(x, y)
                     } else {
@@ -313,8 +353,8 @@ Item {
 
             darkBackdrop(outerR * 1.02, root.visualAdaptiveAnchorBackdropOpacity)
 
-            glowFill(outerR * 1.08, (root.shellMode === "ghost" ? 0.16 : 0.15) + root.visualAdaptiveGlowBoost * 0.28 + root.visualAdaptiveAnchorGlowBoost * 0.56)
-            glowFill(outerR * 0.74, 0.08 + root.displayAmplitude * 0.08 + root.visualAdaptiveGlowBoost * 0.14 + root.visualAdaptiveAnchorGlowBoost * 0.34 + root.visualAdaptiveAnchorFillBoost * 0.1)
+            glowFill(outerR * 1.08, (root.shellMode === "ghost" ? 0.16 : 0.15) + root.visualAdaptiveGlowBoost * 0.28 + root.visualAdaptiveAnchorGlowBoost * 0.56 + outerDrive * 0.11)
+            glowFill(outerR * 0.74, 0.08 + root.displayAmplitude * 0.08 + root.visualAdaptiveGlowBoost * 0.14 + root.visualAdaptiveAnchorGlowBoost * 0.34 + root.visualAdaptiveAnchorFillBoost * 0.1 + reactiveDrive * 0.18)
 
             circleStroke(outerR * 0.98, 1.0 + root.visualAdaptiveAnchorStrokeBoost * 1.45, 0.12 + root.visualAdaptiveLabelContrast * 0.18 + root.visualAdaptiveAnchorStrokeBoost * 0.34)
             circleStroke(outerR * 0.82 * subtle, 1.2 + root.visualAdaptiveAnchorStrokeBoost * 1.15, 0.22 + root.visualAdaptiveLabelContrast * 0.14 + root.visualAdaptiveAnchorStrokeBoost * 0.27)
@@ -329,14 +369,14 @@ Item {
             drawCompassArms(outerR, 0.24 + root.visualAdaptiveAnchorStrokeBoost * 0.18)
 
             if (voiceVisualState === "listening" || voiceVisualState === "speaking") {
-                circleStroke(outerR * (0.52 + pulse * 0.16), 1.4, 0.18)
-                circleStroke(outerR * (0.64 + pulse * 0.12), 1.1, 0.12)
+                circleStroke(outerR * (0.52 + outerPulse * 0.16), 1.4, 0.18)
+                circleStroke(outerR * (0.64 + outerPulse * 0.12), 1.1, 0.12)
             }
 
             if (root.speakingActive) {
-                circleStroke(outerR * (0.46 + safeAudioLevel * 0.16 + Math.sin(root.phase * 1.4) * 0.025), 1.1 + safeAudioLevel * 2.4, 0.12 + safeAudioLevel * 0.24)
-                circleStroke(outerR * (0.68 + safeAudioLevel * 0.1 + Math.sin(root.phase * 1.1 + 0.9) * 0.02), 0.9 + safeAudioLevel * 1.6, 0.08 + safeAudioLevel * 0.16)
-                ringSegment(outerR * (0.78 + safeAudioLevel * 0.08), root.phase * 0.8, root.phase * 0.8 + Math.PI * (0.26 + safeAudioLevel * 0.22), 1.6 + safeAudioLevel * 1.8, 0.16 + safeAudioLevel * 0.22)
+                circleStroke(outerR * (0.44 + outerDrive * 0.16 + Math.sin(root.phase * 1.4) * root.outerRingCarrierAmplitude * 0.16), 0.9 + reactivePeak * 2.6, 0.1 + reactivePeak * 0.32)
+                circleStroke(outerR * (0.65 + outerDrive * 0.12 + Math.sin(root.phase * 1.1 + 0.9) * root.outerRingCarrierAmplitude * 0.14), 0.7 + outerDrive * 1.7, 0.06 + outerDrive * 0.2)
+                ringSegment(outerR * (0.76 + outerDrive * 0.1), root.phase * 0.9, root.phase * 0.9 + Math.PI * (0.18 + reactivePeak * 0.34), 1.2 + reactivePeak * 2.6 + root.audioReactivePeakBoost * reactivePeak, 0.12 + reactivePeak * 0.3)
             }
 
             if (voiceVisualState === "thinking") {
@@ -361,7 +401,7 @@ Item {
                 ringSegment(outerR * 0.88, 2.28, 3.02, 2.2, 0.34)
             }
 
-            drawHeart(heartR * pulse, 0.44 + root.displayAmplitude * 0.9 + root.visualAdaptiveAnchorFillBoost * 0.56, root.displayAmplitude * 0.46)
+            drawHeart(heartR * centerScale, centerGlow + root.visualAdaptiveAnchorFillBoost * 0.56, root.centerBlobWobble, centerLift)
             circleStroke(heartR * 1.28, 1.2 + root.visualAdaptiveAnchorStrokeBoost * 0.6, 0.18 + root.visualAdaptiveAnchorStrokeBoost * 0.18 + root.visualAdaptiveAnchorFillBoost * 0.08)
         }
     }
@@ -387,6 +427,21 @@ Item {
     }
     onAudioLevelChanged: coreCanvas.requestPaint()
     onSmoothedAudioLevelChanged: {
+        root.displayAmplitude = root.amplitudeForState(root.visualState())
+        coreCanvas.requestPaint()
+    }
+    onVisualDriveLevelChanged: coreCanvas.requestPaint()
+    onVisualDrivePeakChanged: coreCanvas.requestPaint()
+    onCenterBlobDriveChanged: coreCanvas.requestPaint()
+    onCenterBlobScaleDriveChanged: coreCanvas.requestPaint()
+    onBackendCenterBlobScaleChanged: coreCanvas.requestPaint()
+    onOuterSpeakingMotionChanged: {
+        root.displayAmplitude = root.amplitudeForState(root.visualState())
+        coreCanvas.requestPaint()
+    }
+    onForceAudioDriveLevelChanged: coreCanvas.requestPaint()
+    onForceAnchorStateChanged: {
+        root.displayAccentColor = root.accentForState(root.visualState())
         root.displayAmplitude = root.amplitudeForState(root.visualState())
         coreCanvas.requestPaint()
     }
@@ -435,5 +490,22 @@ Item {
         opacity: 0.76
         style: Text.Raised
         styleColor: Qt.rgba(0.01, 0.04, 0.07, 0.16 + root.visualAdaptiveLabelContrast * 0.22)
+    }
+
+    Text {
+        visible: root.showAnchorDebugValues
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.top: parent.bottom
+        anchors.topMargin: 8
+        text: root.visualState()
+              + " center " + root.centerBlobDriveLevel.toFixed(2)
+              + " visual " + root.visualDriveLevel.toFixed(2)
+              + " motion " + root.motionIntensity.toFixed(2)
+        color: root.contrastColor("#d7edf4", root.visualAdaptiveLabelContrast * 0.3)
+        font.family: "Consolas"
+        font.pixelSize: 10
+        opacity: 0.78
+        style: Text.Raised
+        styleColor: Qt.rgba(0.01, 0.04, 0.07, 0.22)
     }
 }

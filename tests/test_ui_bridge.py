@@ -31,6 +31,136 @@ def test_ui_bridge_defaults_to_ghost_mode_and_tracks_rail_state(temp_config) -> 
     assert any(item["key"] == "signals" and item["active"] for item in bridge.command_rail_items)
 
 
+def test_ui_bridge_suppresses_high_rate_voice_stream_collection_rebuilds(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+    collection_emits = 0
+    voice_emits = 0
+
+    def mark_collection() -> None:
+        nonlocal collection_emits
+        collection_emits += 1
+
+    def mark_voice() -> None:
+        nonlocal voice_emits
+        voice_emits += 1
+
+    bridge.collectionsChanged.connect(mark_collection)
+    bridge.voiceStateChanged.connect(mark_voice)
+
+    for index in range(25):
+        bridge.apply_stream_event(
+            {
+                "cursor": index + 1,
+                "event_type": "voice.tts_stream_chunk",
+                "visibility_scope": "watch_surface",
+                "severity": "info",
+                "message": "Voice chunk envelope updated.",
+                "payload": {
+                    "chunk_index": index,
+                    "payload_keys": ["envelope"],
+                },
+            }
+        )
+
+    assert collection_emits == 0
+    assert voice_emits == 0
+
+
+def test_ui_bridge_applies_stream_chunk_voice_envelope_without_collection_rebuild(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+    collection_emits = 0
+    voice_emits = 0
+
+    def mark_collection() -> None:
+        nonlocal collection_emits
+        collection_emits += 1
+
+    def mark_voice() -> None:
+        nonlocal voice_emits
+        voice_emits += 1
+
+    bridge.collectionsChanged.connect(mark_collection)
+    bridge.voiceStateChanged.connect(mark_voice)
+
+    bridge.apply_stream_event(
+        {
+            "cursor": 101,
+            "event_type": "voice.tts_stream_chunk",
+            "visibility_scope": "watch_surface",
+            "severity": "info",
+            "message": "Voice chunk envelope updated.",
+            "payload": {
+                "metadata": {
+                    "voice": {
+                        "enabled": True,
+                        "voice_output_envelope": {
+                            "source": "playback_output_envelope",
+                            "rms_level": 0.44,
+                            "peak_level": 0.78,
+                            "smoothed_level": 0.63,
+                            "speech_energy": 0.7,
+                            "visual_drive_level": 0.81,
+                            "visual_drive_peak": 0.9,
+                            "center_blob_drive": 0.73,
+                            "center_blob_scale_drive": 0.73,
+                            "center_blob_scale": 1.2336,
+                            "outer_speaking_motion": 0.82,
+                            "visual_gain": 1.85,
+                            "raw_audio_present": False,
+                        },
+                        "playback": {
+                            "active_playback_status": "playing",
+                            "live_playback_status": "playing",
+                            "first_audio_started": True,
+                        },
+                    }
+                }
+            },
+        }
+    )
+
+    assert collection_emits == 0
+    assert voice_emits == 1
+    assert bridge.voiceState["voice_anchor_state"] == "speaking"
+    assert bridge.voiceState["voice_smoothed_output_level"] == 0.63
+    assert bridge.voiceState["voice_visual_drive_level"] == 0.81
+    assert bridge.voiceState["voice_visual_drive_peak"] == 0.9
+    assert bridge.voiceState["voice_center_blob_drive"] == 0.73
+    assert bridge.voiceState["voice_center_blob_scale_drive"] == 0.73
+    assert bridge.voiceState["voice_center_blob_scale"] == 1.2336
+    assert bridge.voiceState["voice_outer_speaking_motion"] == 0.82
+    assert bridge.voiceState["audioDriveLevel"] == 0.73
+    assert bridge.voiceState["voice_audio_reactive_source"] == "playback_output_envelope"
+
+
+def test_ui_bridge_coalesces_visible_stream_collection_rebuilds(temp_config) -> None:
+    _ensure_app()
+    bridge = UiBridge(temp_config)
+    collection_emits = 0
+
+    def mark_collection() -> None:
+        nonlocal collection_emits
+        collection_emits += 1
+
+    bridge.collectionsChanged.connect(mark_collection)
+
+    for index in range(25):
+        bridge.apply_stream_event(
+            {
+                "cursor": index + 1,
+                "event_type": "runtime.progress",
+                "visibility_scope": "watch_surface",
+                "severity": "info",
+                "message": f"Progress {index}",
+                "payload": {"index": index},
+            }
+        )
+
+    assert collection_emits == 0
+    QtTest.QTest.qWait(150)
+    assert collection_emits == 1
+
+
 def test_ui_bridge_applies_snapshot_to_context_cards_and_modules(temp_config) -> None:
     bridge = UiBridge(temp_config)
     bridge.apply_snapshot(

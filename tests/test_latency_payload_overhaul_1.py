@@ -13,7 +13,7 @@ def _run_profiled_assistant(
     executor,
     *,
     message: str,
-    response_profile: str,
+    response_profile: str | None,
     workspace_context: dict[str, object] | None = None,
 ) -> dict[str, object]:
     async def runner() -> dict[str, object]:
@@ -227,3 +227,26 @@ def test_deck_detail_profile_remains_backward_compatible(temp_config) -> None:
     assert payload["response_profile"] == "deck_detail"
     assert "payload_diagnostics" in payload
     assert payload["assistant_message"]["metadata"]["response_profile"] == "deck_detail"
+
+
+def test_ghost_surface_defaults_to_compact_response_profile(temp_config) -> None:
+    temp_config.environment = "dev"
+    assistant, jobs, executor, _, _ = _build_assistant_with_workspace(
+        temp_config,
+        system_probe=FakeSystemProbe(),
+    )
+
+    payload = _run_profiled_assistant(
+        assistant,
+        jobs,
+        executor,
+        message="5*4/2",
+        response_profile=None,
+    )
+
+    assert payload["response_profile"] == "ghost_compact"
+    assert payload["payload_diagnostics"]["compacted"] is True
+    assert (
+        payload["assistant_message"]["metadata"]["response_profile_reason"]
+        == "ghost_hot_path_default"
+    )

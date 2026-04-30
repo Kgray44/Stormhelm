@@ -88,10 +88,15 @@ Tests: `tests/test_assistant_orchestrator.py`, `tests/test_safety.py`, `tests/te
 |---|---|---|---|---|---|
 | `what is 18 * 42` | calculations | Calculations | Local parse/evaluate/format. | No | Calculation trace |
 | `what is the voltage divider for 10k and 5k on 12v` | calculations | Calculations helper | Run implemented helper. | No | Calculation trace |
+| `summarize https://example.com/docs` | web_retrieval | Web retrieval tool | Validate public URL, extract public page evidence with HTTP or optional Obscura. | No | Provider trace and evidence bundle |
+| `extract links from https://example.com/docs` | web_retrieval | Web retrieval tool | Extract bounded links/text evidence without opening the browser. | No | Provider trace and link counts |
+| `render this page` | web_retrieval | Web retrieval tool | Extract rendered page evidence only when current page URL context exists. | No | Attempted providers, fallback, final URL safety |
+| `use Obscura CDP to inspect https://example.com/docs` | web_retrieval | Obscura CDP provider | Start a bounded localhost headless CDP session, inspect title/final URL/DOM text/links/metadata, then stop it. | No | CDP session trace and `headless_cdp_page_evidence` |
+| `show me network summary for this public page https://example.com/docs` | web_retrieval | Obscura CDP provider | Route only when extraction/inspection is requested; does not open or control the visible browser. | No | Bounded network/console summary |
 | `open youtube history` | browser_destination | Browser/open tools | Resolve destination/search and open according to surface. | External open may be trust-gated | Action/tool metadata |
 | `open chrome` | app_control/software_control | System/app control or software launch | Launch known app if adapter available. | Action may be trust-gated | Native result/pid when available |
-| `close notepad` | app_control | SystemProbe app control | Request app close semantics. | Trust-gated | Native result/failure reason |
-| `force quit notepad` | app_control | SystemProbe app control | Stronger termination semantics than close/quit. | Trust-gated | Native result/failure reason |
+| `close notepad` | app_control | SystemProbe app control | Resolve the visible app/window, send a graceful close request, and verify closed vs confirmation-required vs failed. | Trust-gated | `close_result_state`, target/window trace |
+| `force quit notepad` | app_control | SystemProbe app control | Destructive fallback after explicit approval; not used for graceful close. | Yes | Native result/failure reason |
 | `install firefox` | software_control | Software control | Resolve target, prepare plan, ask approval; current execution adapter may be unavailable. | Yes | Prepared-only or recovery trace |
 | `verify chrome is installed` | software_control | Software control | Probe known launch paths. | No | Local executable probe |
 | `fix that failed install` | software_recovery | Software recovery | Classify failure and prepare bounded recovery. | Maybe, if action follows | Recovery result is unverified unless checked |
@@ -111,8 +116,8 @@ Tests: `tests/test_assistant_orchestrator.py`, `tests/test_safety.py`, `tests/te
 | `use OpenAI to answer this` | generic_provider | OpenAI provider | Provider call only when enabled/key present. | No action approval, but external API required | Provider response/audit |
 | `do something unsupported` | unsupported | Planner/orchestrator | Refuse or clarify truthfully. | No | Unsupported reason |
 
-Sources: `src/stormhelm/core/orchestrator/planner.py`, `src/stormhelm/core/orchestrator/browser_destinations.py`, `src/stormhelm/core/calculations/service.py`, `src/stormhelm/core/software_control/service.py`, `src/stormhelm/core/screen_awareness/service.py`, `src/stormhelm/core/discord_relay/service.py`, `src/stormhelm/core/tasks/service.py`, `src/stormhelm/core/voice/service.py`, `src/stormhelm/ui/client.py`
-Tests: `tests/test_planner.py`, `tests/test_browser_destination_resolution.py`, `tests/test_calculations.py`, `tests/test_software_control.py`, `tests/test_screen_awareness_service.py`, `tests/test_discord_relay.py`, `tests/test_task_graph.py`, `tests/test_voice_bridge_controls.py`, `tests/test_voice_core_bridge_contracts.py`
+Sources: `src/stormhelm/core/orchestrator/planner.py`, `src/stormhelm/core/orchestrator/browser_destinations.py`, `src/stormhelm/core/web_retrieval/service.py`, `src/stormhelm/core/calculations/service.py`, `src/stormhelm/core/software_control/service.py`, `src/stormhelm/core/screen_awareness/service.py`, `src/stormhelm/core/discord_relay/service.py`, `src/stormhelm/core/tasks/service.py`, `src/stormhelm/core/voice/service.py`, `src/stormhelm/ui/client.py`
+Tests: `tests/test_planner.py`, `tests/test_browser_destination_resolution.py`, `tests/test_web_retrieval_planner.py`, `tests/test_web_retrieval_service.py`, `tests/test_calculations.py`, `tests/test_software_control.py`, `tests/test_screen_awareness_service.py`, `tests/test_discord_relay.py`, `tests/test_task_graph.py`, `tests/test_voice_bridge_controls.py`, `tests/test_voice_core_bridge_contracts.py`
 
 ## Route State And Result State
 
@@ -126,6 +131,10 @@ Expected result-state families include:
 | `needs_approval` | Trust gate is waiting for user decision. | `src/stormhelm/core/trust/service.py`, `src/stormhelm/ui/command_surface_v2.py` |
 | `clarification` | Planner/subsystem could not choose truthfully. | `src/stormhelm/core/orchestrator/planner.py`, `src/stormhelm/core/discord_relay/service.py` |
 | `blocked` | Safety, trust, policy, adapter, or config blocked the action. | `src/stormhelm/core/safety/policy.py`, `src/stormhelm/core/adapters/contracts.py` |
+| `extracted` / `partial` | Public web evidence was extracted or partially extracted; weak extraction is labeled partial or low-confidence. | `src/stormhelm/core/web_retrieval/service.py`, `src/stormhelm/ui/command_surface_v2.py` |
+| `fallback_used` | Obscura or another selected provider failed/unavailable and the final evidence came from fallback. | `src/stormhelm/core/web_retrieval/service.py`, `src/stormhelm/ui/command_surface_v2.py` |
+| `provider_unavailable` / `timeout` / `unsupported` | No fake success: missing binaries, process timeouts, and unsupported content types stay typed. | `src/stormhelm/core/web_retrieval/service.py`, `src/stormhelm/core/web_retrieval/*_provider.py` |
+| `blocked` with `redirect_target_blocked` | A public starting URL redirected to a blocked local/private/file/credential target; extracted text/html is not returned. | `src/stormhelm/core/web_retrieval/service.py`, `src/stormhelm/core/web_retrieval/cdp_provider.py` |
 | `completed` | Tool/subsystem reports completion. | `src/stormhelm/core/tools/executor.py`, subsystem services |
 | `unverified` / `uncertain` | Stormhelm has not verified the state strongly enough to claim success. | `src/stormhelm/core/software_control/service.py`, `src/stormhelm/core/screen_awareness/verification.py` |
 

@@ -27,6 +27,7 @@ class _VoiceClient(QtCore.QObject):
         self.cancelled: list[dict[str, object]] = []
         self.submitted: list[dict[str, object]] = []
         self.capture_turns: list[dict[str, object]] = []
+        self.listen_turns: list[dict[str, object]] = []
         self.playback_stops: list[dict[str, object]] = []
         self.readiness_fetches = 0
         self.snapshot_calls = 0
@@ -56,6 +57,11 @@ class _VoiceClient(QtCore.QObject):
     ) -> None:
         self.capture_turns.append(dict(payload or {}))
 
+    def listen_and_submit_voice_turn(
+        self, payload: dict[str, object] | None = None
+    ) -> None:
+        self.listen_turns.append(dict(payload or {}))
+
     def stop_voice_playback(self, payload: dict[str, object] | None = None) -> None:
         self.playback_stops.append(dict(payload or {}))
 
@@ -66,16 +72,19 @@ def test_bridge_voice_control_slots_emit_backend_action_requests(temp_config) ->
     stops: list[dict] = []
     cancels: list[dict] = []
     capture_turns: list[dict] = []
+    listen_turns: list[dict] = []
 
     bridge.voiceStartPushToTalkCaptureRequested.connect(starts.append)
     bridge.voiceStopPushToTalkCaptureRequested.connect(stops.append)
     bridge.voiceCancelCaptureRequested.connect(cancels.append)
     bridge.voiceCaptureAndSubmitTurnRequested.connect(capture_turns.append)
+    bridge.voiceListenAndSubmitTurnRequested.connect(listen_turns.append)
 
     bridge.startPushToTalkCapture()
     bridge.stopPushToTalkCapture("capture-1")
     bridge.cancelCapture("capture-1")
     bridge.captureAndSubmitTurn("capture-1", "deck", True, True)
+    bridge.listenAndSubmitTurn("deck", True)
 
     assert starts == [{"session_id": "default", "metadata": {"surface": "ghost"}}]
     assert stops == [{"capture_id": "capture-1", "reason": "user_released"}]
@@ -88,11 +97,15 @@ def test_bridge_voice_control_slots_emit_backend_action_requests(temp_config) ->
             "play_response": True,
         }
     ]
+    assert listen_turns == [
+        {"session_id": "default", "mode": "deck", "play_response": True}
+    ]
     assert bridge.statusLine in {
         "Starting push-to-talk capture.",
         "Stopping capture.",
         "Cancelling capture.",
         "Submitting captured audio through Core.",
+        "Listening for one voice request.",
     }
 
 
@@ -105,6 +118,7 @@ def test_controller_routes_voice_bridge_requests_to_client_only(temp_config) -> 
     bridge.stopPushToTalkCapture("capture-1")
     bridge.cancelCapture("capture-1")
     bridge.captureAndSubmitTurn("capture-1", "ghost", False, False)
+    bridge.listenAndSubmitTurn("ghost", True)
     bridge.stopVoicePlayback("playback-1")
 
     assert client.started == [
@@ -120,9 +134,22 @@ def test_controller_routes_voice_bridge_requests_to_client_only(temp_config) -> 
             "play_response": False,
         }
     ]
+    assert client.listen_turns == [
+        {"session_id": "default", "mode": "ghost", "play_response": True}
+    ]
     assert client.playback_stops == [
         {"playback_id": "playback-1", "reason": "user_requested"}
     ]
+
+
+def test_l6_voice_listen_turn_api_route_is_exposed(temp_config) -> None:
+    paths = {
+        route.path
+        for route in create_app(temp_config).routes
+        if isinstance(route, APIRoute)
+    }
+
+    assert "/voice/capture/listen-turn" in paths
 
 
 def test_bridge_voice_action_result_updates_from_backend_status_without_raw_audio(

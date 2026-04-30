@@ -295,6 +295,12 @@ ApplicationWindow {
             motionIntensity: bridge ? Number(bridge.voiceState.voice_motion_intensity || 0.12) : 0.12
             audioLevel: bridge ? Number(bridge.voiceState.voice_smoothed_output_level || 0) : 0
             smoothedAudioLevel: bridge ? Number(bridge.voiceState.voice_smoothed_output_level || 0) : 0
+            visualDriveLevel: bridge ? Number(bridge.voiceState.voice_visual_drive_level !== undefined ? bridge.voiceState.voice_visual_drive_level : (bridge.voiceState.audioDriveLevel || 0)) : 0
+            visualDrivePeak: bridge ? Number(bridge.voiceState.voice_visual_drive_peak !== undefined ? bridge.voiceState.voice_visual_drive_peak : bridge.voiceState.voice_visual_drive_level || 0) : 0
+            centerBlobDrive: bridge ? Number(bridge.voiceState.voice_center_blob_drive !== undefined ? bridge.voiceState.voice_center_blob_drive : (bridge.voiceState.audioDriveLevel || 0)) : 0
+            centerBlobScaleDrive: bridge ? Number(bridge.voiceState.voice_center_blob_scale_drive !== undefined ? bridge.voiceState.voice_center_blob_scale_drive : (bridge.voiceState.voice_center_blob_drive !== undefined ? bridge.voiceState.voice_center_blob_drive : (bridge.voiceState.audioDriveLevel || 0))) : 0
+            backendCenterBlobScale: bridge ? Number(bridge.voiceState.voice_center_blob_scale !== undefined ? bridge.voiceState.voice_center_blob_scale : 1.0) : 1.0
+            outerSpeakingMotion: bridge ? Number(bridge.voiceState.voice_outer_speaking_motion !== undefined ? bridge.voiceState.voice_outer_speaking_motion : (bridge.voiceState.voice_visual_drive_level || 0)) : 0
             audioReactiveAvailable: bridge ? !!bridge.voiceState.voice_audio_reactive_available : false
             audioReactiveSource: bridge ? (bridge.voiceState.voice_audio_reactive_source || "unavailable") : "unavailable"
             statusLabel: bridge ? ((bridge.voiceState.voice_anchor && bridge.voiceState.voice_anchor.state_label) || "") : ""

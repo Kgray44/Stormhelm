@@ -181,7 +181,8 @@ def test_tool_registry_exposes_adapter_contract_metadata() -> None:
         "file.external"
     }
     assert {contract["adapter_id"] for contract in metadata_by_name["app_control"]["adapter_contracts"]} == {
-        "app.desktop_control"
+        "app.desktop_control",
+        "app.desktop_graceful_close",
     }
     assert {contract["adapter_id"] for contract in metadata_by_name["shell_command"]["adapter_contracts"]} == {
         "terminal.shell_stub"

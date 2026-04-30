@@ -192,8 +192,8 @@ class IntentFrameExtractor:
             return "open" if any(token in tokens for token in {"open", "show", "launch", "start"}) else "launch"
         if self._task_continuity_signal(normalized):
             return "assemble"
-        if any(token in tokens for token in {"quit", "close"}) and re.search(r"\bnot\s+(?:uninstall|remove|update)\b", normalized):
-            return "quit" if "quit" in tokens else "close"
+        if any(token in tokens for token in {"quit", "close", "exit"}) and re.search(r"\bnot\s+(?:uninstall|remove|update)\b", normalized):
+            return "quit" if any(token in tokens for token in {"quit", "exit"}) else "close"
         if any(token in tokens for token in {"install", "download", "setup"}) or "set up" in normalized:
             if "environment" not in normalized and "workspace" not in normalized and "workflow" not in normalized:
                 return "install"
@@ -205,10 +205,14 @@ class IntentFrameExtractor:
             return "update"
         if any(token in tokens for token in {"repair", "fix"}):
             return "repair"
-        if any(token in tokens for token in {"read", "inspect", "summarize"}) or "contents of" in normalized:
+        if (
+            any(token in tokens for token in {"read", "inspect", "summarize", "extract", "render"})
+            or "contents of" in normalized
+            or "source of" in normalized
+        ):
             return "inspect"
-        if any(token in tokens for token in {"quit", "close"}):
-            return "quit" if "quit" in tokens else "close"
+        if any(token in tokens for token in {"quit", "close", "exit"}):
+            return "quit" if any(token in tokens for token in {"quit", "exit"}) else "close"
         if self._weather_status_signal(normalized):
             return "status"
         if tokens and tokens[0] in {"explain", "why", "what"} and not self._looks_like_status(normalized):
@@ -252,10 +256,12 @@ class IntentFrameExtractor:
     ) -> tuple[str, str, dict[str, Any]]:
         del active_context
         entities: dict[str, Any] = {}
-        url_match = re.search(r"https?://[^\s]+", raw_text, flags=re.IGNORECASE)
-        if url_match:
-            url = url_match.group(0).strip(" .,:;!?\"'")
+        url_matches = re.findall(r"https?://[^\s]+", raw_text, flags=re.IGNORECASE)
+        if url_matches:
+            urls = [match.strip(" .,:;!?\"'") for match in url_matches if match.strip(" .,:;!?\"'")]
+            url = urls[0]
             entities["url"] = url
+            entities["urls"] = urls
             return "url", url, entities
         path_match = re.search(r"(?<![A-Za-z])(?P<path>[A-Za-z]:[\\/][^\r\n,;]+)", raw_text)
         if path_match:
@@ -469,7 +475,7 @@ class IntentFrameExtractor:
             return "external_send"
         if operation in {"quit", "close", "launch"} and target_type == "app":
             return "external_app_open"
-        if operation == "open" and target_type in {"url", "website"}:
+        if operation == "open" and target_type in {"url", "website"} and not self._web_retrieval_signal(normalized):
             return "external_browser_open"
         if operation == "open" and target_type in {"file", "folder"}:
             return "internal_surface_open"
@@ -503,6 +509,8 @@ class IntentFrameExtractor:
         if operation == "compare" and target_type in {"file", "selected_text"}:
             return "comparison"
         if target_type in {"url", "website"}:
+            if self._web_retrieval_signal(normalized):
+                return "web_retrieval"
             return "browser_destination"
         if self._maintenance_signal(normalized):
             return "maintenance"
@@ -817,13 +825,24 @@ class IntentFrameExtractor:
             verb in normalized for verb in {"open", "show", "bring", "pull"}
         )
 
+    def _web_retrieval_signal(self, normalized: str) -> bool:
+        if re.search(r"\b(?:open|launch|go to|navigate|bring up|pull up)\b", normalized) and not re.search(
+            r"\b(?:read|summarize|inspect|extract|render|compare|text|links?|html|source|content)\b",
+            normalized,
+        ):
+            return False
+        return bool(
+            re.search(r"\b(?:read|summarize|inspect|extract|render|compare|parse)\b", normalized)
+            or re.search(r"\b(?:links?|text|html|source|contents?|article|dom\s+text|network\s+summary|cdp|browser\s+renderer)\b", normalized)
+        )
+
     def _domain_like_destination(self, raw_text: str, normalized: str) -> str:
         if any(phrase in normalized for phrase in {"what is a website", "website design", "app ideas"}):
             return ""
         if "not exactly" in normalized and "almost" in normalized:
             return ""
         match = re.search(r"\b(?:https?://)?(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/[^\s]*)?\b", raw_text, flags=re.IGNORECASE)
-        if match and re.search(r"\b(?:open|show|bring|pull)\b", normalized):
+        if match and (re.search(r"\b(?:open|show|bring|pull)\b", normalized) or self._web_retrieval_signal(normalized)):
             return str(match.group(0)).strip(" .,:;!?\"'")
         browser_target = re.search(
             r"\b(?:open|show|bring\s+up|pull\s+up)\s+(?P<target>[a-z0-9-]{3,})\s+(?:in|with)\s+(?:a\s+)?browser\b",
@@ -859,7 +878,7 @@ class IntentFrameExtractor:
         return re.sub(r"^(?:install|uninstall|update|upgrade|repair|fix|remove)\s+", "", raw_text, flags=re.IGNORECASE).strip(" .,:;!?")
 
     def _app_target_text(self, raw_text: str) -> str:
-        return re.sub(r"^(?:open|launch|start|quit|close|focus)\s+", "", raw_text, flags=re.IGNORECASE).strip(" .,:;!?")
+        return re.sub(r"^(?:open|launch|start|quit|exit|close|focus)\s+", "", raw_text, flags=re.IGNORECASE).strip(" .,:;!?")
 
     def _routine_signal(self, normalized: str) -> bool:
         return "routine" in normalized or "saved workflow" in normalized

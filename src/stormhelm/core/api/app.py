@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import signal
+import sys
 import threading
 from contextlib import asynccontextmanager
 from time import perf_counter
@@ -60,6 +61,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         app.state.container = container
         await container.start()
+        _remember_runtime_voice_gate_snapshot(container, publish=True)
         try:
             yield
         finally:
@@ -87,7 +89,80 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "runtime_mode": current.config.runtime.mode,
             "install_mode": current.lifecycle.install_state.install_mode.value,
             "pid": os.getpid(),
+            "runtime_identity": {
+                "pid": os.getpid(),
+                "python_executable": sys.executable,
+                "python_prefix": sys.prefix,
+                "python_base_prefix": sys.base_prefix,
+                "using_virtualenv": sys.prefix != sys.base_prefix,
+                "working_directory": os.getcwd(),
+                "project_root": str(current.config.project_root),
+            },
         }
+
+    def _payload_bytes(payload: object) -> int:
+        try:
+            return len(json.dumps(payload, separators=(",", ":"), default=str).encode("utf-8"))
+        except (TypeError, ValueError):
+            return 0
+
+    def _largest_sections(payload: dict[str, object], *, limit: int = 8) -> list[dict[str, object]]:
+        sections: list[dict[str, object]] = []
+        for key, value in payload.items():
+            section = str(key)
+            if section.startswith("snapshot_") or section.startswith("status_"):
+                continue
+            sections.append({"section": section, "bytes": _payload_bytes(value)})
+        sections.sort(key=lambda item: int(item.get("bytes") or 0), reverse=True)
+        return sections[: max(0, limit)]
+
+    def _finish_status_instrumentation(
+        payload: dict[str, object],
+        *,
+        started_at: float,
+        profile: str,
+        deferred_sections: list[str] | tuple[str, ...] = (),
+    ) -> dict[str, object]:
+        payload["status_profile"] = str(payload.get("status_profile") or profile)
+        payload.setdefault("status_sections_ms", {})
+        existing_deferred = payload.get("status_deferred_sections")
+        if isinstance(existing_deferred, list):
+            deferred = [str(item) for item in existing_deferred]
+        else:
+            deferred = []
+        for section in deferred_sections:
+            if section not in deferred:
+                deferred.append(str(section))
+        payload["status_deferred_sections"] = deferred
+        payload["status_total_ms"] = round((perf_counter() - started_at) * 1000, 3)
+        payload["status_payload_bytes"] = 0
+        payload["status_payload_bytes"] = _payload_bytes(payload)
+        payload["status_payload_bytes"] = _payload_bytes(payload)
+        return payload
+
+    def _finish_snapshot_instrumentation(
+        payload: dict[str, object],
+        *,
+        started_at: float,
+        profile: str,
+        deferred_sections: list[str] | tuple[str, ...] = (),
+    ) -> dict[str, object]:
+        payload["snapshot_profile"] = str(payload.get("snapshot_profile") or profile)
+        existing_deferred = payload.get("snapshot_deferred_sections")
+        if isinstance(existing_deferred, list):
+            deferred = [str(item) for item in existing_deferred]
+        else:
+            deferred = []
+        for section in deferred_sections:
+            if section not in deferred:
+                deferred.append(str(section))
+        payload["snapshot_deferred_sections"] = deferred
+        payload["snapshot_largest_sections"] = _largest_sections(payload)
+        payload["snapshot_total_ms"] = round((perf_counter() - started_at) * 1000, 3)
+        payload["snapshot_payload_bytes"] = 0
+        payload["snapshot_payload_bytes"] = _payload_bytes(payload)
+        payload["snapshot_payload_bytes"] = _payload_bytes(payload)
+        return payload
 
     def _assistant_voice_text(result: dict[str, object]) -> str:
         assistant_message = (
@@ -107,14 +182,228 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 return text
         return ""
 
-    def _voice_output_enabled(current: CoreContainer) -> bool:
+    def _runtime_voice_gate_snapshot(current: CoreContainer) -> dict[str, object]:
+        voice_snapshot = getattr(current.voice, "runtime_voice_gate_snapshot", None)
+        if callable(voice_snapshot):
+            try:
+                snapshot = voice_snapshot()
+                if isinstance(snapshot, dict):
+                    return dict(snapshot)
+            except TypeError:
+                pass
         voice_config = current.voice.config
-        return bool(
-            voice_config.enabled
-            and str(voice_config.mode or "").strip().lower() != "disabled"
-            and voice_config.spoken_responses_enabled
-            and voice_config.playback.enabled
+        current_config = getattr(current, "config", None)
+        openai_config = getattr(current_config, "openai", None)
+        env_path = getattr(current_config, "project_root", None)
+        env_loaded = bool(env_path and (env_path / ".env").exists())
+        return {
+            "env_loaded": env_loaded,
+            "openai_key_present": bool(getattr(openai_config, "api_key", None)),
+            "openai_enabled": bool(getattr(openai_config, "enabled", False)),
+            "voice_enabled": bool(voice_config.enabled),
+            "voice_mode": str(voice_config.mode or "").strip().lower(),
+            "spoken_responses_enabled": bool(voice_config.spoken_responses_enabled),
+            "typed_response_speech_enabled": bool(
+                voice_config.enabled
+                and voice_config.spoken_responses_enabled
+                and voice_config.playback.enabled
+            ),
+            "playback_enabled": bool(voice_config.playback.enabled),
+            "playback_provider": str(voice_config.playback.provider or "").strip().lower(),
+            "streaming_playback_enabled": bool(voice_config.playback.streaming_enabled),
+            "openai_stream_tts_outputs": bool(voice_config.openai.stream_tts_outputs),
+            "live_format": str(voice_config.openai.tts_live_format or "").strip().lower(),
+            "dev_playback_allowed": bool(voice_config.playback.allow_dev_playback),
+            "debug_mock_provider": bool(voice_config.debug_mock_provider),
+            "raw_secret_logged": False,
+            "raw_audio_logged": False,
+        }
+
+    def _remember_runtime_voice_gate_snapshot(
+        current: CoreContainer,
+        *,
+        publish: bool = False,
+    ) -> dict[str, object]:
+        snapshot = _runtime_voice_gate_snapshot(current)
+        remember = getattr(current.voice, "remember_runtime_gate_snapshot", None)
+        if callable(remember):
+            remember(snapshot)
+        if publish:
+            current.events.publish(
+                event_family="voice",
+                event_type="voice.runtime_gate_snapshot",
+                severity="debug",
+                subsystem="voice",
+                message="VOICE_RUNTIME_GATE_SNAPSHOT",
+                payload=dict(snapshot),
+            )
+        return snapshot
+
+    def _voice_output_disabled_reasons(
+        current: CoreContainer,
+        gate_snapshot: dict[str, object] | None = None,
+    ) -> list[str]:
+        gate = gate_snapshot or _runtime_voice_gate_snapshot(current)
+        reasons: list[str] = []
+        if not gate.get("voice_enabled"):
+            reasons.append("voice_disabled")
+        if str(gate.get("voice_mode") or "").strip().lower() == "disabled":
+            reasons.append("voice_mode_disabled")
+        if not gate.get("spoken_responses_enabled"):
+            reasons.append("spoken_responses_disabled")
+        if not gate.get("playback_enabled"):
+            reasons.append("playback_disabled")
+        if not gate.get("debug_mock_provider"):
+            if not gate.get("openai_enabled"):
+                reasons.append("openai_disabled")
+            if not gate.get("openai_key_present"):
+                reasons.append("openai_key_missing")
+        if getattr(current.voice, "spoken_output_muted", False):
+            reasons.append("spoken_output_muted")
+        return reasons
+
+    def _voice_output_enabled(
+        current: CoreContainer,
+        gate_snapshot: dict[str, object] | None = None,
+    ) -> bool:
+        return not _voice_output_disabled_reasons(current, gate_snapshot)
+
+    def _voice_speak_decision(
+        current: CoreContainer,
+        result: dict[str, object],
+        *,
+        session_id: str,
+        surface_mode: str,
+        active_module: str,
+        gate_snapshot: dict[str, object],
+        text: str,
+        skipped_reason: str | None,
+        disabled_reasons: list[str] | None = None,
+        voice_service_called: bool = False,
+        voice_service_status: str | None = None,
+        voice_service_error_code: str | None = None,
+        user_heard_claimed: bool = False,
+    ) -> dict[str, object]:
+        assistant_message = (
+            result.get("assistant_message") if isinstance(result, dict) else {}
         )
+        metadata = (
+            assistant_message.get("metadata")
+            if isinstance(assistant_message, dict)
+            and isinstance(assistant_message.get("metadata"), dict)
+            else {}
+        )
+        latency_trace = (
+            metadata.get("latency_trace") if isinstance(metadata, dict) else {}
+        )
+        request_id = (
+            latency_trace.get("request_id")
+            if isinstance(latency_trace, dict)
+            else None
+        )
+        response_text = (
+            assistant_message.get("content") if isinstance(assistant_message, dict) else ""
+        )
+        speakable = bool(text and skipped_reason is None)
+        return {
+            "request_id": request_id,
+            "session_id": session_id,
+            "prompt_source": "typed_ui",
+            "surface_mode": surface_mode,
+            "active_module": active_module,
+            "response_has_text": bool(str(response_text or "").strip()),
+            "response_text_chars": len(str(response_text or "")),
+            "approved_spoken_text_present": bool(text),
+            "approved_spoken_text_chars": len(text),
+            "speakable": speakable,
+            "skipped_reason": skipped_reason,
+            "disabled_reasons": list(disabled_reasons or []),
+            "voice_service_called": bool(voice_service_called),
+            "voice_service_status": voice_service_status,
+            "voice_service_error_code": voice_service_error_code,
+            "playback_provider": gate_snapshot.get("playback_provider"),
+            "streaming_requested": bool(
+                gate_snapshot.get("openai_stream_tts_outputs")
+                and gate_snapshot.get("streaming_playback_enabled")
+            ),
+            "openai_stream_tts_outputs": bool(gate_snapshot.get("openai_stream_tts_outputs")),
+            "streaming_playback_enabled": bool(gate_snapshot.get("streaming_playback_enabled")),
+            "live_format": gate_snapshot.get("live_format"),
+            "user_heard_claimed": bool(user_heard_claimed),
+            "raw_secret_logged": False,
+            "raw_audio_logged": False,
+        }
+
+    def _voice_output_user_heard_claimed(
+        current: CoreContainer,
+        result_object: object | None = None,
+    ) -> bool:
+        playback_result = getattr(result_object, "playback_result", None)
+        if bool(getattr(result_object, "user_heard_claimed", False)):
+            return True
+        if playback_result is not None and bool(
+            getattr(playback_result, "user_heard_claimed", False)
+        ):
+            return True
+        for attribute in (
+            "last_live_playback_result",
+            "last_playback_result",
+            "last_live_playback_session",
+        ):
+            value = getattr(current.voice, attribute, None)
+            if value is not None and bool(getattr(value, "user_heard_claimed", False)):
+                return True
+            metadata = getattr(value, "metadata", None)
+            if isinstance(metadata, dict) and metadata.get("user_heard_claimed") is True:
+                return True
+        return False
+
+    def _remember_voice_speak_decision(
+        current: CoreContainer,
+        decision: dict[str, object],
+        *,
+        severity: str = "debug",
+    ) -> None:
+        remember = getattr(current.voice, "remember_assistant_speak_decision", None)
+        if callable(remember):
+            remember(decision)
+        current.events.publish(
+            event_family="voice",
+            event_type="voice.speak_decision",
+            severity=severity,
+            subsystem="voice",
+            session_id=str(decision.get("session_id") or "default"),
+            message="VOICE_SPEAK_DECISION",
+            payload=dict(decision),
+        )
+
+    def _attach_voice_output_metadata(
+        result: dict[str, object],
+        *,
+        scheduled: bool,
+        decision: dict[str, object],
+        mode: str,
+        playback_requested: bool,
+        streaming_requested: bool,
+    ) -> None:
+        assistant_message = result.get("assistant_message")
+        if not isinstance(assistant_message, dict):
+            return
+        metadata = assistant_message.setdefault("metadata", {})
+        if not isinstance(metadata, dict):
+            return
+        metadata["voice_output"] = {
+            "scheduled": scheduled,
+            "source": "assistant_response",
+            "mode": mode,
+            "playback_requested": playback_requested,
+            "streaming_requested": streaming_requested,
+            "output_mode": "streaming" if streaming_requested else "buffered",
+            "completion_claimed": False,
+            "verification_claimed": False,
+            "user_heard_claimed": bool(decision.get("user_heard_claimed")),
+            "decision": dict(decision),
+        }
 
     def _schedule_assistant_voice_output(
         current: CoreContainer,
@@ -124,35 +413,77 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         surface_mode: str,
         active_module: str,
     ) -> None:
-        if not _voice_output_enabled(current):
-            return
+        gate_snapshot = _remember_runtime_voice_gate_snapshot(current)
+        disabled_reasons = _voice_output_disabled_reasons(current, gate_snapshot)
         text = _assistant_voice_text(result)
+        streaming_requested = bool(
+            gate_snapshot.get("openai_stream_tts_outputs")
+            and gate_snapshot.get("streaming_playback_enabled")
+        )
+        if disabled_reasons:
+            decision = _voice_speak_decision(
+                current,
+                result,
+                session_id=session_id,
+                surface_mode=surface_mode,
+                active_module=active_module,
+                gate_snapshot=gate_snapshot,
+                text=text,
+                skipped_reason="voice_output_disabled",
+                disabled_reasons=disabled_reasons,
+            )
+            _attach_voice_output_metadata(
+                result,
+                scheduled=False,
+                decision=decision,
+                mode=str(gate_snapshot.get("voice_mode") or current.voice.config.mode),
+                playback_requested=False,
+                streaming_requested=streaming_requested,
+            )
+            _remember_voice_speak_decision(current, decision)
+            return
         if not text:
+            decision = _voice_speak_decision(
+                current,
+                result,
+                session_id=session_id,
+                surface_mode=surface_mode,
+                active_module=active_module,
+                gate_snapshot=gate_snapshot,
+                text=text,
+                skipped_reason="empty_spoken_text",
+            )
+            _attach_voice_output_metadata(
+                result,
+                scheduled=False,
+                decision=decision,
+                mode=str(gate_snapshot.get("voice_mode") or current.voice.config.mode),
+                playback_requested=False,
+                streaming_requested=streaming_requested,
+            )
+            _remember_voice_speak_decision(current, decision)
             return
 
-        streaming_requested = bool(
-            current.voice.config.openai.stream_tts_outputs
-            and current.voice.config.playback.streaming_enabled
+        decision = _voice_speak_decision(
+            current,
+            result,
+            session_id=session_id,
+            surface_mode=surface_mode,
+            active_module=active_module,
+            gate_snapshot=gate_snapshot,
+            text=text,
+            skipped_reason=None,
+            voice_service_called=True,
         )
-        assistant_message = result.get("assistant_message")
-        metadata = (
-            assistant_message.get("metadata")
-            if isinstance(assistant_message, dict)
-            and isinstance(assistant_message.get("metadata"), dict)
-            else None
+        _attach_voice_output_metadata(
+            result,
+            scheduled=True,
+            decision=decision,
+            mode=str(gate_snapshot.get("voice_mode") or current.voice.config.mode),
+            playback_requested=True,
+            streaming_requested=streaming_requested,
         )
-        if isinstance(metadata, dict):
-            metadata["voice_output"] = {
-                "scheduled": True,
-                "source": "assistant_response",
-                "mode": current.voice.config.mode,
-                "playback_requested": True,
-                "streaming_requested": streaming_requested,
-                "output_mode": "streaming" if streaming_requested else "buffered",
-                "completion_claimed": False,
-                "verification_claimed": False,
-                "user_heard_claimed": False,
-            }
+        _remember_voice_speak_decision(current, decision)
 
         async def _run_voice_output() -> None:
             try:
@@ -162,17 +493,11 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                     and current.voice.config.playback.prewarm_enabled
                     and current.voice.config.spoken_responses_enabled
                 ):
-                    prewarm(
-                        session_id=session_id,
-                        metadata={
-                            "source": "assistant_response",
-                            "assistant_response_voice_output": True,
-                        },
-                    )
+                    prewarm(session_id=session_id)
                 if streaming_requested and callable(
                     getattr(current.voice, "stream_core_approved_spoken_text", None)
                 ):
-                    await current.voice.stream_core_approved_spoken_text(
+                    streaming_result = await current.voice.stream_core_approved_spoken_text(
                         text,
                         speak_allowed=True,
                         source="assistant_response",
@@ -182,7 +507,34 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                             "active_module": active_module,
                             "assistant_response_voice_output": True,
                             "voice_stream_used_by_normal_path": True,
+                            "prompt_source": "typed_ui",
                         },
+                    )
+                    result_decision = _voice_speak_decision(
+                        current,
+                        result,
+                        session_id=session_id,
+                        surface_mode=surface_mode,
+                        active_module=active_module,
+                        gate_snapshot=gate_snapshot,
+                        text=text,
+                        skipped_reason=None,
+                        voice_service_called=True,
+                        voice_service_status=getattr(streaming_result, "status", None),
+                        voice_service_error_code=getattr(
+                            streaming_result, "error_code", None
+                        ),
+                        user_heard_claimed=_voice_output_user_heard_claimed(
+                            current,
+                            streaming_result,
+                        ),
+                    )
+                    _remember_voice_speak_decision(
+                        current,
+                        result_decision,
+                        severity="info"
+                        if result_decision.get("user_heard_claimed")
+                        else "debug",
                     )
                     return
                 synthesis = await current.voice.synthesize_speech_text(
@@ -193,20 +545,55 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                     metadata={
                         "active_module": active_module,
                         "assistant_response_voice_output": True,
+                        "prompt_source": "typed_ui",
                     },
                 )
                 if synthesis.ok:
-                    await current.voice.play_speech_output(
+                    playback = await current.voice.play_speech_output(
                         synthesis,
                         session_id=session_id,
                         metadata={
                             "active_module": active_module,
                             "assistant_response_voice_output": True,
+                            "prompt_source": "typed_ui",
                         },
                     )
+                    result_decision = _voice_speak_decision(
+                        current,
+                        result,
+                        session_id=session_id,
+                        surface_mode=surface_mode,
+                        active_module=active_module,
+                        gate_snapshot=gate_snapshot,
+                        text=text,
+                        skipped_reason=None,
+                        voice_service_called=True,
+                        voice_service_status=getattr(playback, "status", None),
+                        voice_service_error_code=getattr(playback, "error_code", None),
+                        user_heard_claimed=_voice_output_user_heard_claimed(
+                            current,
+                            playback,
+                        ),
+                    )
+                    _remember_voice_speak_decision(current, result_decision)
             except asyncio.CancelledError:
                 raise
             except Exception as error:
+                failed_decision = _voice_speak_decision(
+                    current,
+                    result,
+                    session_id=session_id,
+                    surface_mode=surface_mode,
+                    active_module=active_module,
+                    gate_snapshot=gate_snapshot,
+                    text=text,
+                    skipped_reason=None,
+                    voice_service_called=True,
+                    voice_service_status="failed",
+                    voice_service_error_code="assistant_voice_output_failed",
+                    user_heard_claimed=False,
+                )
+                _remember_voice_speak_decision(current, failed_decision, severity="error")
                 current.events.publish(
                     event_family="voice",
                     event_type="voice.assistant_output_failed",
@@ -223,7 +610,10 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                     },
                 )
 
-        task = asyncio.create_task(_run_voice_output())
+        def _run_voice_output_in_thread() -> None:
+            asyncio.run(_run_voice_output())
+
+        task = asyncio.create_task(asyncio.to_thread(_run_voice_output_in_thread))
         voice_output_tasks.add(task)
         task.add_done_callback(voice_output_tasks.discard)
 
@@ -232,9 +622,39 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         return _health_payload(request)
 
     @app.get("/status")
-    def status(request: Request) -> dict[str, object]:
+    def status(request: Request, detail: str = "") -> dict[str, object]:
+        status_started = perf_counter()
         current = _current_container(request)
-        return current.status_snapshot()
+        if str(detail or "").strip().lower() in {"full", "detail", "debug"}:
+            snapshot = current.status_snapshot()
+            snapshot.setdefault("status_profile", "full_status")
+            return _finish_status_instrumentation(
+                snapshot,
+                started_at=status_started,
+                profile="full_status",
+            )
+        fast_status = getattr(current, "status_snapshot_fast", None)
+        if callable(fast_status):
+            snapshot = fast_status()
+            return _finish_status_instrumentation(
+                snapshot,
+                started_at=status_started,
+                profile="fast_status",
+                deferred_sections=(
+                    "bridge_authority",
+                    "workspace",
+                    "active_task",
+                    "active_request_state",
+                    "system_detail",
+                    "deck_detail",
+                ),
+            )
+        snapshot = current.status_snapshot()
+        return _finish_status_instrumentation(
+            snapshot,
+            started_at=status_started,
+            profile="full_status",
+        )
 
     @app.post("/chat/send")
     async def send_chat(payload: ChatRequest, request: Request) -> Response:
@@ -1069,6 +1489,20 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         )
         return _voice_action_response("voice.captureAndSubmitTurn", result, current)
 
+    @app.post("/voice/capture/listen-turn")
+    async def listen_and_submit_voice_turn(
+        payload: VoiceCaptureControlRequest, request: Request
+    ) -> dict[str, object]:
+        current = _current_container(request)
+        result = await current.voice.listen_and_submit_turn(
+            session_id=payload.session_id,
+            mode=payload.mode or "ghost",
+            synthesize_response=payload.synthesize_response,
+            play_response=payload.play_response,
+            metadata=payload.metadata,
+        )
+        return _voice_action_response("voice.listenAndSubmitTurn", result, current)
+
     @app.post("/voice/playback/stop")
     async def stop_voice_playback(
         payload: VoicePlaybackControlRequest, request: Request
@@ -1156,10 +1590,62 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         )
         return _voice_action_response("voice.handleInterruption", result, current)
 
+    def _limit_snapshot_text(value: object, limit: int) -> object:
+        if not isinstance(value, str):
+            return value
+        if len(value) <= limit:
+            return value
+        return value[:limit].rstrip() + "..."
+
+    def _compact_ghost_history_message(message: object) -> dict[str, object]:
+        payload = message.to_dict() if hasattr(message, "to_dict") else dict(message)
+        metadata = (
+            payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        )
+        compact_metadata: dict[str, object] = {}
+        for key in (
+            "bearing_title",
+            "micro_response",
+            "response_profile",
+            "response_profile_reason",
+            "route_family",
+            "result_state",
+        ):
+            if key in metadata:
+                compact_metadata[key] = _limit_snapshot_text(metadata.get(key), 360)
+        route_state = metadata.get("route_state")
+        if isinstance(route_state, dict):
+            winner = route_state.get("winner")
+            compact_metadata["route_state"] = {
+                "winner": {
+                    "route_family": winner.get("route_family"),
+                    "confidence": winner.get("confidence"),
+                }
+                if isinstance(winner, dict)
+                else None,
+                "summary_omitted": True,
+                "detail_load_deferred": True,
+            }
+        voice_output = metadata.get("voice_output")
+        if isinstance(voice_output, dict):
+            compact_metadata["voice_output"] = {
+                "scheduled": bool(voice_output.get("scheduled")),
+                "playback_requested": bool(voice_output.get("playback_requested")),
+                "streaming_requested": bool(voice_output.get("streaming_requested")),
+            }
+        return {
+            "message_id": payload.get("message_id"),
+            "role": payload.get("role"),
+            "content": _limit_snapshot_text(payload.get("content"), 1200),
+            "created_at": payload.get("created_at"),
+            "metadata": compact_metadata,
+        }
+
     @app.get("/snapshot")
     def snapshot(
         request: Request,
         session_id: str = "default",
+        profile: str = "ghost_light",
         event_since_id: int = 0,
         event_limit: int = 100,
         job_limit: int = 50,
@@ -1167,9 +1653,10 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         history_limit: int = 100,
         compact: bool = False,
     ) -> dict[str, object]:
+        snapshot_started = perf_counter()
         current = _current_container(request)
         if compact:
-            return {
+            payload = {
                 "snapshot_profile": "command_eval_compact",
                 "session_id": session_id,
                 "health": {"ok": True},
@@ -1194,7 +1681,132 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                     "omitted_reason": "command_eval_compact_snapshot",
                 },
             }
-        return {
+            return _finish_snapshot_instrumentation(
+                payload,
+                started_at=snapshot_started,
+                profile="command_eval_compact",
+                deferred_sections=("status", "settings", "tools", "history", "deck_detail"),
+            )
+        normalized_profile = str(profile or "ghost_light").strip().lower()
+        if normalized_profile in {"ghost", "ghost_light", "light", "default"}:
+            event_cap = max(0, min(int(event_limit or 0), 12))
+            job_cap = max(0, min(int(job_limit or 0), 8))
+            note_cap = max(0, min(int(note_limit or 0), 0))
+            history_cap = max(0, min(int(history_limit or 0), 12))
+            payload = {
+                "snapshot_profile": "ghost_light",
+                "session_id": session_id,
+                "detail_load_deferred": True,
+                "deferred_reason": "ghost_hot_path_avoids_deck_detail",
+                "health": _health_payload(request),
+                "status": current.status_snapshot_fast(session_id=session_id),
+                "jobs": current.jobs.list_jobs(limit=job_cap),
+                "events": current.events.recent(
+                    since_id=event_since_id, limit=event_cap
+                ),
+                "notes": [
+                    note.to_dict() for note in current.notes.list_notes(limit=note_cap)
+                ],
+                "history": [
+                    _compact_ghost_history_message(message)
+                    for message in current.conversations.list_messages(
+                        session_id=session_id, limit=history_cap
+                    )
+                ],
+                "active_workspace": current._status_active_workspace_light(session_id),
+                "active_request_state": current._hot_path_compact_value(
+                    current.assistant.session_state.get_active_request_state(
+                        session_id
+                    ),
+                    max_depth=3,
+                    list_limit=6,
+                    text_limit=400,
+                ),
+                "recent_context_resolutions": current._hot_path_compact_value(
+                    current.assistant.session_state.get_recent_context_resolutions(
+                        session_id
+                    ),
+                    max_depth=3,
+                    list_limit=4,
+                    text_limit=300,
+                ),
+                "active_task": current._status_active_task_summary(session_id),
+            }
+            return _finish_snapshot_instrumentation(
+                payload,
+                started_at=snapshot_started,
+                profile="ghost_light",
+                deferred_sections=(
+                    "deck_detail",
+                    "settings",
+                    "tools",
+                    "workspace_detail",
+                    "system_detail",
+                    "weather_detail",
+                ),
+            )
+        if normalized_profile in {"deck_summary", "summary"}:
+            event_cap = max(0, min(int(event_limit or 0), 32))
+            job_cap = max(0, min(int(job_limit or 0), 20))
+            note_cap = max(0, min(int(note_limit or 0), 12))
+            history_cap = max(0, min(int(history_limit or 0), 32))
+            payload = {
+                "snapshot_profile": "deck_summary",
+                "session_id": session_id,
+                "detail_load_deferred": True,
+                "deferred_reason": "deck_summary_defers_full_detail_payload",
+                "health": _health_payload(request),
+                "status": current.status_snapshot_fast(session_id=session_id),
+                "jobs": current.jobs.list_jobs(limit=job_cap),
+                "events": current.events.recent(
+                    since_id=event_since_id, limit=event_cap
+                ),
+                "notes": [
+                    note.to_dict() for note in current.notes.list_notes(limit=note_cap)
+                ],
+                "settings_summary": {
+                    "environment": current.config.environment,
+                    "runtime_mode": current.config.runtime.mode,
+                    "api_base_url": current.config.api_base_url,
+                    "detail_load_deferred": True,
+                },
+                "history": [
+                    _compact_ghost_history_message(message)
+                    for message in current.conversations.list_messages(
+                        session_id=session_id, limit=history_cap
+                    )
+                ],
+                "tools_summary": {
+                    "tool_count": current._tool_count_fast(),
+                    "detail_load_deferred": True,
+                },
+                "active_workspace": current._status_active_workspace_light(session_id),
+                "active_request_state": current._hot_path_compact_value(
+                    current.assistant.session_state.get_active_request_state(
+                        session_id
+                    ),
+                    max_depth=3,
+                    list_limit=8,
+                    text_limit=600,
+                ),
+                "recent_context_resolutions": current._hot_path_compact_value(
+                    current.assistant.session_state.get_recent_context_resolutions(
+                        session_id
+                    ),
+                    max_depth=3,
+                    list_limit=8,
+                    text_limit=400,
+                ),
+                "active_task": current._status_active_task_summary(session_id),
+            }
+            return _finish_snapshot_instrumentation(
+                payload,
+                started_at=snapshot_started,
+                profile="deck_summary",
+                deferred_sections=("deck_detail", "workspace_detail", "system_detail"),
+            )
+        payload = {
+            "snapshot_profile": "deck_detail",
             "health": _health_payload(request),
             "status": current.status_snapshot(),
             "jobs": current.jobs.list_jobs(limit=job_limit),
@@ -1210,7 +1822,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 )
             ],
             "tools": current.tool_registry.metadata(),
-            "active_workspace": current.assistant.workspace_service.active_workspace_summary(
+            "active_workspace": current.assistant.workspace_service.active_workspace_summary_compact(
                 session_id
             ),
             "active_request_state": current.assistant.session_state.get_active_request_state(
@@ -1221,5 +1833,10 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             ),
             "active_task": current.task_service.active_task_summary(session_id),
         }
+        return _finish_snapshot_instrumentation(
+            payload,
+            started_at=snapshot_started,
+            profile="deck_detail",
+        )
 
     return app

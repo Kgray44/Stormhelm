@@ -9,11 +9,12 @@ from stormhelm.core.api.app import create_app
 from stormhelm.core.container import CoreContainer
 from stormhelm.core.memory.database import SQLiteDatabase
 from stormhelm.core.memory.repositories import PreferencesRepository
-from stormhelm.core.orchestrator.assistant import STAGE_TIMING_KEYS
+from stormhelm.core.orchestrator.assistant import STAGE_TIMING_KEYS, _subspans_from_jobs
 from stormhelm.core.orchestrator.command_eval.runner import _stage_timings_from_metadata
 from stormhelm.core.orchestrator.planner_v2 import PlannerV2
 from stormhelm.core.orchestrator.router import ToolRequest
 from stormhelm.core.orchestrator.session_state import ConversationStateStore
+from stormhelm.core.system.probe import SystemProbe
 from stormhelm.core.workspace.repository import WorkspaceRepository
 
 from test_assistant_orchestrator import FakeSystemProbe
@@ -73,6 +74,206 @@ def test_compact_snapshot_omits_full_status_tools_and_workspace_detail(
     assert "tools" not in payload
     assert "settings" not in payload
     assert "history" not in payload
+
+
+def test_status_default_uses_fast_hot_path_without_full_status_snapshot(
+    temp_config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_status_snapshot(self):  # noqa: ANN001
+        pytest.fail("default /status should use the fast hot-path snapshot")
+
+    monkeypatch.setattr(CoreContainer, "status_snapshot", fail_status_snapshot)
+
+    with TestClient(create_app(temp_config)) as client:
+        response = client.get("/status")
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["status_profile"] == "fast_status"
+    assert payload["detail_load_deferred"] is True
+    assert "voice" in payload
+    assert "bridge_authority" not in payload
+    assert "tool_state" not in payload
+
+
+def test_status_default_exposes_bounded_hot_path_timing(temp_config) -> None:
+    with TestClient(create_app(temp_config)) as client:
+        response = client.get("/status")
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["status_profile"] == "fast_status"
+    assert payload["status_total_ms"] >= 0.0
+    assert isinstance(payload["status_sections_ms"], dict)
+    assert "voice" in payload["status_sections_ms"]
+    assert "system_state" in payload["status_sections_ms"]
+    assert "workspace" in payload["status_deferred_sections"]
+    assert payload["status_payload_bytes"] > 0
+    assert payload["status_payload_bytes"] < 120_000
+
+
+def test_status_full_detail_remains_explicit_opt_in(temp_config) -> None:
+    with TestClient(create_app(temp_config)) as client:
+        response = client.get("/status", params={"detail": "full"})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert "bridge_authority" in payload
+    assert payload.get("status_profile") != "fast_status"
+
+
+def test_ghost_light_snapshot_is_default_and_avoids_deck_detail(
+    temp_config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_status_snapshot(self):  # noqa: ANN001
+        pytest.fail("ghost_light snapshot should not build full status snapshot")
+
+    monkeypatch.setattr(CoreContainer, "status_snapshot", fail_status_snapshot)
+
+    with TestClient(create_app(temp_config)) as client:
+        response = client.get("/snapshot", params={"session_id": "default"})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["snapshot_profile"] == "ghost_light"
+    assert payload["status"]["status_profile"] == "fast_status"
+    assert payload["active_workspace"]["detail_load_deferred"] is True
+    assert "settings" not in payload
+    assert "tools" not in payload
+    assert "deck_detail" not in payload
+
+
+def test_ghost_light_snapshot_exposes_profile_timing_and_size(temp_config) -> None:
+    with TestClient(create_app(temp_config)) as client:
+        response = client.get(
+            "/snapshot",
+            params={
+                "session_id": "default",
+                "event_limit": 12,
+                "job_limit": 8,
+                "note_limit": 0,
+                "history_limit": 12,
+            },
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["snapshot_profile"] == "ghost_light"
+    assert payload["snapshot_total_ms"] >= 0.0
+    assert payload["snapshot_payload_bytes"] > 0
+    assert payload["snapshot_payload_bytes"] < 200_000
+    assert "deck_detail" in payload["snapshot_deferred_sections"]
+    assert isinstance(payload["snapshot_largest_sections"], list)
+    assert payload["snapshot_largest_sections"]
+    assert all("section" in item and "bytes" in item for item in payload["snapshot_largest_sections"])
+
+
+def test_deck_detail_snapshot_remains_explicit_opt_in(temp_config) -> None:
+    with TestClient(create_app(temp_config)) as client:
+        response = client.get(
+            "/snapshot",
+            params={
+                "session_id": "default",
+                "profile": "deck_detail",
+                "event_limit": 1,
+                "job_limit": 1,
+                "note_limit": 1,
+                "history_limit": 1,
+            },
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["snapshot_profile"] == "deck_detail"
+    assert "settings" in payload
+    assert "tools" in payload
+    assert "status" in payload
+
+
+def test_weather_status_exposes_safe_location_provider_cache_subspans(
+    temp_config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe = SystemProbe(temp_config)
+
+    def fake_resolve(self, **kwargs):  # noqa: ANN001, ANN202
+        return {
+            "resolved": True,
+            "source": "queried_place",
+            "label": "Perkinsville, Vermont",
+            "latitude": 43.15,
+            "longitude": -72.51,
+            "timezone": "America/New_York",
+            "approximate": False,
+        }
+
+    def fake_fetch(self, url: str, *, timeout: float):  # noqa: ANN001, ANN202
+        assert "api_key" not in url.lower()
+        return {
+            "current": {
+                "temperature_2m": 51.0,
+                "apparent_temperature": 48.0,
+                "weather_code": 3,
+                "wind_speed_10m": 6.0,
+                "relative_humidity_2m": 67,
+            },
+            "daily": {
+                "weather_code": [3, 45],
+                "temperature_2m_max": [56.0, 60.0],
+                "temperature_2m_min": [39.0, 42.0],
+                "precipitation_probability_max": [20, 35],
+            },
+            "hourly": {
+                "temperature_2m": [50.0],
+                "apparent_temperature": [47.0],
+                "weather_code": [3],
+                "precipitation_probability": [20],
+            },
+        }
+
+    monkeypatch.setattr(SystemProbe, "resolve_best_location_for_request", fake_resolve)
+    monkeypatch.setattr(SystemProbe, "_fetch_json", fake_fetch)
+
+    result = probe.weather_status(
+        location_mode="named",
+        named_location="Perkinsville Vermont",
+        named_location_type="place_query",
+    )
+
+    assert result["available"] is True
+    trace = result["weather_trace"]
+    assert trace["weather_location_lookup_ms"] >= 0.0
+    assert trace["weather_provider_call_ms"] >= 0.0
+    assert trace["weather_cache_hit"] is False
+    assert trace["weather_timeout_ms"] == 6000.0
+    assert trace["weather_provider_status"] == "ok"
+    assert trace["weather_job_wait_ms"] == 0.0
+    assert trace["weather_provider_service"] == "open-meteo"
+    assert "api_key" not in str(trace).lower()
+    assert result["weather_location_lookup_ms"] == trace["weather_location_lookup_ms"]
+    assert result["weather_provider_call_ms"] == trace["weather_provider_call_ms"]
+
+
+def test_weather_job_subspans_are_available_for_route_metadata() -> None:
+    class _Job:
+        result = {
+            "data": {
+                "weather_trace": {
+                    "weather_location_lookup_ms": 12.5,
+                    "weather_provider_call_ms": 34.25,
+                    "weather_timeout_ms": 6000.0,
+                    "weather_job_wait_ms": 0.0,
+                }
+            }
+        }
+
+    subspans = _subspans_from_jobs([_Job()])
+
+    assert subspans["weather_location_lookup_ms"] == 12.5
+    assert subspans["weather_provider_call_ms"] == 34.25
+    assert subspans["weather_timeout_ms"] == 6000.0
 
 
 def test_command_eval_snapshot_timing_is_attributed() -> None:

@@ -7,9 +7,11 @@ from dataclasses import replace
 from stormhelm.config.models import VoiceConfig
 from stormhelm.config.models import VoicePlaybackConfig
 from stormhelm.core.voice.models import VoiceAudioOutput
+from stormhelm.core.voice.models import VoiceLivePlaybackRequest
 from stormhelm.core.voice.models import VoicePlaybackRequest
 from stormhelm.core.voice.providers import LocalPlaybackProvider
 from stormhelm.core.voice.providers import MockPlaybackProvider
+from stormhelm.core.voice.providers import WindowsMCIPlaybackBackend
 
 
 class FakeLocalPlaybackBackend:
@@ -30,6 +32,10 @@ class FakeLocalPlaybackBackend:
         self.fail_playback = fail_playback
         self.play_calls: list[dict[str, object]] = []
         self.stop_calls: list[dict[str, object]] = []
+        self.stream_start_calls: list[dict[str, object]] = []
+        self.stream_feed_calls: list[dict[str, object]] = []
+        self.stream_complete_calls: list[str] = []
+        self.stream_cancel_calls: list[dict[str, object]] = []
 
     def get_availability(self, config: VoiceConfig) -> dict[str, object]:
         return {
@@ -77,6 +83,74 @@ class FakeLocalPlaybackBackend:
         return {"status": "stopped", "elapsed_ms": 3}
 
 
+class FakeStreamingSpeakerBackend(FakeLocalPlaybackBackend):
+    dependency_name = "fake_speaker_stream"
+
+    def start_stream(self, *, request: VoiceLivePlaybackRequest) -> dict[str, object]:
+        self.stream_start_calls.append(
+            {
+                "playback_stream_id": request.playback_stream_id,
+                "audio_format": request.audio_format,
+                "device": request.device,
+            }
+        )
+        return {
+            "status": "started",
+            "backend": self.dependency_name,
+            "streaming_supported": True,
+            "audible_playback": True,
+            "user_heard_claimed": False,
+        }
+
+    def feed_stream_chunk(
+        self,
+        playback_stream_id: str,
+        data: bytes,
+        *,
+        chunk_index: int | None = None,
+    ) -> dict[str, object]:
+        self.stream_feed_calls.append(
+            {
+                "playback_stream_id": playback_stream_id,
+                "chunk_index": chunk_index,
+                "size_bytes": len(data),
+            }
+        )
+        return {
+            "ok": True,
+            "status": "playing",
+            "chunk_index": chunk_index or 0,
+            "playback_started": True,
+            "audible_playback": True,
+            "user_heard_claimed": True,
+        }
+
+    def complete_stream(self, playback_stream_id: str) -> dict[str, object]:
+        self.stream_complete_calls.append(playback_stream_id)
+        return {
+            "status": "completed",
+            "audible_playback": True,
+            "user_heard_claimed": True,
+            "raw_audio_present": False,
+        }
+
+    def cancel_stream(
+        self,
+        playback_stream_id: str | None = None,
+        *,
+        reason: str = "user_requested",
+    ) -> dict[str, object]:
+        self.stream_cancel_calls.append(
+            {"playback_stream_id": playback_stream_id, "reason": reason}
+        )
+        return {
+            "status": "cancelled",
+            "audible_playback": True,
+            "user_heard_claimed": True,
+            "raw_audio_present": False,
+        }
+
+
 def _audio_output(data: bytes = b"fake audio bytes") -> VoiceAudioOutput:
     return VoiceAudioOutput.from_bytes(
         data,
@@ -119,6 +193,7 @@ def _local_config(*, enabled: bool = True, allow_dev: bool = True) -> VoiceConfi
             device="test-device",
             volume=0.5,
             allow_dev_playback=allow_dev,
+            streaming_enabled=True,
         ),
     )
 
@@ -310,4 +385,81 @@ def test_local_playback_provider_can_start_then_stop_active_backend_playback(
     assert stopped.user_heard_claimed is False
     assert backend.stop_calls == [
         {"playback_id": started.playback_id, "reason": "stop_speaking"}
+    ]
+
+
+def test_local_playback_provider_streams_chunks_to_real_speaker_backend() -> None:
+    backend = FakeStreamingSpeakerBackend()
+    provider = LocalPlaybackProvider(config=_local_config(), backend=backend)
+    request = VoiceLivePlaybackRequest(
+        speech_request_id="voice-speech-speaker",
+        provider="local",
+        device="test-device",
+        audio_format="pcm",
+        session_id="voice-session",
+        turn_id="voice-turn",
+        allowed_to_play=True,
+        metadata={"sample_rate": 24000, "channels": 1, "sample_width_bytes": 2},
+    )
+
+    session = provider.start_stream(request)
+    first = provider.feed_stream_chunk(
+        session.playback_stream_id,
+        b"\x00\x00\x01\x00",
+        chunk_index=0,
+    )
+    completed = provider.complete_stream(session.playback_stream_id)
+    payload = completed.to_dict()
+
+    assert session.status == "started"
+    assert backend.stream_start_calls[0]["audio_format"] == "pcm"
+    assert first.ok is True
+    assert first.playback_started is True
+    assert backend.stream_feed_calls[0]["size_bytes"] == 4
+    assert completed.ok is True
+    assert completed.status == "completed"
+    assert completed.provider == "local"
+    assert completed.chunk_count == 1
+    assert completed.user_heard_claimed is True
+    assert payload["user_heard_claimed"] is True
+    assert "b'\\x00" not in str(payload)
+    assert payload["raw_audio_present"] is False
+
+
+def test_default_windows_backend_exposes_progressive_stream_methods() -> None:
+    backend = WindowsMCIPlaybackBackend()
+
+    assert callable(getattr(backend, "start_stream", None))
+    assert callable(getattr(backend, "feed_stream_chunk", None))
+    assert callable(getattr(backend, "complete_stream", None))
+    assert callable(getattr(backend, "cancel_stream", None))
+
+
+def test_local_speaker_stream_cancel_reports_partial_playback_truthfully() -> None:
+    backend = FakeStreamingSpeakerBackend()
+    provider = LocalPlaybackProvider(config=_local_config(), backend=backend)
+    request = VoiceLivePlaybackRequest(
+        speech_request_id="voice-speech-speaker",
+        provider="local",
+        device="test-device",
+        audio_format="pcm",
+        session_id="voice-session",
+        turn_id="voice-turn",
+        allowed_to_play=True,
+    )
+
+    session = provider.start_stream(request)
+    provider.feed_stream_chunk(session.playback_stream_id, b"\x00\x00", chunk_index=0)
+    cancelled = provider.cancel_stream(
+        session.playback_stream_id,
+        reason="stop_speaking",
+    )
+
+    assert cancelled.ok is True
+    assert cancelled.status == "cancelled"
+    assert cancelled.partial_playback is True
+    assert cancelled.chunk_count == 1
+    assert cancelled.user_heard_claimed is True
+    assert backend.stream_cancel_calls == [
+        {"playback_stream_id": session.playback_stream_id, "reason": "stop_speaking"}
     ]

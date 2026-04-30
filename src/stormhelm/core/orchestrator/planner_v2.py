@@ -16,6 +16,7 @@ from stormhelm.core.orchestrator.route_spine import RouteSpineWinner
 
 PLANNER_V2_ROUTE_FAMILIES = {
     "calculations",
+    "web_retrieval",
     "browser_destination",
     "app_control",
     "file",
@@ -63,6 +64,7 @@ LEGACY_MIGRATION_SCHEDULE: dict[str, tuple[str, str]] = {
     "workflow": ("migrated", "migrated_in_planner_v2_expansion_1"),
     "task_continuity": ("migrated", "migrated_in_planner_v2_expansion_1"),
     "discord_relay": ("migrated", "migrated_in_planner_v2_expansion_1"),
+    "web_retrieval": ("migrated", "obscura_public_page_rendering_adapter"),
     "maintenance": ("scheduled", "medium"),
     "trust_approvals": ("scheduled", "medium"),
     "power": ("scheduled", "low"),
@@ -151,6 +153,25 @@ def _json_ready(value: Any) -> Any:
     if isinstance(value, (list, tuple, set)):
         return [_json_ready(item) for item in value]
     return value
+
+
+def _web_retrieval_intent(text: str, operation: str) -> str:
+    normalized = str(text or "").strip().lower()
+    if re.search(r"\b(?:obscura\s+cdp|cdp\s+provider|browser\s+renderer|headless\s+renderer)\b", normalized):
+        if re.search(r"\bnetwork\s+summary\b", normalized):
+            return "cdp_network_summary"
+        return "cdp_inspect"
+    if re.search(r"\b(?:dom\s+text|network\s+summary)\b", normalized):
+        return "cdp_network_summary" if "network summary" in normalized else "cdp_inspect"
+    if "link" in normalized:
+        return "extract_links"
+    if "render" in normalized:
+        return "render_page"
+    if operation == "compare" or re.search(r"\b(?:compare|versus|vs|diff)\b", normalized):
+        return "compare_pages"
+    if "summary" in normalized or "summarize" in normalized:
+        return "summarize_page"
+    return "read_page"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1218,14 +1239,49 @@ class PlanBuilder:
         subject = frame.target_text or family
         if family == "calculations":
             return PlanDraft(family, "calculations", frame.operation, frame.target_type, subject=subject, request_type_hint="calculation_response", execution_type="calculation_evaluate")
+        if family == "web_retrieval":
+            urls = [
+                str(url).strip()
+                for url in frame.extracted_entities.get("urls", [])
+                if str(url).strip()
+            ]
+            if not urls:
+                url = str(binding.value or frame.extracted_entities.get("url") or frame.target_text or "").strip()
+                urls = [url] if url else []
+            intent = _web_retrieval_intent(frame.normalized_text, frame.operation)
+            include_html = bool(re.search(r"\b(?:html|source)\b", frame.normalized_text))
+            preferred_provider = "obscura_cdp" if intent.startswith("cdp_") else "auto"
+            return PlanDraft(
+                family,
+                "web_retrieval",
+                frame.operation,
+                "url",
+                subject=urls[0] if urls else subject,
+                tool_name="web_retrieval_fetch",
+                tool_arguments={
+                    "urls": urls,
+                    "intent": intent,
+                    "preferred_provider": preferred_provider,
+                    "require_rendering": intent in {"render_page", "compare_pages"} or intent.startswith("cdp_"),
+                    "include_links": intent
+                    in {"extract_links", "summarize_page", "read_page", "compare_pages", "cdp_inspect", "cdp_network_summary"},
+                    "include_html": include_html or intent.startswith("cdp_"),
+                },
+                request_type_hint="web_retrieval_response",
+                execution_type="web_retrieval_extract",
+                requires_execution=True,
+            )
         if family == "browser_destination":
             url = str(binding.value or frame.extracted_entities.get("url") or frame.target_text)
             requested_tool = str(frame.extracted_entities.get("tool_name") or "").strip()
+            deck_requested = surface_mode.strip().lower() == "deck" or bool(
+                re.search(r"\b(?:in|inside|within)\s+(?:the\s+)?deck\b", frame.normalized_text)
+            )
             tool = (
                 requested_tool
                 if requested_tool in {"external_open_url", "deck_open_url"}
                 else "deck_open_url"
-                if surface_mode.strip().lower() == "deck"
+                if deck_requested
                 else "external_open_url"
             )
             return PlanDraft(family, "browser", "open", "website", subject=url, tool_name=tool, tool_arguments={"url": url}, request_type_hint="direct_action", execution_type="resolve_url_then_open_in_browser", requires_execution=True)
@@ -1237,13 +1293,16 @@ class PlanBuilder:
         if family == "file":
             path = str(binding.value or frame.extracted_entities.get("path") or frame.target_text)
             requested_tool = str(frame.extracted_entities.get("tool_name") or "").strip()
+            deck_requested = surface_mode.strip().lower() == "deck" or bool(
+                re.search(r"\b(?:in|inside|within)\s+(?:the\s+)?deck\b", frame.normalized_text)
+            )
             tool = (
                 requested_tool
                 if requested_tool in {"file_reader", "deck_open_file", "external_open_file"}
                 else "file_reader"
                 if frame.operation == "inspect"
                 else "deck_open_file"
-                if surface_mode.strip().lower() == "deck"
+                if deck_requested
                 else "external_open_file"
             )
             operation = "inspect" if tool == "file_reader" else frame.operation
@@ -1278,6 +1337,20 @@ class PlanBuilder:
             command = str(frame.extracted_entities.get("shell_command") or frame.target_text or "open_terminal").strip()
             return PlanDraft(family, "terminal", frame.operation, "workspace", subject=command or "terminal", tool_name="shell_command", tool_arguments={"command": command, "dry_run": True}, request_type_hint="terminal_preflight", execution_type="execute_control_command", requires_execution=True)
         if family == "desktop_search":
+            source_case = str(frame.extracted_entities.get("source_case") or "").strip().lower()
+            requested_tool = str(frame.extracted_entities.get("tool_name") or "").strip().lower()
+            if source_case == "recent_files" or requested_tool == "recent_files":
+                return PlanDraft(
+                    family,
+                    "system",
+                    "status",
+                    "system_resource",
+                    subject="recent_files",
+                    tool_name="recent_files",
+                    tool_arguments={},
+                    request_type_hint="direct_deterministic_fact",
+                    execution_type="retrieve_current_status",
+                )
             return PlanDraft(family, "workflow", frame.operation, frame.target_type, subject=subject or "desktop_search", tool_name="desktop_search", tool_arguments={"query": subject or frame.raw_text, "action": "search"}, request_type_hint="search_and_act", execution_type="search_then_open")
         if family == "development" and frame.clarification_needed:
             return PlanDraft(family, "development", "clarify", "unknown", subject=subject or "echo command", request_type_hint="development_echo_clarification", execution_type="clarify_route_context")
@@ -1410,6 +1483,10 @@ class PolicyEvaluator:
         risk = frame.risk_class
         if plan.route_family == "software_control" and frame.operation == "verify":
             risk = "read_only"
+        if plan.tool_name in {"deck_open_url", "deck_open_file"}:
+            risk = "internal_surface_open"
+        if plan.tool_name == "file_reader":
+            risk = "read_only"
         reasons: list[str] = []
         execution_blocked = False
         if binding.status in {"missing", "stale", "ambiguous"} and binding.missing_preconditions:
@@ -1493,7 +1570,8 @@ class PlannerV2:
         active_context = active_context or {}
         active_request_state = active_request_state or {}
         recent_tool_results = recent_tool_results or []
-        normalized = self._normalizer.normalize(raw_text, surface_mode=surface_mode, active_module=active_module)
+        planner_text = self._strong_operator_route_probe_inner(raw_text) or raw_text
+        normalized = self._normalizer.normalize(planner_text, surface_mode=surface_mode, active_module=active_module)
         frame = self._extractor.extract(
             normalized.raw_text,
             active_context=active_context,
@@ -1546,6 +1624,51 @@ class PlannerV2:
     def _should_defer_to_legacy(self, frame: IntentFrame) -> bool:
         owner = str(frame.native_owner_hint or "").strip()
         return bool(owner and owner in PLANNER_V2_LEGACY_DEFER_FAMILIES and owner not in PLANNER_V2_ROUTE_FAMILIES)
+
+    def _strong_operator_route_probe_inner(self, raw_text: str) -> str:
+        match = re.match(
+            (
+                r"^\s*(?:open|route|run|use|try|diagnose|inspect)\s+or\s+"
+                r"(?:open|route|run|use|try|diagnose|inspect)\s+this\s+"
+                r"if\s+that\s+is\s+the\s+right\s+route\s*:\s*(?P<inner>.+?)\s*$"
+            ),
+            str(raw_text or ""),
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return ""
+        inner = " ".join(str(match.group("inner") or "").split()).strip()
+        if not inner:
+            return ""
+        normalized = normalize_phrase(inner)
+        if re.search(r"\b(?:almost|nearly|sort of|kind of)\b", normalized) and re.search(
+            r"\b(?:not exactly|not quite|but not|instead)\b",
+            normalized,
+        ):
+            return ""
+        if inner.lstrip().startswith(("/", "\\")):
+            return inner
+        if re.search(r"\bhttps?://|\bwww\.", inner, flags=re.IGNORECASE):
+            return inner
+        if re.search(r"(?:[A-Za-z]:\\|\\\\|/)[^\s,;?!]+", inner):
+            return inner
+        if self._direct_status_family(normalized, inner.lower()):
+            return inner
+        if (
+            self._workspace_signal(normalized)
+            or self._routine_signal(normalized)
+            or self._workflow_signal(normalized)
+            or self._task_continuity_signal(normalized)
+            or re.search(r"\b(?:continue|resume|pick up)\b.{0,24}\bwhere\s+i\s+left\s+off\b", normalized)
+            or self._discord_relay_signal(normalized)
+            or self._software_lifecycle_text(normalized)
+        ):
+            return inner
+        if re.search(r"\b(?:open|launch|navigate|go to|show)\b.{0,48}\b(?:browser|page|site|url|youtube|deck)\b", normalized):
+            return inner
+        if re.search(r"\b(?:find|search|locate)\b.{0,48}\b(?:on this computer|on my computer|desktop|file|folder|readme)\b", normalized):
+            return inner
+        return ""
 
     def _legacy_defer_decision(
         self,
@@ -1641,6 +1764,22 @@ class PlannerV2:
             frame.clarification_needed = False
             frame.clarification_reason = ""
             return frame
+        if self._recent_files_status_signal(text):
+            frame.operation = "status"
+            frame.target_type = "file"
+            frame.target_text = "recent files"
+            frame.context_reference = "none"
+            frame.context_status = "available"
+            frame.risk_class = "read_only"
+            frame.native_owner_hint = "desktop_search"
+            frame.candidate_route_families = ["desktop_search"]
+            frame.extracted_entities["source_case"] = "recent_files"
+            frame.extracted_entities["tool_name"] = "recent_files"
+            frame.generic_provider_allowed = False
+            frame.generic_provider_reason = "native_route_candidate_present"
+            frame.clarification_needed = False
+            frame.clarification_reason = ""
+            return frame
         if self._browser_correction_near_miss(text):
             frame.operation = "unknown"
             frame.target_type = "unknown"
@@ -1658,6 +1797,24 @@ class PlannerV2:
                 reason="browser_destination_near_miss",
                 context_status="missing",
             )
+            return frame
+        deck_file_path = self._explicit_deck_file_path(frame.raw_text)
+        if deck_file_path:
+            frame.operation = "open"
+            frame.target_type = "file"
+            frame.target_text = deck_file_path
+            frame.context_reference = "none"
+            frame.context_status = "available"
+            frame.risk_class = "internal_surface_open"
+            frame.native_owner_hint = "file"
+            frame.candidate_route_families = ["file"]
+            frame.extracted_entities["path"] = deck_file_path
+            frame.extracted_entities["source_case"] = "deck_open_file"
+            frame.extracted_entities["tool_name"] = "deck_open_file"
+            frame.generic_provider_allowed = False
+            frame.generic_provider_reason = "native_route_candidate_present"
+            frame.clarification_needed = False
+            frame.clarification_reason = ""
             return frame
         if self._echo_command_near_miss(text, raw_lower):
             frame.operation = "inspect"
@@ -1809,7 +1966,24 @@ class PlannerV2:
             frame.generic_provider_reason = "native_route_candidate_present"
             frame.clarification_needed = False
             frame.clarification_reason = ""
-        if self._browser_context_signal(text):
+        web_page_context = self._web_retrieval_current_page_context(text, active_context, recent_tool_results)
+        if web_page_context is not None:
+            frame.operation = "render" if "render" in text else "compare" if re.search(r"\b(?:compare|versus|vs|diff)\b", text) else "inspect"
+            frame.target_type = "url"
+            frame.target_text = str(web_page_context.get("value") or "current page")
+            frame.context_reference = "current_page"
+            frame.context_status = "available"
+            frame.risk_class = "read_only"
+            frame.native_owner_hint = "web_retrieval"
+            frame.candidate_route_families = ["web_retrieval"]
+            frame.extracted_entities["url"] = str(web_page_context.get("value") or "")
+            frame.extracted_entities["urls"] = [str(web_page_context.get("value") or "")]
+            frame.extracted_entities["source_case"] = "active_browser_page"
+            frame.generic_provider_allowed = False
+            frame.generic_provider_reason = "native_route_candidate_present"
+            frame.clarification_needed = False
+            frame.clarification_reason = ""
+        elif self._browser_context_signal(text):
             frame.operation = "inspect"
             frame.target_type = "current_page"
             frame.target_text = "browser page"
@@ -1833,6 +2007,12 @@ class PlannerV2:
         elif frame.native_owner_hint == "resources" and not frame.extracted_entities.get("tool_name"):
             frame.extracted_entities["tool_name"] = self._resource_tool_name(text)
             frame.extracted_entities["source_case"] = frame.extracted_entities["tool_name"]
+        if self._vague_dual_deictic_without_binding(text, active_context, active_request_state):
+            self._set_context_clarification(
+                frame,
+                reason="ambiguous_deictic_no_owner",
+                context_status="ambiguous",
+            )
         active_followup_owner = self._active_state_followup_owner(frame, active_request_state)
         if active_followup_owner:
             self._apply_active_state_followup(
@@ -1998,8 +2178,14 @@ class PlannerV2:
         trust = active_request_state.get("trust") if isinstance(active_request_state.get("trust"), dict) else {}
         parameters = active_request_state.get("parameters") if isinstance(active_request_state.get("parameters"), dict) else {}
         stage = str(parameters.get("request_stage") or "").strip().lower()
+        pending_preview = parameters.get("pending_preview") if isinstance(parameters.get("pending_preview"), dict) else {}
+        pending_source = str(pending_preview.get("source_case") or "").strip().lower()
+        if frame.native_owner_hint == "context_clarification":
+            return ""
         if not self._active_state_is_reusable(active_request_state):
             return ""
+        if self._explicit_confirmation_signal(frame.normalized_text) and pending_source == "routine_save":
+            return "routine"
         if trust and stage == "awaiting_confirmation" and self._followup_signal(frame.normalized_text):
             return "trust_approvals"
         if family not in PLANNER_V2_ROUTE_FAMILIES:
@@ -2075,10 +2261,46 @@ class PlannerV2:
         frame.clarification_reason = reason
 
     def _browser_correction_near_miss(self, text: str) -> bool:
+        near_miss = bool(
+            re.search(r"\b(?:almost|nearly|sort of|kind of)\b", text)
+            and re.search(r"\b(?:not exactly|not quite|but not|instead)\b", text)
+        )
+        if not near_miss:
+            return False
+        if re.search(
+            r"\b(?:open|launch|navigate|go to|show)\b.{0,48}\b(?:https?://|www\.|browser|page|site|url|deck|file)\b",
+            text,
+        ):
+            return True
         return bool(
             re.search(r"\b(?:almost|nearly|sort of|kind of)\b.{0,32}\b(?:open|launch|navigate|go to)\b.{0,32}\bbrowser\b", text)
             and re.search(r"\b(?:not exactly|not quite|but not|instead)\b", text)
         )
+
+    def _explicit_deck_file_path(self, raw_text: str) -> str:
+        text = str(raw_text or "")
+        if not re.search(r"\b(?:open|show|display|view)\b", text, flags=re.IGNORECASE):
+            return ""
+        match = re.search(
+            r"(?:^|[\s\"'])(?P<path>(?:[A-Za-z]:\\|\\\\|/)[^\r\n]+?)\s+\b(?:in|inside|within)\s+(?:the\s+)?deck\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return ""
+        return str(match.group("path") or "").strip(" .,:;!?\"'")
+
+    def _vague_dual_deictic_without_binding(
+        self,
+        text: str,
+        active_context: dict[str, Any],
+        active_request_state: dict[str, Any],
+    ) -> bool:
+        if not re.fullmatch(r"(?:no,\s*)?use\s+(?:this|that|it)\s+for\s+(?:this|that|it)", text.strip()):
+            return False
+        parameters = active_request_state.get("parameters") if isinstance(active_request_state.get("parameters"), dict) else {}
+        source_keys = {"source", "source_text", "source_payload", "selected_context", "payload", "content"}
+        return not any(self._context_value_present(parameters.get(key)) for key in source_keys)
 
     def _system_control_signal(self, text: str) -> bool:
         if re.search(r"\b(?:file|note|notes|document|readme)\b", text):
@@ -2099,11 +2321,14 @@ class PlannerV2:
             return "notes"
         if re.search(r"\b(?:what time is it|current time|time right now)\b", text):
             return "time"
-        if re.search(r"\b(?:what machine|what computer|machine name|os version|time ?zone|timezone|this computer)\b", text):
+        if re.search(r"\b(?:what machine|what computer|machine name|machine status|computer status|os version|time ?zone|timezone|this computer)\b", text):
             return "machine"
         if self._network_status_signal(text):
             return "network"
-        if self._storage_diagnosis_signal(text) or re.search(r"\b(?:disk space|storage space|free space)\b", text):
+        if self._storage_diagnosis_signal(text) or re.search(
+            r"\b(?:storage status|storage usage|storage space|disk status|disk space|disk usage|drive space|free space)\b",
+            text,
+        ):
             return "storage"
         if re.search(r"\b(?:where am i|current location|my location)\b", text):
             return "location"
@@ -2131,8 +2356,19 @@ class PlannerV2:
         if re.search(r"\b(?:location|locations|saved place|saved places)\b.{0,24}\b(?:concept|theory|idea|architecture|settings)\b", text):
             return False
         return bool(
+            re.fullmatch(r"(?:my\s+)?saved\s+(?:locations?|places?)", text.strip())
+            or re.fullmatch(r"(?:saved\s+)?home\s+location", text.strip())
+            or
             re.search(r"\b(?:show|list|display|view|see|open)\b.{0,48}\b(?:my\s+)?saved\s+(?:locations?|places?)\b", text)
             or re.search(r"\b(?:what|which)\b.{0,36}\bsaved\s+(?:locations?|places?)\b", text)
+        )
+
+    def _recent_files_status_signal(self, text: str) -> bool:
+        if re.search(r"\b(?:recent|latest)\b.{0,24}\b(?:file|files|document|documents)\b.{0,24}\b(?:concept|theory|idea|architecture)\b", text):
+            return False
+        return bool(
+            re.fullmatch(r"(?:show\s+|list\s+|display\s+|view\s+|see\s+|open\s+)?(?:my\s+)?(?:recent|latest)\s+(?:files?|documents?)", text.strip())
+            or re.fullmatch(r"what\s+was\s+i\s+working\s+on", text.strip())
         )
 
     def _workspace_list_signal(self, text: str) -> bool:
@@ -2340,6 +2576,9 @@ class PlannerV2:
                 context_status="missing",
             )
             return
+        pending_preview = parameters.get("pending_preview") if isinstance(parameters.get("pending_preview"), dict) else {}
+        if family == "routine" and str(pending_preview.get("source_case") or "").strip().lower() == "routine_save":
+            parameters = {**parameters, "source_case": "routine_save", "tool_name": "routine_save"}
         route = active_request_state.get("route") if isinstance(active_request_state.get("route"), dict) else {}
         route_tool_name = str(route.get("tool_name") or "").strip()
         subject = str(active_request_state.get("subject") or parameters.get("target_name") or family.replace("_", " ")).strip()
@@ -2703,6 +2942,17 @@ class PlannerV2:
         return {"label": str(label), "value": value}
 
     def _recent_website_context(self, active_context: dict[str, Any], recent_tool_results: list[dict[str, Any]]) -> dict[str, Any] | None:
+        active_item = active_context.get("active_item") if isinstance(active_context.get("active_item"), dict) else {}
+        active_url = active_item.get("url") or active_item.get("value")
+        active_kind = str(active_item.get("kind") or "").strip().lower()
+        if active_url and (active_kind in {"browser", "browser-tab", "page", "url", "website", "link"} or str(active_url).startswith(("http://", "https://"))):
+            return {
+                "type": "website",
+                "source": "active_context",
+                "label": str(active_item.get("title") or active_url),
+                "value": str(active_url),
+                "confidence": 0.94,
+            }
         for entity in IntentFrameExtractor()._recent_entities(active_context, recent_tool_results):
             if not isinstance(entity, dict):
                 continue
@@ -2932,6 +3182,20 @@ class PlannerV2:
             or re.search(r"\b(?:what|which)\b.{0,24}\b(?:page|tab)\b.{0,24}\b(?:open|active|current)\b.{0,24}\b(?:browser|tab)\b", text)
             or re.search(r"\bcurrent\b.{0,16}\b(?:browser\s+)?(?:page|tab)\b", text)
         )
+
+    def _web_retrieval_current_page_context(
+        self,
+        text: str,
+        active_context: dict[str, Any],
+        recent_tool_results: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        if not re.search(r"\b(?:read|summarize|inspect|extract|render|compare|parse)\b", text):
+            return None
+        if re.search(r"\b(?:open|launch|go to|navigate|click|tap|press|send|share|relay|message|install|download)\b", text):
+            return None
+        if not re.search(r"\b(?:this|current|active|page|article|url|site)\b", text):
+            return None
+        return self._recent_website_context(active_context, recent_tool_results)
 
     def _expansion_conceptual_near_miss(self, text: str) -> bool:
         return (

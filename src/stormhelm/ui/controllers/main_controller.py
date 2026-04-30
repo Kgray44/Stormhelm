@@ -53,6 +53,9 @@ class MainController(QtCore.QObject):
         self.bridge.voiceCaptureAndSubmitTurnRequested.connect(
             self._capture_and_submit_voice_turn
         )
+        self.bridge.voiceListenAndSubmitTurnRequested.connect(
+            self._listen_and_submit_voice_turn
+        )
         self.bridge.voiceStopPlaybackRequested.connect(self._stop_voice_playback)
         self.bridge.voiceStopSpeakingRequested.connect(self._stop_voice_speaking)
         self.bridge.voiceSuppressCurrentResponseRequested.connect(
@@ -74,6 +77,8 @@ class MainController(QtCore.QObject):
         self.client.error_occurred.connect(self._handle_error)
         self.client.snapshot_received.connect(self._handle_snapshot)
         self.client.health_received.connect(self._handle_health)
+        if hasattr(self.client, "status_received"):
+            self.client.status_received.connect(self._handle_status)
         self.client.chat_received.connect(self._handle_chat)
         self.client.note_saved.connect(self._handle_note_saved)
         if hasattr(self.client, "voice_action_received"):
@@ -101,6 +106,7 @@ class MainController(QtCore.QObject):
             self.bridge.set_connection_error(str(error))
             self.bridge.set_status_line(f"Core startup issue: {error}")
 
+        self._request_snapshot(force=True)
         self.poll()
         self.refresh_timer.start()
         self.presence_timer.start()
@@ -113,6 +119,9 @@ class MainController(QtCore.QObject):
             )
 
     def poll(self) -> None:
+        if hasattr(self.client, "fetch_status"):
+            self.client.fetch_status()
+            return
         self._request_snapshot()
 
     def _handle_local_mode_command(self, message: str) -> bool:
@@ -139,6 +148,7 @@ class MainController(QtCore.QObject):
             active_module=self.bridge.active_module_key,
             workspace_context=self.bridge.workspace_context_payload(),
             input_context=self.bridge.input_context_payload(),
+            response_profile=self._response_profile_for_mode(),
         )
 
     def _save_note(self, title: str, content: str) -> None:
@@ -169,6 +179,10 @@ class MainController(QtCore.QObject):
     def _capture_and_submit_voice_turn(self, payload: dict[str, object]) -> None:
         if hasattr(self.client, "capture_and_submit_voice_turn"):
             self.client.capture_and_submit_voice_turn(dict(payload or {}))
+
+    def _listen_and_submit_voice_turn(self, payload: dict[str, object]) -> None:
+        if hasattr(self.client, "listen_and_submit_voice_turn"):
+            self.client.listen_and_submit_voice_turn(dict(payload or {}))
 
     def _stop_voice_playback(self, payload: dict[str, object]) -> None:
         if hasattr(self.client, "stop_voice_playback"):
@@ -224,6 +238,15 @@ class MainController(QtCore.QObject):
             self._core_recovery_scheduled = False
             self.bridge.set_status_line("Standing watch.")
         self.bridge.apply_health(payload)
+
+    def _handle_status(self, payload: dict) -> None:
+        if payload.get("status") == "ok" and self._manual_backend_shutdown_requested:
+            self._manual_backend_shutdown_requested = False
+        if not self._core_online:
+            self._core_online = True
+            self._core_recovery_attempts = 0
+            self._core_recovery_scheduled = False
+        self.bridge.apply_status(payload)
 
     def _handle_chat(self, payload: dict) -> None:
         self._apply_actions(payload.get("actions", []))
@@ -322,7 +345,7 @@ class MainController(QtCore.QObject):
                 self._snapshot_refresh_queued = True
             return
         self._snapshot_in_flight = True
-        self.client.fetch_snapshot()
+        self._fetch_snapshot_hot_path()
 
     def _complete_snapshot_request(self) -> None:
         self._snapshot_in_flight = False
@@ -330,6 +353,34 @@ class MainController(QtCore.QObject):
             return
         self._snapshot_refresh_queued = False
         self._request_snapshot()
+
+    def _fetch_snapshot_hot_path(self) -> None:
+        profile = self._snapshot_profile_for_mode()
+        kwargs = {
+            "profile": profile,
+            "event_limit": 12 if profile == "ghost_light" else 32,
+            "job_limit": 8 if profile == "ghost_light" else 20,
+            "note_limit": 0 if profile == "ghost_light" else 12,
+            "history_limit": 12 if profile == "ghost_light" else 32,
+        }
+        try:
+            self.client.fetch_snapshot(**kwargs)
+        except TypeError:
+            self.client.fetch_snapshot()
+
+    def _snapshot_profile_for_mode(self) -> str:
+        return (
+            "ghost_light"
+            if str(self.bridge.mode_value or "").strip().lower() == "ghost"
+            else "deck_summary"
+        )
+
+    def _response_profile_for_mode(self) -> str:
+        return (
+            "ghost_compact"
+            if str(self.bridge.mode_value or "").strip().lower() == "ghost"
+            else "deck_summary"
+        )
 
     def _is_connection_disruption(self, purpose: str, error: str) -> bool:
         normalized_purpose = str(purpose or "").strip().lower()

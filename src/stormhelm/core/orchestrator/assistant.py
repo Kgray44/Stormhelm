@@ -92,6 +92,26 @@ STAGE_TIMING_KEYS = (
     "response_compose_ms",
     "response_serialization_ms",
     "payload_compaction_ms",
+    "weather_location_lookup_ms",
+    "weather_provider_call_ms",
+    "weather_timeout_ms",
+    "weather_job_wait_ms",
+    "system_cache_hit",
+    "system_cache_age_ms",
+    "system_resource_cache_hit",
+    "system_resource_cache_age_ms",
+    "cpu_probe_ms",
+    "resource_probe_ms",
+    "resource_status_probe_ms",
+    "hardware_telemetry_probe_ms",
+    "battery_probe_ms",
+    "storage_probe_ms",
+    "network_probe_ms",
+    "power_probe_ms",
+    "system_probe_deferred",
+    "system_probe_timeout_ms",
+    "live_probe_deferred",
+    "live_probe_timeout_ms",
     "total_latency_ms",
     "memoized_summary_hits",
     "context_cache_hits",
@@ -288,7 +308,86 @@ def _subspans_from_jobs(jobs: list[Any]) -> dict[str, float]:
         debug = data.get("debug") if isinstance(data.get("debug"), dict) else {}
         subspans = debug.get("route_handler_subspans") if isinstance(debug.get("route_handler_subspans"), dict) else {}
         _merge_route_subspans(values, subspans)
+        weather_trace = data.get("weather_trace") if isinstance(data.get("weather_trace"), dict) else {}
+        _merge_route_subspans(
+            values,
+            {
+                key: weather_trace.get(key)
+                for key in (
+                    "weather_location_lookup_ms",
+                    "weather_provider_call_ms",
+                    "weather_timeout_ms",
+                    "weather_job_wait_ms",
+                )
+                if key in weather_trace
+            },
+        )
+        system_trace = data.get("system_resource_trace") if isinstance(data.get("system_resource_trace"), dict) else {}
+        _merge_route_subspans(
+            values,
+            {
+                key: system_trace.get(key)
+                for key in (
+                    "system_cache_hit",
+                    "system_cache_age_ms",
+                    "system_resource_cache_hit",
+                    "system_resource_cache_age_ms",
+                    "cpu_probe_ms",
+                    "resource_probe_ms",
+                    "resource_status_probe_ms",
+                    "hardware_telemetry_probe_ms",
+                    "battery_probe_ms",
+                    "storage_probe_ms",
+                    "network_probe_ms",
+                    "power_probe_ms",
+                    "system_probe_deferred",
+                    "system_probe_timeout_ms",
+                    "live_probe_deferred",
+                    "live_probe_timeout_ms",
+                )
+                if key in system_trace
+            },
+        )
     return values
+
+
+def _system_resource_trace_from_job_dicts(jobs: list[dict[str, Any]]) -> dict[str, Any]:
+    trace: dict[str, Any] = {}
+    for job in jobs:
+        result = job.get("result") if isinstance(job.get("result"), dict) else {}
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        system_trace = (
+            data.get("system_resource_trace")
+            if isinstance(data.get("system_resource_trace"), dict)
+            else {}
+        )
+        if not system_trace:
+            continue
+        for key in (
+            "system_cache_hit",
+            "system_cache_age_ms",
+            "system_freshness_state",
+            "system_resource_cache_hit",
+            "system_resource_cache_age_ms",
+            "cpu_probe_ms",
+            "resource_probe_ms",
+            "resource_status_probe_ms",
+            "hardware_telemetry_probe_ms",
+            "battery_probe_ms",
+            "storage_probe_ms",
+            "network_probe_ms",
+            "power_probe_ms",
+            "system_probe_deferred",
+            "system_probe_timeout_ms",
+            "system_live_refresh_job_id",
+            "system_resource_freshness_state",
+            "live_probe_deferred",
+            "live_probe_job_id",
+            "live_probe_timeout_ms",
+        ):
+            if key in system_trace:
+                trace[key] = system_trace.get(key)
+    return trace
 
 
 class AssistantOrchestrator:
@@ -672,16 +771,26 @@ class AssistantOrchestrator:
                 )
             elif tool_name == "workspace_where_left_off":
                 data = (
-                    self.task_service.where_we_left_off(session_id=session_id)
-                    if self.task_service is not None
-                    else None
-                ) or service.where_we_left_off(session_id=session_id, compact=compact_mode)
+                    service.where_we_left_off(session_id=session_id, compact=True)
+                    if compact_mode
+                    else (
+                        self.task_service.where_we_left_off(session_id=session_id)
+                        if self.task_service is not None
+                        else None
+                    )
+                    or service.where_we_left_off(session_id=session_id, compact=False)
+                )
             else:
                 data = (
-                    self.task_service.next_steps(session_id=session_id)
-                    if self.task_service is not None
-                    else None
-                ) or service.next_steps(session_id=session_id, compact=compact_mode)
+                    service.next_steps(session_id=session_id, compact=True)
+                    if compact_mode
+                    else (
+                        self.task_service.next_steps(session_id=session_id)
+                        if self.task_service is not None
+                        else None
+                    )
+                    or service.next_steps(session_id=session_id, compact=False)
+                )
             if tool_name in {
                 "workspace_restore",
                 "workspace_assemble",
@@ -1790,6 +1899,10 @@ class AssistantOrchestrator:
             fail_fast_reason = self._fail_fast_reason_from_debug(planner_debug, planner_obedience)
         if fail_fast_reason:
             response_metadata["fail_fast_reason"] = fail_fast_reason
+        system_resource_trace = _system_resource_trace_from_job_dicts(jobs)
+        if system_resource_trace:
+            response_metadata["system_resource_trace"] = dict(system_resource_trace)
+            planner_debug["system_resource_trace"] = dict(system_resource_trace)
         if route_handler_subspans:
             response_metadata["route_handler_subspans"] = dict(route_handler_subspans)
             planner_debug["route_handler_subspans"] = dict(route_handler_subspans)
@@ -1913,7 +2026,8 @@ class AssistantOrchestrator:
         _record_stage_ms(stage_timings, "event_job_snapshot_ms", event_snapshot_started)
 
         active_state_started = perf_counter()
-        if command_eval_compact:
+        compact_runtime_response = self._compact_runtime_profile(resolved_response_profile)
+        if compact_runtime_response:
             active_request_state_payload = dict(active_request_state)
             recent_context_resolutions_payload = list(recent_context_resolutions)
             stage_timings["context_cache_hits"] += 1.0
@@ -1928,7 +2042,7 @@ class AssistantOrchestrator:
                 actions=actions,
                 profile=resolved_response_profile,
             )
-            if self.task_service is not None and resolved_response_profile == "command_eval_compact"
+            if self.task_service is not None and compact_runtime_response
             else self.task_service.active_task_summary(session_id)
             if self.task_service is not None
             else {}
@@ -2200,16 +2314,35 @@ class AssistantOrchestrator:
             return self.persona.report(progress_state.message), initial_jobs, []
         job_wait_started = perf_counter()
         completed_jobs = await asyncio.gather(*[self.jobs.wait(job.job_id) for job in submitted_jobs])
+        job_wait_ms = round((perf_counter() - job_wait_started) * 1000, 3)
         if route_handler_subspans is not None:
-            _add_route_subspan(
-                route_handler_subspans,
-                "routine_job_wait_ms" if routine_requested else "job_wait_ms",
-                job_wait_started,
+            wait_key = "routine_job_wait_ms" if routine_requested else "job_wait_ms"
+            route_handler_subspans[wait_key] = round(
+                float(route_handler_subspans.get(wait_key, 0.0)) + job_wait_ms,
+                3,
             )
-            if routine_requested:
-                _merge_route_subspans(route_handler_subspans, _subspans_from_jobs(completed_jobs))
+            completed_subspans = _subspans_from_jobs(completed_jobs)
+            if completed_subspans:
+                _merge_route_subspans(route_handler_subspans, completed_subspans)
+            if any(str(getattr(job, "tool_name", "") or "") == "weather_current" for job in completed_jobs):
+                route_handler_subspans["weather_job_wait_ms"] = round(
+                    float(route_handler_subspans.get("weather_job_wait_ms", 0.0)) + job_wait_ms,
+                    3,
+                )
         if stage_timings is not None:
             _record_stage_ms(stage_timings, "job_collection_ms", job_started)
+            completed_subspans = _subspans_from_jobs(completed_jobs)
+            for key, value in completed_subspans.items():
+                if key in STAGE_TIMING_KEYS and not key.startswith("weather_"):
+                    stage_timings[key] = round(float(stage_timings.get(key, 0.0)) + float(value or 0.0), 3)
+            if any(str(getattr(job, "tool_name", "") or "") == "weather_current" for job in completed_jobs):
+                stage_timings["weather_job_wait_ms"] = round(
+                    float(stage_timings.get("weather_job_wait_ms", 0.0)) + job_wait_ms,
+                    3,
+                )
+                for key, value in completed_subspans.items():
+                    if key.startswith("weather_"):
+                        stage_timings[key] = round(float(stage_timings.get(key, 0.0)) + float(value or 0.0), 3)
         actions: list[dict[str, Any]] = []
         summaries: list[str] = []
 
@@ -2235,6 +2368,17 @@ class AssistantOrchestrator:
                     result=job.result,
                     captured_at=job.finished_at or job.created_at,
                 )
+                data = job.result.get("data")
+                active_from_tool = (
+                    data.get("active_request_state")
+                    if isinstance(data, dict)
+                    else None
+                )
+                if isinstance(active_from_tool, dict):
+                    self.session_state.set_active_request_state(
+                        session_id,
+                        active_from_tool,
+                    )
 
         if self.workspace_service is not None:
             self.workspace_service.remember_actions(
@@ -3472,6 +3616,8 @@ class AssistantOrchestrator:
             return str(planned_decision.response_mode or "forecast_summary")
         if tool_name == "desktop_search":
             return "search_result"
+        if tool_name == "web_retrieval_fetch":
+            return "web_evidence_result"
         if tool_name in {
             "workspace_restore",
             "workspace_assemble",
@@ -3566,6 +3712,7 @@ class AssistantOrchestrator:
                 "file_operation": "Files",
                 "maintenance_action": "Maintenance",
                 "recent_files": "Files",
+                "web_retrieval_fetch": "Web Evidence",
                 "workspace_restore": "Workspace",
                 "workspace_assemble": "Workspace",
                 "workspace_save": "Workspace",
@@ -3614,9 +3761,19 @@ class AssistantOrchestrator:
         if str(os.environ.get("STORMHELM_COMMAND_EVAL_DRY_RUN") or "").strip().lower() in {"1", "true", "yes"}:
             return "command_eval_compact", "command_eval_dry_run"
         ghost_default = str(os.environ.get("STORMHELM_GHOST_COMPACT_DEFAULT") or "").strip().lower()
-        if ghost_default in {"1", "true", "yes"} and str(surface_mode or "").strip().lower() == "ghost":
-            return "ghost_compact", "ghost_compact_default"
-        del active_module
+        surface = str(surface_mode or "").strip().lower()
+        if surface == "ghost":
+            if (
+                str(getattr(self.config, "environment", "") or "").strip().lower()
+                == "test"
+                and ghost_default not in {"1", "true", "yes"}
+            ):
+                return "deck_detail", "backward_compatible_test_default"
+            if ghost_default in {"0", "false", "no"}:
+                return "deck_detail", "ghost_compact_default_disabled"
+            return "ghost_compact", "ghost_hot_path_default"
+        if surface == "deck" or str(active_module or "").strip().lower() == "deck":
+            return "deck_summary", "deck_hot_path_default"
         return "deck_detail", "backward_compatible_default"
 
     def _apply_response_profile(
@@ -3880,6 +4037,7 @@ class AssistantOrchestrator:
             "planner_obedience",
             "route_state",
             "route_handler_subspans",
+            "system_resource_trace",
             "stage_timings_ms",
             "api_timings_ms",
             "voice_core_result",
@@ -3973,6 +4131,7 @@ class AssistantOrchestrator:
             "actual_tool_names",
             "actual_result_mode",
             "route_handler_subspans",
+            "system_resource_trace",
             "stage_timings_ms",
             "native_decline_reasons",
             "selected_route_spec",
@@ -4661,11 +4820,28 @@ def _direct_route_family(tool_name: str) -> str:
     return {
         "clock": "time",
         "system_info": "machine",
+        "machine_status": "machine",
+        "resource_status": "resources",
+        "resource_diagnosis": "resources",
         "power_status": "power",
+        "power_projection": "power",
+        "power_diagnosis": "power",
         "storage_status": "storage",
+        "storage_diagnosis": "storage",
         "network_status": "network",
+        "network_throughput": "network",
+        "network_diagnosis": "network",
+        "location_status": "location",
+        "saved_locations": "location",
+        "save_location": "location",
+        "weather_current": "weather",
         "active_apps": "app_control",
-        "recent_files": "machine",
+        "app_control": "app_control",
+        "window_status": "window_control",
+        "window_control": "window_control",
+        "system_control": "system_control",
+        "control_capabilities": "system_control",
+        "recent_files": "task_continuity",
         "echo": "development",
         "file_reader": "file",
         "notes_write": "notes",
@@ -4683,6 +4859,7 @@ def _direct_route_family(tool_name: str) -> str:
         "external_open_url": "browser_destination",
         "deck_open_file": "file",
         "external_open_file": "file",
+        "web_retrieval_fetch": "web_retrieval",
     }.get(str(tool_name or "").strip(), "")
 
 
@@ -4693,14 +4870,21 @@ def _direct_route_subsystem(route_family: str, tool_name: str) -> str:
         "app_control": "system",
         "browser_destination": "browser",
         "development": "development",
-        "file": "files",
+        "desktop_search": "files",
+        "file_operation": "files",
+        "web_retrieval": "web_retrieval",
+        "location": "location",
         "machine": "system",
         "network": "system",
         "notes": "workspace",
         "power": "system",
+        "resources": "system",
+        "system_control": "system",
         "storage": "system",
         "task_continuity": "workspace",
         "terminal": "terminal",
         "time": "system",
+        "weather": "weather",
+        "window_control": "system",
         "workspace_operations": "workspace",
     }.get(str(route_family or "").strip(), "")

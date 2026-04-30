@@ -28,6 +28,7 @@ class ScreenObservationScope(StrEnum):
 class ScreenSourceType(StrEnum):
     PLACEHOLDER = "placeholder"
     SCREEN_CAPTURE = "screen_capture"
+    LOCAL_OCR = "local_ocr"
     ACCESSIBILITY = "accessibility"
     BROWSER_DOM = "browser_dom"
     FOCUS_STATE = "focus_state"
@@ -78,6 +79,9 @@ class ScreenRouteDisposition(StrEnum):
 
 class ScreenLimitationCode(StrEnum):
     OBSERVATION_UNAVAILABLE = "observation_unavailable"
+    SCREEN_CAPTURE_DISABLED = "screen_capture_disabled"
+    SCREEN_CAPTURE_UNAVAILABLE = "screen_capture_unavailable"
+    SENSITIVE_CONTENT_RESTRICTED = "sensitive_content_restricted"
     LOW_CONFIDENCE = "low_confidence"
     PRIOR_OBSERVATION_REQUIRED = "prior_observation_required"
     UNVERIFIED_CHANGE = "unverified_change"
@@ -556,6 +560,7 @@ class ScreenObservation:
     capture_reference: str | None = None
     selected_text: str | None = None
     clipboard_text: str | None = None
+    visual_text: str | None = None
     workspace_snapshot: dict[str, Any] = field(default_factory=dict)
     monitor_metadata: dict[str, Any] = field(default_factory=dict)
     quality_notes: list[str] = field(default_factory=list)
@@ -563,6 +568,7 @@ class ScreenObservation:
     selection_metadata: dict[str, Any] = field(default_factory=dict)
     focus_metadata: dict[str, Any] = field(default_factory=dict)
     cursor_metadata: dict[str, Any] = field(default_factory=dict)
+    visual_metadata: dict[str, Any] = field(default_factory=dict)
     sensitivity: ScreenSensitivityLevel = ScreenSensitivityLevel.UNKNOWN
 
     def to_dict(self) -> dict[str, Any]:

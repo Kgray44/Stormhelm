@@ -44,7 +44,7 @@ def test_default_adapter_contract_registry_covers_core_adapter_families() -> Non
 
     snapshot = registry.snapshot()
 
-    assert {"browser", "app", "file", "relay", "settings", "terminal"}.issubset(set(snapshot["families"]))
+    assert {"browser", "app", "file", "relay", "settings", "terminal", "web_retrieval"}.issubset(set(snapshot["families"]))
     assert snapshot["healthy_contract_count"] >= snapshot["contract_count"]
     assert snapshot["validation_failure_count"] == 0
     assert registry.resolve_tool_contract("external_open_url", {"url": "https://example.com"}) is not None
@@ -53,6 +53,44 @@ def test_default_adapter_contract_registry_covers_core_adapter_families() -> Non
     assert registry.resolve_tool_contract("app_control", {"action": "focus", "app_name": "discord"}).adapter_id == "app.desktop_control"  # type: ignore[union-attr]
     assert registry.resolve_tool_contract("deck_open_file", {"path": "C:/Stormhelm/notes/test.md"}).adapter_id == "file.deck"  # type: ignore[union-attr]
     assert registry.resolve_tool_contract("shell_command", {"command": "dir"}).adapter_id == "terminal.shell_stub"  # type: ignore[union-attr]
+    assert registry.resolve_tool_contract("web_retrieval_fetch", {"provider": "obscura"}).adapter_id == "web_retrieval.obscura.cli"  # type: ignore[union-attr]
+
+
+def test_obscura_web_retrieval_contract_keeps_strict_claim_ceiling() -> None:
+    contract = default_adapter_contract_registry().get_contract("web_retrieval.obscura.cli")
+
+    assert contract.family == "web_retrieval"
+    assert contract.trust_tier == TrustTier.EXTERNAL_DISPATCH
+    assert contract.verification.max_claimable_outcome == ClaimOutcome.OBSERVED
+    assert "rendered_page_evidence" in contract.artifact_modes
+    assert "public_web_only" in contract.safety_posture
+    assert "no_truth_verification" in contract.safety_posture
+    assert "no_user_visible_screen_claim" in contract.safety_posture
+    assert "click" not in contract.action_modes
+    assert "form_submit" not in contract.action_modes
+
+
+def test_obscura_cdp_contract_keeps_headless_page_evidence_ceiling() -> None:
+    registry = default_adapter_contract_registry()
+    contract = registry.get_contract("web_retrieval.obscura.cdp")
+
+    assert contract.family == "web_retrieval"
+    assert contract.trust_tier == TrustTier.LOCAL_NETWORK
+    assert contract.verification.max_claimable_outcome == ClaimOutcome.OBSERVED
+    assert "headless_cdp_page_evidence" in contract.artifact_modes
+    assert "web.cdp.start_local_session" in contract.action_modes
+    assert "web.cdp.navigate_public_url" in contract.action_modes
+    assert "browser.input.click" not in contract.action_modes
+    assert "browser.input.type" not in contract.action_modes
+    assert "browser.cookies.read" not in contract.action_modes
+    assert "browser.visible_screen_verify" not in contract.artifact_modes
+    assert "no_truth_verification" in contract.safety_posture
+    assert "no_logged_in_context" in contract.safety_posture
+
+    assert registry.resolve_tool_contract(
+        "web_retrieval_fetch",
+        {"preferred_provider": "obscura_cdp"},
+    ).adapter_id == "web_retrieval.obscura.cdp"  # type: ignore[union-attr]
 
 
 def test_adapter_contract_registry_supports_future_bindings() -> None:

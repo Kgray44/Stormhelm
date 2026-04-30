@@ -94,3 +94,44 @@ def test_core_api_client_parses_stream_frames_and_tracks_cursor() -> None:
     ]
     assert gaps == [{"requested_cursor": 1, "earliest_cursor": 4, "latest_cursor": 5}]
     assert client._stream_last_cursor == 5
+
+
+def test_core_api_client_fetch_snapshot_defaults_to_ghost_light_profile(monkeypatch) -> None:
+    client = CoreApiClient("http://stormhelm.test")
+    requests: list[str] = []
+
+    def capture(method, path, payload, callback):  # noqa: ANN001
+        del method, payload, callback
+        requests.append(path)
+
+    monkeypatch.setattr(client, "_send_json", capture)
+
+    client.fetch_snapshot()
+
+    assert requests
+    assert "profile=ghost_light" in requests[0]
+    assert "event_limit=12" in requests[0]
+    assert "job_limit=8" in requests[0]
+    assert "history_limit=12" in requests[0]
+
+
+def test_core_api_client_event_stream_uses_bounded_replay(monkeypatch) -> None:
+    client = CoreApiClient("http://stormhelm.test")
+    urls: list[str] = []
+
+    class _Reply(QtCore.QObject):
+        readyRead = QtCore.Signal()
+        finished = QtCore.Signal()
+
+    class _Manager:
+        def get(self, request):  # noqa: ANN001
+            urls.append(request.url().toString())
+            return _Reply()
+
+    monkeypatch.setattr(client, "manager", _Manager())
+
+    client._open_event_stream(cursor=None)
+
+    assert urls
+    assert "replay_limit=8" in urls[0]
+    assert "heartbeat_seconds=1" in urls[0]

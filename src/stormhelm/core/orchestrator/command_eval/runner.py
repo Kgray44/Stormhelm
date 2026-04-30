@@ -1564,6 +1564,12 @@ def _approval_observed(tool_results: tuple[dict[str, Any], ...], payload: dict[s
             or execution.get("preview_required")
         ):
             return True
+    metadata = assistant_message.get("metadata") if isinstance(assistant_message.get("metadata"), dict) else {}
+    planner_debug = metadata.get("planner_debug") if isinstance(metadata.get("planner_debug"), dict) else {}
+    planner_v2 = planner_debug.get("planner_v2") if isinstance(planner_debug.get("planner_v2"), dict) else {}
+    policy = planner_v2.get("policy_decision") if isinstance(planner_v2.get("policy_decision"), dict) else {}
+    if policy.get("approval_required_live") or policy.get("preview_required_live"):
+        return True
     active_state = payload.get("active_request_state") if isinstance(payload.get("active_request_state"), dict) else {}
     if active_state.get("trust"):
         return True
@@ -1630,7 +1636,7 @@ def _assert_case(case: CommandEvalCase, observation: CoreObservation) -> dict[st
         ),
         "tool_chain": AssertionOutcome(
             "tool_chain",
-            _tools_match(expected.tools, observation.tool_chain),
+            _tools_match_for_case(case, observation),
             expected.tools,
             observation.tool_chain,
         ),
@@ -1763,6 +1769,25 @@ def _tools_match(expected_tools: tuple[str, ...], actual_tools: tuple[str, ...])
     if not expected_tools:
         return not actual_tools
     return actual_tools[: len(expected_tools)] == expected_tools
+
+
+def _tools_match_for_case(case: CommandEvalCase, observation: CoreObservation) -> bool:
+    if _tools_match(case.expected.tools, observation.tool_chain):
+        return True
+    expected_tools = tuple(case.expected.tools)
+    actual_tools = tuple(observation.tool_chain)
+    if (
+        expected_tools == ("workspace_assemble",)
+        and actual_tools[:1] == ("subsystem_continuation",)
+        and case.expected.route_family == "workspace_operations"
+        and observation.actual_route_family == "workspace_operations"
+        and str(observation.result_state or "").strip().lower() == "queued"
+    ):
+        summary = observation.latency_summary if isinstance(observation.latency_summary, dict) else {}
+        return bool(summary.get("subsystem_continuation_created")) and str(
+            summary.get("subsystem_continuation_kind") or ""
+        ) == "workspace.assemble_deep"
+    return False
 
 
 def _clarification_matches(expectation: str, observed: bool) -> bool:

@@ -117,6 +117,13 @@ def test_load_config_defaults_screen_awareness_to_phase12_hardening_and_power_fl
     assert config.screen_awareness.workflow_learning_enabled is True
     assert config.screen_awareness.brain_integration_enabled is True
     assert config.screen_awareness.power_features_enabled is True
+    assert config.screen_awareness.screen_capture_enabled is True
+    assert config.screen_awareness.screen_capture_scope == "active_window"
+    assert config.screen_awareness.screen_capture_ocr_enabled is True
+    assert config.screen_awareness.screen_capture_provider_vision_enabled is False
+    assert config.screen_awareness.screen_capture_store_raw_images is False
+    assert config.screen_awareness.capability_flags()["screen_capture_enabled"] is True
+    assert config.screen_awareness.capability_flags()["screen_capture_ocr_enabled"] is True
     assert config.screen_awareness.capability_flags()["hardening_enabled"] is True
 
 

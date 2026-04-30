@@ -1226,6 +1226,11 @@ class WorkspaceService:
         if workspace is None:
             return {}
         items = self._normalize_item_list(posture.get("opened_items"))
+        if not items:
+            items = [
+                item.to_action_item()
+                for item in self.repository.list_items(workspace.workspace_id, limit=2)
+            ]
         active_item = posture.get("active_item") if isinstance(posture.get("active_item"), dict) else {}
         if not active_item and items:
             active_item = items[0]

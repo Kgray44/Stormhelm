@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import base64
 import html
 import json
 import os
@@ -10,13 +11,15 @@ import socket
 import subprocess
 import tempfile
 import re
+import threading
+import textwrap
 import urllib.parse
 import urllib.request
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from time import monotonic
+from time import monotonic, sleep
 from typing import TYPE_CHECKING, Any
 
 from stormhelm.config.models import AppConfig
@@ -123,6 +126,15 @@ _COMMON_APP_COMPATIBILITY: dict[str, dict[str, Any]] = {
         "package_terms": set(),
         "host_processes": set(),
     },
+    "arduino ide": {
+        "builtin": False,
+        "aliases": {"arduino", "arduino ide", "arduinoide", "arduino editor"},
+        "process_names": {"arduino", "arduino ide", "arduinoide"},
+        "executables": {"arduino", "arduino ide", "arduinoide"},
+        "window_titles": {"arduino", "arduino ide"},
+        "package_terms": {"arduino", "arduino ide"},
+        "host_processes": set(),
+    },
 }
 
 _BUILTIN_APP_ALIAS_GROUPS: dict[str, set[str]] = {
@@ -153,6 +165,44 @@ _GENERIC_APP_MATCH_TOKENS = {
     "windows",
 }
 
+_PROTECTED_CLOSE_PROCESS_NAMES = {
+    "applicationframehost",
+    "audiodg",
+    "csrss",
+    "dwm",
+    "explorer",
+    "fontdrvhost",
+    "idle",
+    "lsass",
+    "lsm",
+    "registry",
+    "runtimebroker",
+    "searchhost",
+    "services",
+    "shellexperiencehost",
+    "sihost",
+    "smss",
+    "startmenuexperiencehost",
+    "svchost",
+    "system",
+    "taskhostw",
+    "wininit",
+    "winlogon",
+}
+
+_CONFIRMATION_PROMPT_TITLE_TERMS = {
+    "are you sure",
+    "cancel",
+    "close without saving",
+    "confirm",
+    "discard",
+    "do you want to save",
+    "save changes",
+    "save file",
+    "save sketch",
+    "unsaved",
+}
+
 
 def _hidden_console_subprocess_kwargs() -> dict[str, Any]:
     if os.name != "nt":
@@ -179,9 +229,53 @@ class SystemProbe:
     _battery_report_cached_at: float = field(default=0.0, init=False, repr=False)
     _hardware_telemetry_cache: dict[str, dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
     _hardware_telemetry_cached_at: dict[str, float] = field(default_factory=dict, init=False, repr=False)
+    _resource_status_cache: dict[str, Any] | None = field(default=None, init=False, repr=False)
+    _resource_status_cached_at: float = field(default=0.0, init=False, repr=False)
+    _resource_refresh_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _resource_refresh_running: bool = field(default=False, init=False, repr=False)
+    _resource_refresh_id: str = field(default="", init=False, repr=False)
+    _power_status_cache: dict[str, Any] | None = field(default=None, init=False, repr=False)
+    _power_status_cached_at: float = field(default=0.0, init=False, repr=False)
+    _power_refresh_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _power_refresh_running: bool = field(default=False, init=False, repr=False)
+    _power_refresh_id: str = field(default="", init=False, repr=False)
+    _network_status_cache: dict[str, Any] | None = field(default=None, init=False, repr=False)
+    _network_status_cached_at: float = field(default=0.0, init=False, repr=False)
+    _network_refresh_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _network_refresh_running: bool = field(default=False, init=False, repr=False)
+    _network_refresh_id: str = field(default="", init=False, repr=False)
+    _storage_status_cache: dict[str, Any] | None = field(default=None, init=False, repr=False)
+    _storage_status_cached_at: float = field(default=0.0, init=False, repr=False)
+    _storage_refresh_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _storage_refresh_running: bool = field(default=False, init=False, repr=False)
+    _storage_refresh_id: str = field(default="", init=False, repr=False)
+    _weather_status_cache: dict[str, dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
+    _weather_status_cached_at: dict[str, float] = field(default_factory=dict, init=False, repr=False)
+    _weather_refresh_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _weather_refresh_running: dict[str, bool] = field(default_factory=dict, init=False, repr=False)
+    _weather_refresh_ids: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _location_status_cache: dict[str, Any] | None = field(default=None, init=False, repr=False)
+    _location_status_cached_at: float = field(default=0.0, init=False, repr=False)
+    _location_refresh_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _location_refresh_running: bool = field(default=False, init=False, repr=False)
+    _location_refresh_id: str = field(default="", init=False, repr=False)
+    _recent_files_cache: dict[str, Any] | None = field(default=None, init=False, repr=False)
+    _recent_files_cached_at: float = field(default=0.0, init=False, repr=False)
+    _recent_files_refresh_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _recent_files_refresh_running: bool = field(default=False, init=False, repr=False)
+    _recent_files_refresh_id: str = field(default="", init=False, repr=False)
 
     _HOME_LOCATION_KEY = "location.saved.home"
     _NAMED_LOCATIONS_KEY = "location.saved.named"
+    _SYSTEM_RESOURCE_CACHE_TTL_SECONDS = 30.0
+    _SYSTEM_POWER_CACHE_TTL_SECONDS = 30.0
+    _SYSTEM_NETWORK_CACHE_TTL_SECONDS = 30.0
+    _SYSTEM_STORAGE_CACHE_TTL_SECONDS = 30.0
+    _WEATHER_CACHE_TTL_SECONDS = 600.0
+    _LOCATION_CACHE_TTL_SECONDS = 600.0
+    _RECENT_FILES_CACHE_TTL_SECONDS = 120.0
+    _GRACEFUL_CLOSE_VERIFY_TIMEOUT_SECONDS = 12.0
+    _GRACEFUL_CLOSE_VERIFY_INTERVAL_SECONDS = 0.1
 
     def machine_status(self) -> dict[str, Any]:
         now = datetime.now().astimezone()
@@ -228,7 +322,49 @@ class SystemProbe:
         self._hardware_telemetry_cached_at[tier] = completed_at
         return snapshot
 
-    def power_status(self) -> dict[str, Any]:
+    def power_status(
+        self,
+        *,
+        allow_live_refresh: bool = True,
+        force_refresh: bool = False,
+    ) -> dict[str, Any]:
+        started = monotonic()
+        if allow_live_refresh or force_refresh:
+            return self._power_status_live(force_refresh=force_refresh)
+
+        now = monotonic()
+        cached = deepcopy(self._power_status_cache) if self._power_status_cache is not None else None
+        if cached is not None:
+            age_ms = self._cache_age_ms(self._power_status_cached_at, now=now)
+            freshness_state = "fresh" if age_ms <= self._SYSTEM_POWER_CACHE_TTL_SECONDS * 1000 else "stale"
+            refresh_id = ""
+            deferred = False
+            if freshness_state == "stale":
+                refresh_id = self._start_power_status_refresh()
+                deferred = True
+            return self._annotate_power_status(
+                cached,
+                cache_hit=True,
+                cache_age_ms=age_ms,
+                freshness_state=freshness_state,
+                deferred=deferred,
+                refresh_id=refresh_id,
+                started_at=started,
+            )
+
+        baseline = self._power_status_fast_baseline()
+        refresh_id = self._start_power_status_refresh()
+        return self._annotate_power_status(
+            baseline,
+            cache_hit=False,
+            cache_age_ms=None,
+            freshness_state="missing",
+            deferred=True,
+            refresh_id=refresh_id,
+            started_at=started,
+        )
+
+    def _power_status_fast_baseline(self) -> dict[str, Any]:
         class SYSTEM_POWER_STATUS(ctypes.Structure):
             _fields_ = [
                 ("ACLineStatus", ctypes.c_byte),
@@ -239,10 +375,50 @@ class SystemProbe:
                 ("BatteryFullLifeTime", ctypes.c_uint32),
             ]
 
+        if not hasattr(ctypes, "windll"):
+            return {
+                "available": False,
+                "reason": "windows_power_status_unavailable",
+                "detail_load_deferred": True,
+            }
         status = SYSTEM_POWER_STATUS()
         if not ctypes.windll.kernel32.GetSystemPowerStatus(ctypes.byref(status)):
-            return overlay_power_status({"available": False}, self.hardware_telemetry_snapshot(sampling_tier="active"))
+            return {
+                "available": False,
+                "reason": "windows_power_status_failed",
+                "detail_load_deferred": True,
+            }
         percent = None if status.BatteryLifePercent == 255 else int(status.BatteryLifePercent)
+        return {
+            "available": True,
+            "ac_line_status": {0: "offline", 1: "online"}.get(int(status.ACLineStatus), "unknown"),
+            "battery_percent": percent,
+            "battery_flag": int(status.BatteryFlag),
+            "battery_saver": bool(int(status.BatteryFlag) & 8),
+            "seconds_remaining": None if status.BatteryLifeTime == 0xFFFFFFFF else int(status.BatteryLifeTime),
+            "power_source": "ac" if int(status.ACLineStatus) == 1 else "battery" if int(status.ACLineStatus) == 0 else "unknown",
+            "detail_load_deferred": True,
+        }
+
+    def _power_status_live(self, *, force_refresh: bool = False) -> dict[str, Any]:
+        started = monotonic()
+        result = self._power_status_fast_baseline()
+        if not result.get("available"):
+            hardware = self.hardware_telemetry_snapshot(sampling_tier="active", force_refresh=force_refresh)
+            annotated = self._annotate_power_status(
+                overlay_power_status(result, hardware),
+                cache_hit=False,
+                cache_age_ms=0.0,
+                freshness_state="fresh",
+                deferred=False,
+                refresh_id="",
+                started_at=started,
+            )
+            self._power_status_cache = deepcopy(annotated)
+            self._power_status_cached_at = monotonic()
+            return annotated
+
+        percent = self._coerce_int(result.get("battery_percent"))
         nt_battery = self._nt_battery_state()
         remaining_capacity_mwh = self._coerce_int(nt_battery.get("remaining_capacity_mwh"))
         full_charge_capacity_mwh = self._coerce_int(nt_battery.get("full_charge_capacity_mwh"))
@@ -266,26 +442,90 @@ class SystemProbe:
         time_to_empty_seconds = self._coerce_int(nt_battery.get("time_to_empty_seconds"))
         if discharge_rate_mw and remaining_capacity_mwh is not None:
             time_to_empty_seconds = int(max(remaining_capacity_mwh * 3600 / discharge_rate_mw, 0))
-        result = {
-            "available": True,
-            "ac_line_status": {0: "offline", 1: "online"}.get(int(status.ACLineStatus), "unknown"),
-            "battery_percent": percent,
-            "battery_flag": int(status.BatteryFlag),
-            "battery_saver": bool(int(status.BatteryFlag) & 8),
-            "seconds_remaining": None if status.BatteryLifeTime == 0xFFFFFFFF else int(status.BatteryLifeTime),
-            "power_source": "ac" if int(status.ACLineStatus) == 1 else "battery" if int(status.ACLineStatus) == 0 else "unknown",
-            "remaining_capacity_mwh": remaining_capacity_mwh,
-            "full_charge_capacity_mwh": full_charge_capacity_mwh,
-            "design_capacity_mwh": design_capacity_mwh,
-            "charge_rate_mw": charge_rate_mw,
-            "discharge_rate_mw": discharge_rate_mw,
-            "charge_rate_watts": round(charge_rate_mw / 1000, 2) if charge_rate_mw else None,
-            "discharge_rate_watts": round(discharge_rate_mw / 1000, 2) if discharge_rate_mw else None,
-            "time_to_full_seconds": time_to_full_seconds,
-            "time_to_empty_seconds": time_to_empty_seconds,
-            "power_history_source": str(battery_report.get("source", "")).strip() or None,
+        result.update(
+            {
+                "remaining_capacity_mwh": remaining_capacity_mwh,
+                "full_charge_capacity_mwh": full_charge_capacity_mwh,
+                "design_capacity_mwh": design_capacity_mwh,
+                "charge_rate_mw": charge_rate_mw,
+                "discharge_rate_mw": discharge_rate_mw,
+                "charge_rate_watts": round(charge_rate_mw / 1000, 2) if charge_rate_mw else None,
+                "discharge_rate_watts": round(discharge_rate_mw / 1000, 2) if discharge_rate_mw else None,
+                "time_to_full_seconds": time_to_full_seconds,
+                "time_to_empty_seconds": time_to_empty_seconds,
+                "power_history_source": str(battery_report.get("source", "")).strip() or None,
+                "detail_load_deferred": False,
+            }
+        )
+        hardware = self.hardware_telemetry_snapshot(sampling_tier="active", force_refresh=force_refresh)
+        annotated = self._annotate_power_status(
+            overlay_power_status(result, hardware),
+            cache_hit=False,
+            cache_age_ms=0.0,
+            freshness_state="fresh",
+            deferred=False,
+            refresh_id="",
+            started_at=started,
+        )
+        self._power_status_cache = deepcopy(annotated)
+        self._power_status_cached_at = monotonic()
+        return annotated
+
+    def _annotate_power_status(
+        self,
+        payload: dict[str, Any],
+        *,
+        cache_hit: bool,
+        cache_age_ms: float | None,
+        freshness_state: str,
+        deferred: bool,
+        refresh_id: str,
+        started_at: float,
+    ) -> dict[str, Any]:
+        result = dict(payload)
+        power_probe_ms = round((monotonic() - started_at) * 1000, 3)
+        trace = {
+            "system_cache_hit": bool(cache_hit),
+            "system_cache_age_ms": cache_age_ms,
+            "system_freshness_state": freshness_state,
+            "system_resource_cache_hit": bool(cache_hit),
+            "system_resource_cache_age_ms": cache_age_ms,
+            "battery_probe_ms": power_probe_ms,
+            "power_probe_ms": power_probe_ms,
+            "system_probe_deferred": bool(deferred),
+            "system_probe_timeout_ms": 0.0,
+            "system_live_refresh_job_id": refresh_id,
+            "system_resource_freshness_state": freshness_state,
+            "live_probe_deferred": bool(deferred),
+            "live_probe_job_id": refresh_id,
+            "live_probe_timeout_ms": 0.0,
         }
-        return overlay_power_status(result, self.hardware_telemetry_snapshot(sampling_tier="active"))
+        result.update(trace)
+        result["system_resource_trace"] = dict(trace)
+        return result
+
+    def _start_power_status_refresh(self) -> str:
+        with self._power_refresh_lock:
+            if self._power_refresh_running and self._power_refresh_id:
+                return self._power_refresh_id
+            self._power_refresh_id = f"system-power-refresh-{int(monotonic() * 1000)}"
+            self._power_refresh_running = True
+            refresh_id = self._power_refresh_id
+
+        def refresh() -> None:
+            try:
+                self._power_status_live(force_refresh=True)
+            finally:
+                with self._power_refresh_lock:
+                    self._power_refresh_running = False
+
+        thread = threading.Thread(
+            target=refresh,
+            name="StormhelmPowerTelemetryRefresh",
+            daemon=True,
+        )
+        thread.start()
+        return refresh_id
 
     def power_projection(
         self,
@@ -293,8 +533,12 @@ class SystemProbe:
         metric: str = "time_to_percent",
         target_percent: int | None = None,
         assume_unplugged: bool = False,
+        allow_live_refresh: bool = True,
     ) -> dict[str, Any]:
-        status = self.power_status()
+        try:
+            status = self.power_status(allow_live_refresh=allow_live_refresh)
+        except TypeError:
+            status = self.power_status()
         if not status.get("available"):
             return {"available": False, "metric": metric, "reliable": False, "reason": "power_unavailable"}
 
@@ -485,7 +729,64 @@ class SystemProbe:
             "notes": notes,
         }
 
-    def resource_status(self) -> dict[str, Any]:
+    def resource_status(
+        self,
+        *,
+        allow_live_refresh: bool = True,
+        force_refresh: bool = False,
+        sampling_tier: str = "active",
+    ) -> dict[str, Any]:
+        started = monotonic()
+        if allow_live_refresh or force_refresh:
+            return self._resource_status_live(
+                sampling_tier=sampling_tier,
+                force_refresh=force_refresh,
+            )
+
+        now = monotonic()
+        cached = deepcopy(self._resource_status_cache) if self._resource_status_cache is not None else None
+        if cached is not None:
+            age_ms = self._cache_age_ms(self._resource_status_cached_at, now=now)
+            freshness_state = "fresh" if age_ms <= self._SYSTEM_RESOURCE_CACHE_TTL_SECONDS * 1000 else "stale"
+            refresh_id = ""
+            deferred = False
+            if freshness_state == "stale":
+                refresh_id = self._start_resource_status_refresh()
+                deferred = True
+            return self._annotate_resource_status(
+                cached,
+                cache_hit=True,
+                cache_age_ms=age_ms,
+                freshness_state=freshness_state,
+                deferred=deferred,
+                refresh_id=refresh_id,
+                started_at=started,
+                cpu_probe_ms=0.0,
+                hardware_probe_ms=0.0,
+            )
+
+        baseline = self._resource_status_fast_baseline()
+        refresh_id = self._start_resource_status_refresh()
+        return self._annotate_resource_status(
+            baseline,
+            cache_hit=False,
+            cache_age_ms=None,
+            freshness_state="missing",
+            deferred=True,
+            refresh_id=refresh_id,
+            started_at=started,
+            cpu_probe_ms=0.0,
+            hardware_probe_ms=0.0,
+        )
+
+    def _resource_status_live(
+        self,
+        *,
+        sampling_tier: str = "active",
+        force_refresh: bool = False,
+    ) -> dict[str, Any]:
+        started = monotonic()
+        cpu_started = monotonic()
         details = self._run_powershell_json(
             """
             $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1 Name, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed
@@ -494,6 +795,7 @@ class SystemProbe:
             [pscustomobject]@{ cpu = $cpu; os = $os; gpu = $gpu } | ConvertTo-Json -Compress -Depth 5
             """
         ) or {}
+        cpu_probe_ms = round((monotonic() - cpu_started) * 1000, 3)
         os_block = details.get("os") or {}
         total_kb = int(os_block.get("TotalVisibleMemorySize") or 0)
         free_kb = int(os_block.get("FreePhysicalMemory") or 0)
@@ -519,9 +821,229 @@ class SystemProbe:
                 if isinstance(item, dict)
             ],
         }
-        return overlay_resource_status(result, self.hardware_telemetry_snapshot(sampling_tier="active"))
+        hardware_started = monotonic()
+        hardware = self.hardware_telemetry_snapshot(
+            sampling_tier=sampling_tier,
+            force_refresh=force_refresh,
+        )
+        hardware_probe_ms = round((monotonic() - hardware_started) * 1000, 3)
+        result = overlay_resource_status(result, hardware)
+        completed_at = monotonic()
+        annotated = self._annotate_resource_status(
+            result,
+            cache_hit=False,
+            cache_age_ms=0.0,
+            freshness_state="fresh",
+            deferred=False,
+            refresh_id="",
+            started_at=started,
+            cpu_probe_ms=cpu_probe_ms,
+            hardware_probe_ms=hardware_probe_ms,
+        )
+        self._resource_status_cache = deepcopy(annotated)
+        self._resource_status_cached_at = completed_at
+        return annotated
 
-    def storage_status(self) -> dict[str, Any]:
+    def _resource_status_fast_baseline(self) -> dict[str, Any]:
+        memory = self._native_memory_status_fast()
+        result: dict[str, Any] = {
+            "cpu": {
+                "name": platform.processor(),
+                "cores": 0,
+                "logical_processors": int(os.cpu_count() or 0),
+                "max_clock_mhz": 0,
+                "utilization_percent": None,
+            },
+            "memory": memory,
+            "gpu": [],
+            "thermal": {},
+            "capabilities": {
+                "helper_reachable": False,
+                "cpu_deep_telemetry_available": False,
+                "gpu_deep_telemetry_available": False,
+                "thermal_sensor_availability": False,
+            },
+            "sources": {
+                "helper": {
+                    "provider": "cached_system_resource",
+                    "state": "deferred",
+                    "detail": "Live hardware telemetry refresh is deferred from the Ghost hot path.",
+                }
+            },
+            "freshness": {
+                "sampling_tier": "ghost_cached",
+                "sample_age_seconds": None,
+                "reason": "missing_cached_sample",
+            },
+            "monitoring": {},
+        }
+        cached_hardware = self._cached_hardware_telemetry_snapshot("active")
+        if cached_hardware is not None:
+            result = overlay_resource_status(result, cached_hardware)
+        return result
+
+    def _native_memory_status_fast(self) -> dict[str, Any]:
+        if os.name == "nt":
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            status = MEMORYSTATUSEX()
+            status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            try:
+                if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                    total = int(status.ullTotalPhys)
+                    free = int(status.ullAvailPhys)
+                    return {
+                        "total_bytes": total,
+                        "free_bytes": free,
+                        "used_bytes": max(total - free, 0),
+                    }
+            except Exception:
+                pass
+        return {
+            "total_bytes": 0,
+            "free_bytes": 0,
+            "used_bytes": 0,
+            "detail_load_deferred": True,
+        }
+
+    def _cached_hardware_telemetry_snapshot(self, tier: str) -> dict[str, Any] | None:
+        cached = self._hardware_telemetry_cache.get(tier)
+        if cached is None:
+            return None
+        snapshot = deepcopy(cached)
+        cached_at = self._hardware_telemetry_cached_at.get(tier, 0.0)
+        freshness = snapshot.get("freshness")
+        if isinstance(freshness, dict):
+            freshness["sample_age_seconds"] = round(max(monotonic() - cached_at, 0.0), 2) if cached_at else None
+        return snapshot
+
+    def _annotate_resource_status(
+        self,
+        payload: dict[str, Any],
+        *,
+        cache_hit: bool,
+        cache_age_ms: float | None,
+        freshness_state: str,
+        deferred: bool,
+        refresh_id: str,
+        started_at: float,
+        cpu_probe_ms: float,
+        hardware_probe_ms: float,
+    ) -> dict[str, Any]:
+        result = dict(payload)
+        resource_status_probe_ms = round((monotonic() - started_at) * 1000, 3)
+        timeout_ms = round(max(float(self.config.hardware_telemetry.helper_timeout_seconds), 0.0) * 1000, 3)
+        trace = {
+            "system_cache_hit": bool(cache_hit),
+            "system_cache_age_ms": cache_age_ms,
+            "system_freshness_state": freshness_state,
+            "system_resource_cache_hit": bool(cache_hit),
+            "system_resource_cache_age_ms": cache_age_ms,
+            "cpu_probe_ms": round(float(cpu_probe_ms or 0.0), 3),
+            "resource_probe_ms": resource_status_probe_ms,
+            "resource_status_probe_ms": resource_status_probe_ms,
+            "hardware_telemetry_probe_ms": round(float(hardware_probe_ms or 0.0), 3),
+            "system_probe_deferred": bool(deferred),
+            "system_probe_timeout_ms": timeout_ms if deferred else 0.0,
+            "system_live_refresh_job_id": refresh_id,
+            "system_resource_freshness_state": freshness_state,
+            "live_probe_deferred": bool(deferred),
+            "live_probe_job_id": refresh_id,
+            "live_probe_timeout_ms": timeout_ms if deferred else 0.0,
+        }
+        result.update(trace)
+        result["system_resource_trace"] = dict(trace)
+        freshness = result.get("freshness")
+        if isinstance(freshness, dict):
+            freshness["system_resource_freshness_state"] = freshness_state
+            freshness["system_probe_deferred"] = bool(deferred)
+            if cache_age_ms is not None:
+                freshness["sample_age_seconds"] = round(cache_age_ms / 1000.0, 2)
+        return result
+
+    def _cache_age_ms(self, cached_at: float, *, now: float | None = None) -> float:
+        if not cached_at:
+            return 0.0
+        current = monotonic() if now is None else now
+        return round(max(current - cached_at, 0.0) * 1000, 3)
+
+    def _start_resource_status_refresh(self) -> str:
+        with self._resource_refresh_lock:
+            if self._resource_refresh_running and self._resource_refresh_id:
+                return self._resource_refresh_id
+            self._resource_refresh_id = f"system-resource-refresh-{int(monotonic() * 1000)}"
+            self._resource_refresh_running = True
+            refresh_id = self._resource_refresh_id
+
+        def refresh() -> None:
+            try:
+                self._resource_status_live(sampling_tier="active", force_refresh=True)
+            finally:
+                with self._resource_refresh_lock:
+                    self._resource_refresh_running = False
+
+        thread = threading.Thread(
+            target=refresh,
+            name="StormhelmResourceTelemetryRefresh",
+            daemon=True,
+        )
+        thread.start()
+        return refresh_id
+
+    def storage_status(
+        self,
+        *,
+        allow_live_refresh: bool = True,
+        force_refresh: bool = False,
+    ) -> dict[str, Any]:
+        started = monotonic()
+        if allow_live_refresh or force_refresh:
+            return self._storage_status_live(started_at=started)
+
+        now = monotonic()
+        cached = deepcopy(self._storage_status_cache) if self._storage_status_cache is not None else None
+        if cached is not None:
+            age_ms = self._cache_age_ms(self._storage_status_cached_at, now=now)
+            freshness_state = "fresh" if age_ms <= self._SYSTEM_STORAGE_CACHE_TTL_SECONDS * 1000 else "stale"
+            refresh_id = ""
+            deferred = False
+            if freshness_state == "stale":
+                refresh_id = self._start_storage_status_refresh()
+                deferred = True
+            return self._annotate_storage_status(
+                cached,
+                cache_hit=True,
+                cache_age_ms=age_ms,
+                freshness_state=freshness_state,
+                deferred=deferred,
+                refresh_id=refresh_id,
+                started_at=started,
+            )
+
+        refresh_id = self._start_storage_status_refresh()
+        return self._annotate_storage_status(
+            {"drives": [], "detail_load_deferred": True, "deferred_reason": "storage_live_probe_deferred"},
+            cache_hit=False,
+            cache_age_ms=None,
+            freshness_state="missing",
+            deferred=True,
+            refresh_id=refresh_id,
+            started_at=started,
+        )
+
+    def _storage_status_live(self, *, started_at: float | None = None) -> dict[str, Any]:
+        started = monotonic() if started_at is None else started_at
         drives = list(os.listdrives()) if hasattr(os, "listdrives") else [str(self.config.project_root.drive) + "\\"]
         entries: list[dict[str, Any]] = []
         for drive in drives:
@@ -538,12 +1060,115 @@ class SystemProbe:
                 }
             )
         entries.sort(key=lambda item: item["drive"])
-        return {"drives": entries}
+        completed_at = monotonic()
+        annotated = self._annotate_storage_status(
+            {"drives": entries},
+            cache_hit=False,
+            cache_age_ms=0.0,
+            freshness_state="fresh",
+            deferred=False,
+            refresh_id="",
+            started_at=started,
+        )
+        self._storage_status_cache = deepcopy(annotated)
+        self._storage_status_cached_at = completed_at
+        return annotated
 
-    def network_status(self) -> dict[str, Any]:
-        base = self._network_interface_status()
-        snapshot = self.network_monitor.snapshot(diagnostic_burst=False) if self.network_monitor is not None else self._fallback_network_telemetry(base)
-        merged = dict(base)
+    def _annotate_storage_status(
+        self,
+        payload: dict[str, Any],
+        *,
+        cache_hit: bool,
+        cache_age_ms: float | None,
+        freshness_state: str,
+        deferred: bool,
+        refresh_id: str,
+        started_at: float,
+    ) -> dict[str, Any]:
+        result = dict(payload)
+        storage_probe_ms = round((monotonic() - started_at) * 1000, 3)
+        trace = {
+            "system_cache_hit": bool(cache_hit),
+            "system_cache_age_ms": cache_age_ms,
+            "system_freshness_state": freshness_state,
+            "system_resource_cache_hit": bool(cache_hit),
+            "system_resource_cache_age_ms": cache_age_ms,
+            "storage_probe_ms": storage_probe_ms,
+            "system_probe_deferred": bool(deferred),
+            "system_probe_timeout_ms": 0.0,
+            "system_live_refresh_job_id": refresh_id,
+            "system_resource_freshness_state": freshness_state,
+            "live_probe_deferred": bool(deferred),
+            "live_probe_job_id": refresh_id,
+            "live_probe_timeout_ms": 0.0,
+        }
+        result.update(trace)
+        result["system_resource_trace"] = dict(trace)
+        return result
+
+    def _start_storage_status_refresh(self) -> str:
+        with self._storage_refresh_lock:
+            if self._storage_refresh_running and self._storage_refresh_id:
+                return self._storage_refresh_id
+            self._storage_refresh_id = f"system-storage-refresh-{int(monotonic() * 1000)}"
+            self._storage_refresh_running = True
+            refresh_id = self._storage_refresh_id
+
+        def refresh() -> None:
+            try:
+                self._storage_status_live()
+            finally:
+                with self._storage_refresh_lock:
+                    self._storage_refresh_running = False
+
+        thread = threading.Thread(
+            target=refresh,
+            name="StormhelmStorageStatusRefresh",
+            daemon=True,
+        )
+        thread.start()
+        return refresh_id
+
+    def network_status(
+        self,
+        *,
+        allow_live_refresh: bool = True,
+        force_refresh: bool = False,
+    ) -> dict[str, Any]:
+        started = monotonic()
+        if allow_live_refresh or force_refresh:
+            return self._network_status_live(started_at=started)
+
+        now = monotonic()
+        cached = deepcopy(self._network_status_cache) if self._network_status_cache is not None else None
+        if cached is not None:
+            age_ms = self._cache_age_ms(self._network_status_cached_at, now=now)
+            freshness_state = "fresh" if age_ms <= self._SYSTEM_NETWORK_CACHE_TTL_SECONDS * 1000 else "stale"
+            refresh_id = ""
+            deferred = False
+            if freshness_state == "stale":
+                refresh_id = self._start_network_status_refresh()
+                deferred = True
+            return self._annotate_network_status(
+                cached,
+                cache_hit=True,
+                cache_age_ms=age_ms,
+                freshness_state=freshness_state,
+                deferred=deferred,
+                refresh_id=refresh_id,
+                started_at=started,
+            )
+
+        snapshot = (
+            self.network_monitor.snapshot_cached()
+            if self.network_monitor is not None and callable(getattr(self.network_monitor, "snapshot_cached", None))
+            else self._fallback_network_telemetry({})
+        )
+        merged = {
+            "hostname": snapshot.get("hostname") or "",
+            "fqdn": snapshot.get("fqdn") or "",
+            "interfaces": snapshot.get("interfaces", []) if isinstance(snapshot.get("interfaces"), list) else [],
+        }
         merged.update(
             {
                 "monitoring": snapshot.get("monitoring", {}),
@@ -557,7 +1182,116 @@ class SystemProbe:
                 "assessment": snapshot.get("assessment", {}),
             }
         )
-        return merged
+        refresh_id = self._start_network_status_refresh()
+        merged["network_interface_probe_ms"] = 0.0
+        return self._annotate_network_status(
+            merged,
+            cache_hit=False,
+            cache_age_ms=None,
+            freshness_state="missing",
+            deferred=True,
+            refresh_id=refresh_id,
+            started_at=started,
+        )
+
+    def _network_status_live(self, *, started_at: float | None = None) -> dict[str, Any]:
+        started = monotonic() if started_at is None else started_at
+        base_started = monotonic()
+        base = self._network_interface_status()
+        base_ms = round((monotonic() - base_started) * 1000, 3)
+        snapshot_started = monotonic()
+        snapshot = self.network_monitor.snapshot(diagnostic_burst=False) if self.network_monitor is not None else self._fallback_network_telemetry(base)
+        snapshot_ms = round((monotonic() - snapshot_started) * 1000, 3)
+        merged = dict(base)
+        merged.update(
+            {
+                "monitoring": snapshot.get("monitoring", {}),
+                "quality": snapshot.get("quality", {}),
+                "dns": snapshot.get("dns", {}),
+                "throughput": snapshot.get("throughput", {}),
+                "events": snapshot.get("events", []),
+                "trend_points": snapshot.get("trend_points", []),
+                "providers": snapshot.get("providers", {}),
+                "source_debug": snapshot.get("source_debug", {}),
+                "assessment": snapshot.get("assessment", {}),
+                "network_interface_probe_ms": base_ms,
+                "network_monitor_snapshot_ms": snapshot_ms,
+            }
+        )
+        completed_at = monotonic()
+        annotated = self._annotate_network_status(
+            merged,
+            cache_hit=False,
+            cache_age_ms=0.0,
+            freshness_state="fresh",
+            deferred=False,
+            refresh_id="",
+            started_at=started,
+        )
+        self._network_status_cache = deepcopy(annotated)
+        self._network_status_cached_at = completed_at
+        return annotated
+
+    def _annotate_network_status(
+        self,
+        payload: dict[str, Any],
+        *,
+        cache_hit: bool,
+        cache_age_ms: float | None,
+        freshness_state: str,
+        deferred: bool,
+        refresh_id: str,
+        started_at: float,
+    ) -> dict[str, Any]:
+        result = dict(payload)
+        network_probe_ms = round((monotonic() - started_at) * 1000, 3)
+        trace = {
+            "system_cache_hit": bool(cache_hit),
+            "system_cache_age_ms": cache_age_ms,
+            "system_freshness_state": freshness_state,
+            "system_resource_cache_hit": bool(cache_hit),
+            "system_resource_cache_age_ms": cache_age_ms,
+            "network_probe_ms": network_probe_ms,
+            "system_probe_deferred": bool(deferred),
+            "system_probe_timeout_ms": 0.0,
+            "system_live_refresh_job_id": refresh_id,
+            "system_resource_freshness_state": freshness_state,
+            "live_probe_deferred": bool(deferred),
+            "live_probe_job_id": refresh_id,
+            "live_probe_timeout_ms": 0.0,
+        }
+        result.update(trace)
+        result["system_resource_trace"] = dict(trace)
+        monitoring = result.get("monitoring")
+        if isinstance(monitoring, dict):
+            monitoring["system_resource_freshness_state"] = freshness_state
+            monitoring["system_probe_deferred"] = bool(deferred)
+            if cache_age_ms is not None:
+                monitoring["last_sample_age_seconds"] = round(cache_age_ms / 1000.0, 2)
+        return result
+
+    def _start_network_status_refresh(self) -> str:
+        with self._network_refresh_lock:
+            if self._network_refresh_running and self._network_refresh_id:
+                return self._network_refresh_id
+            self._network_refresh_id = f"system-network-refresh-{int(monotonic() * 1000)}"
+            self._network_refresh_running = True
+            refresh_id = self._network_refresh_id
+
+        def refresh() -> None:
+            try:
+                self._network_status_live()
+            finally:
+                with self._network_refresh_lock:
+                    self._network_refresh_running = False
+
+        thread = threading.Thread(
+            target=refresh,
+            name="StormhelmNetworkStatusRefresh",
+            daemon=True,
+        )
+        thread.start()
+        return refresh_id
 
     def network_diagnosis(self, *, focus: str = "overview", diagnostic_burst: bool = False) -> dict[str, Any]:
         base = self._network_interface_status()
@@ -567,14 +1301,22 @@ class SystemProbe:
         merged["focus"] = focus
         return merged
 
-    def network_throughput(self, *, metric: str = "internet_speed") -> dict[str, Any]:
+    def network_throughput(
+        self,
+        *,
+        metric: str = "internet_speed",
+        allow_live_refresh: bool = True,
+    ) -> dict[str, Any]:
         normalized_metric = str(metric or "internet_speed").strip().lower() or "internet_speed"
-        status = self.network_status()
+        status = self.network_status(allow_live_refresh=allow_live_refresh)
         throughput = status.get("throughput", {}) if isinstance(status.get("throughput"), dict) else {}
         interfaces = status.get("interfaces", []) if isinstance(status.get("interfaces"), list) else []
         primary = interfaces[0] if interfaces and isinstance(interfaces[0], dict) else {}
 
-        if (not throughput.get("available")) or throughput.get("state") in {"stale", "provider_unavailable", "waiting_for_baseline", "interval_too_short"}:
+        if allow_live_refresh and (
+            (not throughput.get("available"))
+            or throughput.get("state") in {"stale", "provider_unavailable", "waiting_for_baseline", "interval_too_short"}
+        ):
             measured = ObservedThroughputProvider(self).measure_current(primary_interface=primary)
             if isinstance(measured, dict):
                 throughput = measured
@@ -966,36 +1708,33 @@ class SystemProbe:
         not_running_reason = "app_not_running" if known_target else "app_not_found"
         window_matches = self._matching_window_targets(requested_name)
         selected_window = self._select_single_window_match(window_matches)
+        window_app_group = self._select_window_app_group(requested_name, window_matches)
         process_matches = self._matching_running_processes(requested_name)
         process_group = self._select_process_group(requested_name, process_matches)
         process_count = len(self._unique_process_targets(process_matches))
 
         if normalized_action == "close":
-            if selected_window == "ambiguous":
-                return {
-                    "success": False,
-                    "action": normalized_action,
-                    "reason": "multiple_matches",
-                    "requested_name": requested_name,
-                    "match_scope": "window",
-                    "match_count": len(window_matches),
-                }
-            if isinstance(selected_window, dict):
+            if window_app_group == "ambiguous":
+                return self._close_ambiguity_result(
+                    action=normalized_action,
+                    requested_name=requested_name,
+                    match_scope="window",
+                    matches=window_matches,
+                )
+            if isinstance(window_app_group, list) and window_app_group:
                 return self._execute_graceful_exit(
                     action="close",
                     requested_name=requested_name,
-                    matches=[selected_window],
-                    resolution_source=str(selected_window.get("resolution_source") or "window_title"),
+                    matches=window_app_group,
+                    resolution_source="window_app_group",
                 )
             if process_group == "ambiguous":
-                return {
-                    "success": False,
-                    "action": normalized_action,
-                    "reason": "multiple_matches",
-                    "requested_name": requested_name,
-                    "match_scope": "process",
-                    "match_count": process_count,
-                }
+                return self._close_ambiguity_result(
+                    action=normalized_action,
+                    requested_name=requested_name,
+                    match_scope="process",
+                    matches=process_matches,
+                )
             if process_group:
                 return self._execute_graceful_exit(
                     action="close",
@@ -1020,14 +1759,12 @@ class SystemProbe:
 
         if normalized_action == "quit":
             if process_group == "ambiguous":
-                return {
-                    "success": False,
-                    "action": normalized_action,
-                    "reason": "multiple_matches",
-                    "requested_name": requested_name,
-                    "match_scope": "process",
-                    "match_count": process_count,
-                }
+                return self._close_ambiguity_result(
+                    action=normalized_action,
+                    requested_name=requested_name,
+                    match_scope="process",
+                    matches=process_matches,
+                )
             if process_group:
                 return self._execute_graceful_exit(
                     action="quit",
@@ -1035,21 +1772,19 @@ class SystemProbe:
                     matches=process_group,
                     resolution_source="process_group",
                 )
-            if selected_window == "ambiguous":
-                return {
-                    "success": False,
-                    "action": normalized_action,
-                    "reason": "multiple_matches",
-                    "requested_name": requested_name,
-                    "match_scope": "window",
-                    "match_count": len(window_matches),
-                }
-            if isinstance(selected_window, dict):
+            if window_app_group == "ambiguous":
+                return self._close_ambiguity_result(
+                    action=normalized_action,
+                    requested_name=requested_name,
+                    match_scope="window",
+                    matches=window_matches,
+                )
+            if isinstance(window_app_group, list) and window_app_group:
                 return self._execute_graceful_exit(
                     action="quit",
                     requested_name=requested_name,
-                    matches=[selected_window],
-                    resolution_source=str(selected_window.get("resolution_source") or "window_title"),
+                    matches=window_app_group,
+                    resolution_source="window_app_group",
                 )
             if process_count:
                 return {
@@ -1253,7 +1988,7 @@ class SystemProbe:
         if normalized_action == "focus":
             payload = self._run_powershell_json(
                 f"""
-                $pid = {pid}
+                $targetPidValue = {pid}
                 $title = {json.dumps(window_title)}
                 try {{
                     $shell = New-Object -ComObject WScript.Shell
@@ -1262,7 +1997,7 @@ class SystemProbe:
                         $activated = [bool]$shell.AppActivate($title)
                     }}
                     if (-not $activated) {{
-                        $activated = [bool]$shell.AppActivate($pid)
+                        $activated = [bool]$shell.AppActivate($targetPidValue)
                     }}
                     [pscustomobject]@{{
                         success = $activated
@@ -1296,9 +2031,9 @@ class SystemProbe:
 
         restart_payload = self._run_powershell_json(
             f"""
-            $pid = {pid}
+            $targetPidValue = {pid}
             try {{
-                $proc = Get-Process -Id $pid -ErrorAction Stop
+                $proc = Get-Process -Id $targetPidValue -ErrorAction Stop
                 $path = $proc.Path
                 if (-not $path) {{
                     $path = {json.dumps(process_path or requested_path)}
@@ -1306,7 +2041,7 @@ class SystemProbe:
                 if (-not $path) {{
                     throw "path_unavailable"
                 }}
-                Stop-Process -Id $pid -Force -ErrorAction Stop
+                Stop-Process -Id $targetPidValue -Force -ErrorAction Stop
                 $newProc = Start-Process -FilePath $path -PassThru
                 [pscustomobject]@{{
                     success = $true
@@ -1321,7 +2056,7 @@ class SystemProbe:
                 [pscustomobject]@{{
                     success = $false
                     action = "restart"
-                    pid = $pid
+                    pid = $targetPidValue
                     process_name = {json.dumps(process_name)}
                     window_title = {json.dumps(window_title)}
                     resolution_source = {json.dumps(resolution_source)}
@@ -1348,97 +2083,595 @@ class SystemProbe:
         resolution_source: str,
     ) -> dict[str, Any]:
         targets = self._unique_process_targets(matches)
+        started = monotonic()
         if not targets:
-            return {
-                "success": False,
-                "action": action,
-                "reason": "no_matching_window_found" if action == "close" else "graceful_close_unavailable",
-                "requested_name": requested_name,
-            }
+            return self._close_result_payload(
+                {
+                    "success": False,
+                    "action": action,
+                    "reason": "no_matching_window_found" if action == "close" else "close_unsupported",
+                    "requested_name": requested_name,
+                    "resolution_source": resolution_source,
+                    "close_result_state": "close_unsupported",
+                    "close_target_app": requested_name,
+                    "graceful_close_supported": True,
+                    "graceful_close_requested": False,
+                    "close_verification_ms": round((monotonic() - started) * 1000, 3),
+                }
+            )
         primary = targets[0]
+        protected_target = next((target for target in targets if self._is_protected_close_target(requested_name, target)), None)
+        if protected_target is not None:
+            return self._close_result_payload(
+                {
+                    "success": False,
+                    "action": action,
+                    "reason": "system_process_blocked",
+                    "requested_name": requested_name,
+                    "pid": int(protected_target.get("pid") or 0),
+                    "process_name": str(protected_target.get("process_name") or "").strip() or None,
+                    "window_title": str(protected_target.get("window_title") or "").strip() or None,
+                    "resolution_source": resolution_source,
+                    "close_result_state": "close_unsupported",
+                    "close_target_app": requested_name,
+                    "close_target_process": str(protected_target.get("process_name") or "").strip() or None,
+                    "close_target_window_title": str(protected_target.get("window_title") or "").strip() or None,
+                    "close_target_hwnd_present": int(protected_target.get("window_handle") or 0) > 0,
+                    "graceful_close_supported": True,
+                    "graceful_close_requested": False,
+                    "confirmation_prompt_detected": False,
+                    "force_close_offered": False,
+                    "force_close_requires_approval": True,
+                    "close_verification_ms": round((monotonic() - started) * 1000, 3),
+                }
+            )
+        targets_json_b64 = base64.b64encode(json.dumps(targets).encode("utf-8")).decode("ascii")
         payload = self._run_powershell_json(
             f"""
-            $targets = @(ConvertFrom-Json @'
-            {json.dumps(targets)}
-            '@)
+            $targetsJson = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String({json.dumps(targets_json_b64)}))
+            $targets = @(ConvertFrom-Json -InputObject $targetsJson)
+            $started = [System.Diagnostics.Stopwatch]::StartNew()
             Add-Type @"
             using System;
             using System.Runtime.InteropServices;
+            using System.Text;
             public static class StormhelmWindowApi {{
+                public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+                [DllImport("user32.dll")]
+                public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+                [DllImport("user32.dll")]
+                public static extern bool IsWindowVisible(IntPtr hWnd);
+                [DllImport("user32.dll")]
+                public static extern int GetWindowTextLength(IntPtr hWnd);
+                [DllImport("user32.dll")]
+                public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int maxCount);
+                [DllImport("user32.dll")]
+                public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
                 [DllImport("user32.dll", SetLastError=true)]
-                public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+                public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam, uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
             }}
             "@
+            $WM_CLOSE = 0x0010
+            $SMTO_ABORTIFHUNG = 0x0002
+
+            function Get-VisibleWindowsForProcess([int]$targetPid) {{
+                $handles = New-Object System.Collections.Generic.List[object]
+                [StormhelmWindowApi]::EnumWindows({{
+                    param($hWnd, $lParam)
+                    if (-not [StormhelmWindowApi]::IsWindowVisible($hWnd)) {{ return $true }}
+                    $ownerPid = [uint32]0
+                    [StormhelmWindowApi]::GetWindowThreadProcessId($hWnd, [ref]$ownerPid) | Out-Null
+                    if ([int]$ownerPid -ne $targetPid) {{ return $true }}
+                    $length = [StormhelmWindowApi]::GetWindowTextLength($hWnd)
+                    if ($length -le 0) {{ return $true }}
+                    $buffer = New-Object System.Text.StringBuilder ($length + 1)
+                    [StormhelmWindowApi]::GetWindowText($hWnd, $buffer, $buffer.Capacity) | Out-Null
+                    $title = $buffer.ToString()
+                    if ([string]::IsNullOrWhiteSpace($title)) {{ return $true }}
+                    $handles.Add([pscustomobject]@{{
+                        handle = $hWnd.ToInt64()
+                        title = $title
+                    }}) | Out-Null
+                    return $true
+                }}, [intptr]::Zero) | Out-Null
+                return @($handles)
+            }}
+
+            function Send-GracefulClose([intptr]$windowHandle) {{
+                $closeResult = [intptr]::Zero
+                $sent = [StormhelmWindowApi]::SendMessageTimeout($windowHandle, $WM_CLOSE, [intptr]::Zero, [intptr]::Zero, $SMTO_ABORTIFHUNG, 1500, [ref]$closeResult)
+                return [bool]($sent -ne [intptr]::Zero)
+            }}
+
             $results = @()
             foreach ($target in $targets) {{
-                $pid = [int]$target.pid
+                $targetPidValue = [int]$target.pid
                 $windowHandle = [intptr]([int64]($target.window_handle))
                 try {{
-                    $proc = Get-Process -Id $pid -ErrorAction Stop
-                    $closed = $false
-                    try {{
-                        $closed = [bool]$proc.CloseMainWindow()
-                    }} catch {{
-                        $closed = $false
+                    $proc = Get-Process -Id $targetPidValue -ErrorAction Stop
+                    $attempts = @()
+                    if ($windowHandle -ne [intptr]::Zero) {{
+                        $attempts += [pscustomobject]@{{
+                            handle = [int64]$windowHandle
+                            title = [string]$target.window_title
+                            source = "resolved_handle"
+                        }}
                     }}
-                    if (-not $closed -and $windowHandle -ne [intptr]::Zero) {{
-                        $closed = [bool][StormhelmWindowApi]::PostMessage($windowHandle, 0x0010, [intptr]::Zero, [intptr]::Zero)
+                    if ($attempts.Count -eq 0) {{
+                        $attempts += Get-VisibleWindowsForProcess $targetPidValue | ForEach-Object {{
+                            [pscustomobject]@{{
+                                handle = [int64]$_.handle
+                                title = [string]$_.title
+                                source = "pid_window"
+                            }}
+                        }}
+                    }}
+                    $sent = $false
+                    $method = "none"
+                    foreach ($attempt in $attempts) {{
+                        if ([int64]$attempt.handle -le 0) {{ continue }}
+                        $sent = (Send-GracefulClose ([intptr]([int64]$attempt.handle))) -or $sent
+                        if ($sent) {{ $method = "wm_close" }}
+                    }}
+                    try {{
+                        $closeMainWindowSent = [bool]$proc.CloseMainWindow()
+                        if ($closeMainWindowSent) {{
+                            if ($method -eq "none") {{
+                                $method = "close_main_window"
+                            }} elseif ($method -notmatch "close_main_window") {{
+                                $method = "$method+close_main_window"
+                            }}
+                            $sent = $true
+                        }}
+                    }} catch {{
+                        $sent = $sent
                     }}
                     $results += [pscustomobject]@{{
-                        pid = $pid
+                        pid = $targetPidValue
                         process_name = $proc.ProcessName
-                        closed = [bool]$closed
-                        window_handle = [int64]$windowHandle
+                        close_request_sent = [bool]$sent
+                        method = $method
+                        attempted_windows = [int]$attempts.Count
+                        window_handle = $windowHandle.ToInt64()
                     }}
                 }} catch {{
                     $results += [pscustomobject]@{{
-                        pid = $pid
+                        pid = $targetPidValue
                         process_name = {json.dumps(str(primary.get("process_name") or ""))}
-                        closed = $false
+                        close_request_sent = $false
+                        method = "process_unavailable"
                         error = $_.Exception.Message
-                        window_handle = [int64]$windowHandle
+                        window_handle = $windowHandle.ToInt64()
                     }}
                 }}
             }}
-            $closed = @($results | Where-Object {{ $_.closed }})
+            $requested = @($results | Where-Object {{ $_.close_request_sent }})
             [pscustomobject]@{{
-                success = [bool]($closed.Count -gt 0)
+                success = [bool]($requested.Count -gt 0)
                 action = {json.dumps(action)}
                 pid = {int(primary.get("pid") or 0)}
                 pids = @($results | ForEach-Object {{ [int]$_.pid }})
-                affected_pids = @($closed | ForEach-Object {{ [int]$_.pid }})
+                affected_pids = @($requested | ForEach-Object {{ [int]$_.pid }})
                 attempted_count = [int]$results.Count
-                successful_count = [int]$closed.Count
+                successful_count = [int]$requested.Count
                 graceful_close_attempted = $true
+                graceful_close_supported = $true
+                close_request_sent = [bool]($requested.Count -gt 0)
+                graceful_close_requested = [bool]($requested.Count -gt 0)
+                request_ms = [double]$started.Elapsed.TotalMilliseconds
                 process_name = {json.dumps(str(primary.get("process_name") or ""))}
                 window_title = {json.dumps(str(primary.get("window_title") or ""))}
                 resolution_source = {json.dumps(resolution_source)}
-                reason = if ($closed.Count -gt 0) {{ $null }} else {{ "graceful_close_unavailable" }}
+                method = (($requested | Select-Object -First 1).method)
+                per_target = @($results)
+                reason = if ($requested.Count -gt 0) {{ $null }} else {{ "close_request_failed" }}
             }} | ConvertTo-Json -Compress -Depth 5
             """
         )
-        if isinstance(payload, dict):
-            payload.setdefault("requested_name", requested_name)
-            if (
-                not bool(payload.get("success"))
-                and str(payload.get("reason") or "").strip().lower() == "graceful_close_unavailable"
-                and self._target_absent_after_graceful_exit(requested_name)
-            ):
-                payload["success"] = True
-                payload["reason"] = None
-                payload["post_close_verification"] = "target_disappeared"
-                payload["verification_observed"] = "window_and_process_absent"
-            return payload
-        return {
+        request_payload = payload if isinstance(payload, dict) else {
             "success": False,
             "action": action,
-            "reason": "graceful_close_unavailable",
-            "requested_name": requested_name,
-            "pid": int(primary.get("pid") or 0),
-            "process_name": str(primary.get("process_name") or "").strip() or None,
-            "window_title": str(primary.get("window_title") or "").strip() or None,
-            "resolution_source": resolution_source,
+            "reason": "close_request_failed",
+            "graceful_close_supported": True,
+            "close_request_sent": False,
+            "graceful_close_requested": False,
         }
+        return self._verified_graceful_close_result(
+            action=action,
+            requested_name=requested_name,
+            targets=targets,
+            resolution_source=resolution_source,
+            request_payload=request_payload,
+            started_at=started,
+        )
+
+    def _verified_graceful_close_result(
+        self,
+        *,
+        action: str,
+        requested_name: str,
+        targets: list[dict[str, Any]],
+        resolution_source: str,
+        request_payload: dict[str, Any],
+        started_at: float,
+    ) -> dict[str, Any]:
+        primary = targets[0] if targets else {}
+        supported = bool(request_payload.get("graceful_close_supported", True))
+        request_sent = bool(
+            request_payload.get("close_request_sent")
+            or request_payload.get("graceful_close_requested")
+            or request_payload.get("success")
+        )
+        request_ms = self._coerce_float(
+            request_payload.get("graceful_close_request_ms", request_payload.get("request_ms"))
+        )
+        base = {
+            **request_payload,
+            "action": action,
+            "requested_name": requested_name,
+            "pid": int(primary.get("pid") or request_payload.get("pid") or 0),
+            "process_name": str(primary.get("process_name") or request_payload.get("process_name") or "").strip() or None,
+            "window_title": str(primary.get("window_title") or request_payload.get("window_title") or "").strip() or None,
+            "resolution_source": resolution_source,
+            "app_control_operation": "close",
+            "close_target_app": requested_name,
+            "close_target_process": str(primary.get("process_name") or request_payload.get("process_name") or "").strip() or None,
+            "close_target_window_title": str(primary.get("window_title") or request_payload.get("window_title") or "").strip() or None,
+            "close_target_hwnd_present": int(primary.get("window_handle") or request_payload.get("window_handle") or 0) > 0,
+            "graceful_close_supported": supported,
+            "graceful_close_requested": request_sent,
+            "graceful_close_request_ms": request_ms,
+            "confirmation_prompt_detected": False,
+            "force_close_requires_approval": True,
+        }
+        if not supported:
+            return self._close_result_payload(
+                {
+                    **base,
+                    "success": False,
+                    "reason": "graceful_close_unavailable",
+                    "close_result_state": "close_unsupported",
+                    "force_close_offered": False,
+                    "close_verification_ms": round((monotonic() - started_at) * 1000, 3),
+                }
+            )
+
+        deadline = monotonic() + max(float(self._GRACEFUL_CLOSE_VERIFY_TIMEOUT_SECONDS), 0.0)
+        verification = self._close_verification_snapshot(requested_name, targets)
+        while request_sent and verification["target_window_remaining"] and not verification["confirmation_prompt"]:
+            if monotonic() >= deadline:
+                break
+            sleep(max(float(self._GRACEFUL_CLOSE_VERIFY_INTERVAL_SECONDS), 0.01))
+            verification = self._close_verification_snapshot(requested_name, targets)
+
+        verification_ms = round((monotonic() - started_at) * 1000, 3)
+        prompt = verification["confirmation_prompt"]
+        per_window_summary = self._per_window_close_summary(
+            requested_name=requested_name,
+            targets=targets,
+            request_payload=request_payload,
+            verification=verification,
+            request_sent=request_sent,
+        )
+        base = {**base, **per_window_summary}
+        if prompt:
+            partial = per_window_summary.get("closed_verified_count", 0) > 0
+            return self._close_result_payload(
+                {
+                    **base,
+                    "success": False,
+                    "reason": "confirmation_required",
+                    "close_result_state": "partial_confirmation_required"
+                    if partial
+                    else "close_confirmation_required",
+                    "confirmation_prompt_detected": True,
+                    "confirmation_prompt": prompt,
+                    "available_next_actions": ["save_and_close", "discard_and_close", "cancel_close"],
+                    "force_close_offered": False,
+                    "close_verification_ms": verification_ms,
+                    "verification_observed": "confirmation_prompt",
+                }
+            )
+
+        if not verification["target_window_remaining"] and (request_sent or not verification["process_remaining"]):
+            observed = "window_absent"
+            if not verification["process_remaining"]:
+                observed = "window_and_process_absent"
+            elif verification["process_remaining"]:
+                observed = "target_window_closed_process_running"
+            return self._close_result_payload(
+                {
+                    **base,
+                    "success": True,
+                    "reason": None,
+                    "post_close_verification": "target_disappeared",
+                    "close_result_state": "closed_verified",
+                    "verification_observed": observed,
+                    "force_close_offered": False,
+                    "close_verification_ms": verification_ms,
+                }
+            )
+
+        partial = per_window_summary.get("closed_verified_count", 0) > 0
+        return self._close_result_payload(
+            {
+                **base,
+                "success": False,
+                "reason": "partial_close_failed" if partial else "close_failed",
+                "close_result_state": "partial_close_failed" if partial else "close_failed",
+                "verification_observed": "target_still_visible" if verification["target_window_remaining"] else "process_still_running",
+                "force_close_offered": True,
+                "close_verification_ms": verification_ms,
+            }
+        )
+
+    def _close_verification_snapshot(self, requested_name: str, targets: list[dict[str, Any]]) -> dict[str, Any]:
+        status = self.window_status()
+        status_windows = [item for item in self._ensure_list(status.get("windows")) if isinstance(item, dict)]
+        active_windows = [
+            item
+            for item in self._ensure_list(self.active_apps().get("applications"))
+            if isinstance(item, dict)
+        ]
+        windows = self._dedupe_ranked_matches(active_windows + status_windows, self._window_identity_key)
+        target_windows = [window for window in windows if self._window_matches_any_close_target(window, targets)]
+        if not target_windows:
+            target_windows = [
+                window
+                for window in self._matching_entries(requested_name, windows, resolution_source="post_close_window")
+                if not self._looks_like_close_confirmation_prompt(window, requested_name, targets)
+            ]
+        process_matches = self._matching_running_processes(requested_name)
+        target_pids = {int(target.get("pid") or 0) for target in targets if int(target.get("pid") or 0) > 0}
+        process_remaining = any(int(match.get("pid") or 0) in target_pids for match in process_matches) if target_pids else bool(process_matches)
+        prompt = self._detect_close_confirmation_prompt(windows, requested_name, targets)
+        return {
+            "target_window_remaining": bool(target_windows),
+            "process_remaining": process_remaining,
+            "confirmation_prompt": prompt,
+            "window_count": len(windows),
+            "_windows": windows,
+        }
+
+    def _per_window_close_summary(
+        self,
+        *,
+        requested_name: str,
+        targets: list[dict[str, Any]],
+        request_payload: dict[str, Any],
+        verification: dict[str, Any],
+        request_sent: bool,
+    ) -> dict[str, Any]:
+        windows = [
+            item
+            for item in self._ensure_list(verification.get("_windows"))
+            if isinstance(item, dict)
+        ]
+        results: list[dict[str, Any]] = []
+        for target in targets:
+            close_requested = self._close_request_sent_for_target(
+                target, request_payload=request_payload, fallback=request_sent
+            )
+            remaining = any(
+                self._window_matches_any_close_target(window, [target])
+                for window in windows
+            )
+            prompt = self._detect_close_confirmation_prompt(
+                windows, requested_name, [target]
+            )
+            if (
+                prompt
+                and int(target.get("pid") or 0) > 0
+                and int(prompt.get("pid") or 0) > 0
+                and int(prompt.get("pid") or 0) != int(target.get("pid") or 0)
+            ):
+                prompt = None
+            if prompt:
+                state = "confirmation_required"
+            elif close_requested and not remaining:
+                state = "closed_verified"
+            elif not remaining and not close_requested:
+                state = "closed_verified"
+            elif close_requested:
+                state = "close_failed"
+            else:
+                state = "close_failed"
+            results.append(
+                {
+                    "pid": int(target.get("pid") or 0),
+                    "process_name": str(target.get("process_name") or "").strip() or None,
+                    "window_title": str(target.get("window_title") or "").strip() or None,
+                    "window_handle_present": int(target.get("window_handle") or 0) > 0,
+                    "close_requested": bool(close_requested),
+                    "result_state": state,
+                    "closed_verified": state == "closed_verified",
+                    "confirmation_required": state == "confirmation_required",
+                    "close_failed": state == "close_failed",
+                }
+            )
+        closed_count = sum(1 for item in results if item["result_state"] == "closed_verified")
+        confirmation_count = sum(1 for item in results if item["result_state"] == "confirmation_required")
+        failed_count = sum(1 for item in results if item["result_state"] == "close_failed")
+        requested_count = sum(1 for item in results if item["close_requested"])
+        return {
+            "per_window_results": results,
+            "close_requested_count": requested_count,
+            "closed_verified_count": closed_count,
+            "confirmation_required_count": confirmation_count,
+            "close_failed_count": failed_count,
+            "partial_close": bool(results and 0 < closed_count < len(results)),
+        }
+
+    def _close_request_sent_for_target(
+        self,
+        target: dict[str, Any],
+        *,
+        request_payload: dict[str, Any],
+        fallback: bool,
+    ) -> bool:
+        target_pid = int(target.get("pid") or 0)
+        target_handle = int(target.get("window_handle") or 0)
+        per_target = [
+            item
+            for item in self._ensure_list(request_payload.get("per_target"))
+            if isinstance(item, dict)
+        ]
+        for item in per_target:
+            item_pid = int(item.get("pid") or 0)
+            item_handle = int(item.get("window_handle") or 0)
+            if target_handle > 0 and item_handle == target_handle:
+                return bool(item.get("close_request_sent"))
+            if target_pid > 0 and item_pid == target_pid:
+                return bool(item.get("close_request_sent"))
+        return bool(fallback)
+
+    def _window_matches_any_close_target(self, window: dict[str, Any], targets: list[dict[str, Any]]) -> bool:
+        window_handle = int(window.get("window_handle") or 0)
+        window_pid = int(window.get("pid") or 0)
+        window_title = self._normalize_app_match_value(window.get("window_title"))
+        window_process = self._normalize_app_match_value(window.get("process_name"))
+        for target in targets:
+            target_handle = int(target.get("window_handle") or 0)
+            if target_handle > 0 and window_handle == target_handle:
+                return True
+            target_pid = int(target.get("pid") or 0)
+            target_title = self._normalize_app_match_value(target.get("window_title"))
+            target_process = self._normalize_app_match_value(target.get("process_name"))
+            if target_pid > 0 and window_pid == target_pid and target_title and window_title == target_title:
+                return True
+            if target_handle <= 0 and target_pid > 0 and window_pid == target_pid and target_process and window_process == target_process:
+                return True
+        return False
+
+    def _detect_close_confirmation_prompt(
+        self,
+        windows: list[dict[str, Any]],
+        requested_name: str,
+        targets: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        for window in windows:
+            if self._looks_like_close_confirmation_prompt(window, requested_name, targets):
+                return {
+                    "process_name": str(window.get("process_name") or "").strip() or None,
+                    "window_title": str(window.get("window_title") or "").strip() or None,
+                    "window_handle": int(window.get("window_handle") or 0),
+                    "pid": int(window.get("pid") or 0),
+                }
+        return None
+
+    def _looks_like_close_confirmation_prompt(
+        self,
+        window: dict[str, Any],
+        requested_name: str,
+        targets: list[dict[str, Any]],
+    ) -> bool:
+        title = self._normalize_app_match_value(window.get("window_title"))
+        if not title:
+            return False
+        title_with_spaces = f" {title} "
+        has_prompt_term = any(term in title for term in _CONFIRMATION_PROMPT_TITLE_TERMS)
+        has_save_phrase = "save" in title and any(term in title for term in {"change", "changes", "discard", "unsaved"})
+        if not has_prompt_term and not has_save_phrase:
+            return False
+        window_pid = int(window.get("pid") or 0)
+        target_pids = {int(target.get("pid") or 0) for target in targets if int(target.get("pid") or 0) > 0}
+        if window_pid in target_pids:
+            return True
+        target_processes = {
+            self._normalize_app_match_value(target.get("process_name"))
+            for target in targets
+            if self._normalize_app_match_value(target.get("process_name"))
+        }
+        window_process = self._normalize_app_match_value(window.get("process_name"))
+        if window_process and window_process in target_processes:
+            return True
+        requested_tokens = self._informative_match_tokens(self._app_match_variants(requested_name))
+        title_tokens = set(title_with_spaces.split())
+        return bool(requested_tokens & title_tokens)
+
+    def _close_ambiguity_result(
+        self,
+        *,
+        action: str,
+        requested_name: str,
+        match_scope: str,
+        matches: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return self._close_result_payload(
+            {
+                "success": False,
+                "action": action,
+                "reason": "multiple_matches",
+                "requested_name": requested_name,
+                "match_scope": match_scope,
+                "match_count": len(matches),
+                "ambiguity": True,
+                "candidate_targets": self._close_candidate_summaries(matches),
+                "close_result_state": "close_unsupported",
+                "close_target_app": requested_name,
+                "graceful_close_supported": True,
+                "graceful_close_requested": False,
+                "confirmation_prompt_detected": False,
+                "force_close_offered": False,
+                "force_close_requires_approval": True,
+            }
+        )
+
+    def _close_candidate_summaries(self, matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+        for match in matches[:6]:
+            score = int(match.get("_match_score") or 0)
+            candidates.append(
+                {
+                    "app_identity": str(match.get("process_name") or "").strip() or None,
+                    "process_name": str(match.get("process_name") or "").strip() or None,
+                    "pid": int(match.get("pid") or 0),
+                    "window_title": str(match.get("window_title") or "").strip() or None,
+                    "window_handle_present": int(match.get("window_handle") or 0) > 0,
+                    "path": str(match.get("path") or "").strip() or None,
+                    "confidence": round(max(0.0, min(float(score) / 100.0, 1.0)), 2),
+                    "resolution_source": str(match.get("resolution_source") or "").strip() or None,
+                }
+            )
+        return candidates
+
+    def _close_result_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result = dict(payload)
+        action = str(result.get("action") or "close").strip().lower()
+        result.setdefault("app_control_operation", "close" if action in {"close", "quit"} else action)
+        result.setdefault("close_target_app", result.get("requested_name"))
+        result.setdefault("close_target_process", result.get("process_name"))
+        result.setdefault("close_target_window_title", result.get("window_title"))
+        result.setdefault("close_target_hwnd_present", bool(int(result.get("window_handle") or 0)))
+        result.setdefault("graceful_close_supported", True)
+        result.setdefault("graceful_close_requested", False)
+        result.setdefault("graceful_close_request_ms", self._coerce_float(result.get("request_ms")))
+        result.setdefault("close_verification_ms", 0.0)
+        result.setdefault("confirmation_prompt_detected", False)
+        result.setdefault("force_close_offered", False)
+        result.setdefault("force_close_requires_approval", True)
+        result.setdefault("close_result_state", "close_requested" if result.get("graceful_close_requested") else "close_failed")
+        result.setdefault("ambiguity", False)
+        result["close_trace"] = {
+            "app_control_operation": result.get("app_control_operation"),
+            "close_target_app": result.get("close_target_app"),
+            "close_target_process": result.get("close_target_process"),
+            "close_target_window_title": result.get("close_target_window_title"),
+            "close_target_hwnd_present": result.get("close_target_hwnd_present"),
+            "graceful_close_supported": result.get("graceful_close_supported"),
+            "graceful_close_requested": result.get("graceful_close_requested"),
+            "graceful_close_request_ms": result.get("graceful_close_request_ms"),
+            "close_verification_ms": result.get("close_verification_ms"),
+            "close_result_state": result.get("close_result_state"),
+            "confirmation_prompt_detected": result.get("confirmation_prompt_detected"),
+            "force_close_offered": result.get("force_close_offered"),
+            "force_close_requires_approval": result.get("force_close_requires_approval"),
+            "close_requested_count": result.get("close_requested_count"),
+            "closed_verified_count": result.get("closed_verified_count"),
+            "confirmation_required_count": result.get("confirmation_required_count"),
+            "close_failed_count": result.get("close_failed_count"),
+        }
+        return result
 
     def _target_absent_after_graceful_exit(self, requested_name: str) -> bool:
         if not str(requested_name or "").strip():
@@ -1461,25 +2694,25 @@ class SystemProbe:
                 "requested_name": requested_name,
             }
         primary = targets[0]
+        targets_json_b64 = base64.b64encode(json.dumps(targets).encode("utf-8")).decode("ascii")
         payload = self._run_powershell_json(
             f"""
-            $targets = @(ConvertFrom-Json @'
-            {json.dumps(targets)}
-            '@)
+            $targetsJson = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String({json.dumps(targets_json_b64)}))
+            $targets = @(ConvertFrom-Json -InputObject $targetsJson)
             $results = @()
             foreach ($target in $targets) {{
-                $pid = [int]$target.pid
+                $targetPidValue = [int]$target.pid
                 try {{
-                    $proc = Get-Process -Id $pid -ErrorAction Stop
-                    Stop-Process -Id $pid -Force -ErrorAction Stop
+                    $proc = Get-Process -Id $targetPidValue -ErrorAction Stop
+                    Stop-Process -Id $targetPidValue -Force -ErrorAction Stop
                     $results += [pscustomobject]@{{
-                        pid = $pid
+                        pid = $targetPidValue
                         process_name = $proc.ProcessName
                         terminated = $true
                     }}
                 }} catch {{
                     $results += [pscustomobject]@{{
-                        pid = $pid
+                        pid = $targetPidValue
                         process_name = {json.dumps(str(primary.get("process_name") or ""))}
                         terminated = $false
                         error = $_.Exception.Message
@@ -1545,7 +2778,52 @@ class SystemProbe:
             )
         return targets
 
-    def recent_files(self, limit: int = 12) -> dict[str, Any]:
+    def recent_files(self, limit: int = 12, *, allow_live_scan: bool = True) -> dict[str, Any]:
+        started = monotonic()
+        effective_limit = max(1, int(limit or 12))
+        if allow_live_scan:
+            return self._recent_files_live(effective_limit, started_at=started)
+
+        now = monotonic()
+        cached = deepcopy(self._recent_files_cache) if self._recent_files_cache is not None else None
+        if cached is not None:
+            age_ms = self._cache_age_ms(self._recent_files_cached_at, now=now)
+            freshness_state = "fresh" if age_ms <= self._RECENT_FILES_CACHE_TTL_SECONDS * 1000 else "stale"
+            refresh_id = ""
+            deferred = False
+            if freshness_state == "stale":
+                refresh_id = self._start_recent_files_refresh(limit=effective_limit)
+                deferred = True
+            bounded = dict(cached)
+            files = bounded.get("files") if isinstance(bounded.get("files"), list) else []
+            bounded["files"] = files[:effective_limit]
+            return self._annotate_recent_files(
+                bounded,
+                cache_hit=True,
+                cache_age_ms=age_ms,
+                freshness_state=freshness_state,
+                deferred=deferred,
+                refresh_id=refresh_id,
+                started_at=started,
+            )
+
+        refresh_id = self._start_recent_files_refresh(limit=effective_limit)
+        return self._annotate_recent_files(
+            {
+                "files": [],
+                "detail_load_deferred": True,
+                "deferred_reason": "recent_files_live_scan_deferred",
+            },
+            cache_hit=False,
+            cache_age_ms=None,
+            freshness_state="missing",
+            deferred=True,
+            refresh_id=refresh_id,
+            started_at=started,
+        )
+
+    def _recent_files_live(self, limit: int, *, started_at: float | None = None) -> dict[str, Any]:
+        started = monotonic() if started_at is None else started_at
         roots = [Path(path) for path in self.config.safety.allowed_read_dirs if Path(path).exists()]
         entries: list[dict[str, Any]] = []
         visited = 0
@@ -1575,7 +2853,67 @@ class SystemProbe:
             if visited > 4000:
                 break
         entries.sort(key=lambda item: item["modified_at"], reverse=True)
-        return {"files": entries[:limit]}
+        completed_at = monotonic()
+        annotated = self._annotate_recent_files(
+            {"files": entries[:limit]},
+            cache_hit=False,
+            cache_age_ms=0.0,
+            freshness_state="fresh",
+            deferred=False,
+            refresh_id="",
+            started_at=started,
+        )
+        self._recent_files_cache = deepcopy(annotated)
+        self._recent_files_cached_at = completed_at
+        return annotated
+
+    def _annotate_recent_files(
+        self,
+        payload: dict[str, Any],
+        *,
+        cache_hit: bool,
+        cache_age_ms: float | None,
+        freshness_state: str,
+        deferred: bool,
+        refresh_id: str,
+        started_at: float,
+    ) -> dict[str, Any]:
+        result = dict(payload)
+        trace = {
+            "workspace_cache_hit": bool(cache_hit),
+            "workspace_cache_age_ms": cache_age_ms,
+            "workspace_freshness_state": freshness_state,
+            "workspace_scan_ms": round((monotonic() - started_at) * 1000, 3),
+            "live_probe_deferred": bool(deferred),
+            "live_probe_job_id": refresh_id,
+            "live_probe_timeout_ms": 0.0,
+        }
+        result.update(trace)
+        result["workspace_trace"] = dict(trace)
+        return result
+
+    def _start_recent_files_refresh(self, *, limit: int = 12) -> str:
+        with self._recent_files_refresh_lock:
+            if self._recent_files_refresh_running and self._recent_files_refresh_id:
+                return self._recent_files_refresh_id
+            self._recent_files_refresh_id = f"recent-files-refresh-{int(monotonic() * 1000)}"
+            self._recent_files_refresh_running = True
+            refresh_id = self._recent_files_refresh_id
+
+        def refresh() -> None:
+            try:
+                self._recent_files_live(limit)
+            finally:
+                with self._recent_files_refresh_lock:
+                    self._recent_files_refresh_running = False
+
+        thread = threading.Thread(
+            target=refresh,
+            name="StormhelmRecentFilesRefresh",
+            daemon=True,
+        )
+        thread.start()
+        return refresh_id
 
     def window_status(self) -> dict[str, Any]:
         payload = self._run_powershell_json(
@@ -1619,9 +2957,9 @@ class SystemProbe:
                 if ([string]::IsNullOrWhiteSpace($title)) { return $true }
                 $rect = New-Object StormhelmWindowApi+RECT
                 if (-not [StormhelmWindowApi]::GetWindowRect($hWnd, [ref]$rect)) { return $true }
-                $pid = [uint32]0
-                [StormhelmWindowApi]::GetWindowThreadProcessId($hWnd, [ref]$pid) | Out-Null
-                $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
+                $ownerPid = [uint32]0
+                [StormhelmWindowApi]::GetWindowThreadProcessId($hWnd, [ref]$ownerPid) | Out-Null
+                $proc = Get-Process -Id $ownerPid -ErrorAction SilentlyContinue
                 $screen = [System.Windows.Forms.Screen]::FromHandle($hWnd)
                 $screenIndex = 1
                 for ($i = 0; $i -lt $screens.Length; $i++) {
@@ -1633,10 +2971,10 @@ class SystemProbe:
                 $windows.Add([pscustomobject]@{
                     process_name = if ($proc) { $proc.ProcessName } else { $null }
                     window_title = $title
-                    window_handle = [int64]$hWnd
-                    pid = [int]$pid
+                    window_handle = $hWnd.ToInt64()
+                    pid = [int]$ownerPid
                     minimized = [bool][StormhelmWindowApi]::IsIconic($hWnd)
-                    is_focused = ($hWnd -eq $foreground)
+                    is_focused = ($hWnd.ToInt64() -eq $foreground.ToInt64())
                     x = [int]$rect.Left
                     y = [int]$rect.Top
                     width = [int]($rect.Right - $rect.Left)
@@ -1665,9 +3003,10 @@ class SystemProbe:
                 }
             }
 
+            $windowArray = @($windows.ToArray())
             [pscustomobject]@{
-                focused_window = ($windows | Where-Object { $_.is_focused } | Select-Object -First 1)
-                windows = @($windows)
+                focused_window = ($windowArray | Where-Object { $_.is_focused } | Select-Object -First 1)
+                windows = $windowArray
                 monitors = @($monitors)
             } | ConvertTo-Json -Compress -Depth 6
             """
@@ -1702,6 +3041,7 @@ class SystemProbe:
         normalized_action = str(action or "").strip().lower()
         normalized_target_mode = str(target_mode or "app").strip().lower() or "app"
         if normalized_action not in {
+            "close",
             "focus",
             "move",
             "resize",
@@ -1730,6 +3070,15 @@ class SystemProbe:
                 "requested_name": app_name,
                 "process_name": target.get("process_name"),
             }
+
+        if normalized_action == "close":
+            requested_name = str(app_name or target.get("window_title") or target.get("process_name") or "").strip()
+            return self._execute_graceful_exit(
+                action="close",
+                requested_name=requested_name,
+                matches=[target],
+                resolution_source="focused_window" if normalized_target_mode == "focused" else "window_title",
+            )
 
         if normalized_action == "focus":
             payload = self._run_powershell_json(
@@ -2174,6 +3523,8 @@ class SystemProbe:
                 "close": is_windows,
                 "quit": is_windows,
                 "restart": is_windows,
+                "graceful_close_supported": is_windows,
+                "force_close_requires_approval": True,
             },
             "process": {
                 "force_quit": is_windows,
@@ -2324,6 +3675,7 @@ class SystemProbe:
         allow_home_fallback: bool = True,
         named_location: str | None = None,
         named_location_type: str = "auto",
+        allow_live_probe: bool = True,
     ) -> dict[str, Any]:
         if isinstance(named_location, str) and named_location.strip().lower() in {"", "none", "null"}:
             named_location = None
@@ -2341,6 +3693,26 @@ class SystemProbe:
                         "reason": "saved_named_location_not_found",
                         "requested_name": named_location,
                     }
+            if not allow_live_probe:
+                refresh_id = self._start_location_status_refresh(
+                    mode=mode,
+                    allow_home_fallback=allow_home_fallback,
+                )
+                return self._annotate_location_status(
+                    {
+                        "resolved": False,
+                        "mode": "named",
+                        "source": "deferred",
+                        "reason": "location_live_probe_deferred",
+                        "requested_name": named_location,
+                    },
+                    cache_hit=False,
+                    cache_age_ms=None,
+                    freshness_state="missing",
+                    deferred=True,
+                    refresh_id=refresh_id,
+                    started_at=monotonic(),
+                )
             queried = self._query_location_lookup(named_location)
             if queried:
                 return queried
@@ -2351,9 +3723,20 @@ class SystemProbe:
                 "reason": "queried_place_not_found",
                 "requested_name": named_location,
             }
-        return self.resolve_location(mode=mode, allow_home_fallback=allow_home_fallback)
+        return self.resolve_location(
+            mode=mode,
+            allow_home_fallback=allow_home_fallback,
+            allow_live_probe=allow_live_probe,
+        )
 
-    def resolve_location(self, *, mode: str = "auto", allow_home_fallback: bool = True) -> dict[str, Any]:
+    def resolve_location(
+        self,
+        *,
+        mode: str = "auto",
+        allow_home_fallback: bool = True,
+        allow_live_probe: bool = True,
+    ) -> dict[str, Any]:
+        started = monotonic()
         normalized_mode = (mode or "auto").strip().lower()
         if normalized_mode == "home":
             home = self._saved_home_location()
@@ -2366,9 +3749,70 @@ class SystemProbe:
                 "reason": "saved_home_not_configured",
             }
 
+        if not allow_live_probe:
+            now = monotonic()
+            cached = deepcopy(self._location_status_cache) if self._location_status_cache is not None else None
+            if cached is not None:
+                age_ms = self._cache_age_ms(self._location_status_cached_at, now=now)
+                freshness_state = "fresh" if age_ms <= self._LOCATION_CACHE_TTL_SECONDS * 1000 else "stale"
+                refresh_id = ""
+                deferred = False
+                if freshness_state == "stale":
+                    refresh_id = self._start_location_status_refresh(
+                        mode=normalized_mode,
+                        allow_home_fallback=allow_home_fallback,
+                    )
+                    deferred = True
+                return self._annotate_location_status(
+                    cached,
+                    cache_hit=True,
+                    cache_age_ms=age_ms,
+                    freshness_state=freshness_state,
+                    deferred=deferred,
+                    refresh_id=refresh_id,
+                    started_at=started,
+                )
+            if allow_home_fallback:
+                home = self._saved_home_location()
+                if home:
+                    home["used_home_fallback"] = True
+                    home["fallback_reason"] = "location_live_probe_deferred"
+                    refresh_id = self._start_location_status_refresh(
+                        mode=normalized_mode,
+                        allow_home_fallback=allow_home_fallback,
+                    )
+                    return self._annotate_location_status(
+                        home,
+                        cache_hit=False,
+                        cache_age_ms=None,
+                        freshness_state="fallback",
+                        deferred=True,
+                        refresh_id=refresh_id,
+                        started_at=started,
+                    )
+            refresh_id = self._start_location_status_refresh(
+                mode=normalized_mode,
+                allow_home_fallback=allow_home_fallback,
+            )
+            return self._annotate_location_status(
+                {
+                    "resolved": False,
+                    "mode": normalized_mode,
+                    "source": "deferred",
+                    "reason": "location_live_probe_deferred",
+                },
+                cache_hit=False,
+                cache_age_ms=None,
+                freshness_state="missing",
+                deferred=True,
+                refresh_id=refresh_id,
+                started_at=started,
+            )
+
         live = self._live_device_location()
         live_reason = None
         if isinstance(live, dict) and live.get("resolved"):
+            self._cache_location_status(live)
             return live
         if isinstance(live, dict):
             live_reason = str(live.get("reason") or "").strip() or None
@@ -2378,6 +3822,7 @@ class SystemProbe:
         approximate_device = self._approximate_device_location()
         approximate_reason = None
         if isinstance(approximate_device, dict) and approximate_device.get("resolved"):
+            self._cache_location_status(approximate_device)
             return approximate_device
         if isinstance(approximate_device, dict):
             approximate_reason = str(approximate_device.get("reason") or "").strip() or None
@@ -2392,6 +3837,7 @@ class SystemProbe:
                     home["fallback_reason"] = live_reason
                 elif approximate_reason:
                     home["fallback_reason"] = approximate_reason
+                self._cache_location_status(home)
                 return home
 
         ip_estimate = self._ip_estimate_location()
@@ -2405,6 +3851,7 @@ class SystemProbe:
                 "approximate_device",
                 "saved_home" if allow_home_fallback else "home_fallback_disabled",
             ]
+            self._cache_location_status(ip_estimate)
             return ip_estimate
 
         return {
@@ -2416,6 +3863,70 @@ class SystemProbe:
             "approximate_reason": approximate_reason,
         }
 
+    def _cache_location_status(self, payload: dict[str, Any]) -> None:
+        if payload.get("resolved"):
+            self._location_status_cache = deepcopy(payload)
+            self._location_status_cached_at = monotonic()
+
+    def _annotate_location_status(
+        self,
+        payload: dict[str, Any],
+        *,
+        cache_hit: bool,
+        cache_age_ms: float | None,
+        freshness_state: str,
+        deferred: bool,
+        refresh_id: str,
+        started_at: float,
+    ) -> dict[str, Any]:
+        result = dict(payload)
+        trace = {
+            "location_cache_hit": bool(cache_hit),
+            "location_cache_age_ms": cache_age_ms,
+            "location_freshness_state": freshness_state,
+            "location_probe_ms": round((monotonic() - started_at) * 1000, 3),
+            "live_probe_deferred": bool(deferred),
+            "live_probe_job_id": refresh_id,
+            "live_probe_timeout_ms": 0.0,
+        }
+        result.update(trace)
+        result["location_trace"] = dict(trace)
+        return result
+
+    def _start_location_status_refresh(
+        self,
+        *,
+        mode: str = "auto",
+        allow_home_fallback: bool = True,
+    ) -> str:
+        with self._location_refresh_lock:
+            if self._location_refresh_running and self._location_refresh_id:
+                return self._location_refresh_id
+            self._location_refresh_id = f"location-refresh-{int(monotonic() * 1000)}"
+            self._location_refresh_running = True
+            refresh_id = self._location_refresh_id
+
+        def refresh() -> None:
+            try:
+                result = self.resolve_location(
+                    mode=mode,
+                    allow_home_fallback=allow_home_fallback,
+                    allow_live_probe=True,
+                )
+                if isinstance(result, dict):
+                    self._cache_location_status(result)
+            finally:
+                with self._location_refresh_lock:
+                    self._location_refresh_running = False
+
+        thread = threading.Thread(
+            target=refresh,
+            name="StormhelmLocationRefresh",
+            daemon=True,
+        )
+        thread.start()
+        return refresh_id
+
     def weather_status(
         self,
         *,
@@ -2425,28 +3936,146 @@ class SystemProbe:
         allow_home_fallback: bool = True,
         forecast_target: str = "current",
         units: str | None = None,
+        allow_live_refresh: bool = True,
+        live_probe_budget_ms: float | None = None,
+        force_refresh: bool = False,
     ) -> dict[str, Any]:
+        started = monotonic()
+        cache_key = self._weather_cache_key(
+            location_mode=location_mode,
+            named_location=named_location,
+            named_location_type=named_location_type,
+            allow_home_fallback=allow_home_fallback,
+            forecast_target=forecast_target,
+            units=units,
+        )
+        if allow_live_refresh or force_refresh:
+            result = self._weather_status_live(
+                location_mode=location_mode,
+                named_location=named_location,
+                named_location_type=named_location_type,
+                allow_home_fallback=allow_home_fallback,
+                forecast_target=forecast_target,
+                units=units,
+            )
+            self._cache_weather_status(cache_key, result)
+            return result
+
+        now = monotonic()
+        cached = deepcopy(self._weather_status_cache.get(cache_key))
+        if cached is not None:
+            age_ms = self._cache_age_ms(self._weather_status_cached_at.get(cache_key, 0.0), now=now)
+            freshness_state = "fresh" if age_ms <= self._WEATHER_CACHE_TTL_SECONDS * 1000 else "stale"
+            refresh_id = ""
+            deferred = False
+            if freshness_state == "stale":
+                refresh_id = self._start_weather_status_refresh(
+                    cache_key=cache_key,
+                    location_mode=location_mode,
+                    named_location=named_location,
+                    named_location_type=named_location_type,
+                    allow_home_fallback=allow_home_fallback,
+                    forecast_target=forecast_target,
+                    units=units,
+                )
+                deferred = True
+            return self._annotate_weather_status(
+                cached,
+                cache_hit=True,
+                cache_age_ms=age_ms,
+                freshness_state=freshness_state,
+                deferred=deferred,
+                refresh_id=refresh_id,
+                started_at=started,
+                provider_status="cached" if freshness_state == "fresh" else "stale_refresh_deferred",
+            )
+
+        refresh_id = self._start_weather_status_refresh(
+            cache_key=cache_key,
+            location_mode=location_mode,
+            named_location=named_location,
+            named_location_type=named_location_type,
+            allow_home_fallback=allow_home_fallback,
+            forecast_target=forecast_target,
+            units=units,
+        )
+        timeout_ms = 0.0 if live_probe_budget_ms is None else max(float(live_probe_budget_ms), 0.0)
+        return self._annotate_weather_status(
+            {
+                "available": False,
+                "reason": "weather_live_probe_deferred",
+                "forecast_target": forecast_target,
+                "detail_load_deferred": True,
+            },
+            cache_hit=False,
+            cache_age_ms=None,
+            freshness_state="missing",
+            deferred=True,
+            refresh_id=refresh_id,
+            started_at=started,
+            provider_status="deferred",
+            timeout_ms=timeout_ms,
+        )
+
+    def _weather_status_live(
+        self,
+        *,
+        location_mode: str = "auto",
+        named_location: str | None = None,
+        named_location_type: str = "auto",
+        allow_home_fallback: bool = True,
+        forecast_target: str = "current",
+        units: str | None = None,
+    ) -> dict[str, Any]:
+        trace: dict[str, Any] = {
+            "weather_location_lookup_ms": 0.0,
+            "weather_provider_call_ms": 0.0,
+            "weather_cache_hit": False,
+            "weather_timeout_ms": round(float(self.config.weather.timeout_seconds or 0.0) * 1000.0, 3),
+            "weather_provider_status": "not_started",
+            "weather_provider_service": "open-meteo",
+            "weather_provider_host": urllib.parse.urlparse(
+                str(self.config.weather.provider_base_url or "")
+            ).netloc,
+            "weather_job_wait_ms": 0.0,
+            "weather_cache_age_ms": None,
+            "weather_freshness_state": "live",
+            "live_probe_deferred": False,
+            "live_probe_job_id": "",
+            "live_probe_timeout_ms": 0.0,
+        }
+
+        def _with_weather_trace(payload: dict[str, Any]) -> dict[str, Any]:
+            payload["weather_trace"] = dict(trace)
+            for key, value in trace.items():
+                payload.setdefault(key, value)
+            return payload
+
+        location_started = monotonic()
         resolved = self.resolve_best_location_for_request(
             mode=location_mode,
             named_location=named_location,
             named_location_type=named_location_type,
             allow_home_fallback=allow_home_fallback,
         )
+        trace["weather_location_lookup_ms"] = round((monotonic() - location_started) * 1000, 3)
         if not resolved.get("resolved"):
-            return {
+            trace["weather_provider_status"] = "skipped_location_unavailable"
+            return _with_weather_trace({
                 "available": False,
                 "location": resolved,
                 "reason": resolved.get("reason", "location_unavailable"),
-            }
+            })
 
         latitude = resolved.get("latitude")
         longitude = resolved.get("longitude")
         if latitude is None or longitude is None:
-            return {
+            trace["weather_provider_status"] = "skipped_missing_coordinates"
+            return _with_weather_trace({
                 "available": False,
                 "location": resolved,
                 "reason": "missing_coordinates",
-            }
+            })
 
         normalized_units = (units or self.config.weather.units or "imperial").strip().lower()
         temperature_unit = "fahrenheit" if normalized_units == "imperial" else "celsius"
@@ -2464,22 +4093,26 @@ class SystemProbe:
                 "timezone": "auto",
             }
         )
+        provider_started = monotonic()
         payload = self._fetch_json(
             f"{self.config.weather.provider_base_url}/forecast?{query}",
             timeout=self.config.weather.timeout_seconds,
         )
+        trace["weather_provider_call_ms"] = round((monotonic() - provider_started) * 1000, 3)
         if not isinstance(payload, dict):
-            return {
+            trace["weather_provider_status"] = "unavailable"
+            return _with_weather_trace({
                 "available": False,
                 "location": resolved,
                 "reason": "weather_unavailable",
-            }
+            })
 
         current = payload.get("current", {}) if isinstance(payload.get("current"), dict) else {}
         daily = payload.get("daily", {}) if isinstance(payload.get("daily"), dict) else {}
         forecast = self._select_weather_forecast(payload, forecast_target=forecast_target)
         weather_code = int(forecast.get("weather_code") or current.get("weather_code") or 0)
-        return {
+        trace["weather_provider_status"] = "ok"
+        return _with_weather_trace({
             "available": True,
             "location": resolved,
             "forecast_target": forecast_target,
@@ -2500,12 +4133,117 @@ class SystemProbe:
             },
             "humidity_percent": current.get("relative_humidity_2m"),
             "deck_url": self._weather_page_url(float(latitude), float(longitude)),
-        }
+        })
+
+    def _weather_cache_key(
+        self,
+        *,
+        location_mode: str,
+        named_location: str | None,
+        named_location_type: str,
+        allow_home_fallback: bool,
+        forecast_target: str,
+        units: str | None,
+    ) -> str:
+        return json.dumps(
+            {
+                "location_mode": str(location_mode or "auto").strip().lower(),
+                "named_location": str(named_location or "").strip().lower(),
+                "named_location_type": str(named_location_type or "auto").strip().lower(),
+                "allow_home_fallback": bool(allow_home_fallback),
+                "forecast_target": str(forecast_target or "current").strip().lower(),
+                "units": str(units or self.config.weather.units or "imperial").strip().lower(),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    def _cache_weather_status(self, cache_key: str, payload: dict[str, Any]) -> None:
+        self._weather_status_cache[cache_key] = deepcopy(payload)
+        self._weather_status_cached_at[cache_key] = monotonic()
+
+    def _annotate_weather_status(
+        self,
+        payload: dict[str, Any],
+        *,
+        cache_hit: bool,
+        cache_age_ms: float | None,
+        freshness_state: str,
+        deferred: bool,
+        refresh_id: str,
+        started_at: float,
+        provider_status: str,
+        timeout_ms: float = 0.0,
+    ) -> dict[str, Any]:
+        result = dict(payload)
+        trace = dict(result.get("weather_trace") if isinstance(result.get("weather_trace"), dict) else {})
+        trace.update(
+            {
+                "weather_cache_hit": bool(cache_hit),
+                "weather_cache_age_ms": cache_age_ms,
+                "weather_freshness_state": freshness_state,
+                "weather_provider_status": provider_status,
+                "weather_job_wait_ms": round((monotonic() - started_at) * 1000, 3) if deferred else 0.0,
+                "live_probe_deferred": bool(deferred),
+                "live_probe_job_id": refresh_id,
+                "live_probe_timeout_ms": round(float(timeout_ms or 0.0), 3),
+            }
+        )
+        result["weather_trace"] = dict(trace)
+        for key, value in trace.items():
+            result[key] = value
+        result["live_probe_deferred"] = bool(deferred)
+        result["live_probe_job_id"] = refresh_id
+        result["live_probe_timeout_ms"] = round(float(timeout_ms or 0.0), 3)
+        return result
+
+    def _start_weather_status_refresh(
+        self,
+        *,
+        cache_key: str,
+        location_mode: str = "auto",
+        named_location: str | None = None,
+        named_location_type: str = "auto",
+        allow_home_fallback: bool = True,
+        forecast_target: str = "current",
+        units: str | None = None,
+    ) -> str:
+        with self._weather_refresh_lock:
+            if self._weather_refresh_running.get(cache_key) and self._weather_refresh_ids.get(cache_key):
+                return self._weather_refresh_ids[cache_key]
+            refresh_id = f"weather-refresh-{int(monotonic() * 1000)}"
+            self._weather_refresh_ids[cache_key] = refresh_id
+            self._weather_refresh_running[cache_key] = True
+
+        def refresh() -> None:
+            try:
+                result = self._weather_status_live(
+                    location_mode=location_mode,
+                    named_location=named_location,
+                    named_location_type=named_location_type,
+                    allow_home_fallback=allow_home_fallback,
+                    forecast_target=forecast_target,
+                    units=units,
+                )
+                if isinstance(result, dict):
+                    self._cache_weather_status(cache_key, result)
+            finally:
+                with self._weather_refresh_lock:
+                    self._weather_refresh_running[cache_key] = False
+
+        thread = threading.Thread(
+            target=refresh,
+            name="StormhelmWeatherRefresh",
+            daemon=True,
+        )
+        thread.start()
+        return refresh_id
 
     def _run_powershell_json(self, script: str) -> Any:
+        normalized_script = textwrap.dedent(str(script or "")).strip()
         try:
             completed = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", script],
+                ["powershell", "-NoProfile", "-Command", normalized_script],
                 capture_output=True,
                 text=True,
                 timeout=6,
@@ -2607,7 +4345,7 @@ class SystemProbe:
             return 0
         if candidate in requested_variants:
             return 100
-        if any(variant and (variant in candidate or candidate in variant) for variant in requested_variants):
+        if any(self._variant_substring_match(variant, candidate) for variant in requested_variants):
             return 80
         candidate_tokens = self._informative_match_tokens({candidate})
         overlap = requested_tokens & candidate_tokens
@@ -2617,6 +4355,19 @@ class SystemProbe:
             token = next(iter(overlap))
             return 45 if len(token) >= 6 else 0
         return 0
+
+    def _variant_substring_match(self, requested_variant: str, candidate: str) -> bool:
+        if not requested_variant or not candidate:
+            return False
+        if requested_variant == candidate:
+            return True
+        if requested_variant in candidate:
+            shorter = requested_variant
+        elif candidate in requested_variant:
+            shorter = candidate
+        else:
+            return False
+        return bool(self._informative_match_tokens({shorter}))
 
     def _informative_match_tokens(self, values: set[str]) -> set[str]:
         tokens: set[str] = set()
@@ -2658,6 +4409,32 @@ class SystemProbe:
         if len(unique_targets) > 1:
             return "ambiguous"
         return top_matches[0]
+
+    def _select_window_app_group(
+        self, requested_name: str, matches: list[dict[str, Any]]
+    ) -> list[dict[str, Any]] | str | None:
+        if not matches:
+            return None
+        best_score = int(matches[0].get("_match_score") or 0)
+        top_matches = [
+            match
+            for match in matches
+            if int(match.get("_match_score") or 0) == best_score
+        ]
+        top_groups = {
+            self._process_group_key(match, requested_name) for match in top_matches
+        }
+        if len(top_groups) > 1:
+            return "ambiguous"
+        selected_group = next(iter(top_groups)) if top_groups else ""
+        selected = [
+            dict(match)
+            for match in matches
+            if self._process_group_key(match, requested_name) == selected_group
+        ]
+        for match in selected:
+            match["resolution_source"] = "window_app_group"
+        return selected
 
     def _select_process_group(self, requested_name: str, matches: list[dict[str, Any]]) -> list[dict[str, Any]] | str | None:
         if not matches:
@@ -2727,6 +4504,21 @@ class SystemProbe:
             if any(candidate and candidate in host_processes for candidate in candidates):
                 return True
         return False
+
+    def _is_protected_close_target(self, requested_name: str, item: dict[str, Any]) -> bool:
+        path_value = str(item.get("path") or "").strip()
+        process_name = self._normalize_app_match_value(item.get("process_name"))
+        executable = self._normalize_app_match_value(Path(path_value).stem if path_value else "")
+        requested = self._normalize_app_match_value(requested_name)
+        candidates = {process_name, executable}
+        if any(candidate in _PROTECTED_CLOSE_PROCESS_NAMES for candidate in candidates if candidate):
+            return True
+        if requested in {"stormhelm", "stormhelm core", "stormhelm ui"}:
+            return True
+        normalized_path = self._normalize_app_match_value(path_value)
+        title_mentions_stormhelm = "stormhelm" in self._normalize_app_match_value(item.get("window_title"))
+        runtime_process = process_name in {"python", "pythonw", "stormhelm"}
+        return (title_mentions_stormhelm and runtime_process) or ("stormhelm" in normalized_path and runtime_process)
 
     def _resolve_window_target(
         self,
@@ -3614,5 +5406,13 @@ class SystemProbe:
             return None
         try:
             return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _coerce_float(self, value: Any) -> float | None:
+        if value in {None, ""}:
+            return None
+        try:
+            return round(float(value), 3)
         except (TypeError, ValueError):
             return None

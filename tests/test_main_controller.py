@@ -11,6 +11,7 @@ class DummyClient(QtCore.QObject):
     error_occurred = QtCore.Signal(str, str)
     snapshot_received = QtCore.Signal(dict)
     health_received = QtCore.Signal(dict)
+    status_received = QtCore.Signal(dict)
     chat_received = QtCore.Signal(dict)
     note_saved = QtCore.Signal(dict)
     stream_event_received = QtCore.Signal(dict)
@@ -23,15 +24,21 @@ class DummyClient(QtCore.QObject):
         self.sent_payloads: list[dict[str, str]] = []
         self.saved_notes: list[dict[str, str]] = []
         self.health_calls = 0
+        self.status_calls = 0
         self.snapshot_calls = 0
+        self.snapshot_requests: list[dict[str, object]] = []
         self.started_streams: list[dict[str, object]] = []
         self.stopped_streams = 0
 
     def fetch_health(self) -> None:
         self.health_calls += 1
 
-    def fetch_snapshot(self) -> None:
+    def fetch_status(self) -> None:
+        self.status_calls += 1
+
+    def fetch_snapshot(self, **kwargs: object) -> None:
         self.snapshot_calls += 1
+        self.snapshot_requests.append(dict(kwargs))
 
     def start_event_stream(self, *, session_id: str = "default", cursor: int | None = None) -> None:
         self.started_streams.append({"session_id": session_id, "cursor": cursor})
@@ -48,6 +55,7 @@ class DummyClient(QtCore.QObject):
         active_module: str = "chartroom",
         workspace_context: dict[str, object] | None = None,
         input_context: dict[str, object] | None = None,
+        response_profile: str | None = None,
     ) -> None:
         self.sent_messages.append(message)
         self.sent_payloads.append(
@@ -58,6 +66,7 @@ class DummyClient(QtCore.QObject):
                 "active_module": active_module,
                 "workspace_context": workspace_context or {},
                 "input_context": input_context or {},
+                "response_profile": response_profile,
             }
         )
 
@@ -107,6 +116,7 @@ def test_main_controller_still_sends_normal_messages(temp_config) -> None:
     assert client.sent_messages == ["plot a safe course"]
     assert client.sent_payloads[0]["surface_mode"] == "ghost"
     assert client.sent_payloads[0]["active_module"] == "chartroom"
+    assert client.sent_payloads[0]["response_profile"] == "ghost_compact"
 
 
 def test_main_controller_sends_workspace_and_input_context(temp_config) -> None:
@@ -183,12 +193,70 @@ def test_main_controller_poll_is_single_flight_until_snapshot_returns(temp_confi
     controller.poll()
     controller.poll()
 
-    assert client.snapshot_calls == 1
+    assert client.status_calls == 2
+    assert client.snapshot_calls == 0
 
-    controller._handle_snapshot({})
+
+def test_main_controller_status_updates_do_not_request_snapshot(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+    client = DummyClient()
+    controller = MainController(config=temp_config, bridge=bridge, client=client)
+
     controller.poll()
+    controller._handle_status(
+        {
+            "status_profile": "fast_status",
+            "voice": {
+                "voice_anchor": {
+                    "state": "speaking",
+                    "speaking_visual_active": True,
+                },
+                "live_playback_active": True,
+            },
+        }
+    )
 
-    assert client.snapshot_calls == 2
+    assert client.status_calls == 1
+    assert client.snapshot_calls == 0
+    assert bridge.voiceState.get("voice_anchor_state") == "speaking"
+
+
+def test_main_controller_requests_ghost_light_snapshot_after_chat(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+    client = DummyClient()
+    controller = MainController(config=temp_config, bridge=bridge, client=client)
+
+    controller._handle_chat(
+        {
+            "assistant_message": {
+                "message_id": "assistant-ghost-light",
+                "role": "assistant",
+                "content": "Ready.",
+                "created_at": "2026-04-20T18:10:00Z",
+                "metadata": {
+                    "bearing_title": "Ready",
+                    "micro_response": "Ready.",
+                    "full_response": "Ready.",
+                },
+            }
+        }
+    )
+
+    assert client.snapshot_calls == 1
+    assert client.snapshot_requests[0]["profile"] == "ghost_light"
+    assert client.snapshot_requests[0]["event_limit"] <= 12
+
+
+def test_main_controller_requests_deck_summary_only_when_deck_is_active(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+    client = DummyClient()
+    controller = MainController(config=temp_config, bridge=bridge, client=client)
+    bridge.setMode("deck")
+
+    controller._request_snapshot(force=True)
+
+    assert client.snapshot_calls == 1
+    assert client.snapshot_requests[0]["profile"] == "deck_summary"
 
 
 def test_main_controller_chat_queues_one_refresh_behind_inflight_snapshot(temp_config) -> None:
@@ -196,7 +264,7 @@ def test_main_controller_chat_queues_one_refresh_behind_inflight_snapshot(temp_c
     client = DummyClient()
     controller = MainController(config=temp_config, bridge=bridge, client=client)
 
-    controller.poll()
+    controller._request_snapshot()
     assert client.snapshot_calls == 1
 
     controller._handle_chat(
@@ -218,6 +286,21 @@ def test_main_controller_chat_queues_one_refresh_behind_inflight_snapshot(temp_c
     assert client.snapshot_calls == 1
 
     controller._handle_snapshot({})
+
+    assert client.snapshot_calls == 2
+
+
+def test_main_controller_snapshot_single_flight_when_explicitly_requested(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+    client = DummyClient()
+    controller = MainController(config=temp_config, bridge=bridge, client=client)
+
+    controller._request_snapshot()
+    controller._request_snapshot()
+    assert client.snapshot_calls == 1
+
+    controller._handle_snapshot({})
+    controller._request_snapshot()
 
     assert client.snapshot_calls == 2
 

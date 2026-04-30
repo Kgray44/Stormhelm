@@ -122,6 +122,11 @@ class ScreenAwarenessConfig:
     workflow_learning_enabled: bool = True
     brain_integration_enabled: bool = True
     power_features_enabled: bool = True
+    screen_capture_enabled: bool = True
+    screen_capture_scope: str = "active_window"
+    screen_capture_ocr_enabled: bool = True
+    screen_capture_provider_vision_enabled: bool = False
+    screen_capture_store_raw_images: bool = False
 
     def _phase_at_least(self, minimum_phase: int) -> bool:
         phase_name = str(self.phase or "").strip().lower()
@@ -164,6 +169,14 @@ class ScreenAwarenessConfig:
             "power_features_enabled": self.power_features_enabled
             and self._phase_at_least(11),
             "hardening_enabled": self._phase_at_least(12),
+            "screen_capture_enabled": self.screen_capture_enabled
+            and self._phase_at_least(12),
+            "screen_capture_ocr_enabled": self.screen_capture_ocr_enabled
+            and self.screen_capture_enabled
+            and self._phase_at_least(12),
+            "screen_capture_provider_vision_enabled": self.screen_capture_provider_vision_enabled
+            and self.screen_capture_enabled
+            and self._phase_at_least(12),
         }
 
 
@@ -207,6 +220,80 @@ class TrustConfig:
     once_grant_ttl_seconds: float = 900.0
     pending_request_ttl_seconds: float = 3600.0
     audit_recent_limit: int = 24
+
+
+@dataclass(slots=True)
+class WebRetrievalHttpConfig:
+    enabled: bool = True
+    timeout_seconds: float = 8.0
+
+
+@dataclass(slots=True)
+class WebRetrievalObscuraCDPConfig:
+    enabled: bool = False
+    binary_path: str = "obscura"
+    host: str = "127.0.0.1"
+    port: int = 0
+    startup_timeout_seconds: float = 8.0
+    shutdown_timeout_seconds: float = 4.0
+    navigation_timeout_seconds: float = 12.0
+    max_session_seconds: float = 120.0
+    max_pages_per_session: int = 8
+    max_dom_text_chars: int = 60000
+    max_html_chars: int = 250000
+    max_links: int = 500
+    allow_runtime_eval: bool = False
+    allow_input_domain: bool = False
+    allow_cookies: bool = False
+    allow_logged_in_context: bool = False
+    allow_screenshots: bool = False
+    debug_events_enabled: bool = True
+
+
+@dataclass(slots=True)
+class WebRetrievalObscuraConfig:
+    enabled: bool = False
+    binary_path: str = "obscura"
+    mode: str = "cli"
+    allow_cdp_server: bool = False
+    serve_port: int = 9222
+    stealth_enabled: bool = False
+    obey_robots: bool = True
+    workers: int = 1
+    max_concurrency: int = 3
+    wait_until: str = "networkidle0"
+    dump_format: str = "text"
+    allow_js_eval: bool = False
+    max_eval_chars: int = 2000
+    cdp: WebRetrievalObscuraCDPConfig = field(default_factory=WebRetrievalObscuraCDPConfig)
+
+
+@dataclass(slots=True)
+class WebRetrievalChromiumConfig:
+    enabled: bool = False
+    fallback_enabled: bool = True
+
+
+@dataclass(slots=True)
+class WebRetrievalConfig:
+    enabled: bool = True
+    planner_routing_enabled: bool = True
+    debug_events_enabled: bool = True
+    default_provider: str = "auto"
+    max_url_count: int = 8
+    max_url_chars: int = 4096
+    max_parallel_pages: int = 3
+    timeout_seconds: float = 12.0
+    max_text_chars: int = 60000
+    max_html_chars: int = 250000
+    cache_snapshots: bool = True
+    respect_robots: bool = True
+    allow_private_network_urls: bool = False
+    allow_file_urls: bool = False
+    allow_logged_in_context: bool = False
+    http: WebRetrievalHttpConfig = field(default_factory=WebRetrievalHttpConfig)
+    obscura: WebRetrievalObscuraConfig = field(default_factory=WebRetrievalObscuraConfig)
+    chromium: WebRetrievalChromiumConfig = field(default_factory=WebRetrievalChromiumConfig)
 
 
 def default_discord_trusted_aliases() -> dict[str, "DiscordTrustedAliasConfig"]:
@@ -574,6 +661,7 @@ class ToolEnablementConfig:
     workspace_list: bool = True
     workspace_where_left_off: bool = True
     workspace_next_steps: bool = True
+    web_retrieval_fetch: bool = True
 
     def is_enabled(self, tool_name: str) -> bool:
         return getattr(self, tool_name, False)
@@ -630,6 +718,7 @@ class AppConfig:
     software_control: SoftwareControlConfig
     software_recovery: SoftwareRecoveryConfig
     trust: TrustConfig
+    web_retrieval: WebRetrievalConfig
     discord_relay: DiscordRelayConfig
     openai: OpenAIConfig
     voice: VoiceConfig

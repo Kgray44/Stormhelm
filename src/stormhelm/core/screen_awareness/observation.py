@@ -8,6 +8,7 @@ from stormhelm.core.screen_awareness.models import ScreenObservation
 from stormhelm.core.screen_awareness.models import ScreenObservationScope
 from stormhelm.core.screen_awareness.models import ScreenSensitivityLevel
 from stormhelm.core.screen_awareness.models import ScreenSourceType
+from stormhelm.core.screen_awareness.visual_capture import sensitive_window_level
 
 
 def _clean_text(value: object) -> str | None:
@@ -105,6 +106,8 @@ class NativeContextObservationSource:
         )
         monitor_index = int(focused_window.get("monitor_index") or 0)
         monitor_metadata = next((item for item in monitors if int(item.get("index") or 0) == monitor_index), {})
+        if not monitor_metadata:
+            monitor_metadata = next((item for item in monitors if bool(item.get("is_primary"))), monitors[0] if monitors else {})
 
         workspace_snapshot = {
             "workspace": dict(workspace_context.get("workspace") or active_context.get("workspace") or {})
@@ -148,10 +151,11 @@ class NativeContextObservationSource:
         if not selected_text and not clipboard_text:
             warnings.append("No direct visible text was available from selection or clipboard.")
 
-        title = str(focused_window.get("window_title") or workspace_snapshot.get("active_item", {}).get("title") or "").strip().lower()
-        sensitivity = ScreenSensitivityLevel.NORMAL
-        if any(marker in title for marker in {"password", "account", "billing", "bank", "token", "secret"}):
-            sensitivity = ScreenSensitivityLevel.SENSITIVE
+        sensitivity = sensitive_window_level(focused_window)
+        if sensitivity == ScreenSensitivityLevel.NORMAL:
+            title = str(workspace_snapshot.get("active_item", {}).get("title") or "").strip().lower()
+            if any(marker in title for marker in {"password", "account", "billing", "bank", "token", "secret"}):
+                sensitivity = ScreenSensitivityLevel.SENSITIVE
 
         app_identity = str(
             focused_window.get("process_name")
@@ -192,7 +196,9 @@ class NativeContextObservationSource:
 
 def has_direct_screen_signal(observation: ScreenObservation) -> bool:
     return bool(
-        observation.focus_metadata
+        observation.visual_text
+        or has_screen_capture_signal(observation)
+        or observation.focus_metadata
         or observation.selected_text
         or _has_workspace_signal(observation.workspace_snapshot)
     )
@@ -206,9 +212,35 @@ def has_clipboard_only_signal(observation: ScreenObservation) -> bool:
     return bool(observation.clipboard_text) and not has_live_screen_signal(observation)
 
 
+def has_accessibility_signal(observation: ScreenObservation) -> bool:
+    accessibility = observation.focus_metadata.get("accessibility") if isinstance(observation.focus_metadata, dict) else None
+    if not isinstance(accessibility, dict):
+        return False
+    return _contains_payload(accessibility)
+
+
+def has_screen_content_signal(observation: ScreenObservation) -> bool:
+    return bool(
+        observation.selected_text
+        or observation.visual_text
+        or has_accessibility_signal(observation)
+        or observation.workspace_snapshot.get("active_item")
+    )
+
+
+def has_screen_capture_signal(observation: ScreenObservation) -> bool:
+    status = observation.visual_metadata.get("screen_capture") if isinstance(observation.visual_metadata, dict) else None
+    return bool(isinstance(status, dict) and status.get("captured"))
+
+
+def has_focus_only_signal(observation: ScreenObservation) -> bool:
+    return bool(observation.focus_metadata) and not has_screen_content_signal(observation)
+
+
 def best_live_visible_text(observation: ScreenObservation) -> str | None:
     for candidate in (
         observation.selected_text,
+        observation.visual_text,
         str(observation.workspace_snapshot.get("active_item", {}).get("title") or "").strip() or None,
         str(observation.workspace_snapshot.get("active_item", {}).get("url") or "").strip() or None,
         str(observation.focus_metadata.get("window_title") or "").strip() or None,

@@ -51,6 +51,24 @@ def _merge_data_with_focus(
     return payload
 
 
+def _call_probe_method(probe: Any, method_name: str, **kwargs: Any) -> dict[str, Any]:
+    method = getattr(probe, method_name)
+    try:
+        payload = method(**kwargs)
+    except TypeError:
+        payload = method()
+    return payload if isinstance(payload, dict) else {}
+
+
+def _append_system_freshness_note(summary: str, data: dict[str, Any]) -> str:
+    state = str(data.get("system_resource_freshness_state") or "").strip().lower()
+    if state == "stale":
+        return f"{summary} This is the last cached sample; Stormhelm is refreshing it in the background."
+    if state == "missing":
+        return f"{summary} I do not have a cached live sample yet, so I started a background refresh."
+    return summary
+
+
 def _location_permission_guidance(location: dict[str, Any]) -> str:
     reason = str(
         location.get("fallback_reason")
@@ -819,7 +837,11 @@ class PowerStatusTool(BaseTool):
         return {"focus": focus, "present_in": present_in}
 
     def execute_sync(self, context: ToolContext, arguments: dict[str, Any]) -> ToolResult:
-        data = _probe(context).power_status()
+        data = _call_probe_method(
+            _probe(context),
+            "power_status",
+            allow_live_refresh=arguments["present_in"] == "deck",
+        )
         persona = PersonaContract(context.config)
         focus = arguments["focus"]
         contract = _power_metric_contract(data, metric=focus)
@@ -856,6 +878,7 @@ class PowerStatusTool(BaseTool):
                 summary = persona.report(str(contract.get("unsupported_reason") or f"AC line is {data.get('ac_line_status', 'unknown')} and no battery percentage is available."))
             else:
                 summary = persona.report(_power_overview_summary(data))
+        summary = _append_system_freshness_note(summary, data)
         payload = _merge_data_with_focus(data, present_in=arguments["present_in"], module="systems", state_hint="power")
         payload["metric_contract"] = contract
         return ToolResult(success=True, summary=summary, data=payload)
@@ -896,12 +919,20 @@ class PowerProjectionTool(BaseTool):
 
     def execute_sync(self, context: ToolContext, arguments: dict[str, Any]) -> ToolResult:
         probe = _probe(context)
-        data = probe.power_projection(
-            metric=arguments["metric"],
-            target_percent=arguments["target_percent"],
-            assume_unplugged=arguments["assume_unplugged"],
-        )
-        status_snapshot = probe.power_status()
+        try:
+            data = probe.power_projection(
+                metric=arguments["metric"],
+                target_percent=arguments["target_percent"],
+                assume_unplugged=arguments["assume_unplugged"],
+                allow_live_refresh=arguments["present_in"] == "deck",
+            )
+        except TypeError:
+            data = probe.power_projection(
+                metric=arguments["metric"],
+                target_percent=arguments["target_percent"],
+                assume_unplugged=arguments["assume_unplugged"],
+            )
+        status_snapshot = _call_probe_method(probe, "power_status", allow_live_refresh=arguments["present_in"] == "deck")
         persona = PersonaContract(context.config)
         metric = arguments["metric"]
         notes = [str(note).strip() for note in data.get("notes", []) if str(note).strip()]
@@ -985,7 +1016,11 @@ class ResourceStatusTool(BaseTool):
         return {"focus": focus, "query_kind": query_kind, "metric": metric, "present_in": present_in}
 
     def execute_sync(self, context: ToolContext, arguments: dict[str, Any]) -> ToolResult:
-        data = _probe(context).resource_status()
+        data = _call_probe_method(
+            _probe(context),
+            "resource_status",
+            allow_live_refresh=arguments["present_in"] == "deck",
+        )
         persona = PersonaContract(context.config)
         focus = arguments["focus"]
         query_kind = arguments["query_kind"]
@@ -997,6 +1032,7 @@ class ResourceStatusTool(BaseTool):
             summary = persona.report(_resource_diagnostic_summary(data, focus=focus, metric=metric))
         else:
             summary = persona.report(_resource_telemetry_summary(data, focus=focus, metric=metric))
+        summary = _append_system_freshness_note(summary, data)
         payload = _merge_data_with_focus(data, present_in=arguments["present_in"], module="systems", state_hint="resources")
         payload["metric_contract"] = _resource_metric_contract(data, focus=focus, metric=metric)
         return ToolResult(success=True, summary=summary, data=payload)
@@ -1008,9 +1044,25 @@ class StorageStatusTool(BaseTool):
     description = "Return disk and free-space bearings for mounted local drives."
     category = "system"
 
+    def parameter_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "present_in": {"type": "string", "enum": ["none", "deck"], "default": "none"},
+            },
+            "additionalProperties": False,
+        }
+
+    def validate(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        present_in = str(arguments.get("present_in", "none")).strip().lower() or "none"
+        return {"present_in": present_in}
+
     def execute_sync(self, context: ToolContext, arguments: dict[str, Any]) -> ToolResult:
-        del arguments
-        data = _probe(context).storage_status()
+        data = _call_probe_method(
+            _probe(context),
+            "storage_status",
+            allow_live_refresh=arguments["present_in"] == "deck",
+        )
         drives = data.get("drives", [])
         persona = PersonaContract(context.config)
         if not drives:
@@ -1032,7 +1084,9 @@ class StorageStatusTool(BaseTool):
                 )
             else:
                 summary = persona.report("Storage usage isn't available here.")
-        return ToolResult(success=True, summary=summary, data=data)
+        summary = _append_system_freshness_note(summary, data)
+        payload = _merge_data_with_focus(data, present_in=arguments["present_in"], module="systems", state_hint="storage")
+        return ToolResult(success=True, summary=summary, data=payload)
 
 
 class NetworkStatusTool(BaseTool):
@@ -1057,9 +1111,14 @@ class NetworkStatusTool(BaseTool):
         return {"focus": focus, "present_in": present_in}
 
     def execute_sync(self, context: ToolContext, arguments: dict[str, Any]) -> ToolResult:
-        data = _probe(context).network_status()
+        data = _call_probe_method(
+            _probe(context),
+            "network_status",
+            allow_live_refresh=arguments["present_in"] == "deck",
+        )
         persona = PersonaContract(context.config)
         summary = persona.report(NetworkResponseFormatter().format_status_response(data, focus=arguments["focus"]))
+        summary = _append_system_freshness_note(summary, data)
         payload = _merge_data_with_focus(data, present_in=arguments["present_in"], module="systems", state_hint="network")
         return ToolResult(success=True, summary=summary, data=payload)
 
@@ -1086,7 +1145,14 @@ class NetworkThroughputTool(BaseTool):
         return {"metric": metric, "present_in": present_in}
 
     def execute_sync(self, context: ToolContext, arguments: dict[str, Any]) -> ToolResult:
-        data = _probe(context).network_throughput(metric=arguments["metric"])
+        probe = _probe(context)
+        try:
+            data = probe.network_throughput(
+                metric=arguments["metric"],
+                allow_live_refresh=arguments["present_in"] == "deck",
+            )
+        except TypeError:
+            data = probe.network_throughput(metric=arguments["metric"])
         persona = PersonaContract(context.config)
         summary = persona.report(NetworkResponseFormatter().format_throughput_response(data))
         payload = _merge_data_with_focus(
@@ -1183,17 +1249,30 @@ class LocationStatusTool(BaseTool):
         }
 
     def execute_sync(self, context: ToolContext, arguments: dict[str, Any]) -> ToolResult:
-        data = _probe(context).resolve_best_location_for_request(
-            mode=arguments["mode"],
-            named_location=arguments["named_location"],
-            named_location_type=arguments["named_location_type"],
-            allow_home_fallback=arguments["allow_home_fallback"],
-        )
+        probe = _probe(context)
+        try:
+            data = probe.resolve_best_location_for_request(
+                mode=arguments["mode"],
+                named_location=arguments["named_location"],
+                named_location_type=arguments["named_location_type"],
+                allow_home_fallback=arguments["allow_home_fallback"],
+                allow_live_probe=False,
+            )
+        except TypeError:
+            data = probe.resolve_best_location_for_request(
+                mode=arguments["mode"],
+                named_location=arguments["named_location"],
+                named_location_type=arguments["named_location_type"],
+                allow_home_fallback=arguments["allow_home_fallback"],
+            )
         persona = PersonaContract(context.config)
         guidance = _location_permission_guidance(data)
         if not data.get("resolved"):
             requested_name = str(data.get("requested_name") or "").strip()
-            home = _probe(context).resolve_location(mode="home", allow_home_fallback=False)
+            home = _call_probe_method(probe, "resolve_location", mode="home", allow_home_fallback=False, allow_live_probe=False)
+            if data.get("reason") == "location_live_probe_deferred":
+                summary = persona.report("I do not have fresh location bearings yet, so I started a background refresh.")
+                return ToolResult(success=True, summary=summary, data=data)
             if arguments["mode"] == "current" and home.get("resolved"):
                 failure = str(data.get("live_reason") or data.get("reason") or "").replace("_", " ").strip()
                 summary = persona.report(
@@ -1395,21 +1474,36 @@ class WeatherCurrentTool(BaseTool):
         }
 
     def execute_sync(self, context: ToolContext, arguments: dict[str, Any]) -> ToolResult:
-        data = _probe(context).weather_status(
-            location_mode=arguments["location_mode"],
-            named_location=arguments["named_location"],
-            named_location_type=arguments["named_location_type"],
-            allow_home_fallback=arguments["allow_home_fallback"],
-            forecast_target=arguments["forecast_target"],
-            units=context.config.weather.units,
-        )
+        probe = _probe(context)
+        try:
+            data = probe.weather_status(
+                location_mode=arguments["location_mode"],
+                named_location=arguments["named_location"],
+                named_location_type=arguments["named_location_type"],
+                allow_home_fallback=arguments["allow_home_fallback"],
+                forecast_target=arguments["forecast_target"],
+                units=context.config.weather.units,
+                allow_live_refresh=arguments["open_target"] == "deck",
+                live_probe_budget_ms=750.0,
+            )
+        except TypeError:
+            data = probe.weather_status(
+                location_mode=arguments["location_mode"],
+                named_location=arguments["named_location"],
+                named_location_type=arguments["named_location_type"],
+                allow_home_fallback=arguments["allow_home_fallback"],
+                forecast_target=arguments["forecast_target"],
+                units=context.config.weather.units,
+            )
         persona = PersonaContract(context.config)
         if not data.get("available"):
             reason = data.get("reason", "weather_unavailable")
             guidance = _location_permission_guidance(data.get("location", {}) if isinstance(data.get("location"), dict) else {})
             location = data.get("location", {}) if isinstance(data.get("location"), dict) else {}
             requested_name = str(location.get("requested_name") or "").strip()
-            if reason == "location_unavailable":
+            if reason == "weather_live_probe_deferred":
+                summary = persona.report("I do not have a fresh weather sample yet, so I started a background refresh.")
+            elif reason == "location_unavailable":
                 summary = persona.report(
                     f"Weather bearings are unavailable because Stormhelm could not secure a current or saved location.{guidance}"
                 )
@@ -1543,10 +1637,28 @@ class AppControlTool(BaseTool):
             app_name=arguments.get("app_name"),
             app_path=arguments.get("app_path"),
         )
+        if (
+            str(data.get("reason") or "").strip().lower() == "multiple_matches"
+            and isinstance(data.get("candidate_targets"), list)
+        ):
+            data["active_request_state"] = {
+                "family": "app_control",
+                "subject": str(data.get("requested_name") or arguments.get("app_name") or "").strip(),
+                "parameters": {
+                    "action": str(arguments.get("action") or "close").strip().lower(),
+                    "app_name": str(data.get("requested_name") or arguments.get("app_name") or "").strip(),
+                    "selection_mode": "ambiguous_candidate_set",
+                    "candidate_targets": list(data.get("candidate_targets") or []),
+                    "context_reusable": True,
+                },
+                "context_freshness": "current",
+                "context_reusable": True,
+            }
         persona = PersonaContract(context.config)
         contract = self.resolve_adapter_contract(arguments)
         action = str(data.get("action") or arguments["action"]).replace("_", " ").strip()
         label = str(data.get("window_title") or data.get("process_name") or arguments.get("app_name") or arguments.get("app_path") or "the requested app").strip()
+        close_state = str(data.get("close_result_state") or "").strip().lower()
         if data.get("success"):
             if action == "focus":
                 summary = persona.report(f"Windows reported the focus request for {label} succeeded.")
@@ -1557,9 +1669,15 @@ class AppControlTool(BaseTool):
             elif action == "restore":
                 summary = persona.report(f"Windows reported the restore request for {label} succeeded.")
             elif action == "close":
-                summary = persona.report(f"Windows reported the close request for {label} succeeded.")
+                if close_state == "closed_verified":
+                    summary = persona.report(f"Closed {label}; verification no longer sees the target window.")
+                else:
+                    summary = persona.report(f"Sent a graceful close request to {label}; verification is still limited.")
             elif action == "quit":
-                summary = persona.report(f"Windows reported the quit request for {label} succeeded.")
+                if close_state == "closed_verified":
+                    summary = persona.report(f"Quit {label}; verification no longer sees the target window.")
+                else:
+                    summary = persona.report(f"Sent a graceful quit request to {label}; verification is still limited.")
             elif action == "force quit":
                 summary = persona.report(f"Windows reported the force-quit request for {label} succeeded.")
             elif action == "restart":
@@ -1569,9 +1687,9 @@ class AppControlTool(BaseTool):
             execution = build_execution_report(
                 contract,
                 success=True,
-                observed_outcome=ClaimOutcome.OBSERVED,
+                observed_outcome=ClaimOutcome.VERIFIED if close_state == "closed_verified" else ClaimOutcome.OBSERVED,
                 evidence=["System probe returned a successful desktop-control response."],
-                verification_observed="os_api_acknowledgement",
+                verification_observed=str(data.get("verification_observed") or "os_api_acknowledgement"),
             ) if contract is not None else None
             action_payload = attach_contract_metadata(
                 {
@@ -1603,7 +1721,20 @@ class AppControlTool(BaseTool):
             elif reason == "no matching process found":
                 summary = persona.report(f"No matching {label} process was found.")
             elif reason == "multiple matches":
-                summary = persona.report(f"Found multiple {label} matches; need the target clarified.")
+                summary = persona.report(f"Found multiple {label} matches; answer `close both` or name one target.")
+            elif reason == "confirmation required" or close_state == "close_confirmation_required":
+                summary = persona.report(f"{label} needs a save/discard/cancel confirmation before it can close.")
+            elif close_state == "partial_confirmation_required":
+                summary = persona.report(f"Some {label} windows closed, but one still needs a save/discard/cancel confirmation.")
+            elif reason == "partial close failed" or close_state == "partial_close_failed":
+                summary = persona.report(f"Sent graceful close requests to {label}; some windows closed, but at least one remains. Force-close requires explicit approval.")
+            elif reason == "close failed" or close_state == "close_failed":
+                if data.get("force_close_offered"):
+                    summary = persona.report(f"Sent a graceful close request to {label}, but verification did not complete. Force-close requires explicit approval.")
+                else:
+                    summary = persona.report(f"Sent a graceful close request to {label}, but verification did not complete.")
+            elif reason == "system process blocked":
+                summary = persona.report(f"Blocked close for {label}; it is a protected Windows or Stormhelm process.")
             elif reason == "graceful close unavailable":
                 summary = persona.report(f"Found {label}, but graceful close was unavailable.")
             elif reason == "process termination denied":
@@ -1659,7 +1790,7 @@ class WindowStatusTool(BaseTool):
 class WindowControlTool(BaseTool):
     name = "window_control"
     display_name = "Window Control"
-    description = "Move, resize, snap, focus, or reposition windows deterministically."
+    description = "Close, move, resize, snap, focus, or reposition windows deterministically."
     category = "system"
 
     def parameter_schema(self) -> dict[str, Any]:
@@ -1670,6 +1801,7 @@ class WindowControlTool(BaseTool):
                     "type": "string",
                     "enum": [
                         "focus",
+                        "close",
                         "move",
                         "resize",
                         "move_by",
@@ -1719,6 +1851,7 @@ class WindowControlTool(BaseTool):
         persona = PersonaContract(context.config)
         action = str(data.get("action") or arguments["action"]).replace("_", " ").strip()
         label = str(data.get("window_title") or data.get("process_name") or arguments.get("app_name") or "the window").strip()
+        close_state = str(data.get("close_result_state") or "").strip().lower()
         if data.get("success"):
             if action == "snap right":
                 summary = persona.report(f"Snapped {label} right.")
@@ -1736,11 +1869,21 @@ class WindowControlTool(BaseTool):
                 summary = persona.report(f"Resized {label}.")
             elif action == "focus":
                 summary = persona.report(f"Focused {label}.")
+            elif action == "close" and close_state == "closed_verified":
+                summary = persona.report(f"Closed {label}; verification no longer sees the target window.")
+            elif action == "close":
+                summary = persona.report(f"Sent a graceful close request to {label}; verification is still limited.")
             else:
                 summary = persona.report(f"{action.capitalize()}d {label}.")
         else:
             reason = str(data.get("reason") or "").replace("_", " ").strip()
-            if reason in {"window not found", "focused window unavailable"}:
+            if reason == "confirmation required" or close_state == "close_confirmation_required":
+                summary = persona.report(f"{label} needs a save/discard/cancel confirmation before it can close.")
+            elif reason == "close failed" or close_state == "close_failed":
+                summary = persona.report(f"Sent a graceful close request to {label}, but verification did not complete. Force-close requires explicit approval.")
+            elif reason == "system process blocked":
+                summary = persona.report(f"Blocked close for {label}; it is a protected Windows or Stormhelm process.")
+            elif reason in {"window not found", "focused window unavailable"}:
                 summary = persona.report(f"Couldn't find {label}.")
             elif reason == "monitor not found":
                 summary = persona.report("That monitor isn't available.")
@@ -1912,11 +2055,13 @@ class RecentFilesTool(BaseTool):
 
     def execute_sync(self, context: ToolContext, arguments: dict[str, Any]) -> ToolResult:
         del arguments
-        data = _probe(context).recent_files()
+        data = _call_probe_method(_probe(context), "recent_files", allow_live_scan=False)
         files = data.get("files", [])
         persona = PersonaContract(context.config)
         if files:
             summary = persona.report(f"Recent file bearings recovered {len(files)} local items from the current watch.")
+        elif data.get("live_probe_deferred"):
+            summary = persona.report("Recent file bearings are not cached yet, so I started a background scan.")
         else:
             summary = persona.report("Recent file bearings are empty right now.")
         return ToolResult(success=True, summary=summary, data=data)

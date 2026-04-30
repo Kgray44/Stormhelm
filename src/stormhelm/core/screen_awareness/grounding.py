@@ -248,7 +248,7 @@ class DeterministicGroundingEngine:
         if _extract_roles(lowered) or _extract_spatial(lowered) or _extract_appearance(lowered):
             return True
         if intent in {ScreenIntentType.EXPLAIN_VISIBLE_CONTENT, ScreenIntentType.SOLVE_VISIBLE_PROBLEM} and (
-            observation.selected_text or observation.workspace_snapshot.get("active_item")
+            observation.selected_text or observation.visual_text or observation.workspace_snapshot.get("active_item")
         ):
             return True
         return False
@@ -373,6 +373,20 @@ class DeterministicGroundingEngine:
                     source_type=ScreenSourceType.SELECTION,
                     visible_text=observation.selected_text,
                     semantic_metadata=dict(observation.selection_metadata),
+                )
+            )
+        if observation.visual_text:
+            label = _preview(observation.visual_text)
+            source_type = ScreenSourceType.PROVIDER_VISION if observation.visual_metadata.get("visual_text_source") == "provider_vision" else ScreenSourceType.LOCAL_OCR
+            candidates.append(
+                GroundingCandidate(
+                    candidate_id="visual_text",
+                    label=label,
+                    role=_detect_role(label, kind="screen_capture", default=GroundingCandidateRole.REGION),
+                    source_channel=GroundingEvidenceChannel.NATIVE_OBSERVATION,
+                    source_type=source_type,
+                    visible_text=observation.visual_text,
+                    semantic_metadata=dict(observation.visual_metadata),
                 )
             )
         active_item = observation.workspace_snapshot.get("active_item")

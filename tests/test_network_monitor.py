@@ -134,6 +134,27 @@ def test_network_monitor_detects_packet_loss_burst_and_latency_spike_windows(wor
     assert "external_packet_loss_burst" in event_kinds
 
 
+def test_network_monitor_cached_snapshot_does_not_force_live_sample(
+    workspace_temp_dir: Path,
+) -> None:
+    probe = ScriptedProbe([_step(), _step(gateway_latency_ms=170)])
+    monitor = NetworkMonitor(
+        probe=probe,
+        cloudflare_provider=StubCloudflareProvider(),
+        history_path=workspace_temp_dir / "network-history.json",
+    )
+
+    monitor._sample_once(mode="idle")
+    probe.index = 999
+
+    snapshot = monitor.snapshot_cached()
+
+    assert snapshot["monitoring"]["sample_count"] == 1
+    assert probe.index == 999
+    assert snapshot["system_resource_freshness_state"] in {"fresh", "stale"}
+    assert snapshot["system_probe_deferred"] is False
+
+
 def test_network_monitor_detects_roam_linked_outage_periods(workspace_temp_dir: Path) -> None:
     probe = ScriptedProbe(
         [

@@ -79,8 +79,8 @@ def test_l5a_known_scaffolds_and_deferred_paths_are_labeled_honestly() -> None:
     assert items["l42.software_execute_approved_operation_continuation"].current_status == AuditStatus.POLICY_ONLY
     assert items["l41.background_refresh_hook"].current_status == AuditStatus.SCAFFOLD_ONLY
     assert items["l45.retry_yield_cancellation_cooperation"].current_status == AuditStatus.PARTIAL_USED
-    assert items["l5.true_openai_http_streaming"].current_status == AuditStatus.PARTIAL_USED
-    assert items["l5.local_live_playback_backend_streaming"].current_status == AuditStatus.PARTIAL_USED
+    assert items["l5.true_openai_http_streaming"].current_status == AuditStatus.LIVE_USED
+    assert items["l5.local_live_playback_backend_streaming"].current_status == AuditStatus.LIVE_USED
     assert items["l5.normal_assistant_voice_output_streaming"].current_status == AuditStatus.LIVE_USED
     assert items["l5.normal_assistant_voice_output_streaming"].recommended_phase == "L6"
 

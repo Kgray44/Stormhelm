@@ -16,6 +16,8 @@ ENVELOPE_SOURCES = {
     "unavailable",
 }
 
+CENTER_BLOB_SCALE_GAIN = 0.32
+
 ANCHOR_STATES = {
     "dormant",
     "idle",
@@ -39,8 +41,17 @@ class VoiceAudioEnvelope:
     source: str
     rms_level: float = 0.0
     peak_level: float = 0.0
+    instant_audio_level: float = 0.0
+    fast_audio_level: float = 0.0
     smoothed_level: float = 0.0
     speech_energy: float = 0.0
+    visual_drive_level: float = 0.0
+    visual_drive_peak: float = 0.0
+    center_blob_drive: float = 0.0
+    center_blob_scale_drive: float = 0.0
+    center_blob_scale: float = 1.0
+    outer_speaking_motion: float = 0.0
+    visual_gain: float = 1.85
     noise_floor: float = 0.015
     is_silence: bool = True
     last_update_at: str = ""
@@ -54,14 +65,50 @@ class VoiceAudioEnvelope:
             "source": self.source,
             "rms_level": _round(self.rms_level),
             "peak_level": _round(self.peak_level),
+            "instant_audio_level": _round(self.instant_audio_level),
+            "fast_audio_level": _round(self.fast_audio_level),
             "smoothed_level": _round(self.smoothed_level),
             "speech_energy": _round(self.speech_energy),
+            "visual_drive_level": _round(self.visual_drive_level),
+            "visual_drive_peak": _round(self.visual_drive_peak),
+            "center_blob_drive": _round(self.center_blob_drive),
+            "center_blob_scale_drive": _round(self.center_blob_scale_drive),
+            "center_blob_scale": _round(self.center_blob_scale, maximum=2.0),
+            "outer_speaking_motion": _round(self.outer_speaking_motion),
+            "visual_gain": _round(self.visual_gain, maximum=4.0),
             "noise_floor": _round(self.noise_floor),
             "is_silence": bool(self.is_silence),
             "last_update_at": self.last_update_at,
             "update_hz": int(self.update_hz),
             "audio_reactive_available": bool(self.audio_reactive_available),
             "synthetic": bool(self.synthetic),
+            "raw_audio_present": False,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class AudioEnvelopeFrame:
+    timestamp: str
+    audio_offset_ms: int
+    duration_ms: int
+    rms: float
+    peak: float
+    visual_drive: float
+    envelope: VoiceAudioEnvelope
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "timestamp": self.timestamp,
+            "audio_offset_ms": int(self.audio_offset_ms),
+            "duration_ms": int(self.duration_ms),
+            "rms": _round(self.rms),
+            "peak": _round(self.peak),
+            "visual_drive": _round(self.visual_drive),
+            "center_blob_drive": _round(self.envelope.center_blob_drive),
+            "center_blob_scale_drive": _round(self.envelope.center_blob_scale_drive),
+            "center_blob_scale": _round(self.envelope.center_blob_scale, maximum=2.0),
+            "source": self.envelope.source,
+            "synthetic": bool(self.envelope.synthetic),
             "raw_audio_present": False,
         }
 
@@ -96,21 +143,120 @@ def compute_voice_audio_envelope(
             update_hz=update_hz,
             noise_floor=noise_floor,
         )
+    return _voice_audio_envelope_from_samples(
+        samples,
+        source=normalized_source,
+        previous=previous,
+        update_hz=update_hz,
+        noise_floor=noise_floor,
+    )
+
+
+def compute_voice_audio_envelope_frames(
+    audio: bytes | bytearray | memoryview | None,
+    *,
+    audio_format: str = "pcm",
+    source: str = "streaming_chunk_envelope",
+    previous: VoiceAudioEnvelope | dict[str, Any] | None = None,
+    update_hz: int = 30,
+    sample_rate_hz: int = 24000,
+    channels: int = 1,
+    noise_floor: float = 0.015,
+) -> list[AudioEnvelopeFrame]:
+    """Split PCM output into playback-time visual envelope frames."""
+
+    normalized_source = _source(source)
+    payload = _audio_payload(audio, audio_format=audio_format)
+    samples = _pcm16_samples(payload)
+    if not samples:
+        return []
+    rate = max(1, int(sample_rate_hz or 24000))
+    channel_count = max(1, int(channels or 1))
+    effective_hz = max(1, min(60, int(update_hz or 30)))
+    samples_per_frame = max(channel_count, int((rate * channel_count) / effective_hz))
+    frames: list[AudioEnvelopeFrame] = []
+    previous_frame: VoiceAudioEnvelope | dict[str, Any] | None = previous
+    for offset in range(0, len(samples), samples_per_frame):
+        frame_samples = samples[offset : offset + samples_per_frame]
+        if not frame_samples:
+            continue
+        envelope = _voice_audio_envelope_from_samples(
+            frame_samples,
+            source=normalized_source,
+            previous=previous_frame,
+            update_hz=effective_hz,
+            noise_floor=noise_floor,
+        )
+        duration_ms = max(
+            1,
+            int(round((len(frame_samples) / float(rate * channel_count)) * 1000.0)),
+        )
+        frames.append(
+            AudioEnvelopeFrame(
+                timestamp=envelope.last_update_at,
+                audio_offset_ms=int(round((offset / float(rate * channel_count)) * 1000.0)),
+                duration_ms=duration_ms,
+                rms=envelope.rms_level,
+                peak=envelope.peak_level,
+                visual_drive=envelope.visual_drive_level,
+                envelope=envelope,
+            )
+        )
+        previous_frame = envelope
+    return frames
+
+
+def _voice_audio_envelope_from_samples(
+    samples: list[int],
+    *,
+    source: str,
+    previous: VoiceAudioEnvelope | dict[str, Any] | None,
+    update_hz: int,
+    noise_floor: float,
+) -> VoiceAudioEnvelope:
     peak = max(abs(sample) for sample in samples) / 32768.0
     rms = math.sqrt(sum(sample * sample for sample in samples) / len(samples)) / 32768.0
     energy = _compress_level(rms, noise_floor=noise_floor)
     smoothed = _smooth_level(energy, previous)
+    (
+        visual_drive,
+        visual_peak,
+        visual_gain,
+        instant_audio_level,
+        fast_audio_level,
+        center_blob_drive,
+        center_blob_scale_drive,
+        center_blob_scale,
+        outer_speaking_motion,
+    ) = _visual_drive_levels(
+        energy,
+        peak,
+        source=source,
+        previous=previous,
+        noise_floor=noise_floor,
+        rms_level=rms,
+        smoothed_level=smoothed,
+    )
     return VoiceAudioEnvelope(
-        source=normalized_source,
+        source=source,
         rms_level=_clamp(rms),
         peak_level=_clamp(peak),
+        instant_audio_level=instant_audio_level,
+        fast_audio_level=fast_audio_level,
         smoothed_level=smoothed,
         speech_energy=energy,
+        visual_drive_level=visual_drive,
+        visual_drive_peak=visual_peak,
+        center_blob_drive=center_blob_drive,
+        center_blob_scale_drive=center_blob_scale_drive,
+        center_blob_scale=center_blob_scale,
+        outer_speaking_motion=outer_speaking_motion,
+        visual_gain=visual_gain,
         noise_floor=_clamp(noise_floor),
         is_silence=energy <= 0.02,
         last_update_at=utc_now_iso(),
         update_hz=max(1, min(60, int(update_hz or 30))),
-        audio_reactive_available=normalized_source
+        audio_reactive_available=source
         in {"playback_output_envelope", "streaming_chunk_envelope", "precomputed_artifact_envelope"},
         synthetic=False,
         raw_audio_present=False,
@@ -129,12 +275,40 @@ def synthetic_voice_audio_envelope(
     value = _clamp(level)
     energy = _compress_level(value, noise_floor=0.0)
     smoothed = _smooth_level(energy, previous)
+    (
+        visual_drive,
+        visual_peak,
+        visual_gain,
+        instant_audio_level,
+        fast_audio_level,
+        center_blob_drive,
+        center_blob_scale_drive,
+        center_blob_scale,
+        outer_speaking_motion,
+    ) = _visual_drive_levels(
+        energy,
+        value,
+        source=normalized,
+        previous=previous,
+        noise_floor=0.0,
+        rms_level=value,
+        smoothed_level=smoothed,
+    )
     return VoiceAudioEnvelope(
         source=normalized,
         rms_level=value,
         peak_level=value,
+        instant_audio_level=instant_audio_level,
+        fast_audio_level=fast_audio_level,
         smoothed_level=smoothed,
         speech_energy=energy,
+        visual_drive_level=visual_drive,
+        visual_drive_peak=visual_peak,
+        center_blob_drive=center_blob_drive,
+        center_blob_scale_drive=center_blob_scale_drive,
+        center_blob_scale=center_blob_scale,
+        outer_speaking_motion=outer_speaking_motion,
+        visual_gain=visual_gain,
         noise_floor=_clamp(noise_floor),
         is_silence=energy <= 0.02,
         last_update_at=utc_now_iso(),
@@ -151,7 +325,50 @@ def build_voice_anchor_payload(voice_status: dict[str, Any] | None) -> dict[str,
     state = _state(explicit.get("state") or _derive_anchor_state(voice))
     envelope = _select_envelope(voice, state=state)
     output_level = envelope.smoothed_level
-    motion_intensity = _motion_intensity(state, output_level, envelope)
+    visual_drive_level = _explicit_float(
+        explicit.get("visual_drive_level"),
+        explicit.get("voice_visual_drive_level"),
+        default=envelope.visual_drive_level,
+    )
+    visual_drive_peak = _explicit_float(
+        explicit.get("visual_drive_peak"),
+        explicit.get("voice_visual_drive_peak"),
+        default=envelope.visual_drive_peak,
+    )
+    visual_gain = _explicit_float(
+        explicit.get("visual_gain"),
+        explicit.get("voice_visual_gain"),
+        default=envelope.visual_gain,
+        maximum=4.0,
+    )
+    center_blob_drive = _explicit_float(
+        explicit.get("center_blob_drive"),
+        explicit.get("voice_center_blob_drive"),
+        explicit.get("center_blob_scale_drive"),
+        explicit.get("voice_center_blob_scale_drive"),
+        default=envelope.center_blob_scale_drive,
+    )
+    center_blob_scale_drive = _explicit_float(
+        explicit.get("center_blob_scale_drive"),
+        explicit.get("voice_center_blob_scale_drive"),
+        explicit.get("center_blob_drive"),
+        explicit.get("voice_center_blob_drive"),
+        default=center_blob_drive,
+    )
+    center_blob_scale = _explicit_float(
+        explicit.get("center_blob_scale"),
+        explicit.get("voice_center_blob_scale"),
+        default=1.0 + center_blob_scale_drive * CENTER_BLOB_SCALE_GAIN,
+        maximum=2.0,
+    )
+    outer_speaking_motion = _explicit_float(
+        explicit.get("outer_speaking_motion"),
+        explicit.get("voice_outer_speaking_motion"),
+        default=envelope.outer_speaking_motion,
+    )
+    if state not in {"speaking", "preparing_speech"}:
+        outer_speaking_motion = min(outer_speaking_motion, visual_drive_level)
+    motion_intensity = _motion_intensity(state, outer_speaking_motion, envelope)
     if "motion_intensity" in explicit:
         motion_intensity = _clamp(_float(explicit.get("motion_intensity")))
     audio_source = _source(
@@ -180,8 +397,17 @@ def build_voice_anchor_payload(voice_status: dict[str, Any] | None) -> dict[str,
         "output_level_rms": _round(
             _float(explicit.get("output_level_rms"), envelope.rms_level)
         ),
+        "audio_level_raw": _round(
+            _float(explicit.get("audio_level_raw"), envelope.rms_level)
+        ),
         "output_level_peak": _round(
             _float(explicit.get("output_level_peak"), envelope.peak_level)
+        ),
+        "instant_audio_level": _round(
+            _float(explicit.get("instant_audio_level"), envelope.instant_audio_level)
+        ),
+        "fast_audio_level": _round(
+            _float(explicit.get("fast_audio_level"), envelope.fast_audio_level)
         ),
         "smoothed_output_level": _round(
             _float(explicit.get("smoothed_output_level"), envelope.smoothed_level)
@@ -189,6 +415,14 @@ def build_voice_anchor_payload(voice_status: dict[str, Any] | None) -> dict[str,
         "speech_energy": _round(
             _float(explicit.get("speech_energy"), envelope.speech_energy)
         ),
+        "visual_drive_level": _round(visual_drive_level),
+        "visual_drive_peak": _round(max(visual_drive_peak, visual_drive_level)),
+        "center_blob_drive": _round(center_blob_drive),
+        "center_blob_scale_drive": _round(center_blob_scale_drive),
+        "center_blob_scale": _round(center_blob_scale, maximum=2.0),
+        "outer_speaking_motion": _round(outer_speaking_motion),
+        "visual_gain": _round(visual_gain, maximum=4.0),
+        "audio_drive_level": _round(center_blob_scale_drive),
         "first_audio_started": bool(
             explicit.get("first_audio_started")
             or _dict(voice.get("playback")).get("first_audio_started")
@@ -234,6 +468,13 @@ def _derive_anchor_state(voice: dict[str, Any]) -> str:
     confirmation = _dict(voice.get("spoken_confirmation"))
     pipeline = _dict(voice.get("pipeline_summary"))
     last_error = _dict(voice.get("last_error"))
+    playback_active_now = _playback_active(voice)
+    if (
+        playback_active_now
+        and not _interrupted(interruption)
+        and not _truthy(interruption.get("spoken_output_muted"))
+    ):
+        return "speaking"
     if _text(last_error.get("code")):
         return "error"
     if not _truthy(voice.get("enabled", True)) or not _truthy(
@@ -250,7 +491,7 @@ def _derive_anchor_state(voice: dict[str, Any]) -> str:
         return "interrupted"
     if _truthy(interruption.get("spoken_output_muted")):
         return "muted"
-    if _playback_active(voice):
+    if playback_active_now:
         return "speaking"
     if _preparing_speech(voice):
         return "preparing_speech"
@@ -302,14 +543,100 @@ def _envelope_from_dict(value: Any) -> VoiceAudioEnvelope | None:
     if not payload:
         return None
     source = _source(payload.get("source") or payload.get("audio_reactive_source"))
+    rms_level = _clamp(_float(payload.get("rms_level"), payload.get("output_level_rms")))
+    peak_level = _clamp(_float(payload.get("peak_level"), payload.get("output_level_peak")))
+    smoothed_level = _clamp(
+        _float(payload.get("smoothed_level"), payload.get("smoothed_output_level"))
+    )
+    speech_energy = _clamp(_float(payload.get("speech_energy"), smoothed_level))
+    (
+        computed_drive,
+        computed_peak,
+        computed_gain,
+        computed_instant_level,
+        computed_fast_level,
+        computed_center_drive,
+        computed_center_scale_drive,
+        computed_center_scale,
+        computed_outer_motion,
+    ) = _visual_drive_levels(
+        speech_energy,
+        peak_level,
+        source=source,
+        previous=None,
+        noise_floor=_clamp(_float(payload.get("noise_floor"), 0.015)),
+        rms_level=rms_level,
+        smoothed_level=smoothed_level,
+    )
+    visual_drive_level = _explicit_float(
+        payload.get("visual_drive_level"),
+        payload.get("voice_visual_drive_level"),
+        payload.get("audio_drive_level"),
+        default=computed_drive,
+    )
+    visual_drive_peak = _explicit_float(
+        payload.get("visual_drive_peak"),
+        payload.get("voice_visual_drive_peak"),
+        default=computed_peak,
+    )
+    instant_audio_level = _explicit_float(
+        payload.get("instant_audio_level"),
+        payload.get("voice_instant_audio_level"),
+        default=computed_instant_level,
+    )
+    fast_audio_level = _explicit_float(
+        payload.get("fast_audio_level"),
+        payload.get("voice_fast_audio_level"),
+        default=computed_fast_level,
+    )
+    center_blob_drive = _explicit_float(
+        payload.get("center_blob_drive"),
+        payload.get("voice_center_blob_drive"),
+        payload.get("audio_drive_level"),
+        payload.get("center_blob_scale_drive"),
+        payload.get("voice_center_blob_scale_drive"),
+        default=computed_center_scale_drive,
+    )
+    center_blob_scale_drive = _explicit_float(
+        payload.get("center_blob_scale_drive"),
+        payload.get("voice_center_blob_scale_drive"),
+        payload.get("center_blob_drive"),
+        payload.get("voice_center_blob_drive"),
+        payload.get("audio_drive_level"),
+        default=computed_center_scale_drive,
+    )
+    center_blob_scale = _explicit_float(
+        payload.get("center_blob_scale"),
+        payload.get("voice_center_blob_scale"),
+        default=1.0 + center_blob_scale_drive * CENTER_BLOB_SCALE_GAIN,
+        maximum=2.0,
+    )
+    outer_speaking_motion = _explicit_float(
+        payload.get("outer_speaking_motion"),
+        payload.get("voice_outer_speaking_motion"),
+        default=computed_outer_motion,
+    )
+    visual_gain = _explicit_float(
+        payload.get("visual_gain"),
+        payload.get("voice_visual_gain"),
+        default=computed_gain,
+        maximum=4.0,
+    )
     return VoiceAudioEnvelope(
         source=source,
-        rms_level=_clamp(_float(payload.get("rms_level"), payload.get("output_level_rms"))),
-        peak_level=_clamp(_float(payload.get("peak_level"), payload.get("output_level_peak"))),
-        smoothed_level=_clamp(
-            _float(payload.get("smoothed_level"), payload.get("smoothed_output_level"))
-        ),
-        speech_energy=_clamp(_float(payload.get("speech_energy"))),
+        rms_level=rms_level,
+        peak_level=peak_level,
+        instant_audio_level=instant_audio_level,
+        fast_audio_level=fast_audio_level,
+        smoothed_level=smoothed_level,
+        speech_energy=speech_energy,
+        visual_drive_level=visual_drive_level,
+        visual_drive_peak=max(visual_drive_peak, visual_drive_level),
+        center_blob_drive=center_blob_drive,
+        center_blob_scale_drive=center_blob_scale_drive,
+        center_blob_scale=center_blob_scale,
+        outer_speaking_motion=outer_speaking_motion,
+        visual_gain=visual_gain,
         noise_floor=_clamp(_float(payload.get("noise_floor"), 0.015)),
         is_silence=bool(payload.get("is_silence", False)),
         last_update_at=str(payload.get("last_update_at") or payload.get("visualizer_last_update_at") or utc_now_iso()),
@@ -322,11 +649,11 @@ def _envelope_from_dict(value: Any) -> VoiceAudioEnvelope | None:
     )
 
 
-def _motion_intensity(state: str, output_level: float, envelope: VoiceAudioEnvelope) -> float:
+def _motion_intensity(state: str, outer_speaking_motion: float, envelope: VoiceAudioEnvelope) -> float:
     if state == "speaking":
         if envelope.source in {"synthetic_fallback_envelope", "unavailable"}:
-            return 0.48
-        return _clamp(0.42 + output_level * 0.58)
+            return _clamp(0.16 + outer_speaking_motion * 0.26)
+        return _clamp(0.14 + outer_speaking_motion * 0.74)
     return {
         "dormant": 0.03,
         "idle": 0.12,
@@ -444,6 +771,168 @@ def _smooth_level(
     return _clamp(previous_value + (value - previous_value) * alpha)
 
 
+def _instant_audio_level(rms_level: float, peak_level: float, *, noise_floor: float) -> float:
+    current = max(_clamp(rms_level), _clamp(peak_level) * 0.58)
+    gate = max(0.004, noise_floor * 1.08)
+    if current <= gate:
+        return 0.0
+    normalized = _clamp((current - gate) / max(0.001, 1.0 - gate))
+    return _clamp(pow(normalized, 0.32) * 1.03)
+
+
+def _fast_audio_level(
+    value: float, previous: VoiceAudioEnvelope | dict[str, Any] | None
+) -> float:
+    previous_value = _previous_fast_audio_level(previous)
+    if previous_value is None:
+        return _clamp(value)
+    alpha = 0.94 if value >= previous_value else 0.9
+    return _clamp(previous_value + (_clamp(value) - previous_value) * alpha)
+
+
+def _visual_drive_levels(
+    energy: float,
+    peak_level: float,
+    *,
+    source: str,
+    previous: VoiceAudioEnvelope | dict[str, Any] | None,
+    noise_floor: float,
+    rms_level: float,
+    smoothed_level: float,
+) -> tuple[float, float, float, float, float, float, float, float, float]:
+    if source == "unavailable":
+        return 0.0, 0.0, 1.85, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0
+    energy_level = _clamp(energy)
+    drive_energy = max(energy_level, _clamp(smoothed_level))
+    peak = _clamp(peak_level)
+    instant_level = _instant_audio_level(rms_level, peak, noise_floor=noise_floor)
+    fast_level = _fast_audio_level(instant_level, previous)
+    if source == "synthetic_fallback_envelope":
+        if energy_level <= 0.0 and peak <= 0.0:
+            return 0.0, 0.0, 1.2, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0
+        fallback_energy = max(energy_level, drive_energy, peak)
+        drive = _clamp(pow(fallback_energy, 0.82) * 0.42)
+        instant_level = _instant_audio_level(max(rms_level, fallback_energy), peak, noise_floor=0.0)
+        fast_level = _fast_audio_level(instant_level, previous)
+        center_drive = _clamp(fast_level)
+        outer_motion = _clamp(max(0.1, drive))
+        center_scale = 1.0 + center_drive * CENTER_BLOB_SCALE_GAIN
+        return (
+            drive,
+            max(drive, _clamp(drive + 0.08)),
+            1.2,
+            instant_level,
+            fast_level,
+            center_drive,
+            center_drive,
+            center_scale,
+            outer_motion,
+        )
+    if energy_level <= 0.018 and peak <= max(0.02, noise_floor):
+        raw_drive = 0.0
+        raw_center = 0.0
+    else:
+        raw_drive = _clamp(pow(max(drive_energy, 0.0), 0.45) * 0.99)
+        raw_center = _clamp(pow(max(drive_energy, 0.0), 0.9) * 1.15)
+    previous_drive = _previous_visual_drive(previous)
+    if previous_drive is not None:
+        alpha = 0.88 if raw_drive >= previous_drive else 0.74
+        raw_drive = _clamp(previous_drive + (raw_drive - previous_drive) * alpha)
+    previous_center = _previous_center_blob_drive(previous)
+    if previous_center is not None:
+        alpha = 0.92 if raw_center >= previous_center else 0.76
+        raw_center = _clamp(previous_center + (raw_center - previous_center) * alpha)
+    peak_floor = 0.0
+    if peak > noise_floor:
+        normalized_peak = _clamp((peak - noise_floor) / max(0.001, 1.0 - noise_floor))
+        peak_floor = _clamp(pow(normalized_peak, 0.55) * 0.92)
+    visual_peak = _clamp(max(raw_drive, peak_floor))
+    center_drive = fast_level if instant_level > 0.0 or fast_level > 0.0 else raw_center
+    center_scale = 1.0 + center_drive * CENTER_BLOB_SCALE_GAIN
+    outer_motion = _clamp(max(raw_drive, center_drive * 0.72))
+    return (
+        raw_drive,
+        visual_peak,
+        1.85,
+        instant_level,
+        fast_level,
+        center_drive,
+        center_drive,
+        center_scale,
+        outer_motion,
+    )
+
+
+def _previous_visual_drive(
+    previous: VoiceAudioEnvelope | dict[str, Any] | None
+) -> float | None:
+    if isinstance(previous, VoiceAudioEnvelope):
+        return previous.visual_drive_level
+    if isinstance(previous, dict):
+        value = _optional_float(
+            previous.get("visual_drive_level"),
+            previous.get("voice_visual_drive_level"),
+            previous.get("audio_drive_level"),
+        )
+        return _clamp(value) if value is not None else None
+    return None
+
+
+def _previous_center_blob_drive(
+    previous: VoiceAudioEnvelope | dict[str, Any] | None
+) -> float | None:
+    if isinstance(previous, VoiceAudioEnvelope):
+        return previous.center_blob_drive
+    if isinstance(previous, dict):
+        value = _optional_float(
+            previous.get("center_blob_drive"),
+            previous.get("voice_center_blob_drive"),
+            previous.get("audio_drive_level"),
+        )
+        return _clamp(value) if value is not None else None
+    return None
+
+
+def _previous_fast_audio_level(
+    previous: VoiceAudioEnvelope | dict[str, Any] | None
+) -> float | None:
+    if isinstance(previous, VoiceAudioEnvelope):
+        return previous.fast_audio_level
+    if isinstance(previous, dict):
+        value = _optional_float(
+            previous.get("fast_audio_level"),
+            previous.get("voice_fast_audio_level"),
+            previous.get("center_blob_scale_drive"),
+            previous.get("voice_center_blob_scale_drive"),
+            previous.get("center_blob_drive"),
+            previous.get("voice_center_blob_drive"),
+            previous.get("audio_drive_level"),
+        )
+        return _clamp(value) if value is not None else None
+    return None
+
+
+def _explicit_float(
+    *values: Any,
+    default: float = 0.0,
+    minimum: float = 0.0,
+    maximum: float = 1.0,
+) -> float:
+    value = _optional_float(*values)
+    return _clamp(default if value is None else value, minimum, maximum)
+
+
+def _optional_float(*values: Any) -> float | None:
+    for value in values:
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def _source(value: Any) -> str:
     text = _text(value)
     return text if text in ENVELOPE_SOURCES else "unavailable"
@@ -477,5 +966,5 @@ def _clamp(value: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
     return max(minimum, min(maximum, float(value)))
 
 
-def _round(value: float) -> float:
-    return round(_clamp(float(value)), 4)
+def _round(value: float, *, maximum: float = 1.0) -> float:
+    return round(_clamp(float(value), maximum=maximum), 4)

@@ -6,8 +6,8 @@ Machine-readable inventory is available through `stormhelm.core.latency_integrat
 
 ## Executive Summary
 
-- Fully live: L0 trace contracts, `/chat/send` latency metadata, command-eval latency projection, voice latency projection, route latency policy, fail-fast posture, L2 route triage, provider fallback suppression, the core context snapshot store, worker lane/timing, inline fast-path protection, workspace assemble continuation, L4.4 reporting, priority scheduler/caps, streaming TTS contracts, normal assistant voice output streaming, and voice first-audio metrics.
-- Partially wired: partial-response posture, snapshot policy breadth, invalidation hooks, async route progress contracts, most L4.3 continuation handlers, scheduler retry/yield/cancel cooperation, true OpenAI streaming proof, local live playback hooks, and UI rendering depth.
+- Fully live: L0 trace contracts, `/chat/send` latency metadata, command-eval latency projection, voice latency projection, route latency policy, fail-fast posture, L2 route triage, provider fallback suppression, the core context snapshot store, worker lane/timing, inline fast-path protection, workspace assemble continuation, L4.4 reporting, priority scheduler/caps, streaming TTS contracts, true OpenAI HTTP streaming, Windows local progressive speaker playback, normal assistant voice output streaming, and voice first-audio metrics.
+- Partially wired: partial-response posture, snapshot policy breadth, invalidation hooks, async route progress contracts, most L4.3 continuation handlers, scheduler retry/yield/cancel cooperation, non-Windows speaker streaming, and broad UI rendering depth.
 - Scaffold or policy-only: background refresh hooks, screen verify-change continuation, and software execute-approved-operation continuation.
 - Future-deferred: none in this inventory.
 - Dead/unknown: none identified in this inventory.
@@ -29,6 +29,8 @@ Machine-readable inventory is available through `stormhelm.core.latency_integrat
 - `l44.validation_and_kraken_reporting`
 - `l45.priority_scheduler_and_caps`
 - `l5.streaming_tts_contracts`
+- `l5.true_openai_http_streaming`
+- `l5.local_live_playback_backend_streaming`
 - `l5.normal_assistant_voice_output_streaming`
 - `l5.voice_first_audio_metrics`
 
@@ -44,8 +46,6 @@ Machine-readable inventory is available through `stormhelm.core.latency_integrat
 - `l43.discord_dispatch_approved_preview_continuation`: handler exists with approval/fingerprint gates, dispatch front-half conversion is narrow.
 - `l43.network_live_diagnosis_continuation`: handler exists, normal network route conversion is narrow.
 - `l45.retry_yield_cancellation_cooperation`: JobManager tracks states, but real tool cooperation is not broad.
-- `l5.true_openai_http_streaming`: true HTTP streaming code path is implemented and unit-tested with injected transport, but live OpenAI network smoke has not run.
-- `l5.local_live_playback_backend_streaming`: mock and backend hooks exist; a real live playback backend is not proven.
 - `ui.status_and_deck_surfaces`: backend status is richer than the current UI proof surface.
 
 ## Scaffold Or Policy Only
@@ -61,14 +61,14 @@ None identified in the L5A inventory.
 ## Risk Ranking
 
 - High: software execute continuations must not be claimed as worker-backed route behavior until the trust/side-effect front half is proofed.
-- Medium: true OpenAI provider streaming, real-device live playback, wake-loop streaming, snapshot invalidation breadth, background refresh coverage, retry/yield/cancel cooperation, continuation handler reachability, and UI rendering depth need burn-down.
-- Low: L0 tracing, route triage, provider suppression, core worker timing, inline fast-path protection, scheduler cap mechanics, streaming TTS contracts, and normal assistant voice-output streaming are wired and tested.
+- Medium: wake-loop streaming breadth, snapshot invalidation breadth, background refresh coverage, retry/yield/cancel cooperation, continuation handler reachability, non-Windows speaker streaming, and broad UI rendering depth need burn-down.
+- Low: L0 tracing, route triage, provider suppression, core worker timing, inline fast-path protection, scheduler cap mechanics, streaming TTS contracts, true OpenAI HTTP streaming, Windows local progressive speaker playback, and normal assistant voice-output streaming are wired and tested.
 
 ## Recommended L5.1 Scope
 
 - Keep normal assistant voice output on `VoiceService.stream_core_approved_spoken_text` when streaming is enabled and speech is allowed.
 - Keep the OpenAI true HTTP stream path and buffered projection labels distinct.
-- Prove local live playback streaming with a real backend or report typed unsupported state.
+- Keep Windows local progressive speaker playback as the supported desktop path and report typed unsupported state on non-Windows or unavailable backends.
 - Keep mock smoke benchmarks for request-to-first-audio and Core-result-to-first-audio, and run opt-in live smoke when device/network credentials are available.
 - Keep buffered fallback explicit and prevent duplicate speech.
 
@@ -111,8 +111,8 @@ None identified in the L5A inventory.
 | `l45.priority_scheduler_and_caps` | L4.5 | live_used | Worker loop enforces priority/lane order, protected capacity, and caps. | `tests/test_latency_l45_scheduler_hardening.py` | pressure state, cap wait, queue budget | Medium | keep | L5.1 |
 | `l45.retry_yield_cancellation_cooperation` | L4.5 | partial_used | JobManager records retry/cancel/restart; tool cooperation is limited. | `tests/test_latency_l45_scheduler_hardening.py`, `tests/test_job_manager.py` | retry/cancel/restart fields | Medium | defer_to_phase | L5.1/L6 |
 | `l5.streaming_tts_contracts` | L5 | live_used | Core-approved normal voice output can use the streaming service path when streaming TTS and streaming playback are enabled. | `tests/test_latency_l5_voice_streaming_first_audio.py`, `tests/test_latency_l51_voice_streaming_reality.py` | `voice_streaming_tts_enabled`, `voice_tts_first_chunk_ms`, `voice_streaming_transport_kind`, `voice_streaming_enabled_count`, `voice_streaming_transport_kind_counts` | Low | keep | L6 |
-| `l5.true_openai_http_streaming` | L5 | partial_used | OpenAI provider uses an HTTP streaming path when the normal provider path is selected; injected transport tests prove true-stream labeling, while legacy buffered helpers are labeled `buffered_chunk_projection`. | `tests/test_latency_l5_voice_streaming_first_audio.py`, `tests/test_latency_l51_voice_streaming_reality.py` | `voice_streaming_transport_kind`, `voice_streaming_fallback_used`, `voice_buffered_projection_count` | Medium | defer_to_phase | L6 |
-| `l5.local_live_playback_backend_streaming` | L5 | partial_used | Mock live stream and local backend hooks exist; real backend proof missing. | `tests/test_latency_l5_voice_streaming_first_audio.py`, `tests/test_voice_playback_provider.py` | playback start, partial playback | Medium | defer_to_phase | L6 |
+| `l5.true_openai_http_streaming` | L5 | live_used | OpenAI provider uses an HTTP streaming path when the normal provider path is selected; injected transport tests prove true-stream labeling, while legacy buffered helpers are labeled `buffered_chunk_projection`. | `tests/test_latency_l5_voice_streaming_first_audio.py`, `tests/test_latency_l51_voice_streaming_reality.py` | `voice_streaming_transport_kind`, `voice_streaming_fallback_used`, `voice_buffered_projection_count` | Low | keep | |
+| `l5.local_live_playback_backend_streaming` | L5 | live_used | Windows local provider accepts progressive PCM chunks from the Core-approved streaming path and plays them through the default output device when voice/playback gates are enabled. | `tests/test_latency_l5_voice_streaming_first_audio.py`, `tests/test_voice_playback_provider.py`, `tests/test_latency_l55_windows_voice_runtime.py` | playback start, partial playback, `speaker_backend_available` | Low | keep | |
 | `l5.normal_assistant_voice_output_streaming` | L5 | live_used | `/chat/send` assistant voice output and capture play-response select the streaming service path when streaming TTS and streaming playback are enabled. | `tests/test_latency_l5_voice_streaming_first_audio.py`, `tests/test_latency_l51_voice_streaming_reality.py` | `voice_stream_used_by_normal_path`, `voice_first_audio_ms`, `voice_streaming_path_used_count`, `normal_path_streaming_miss_count` | Medium | keep | L6 |
 | `l5.voice_first_audio_metrics` | L5 | live_used | Prewarm and first-audio summaries surface through voice status/trace. | `tests/test_latency_l5_voice_streaming_first_audio.py`, `tests/test_voice_latency_instrumentation.py` | prewarm, first-audio, partial playback | Medium | keep | L6 |
 | `ui.status_and_deck_surfaces` | L0-L5 | partial_used | Backend status exposes rich state; Deck/Ghost rendering proof is not broad. | `tests/test_ui_bridge.py`, `tests/test_command_surface.py`, `tests/test_voice_ui_state_payload.py` | status, metadata, command rows | Medium | defer_to_phase | L6 |

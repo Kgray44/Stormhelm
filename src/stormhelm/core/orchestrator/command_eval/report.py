@@ -493,6 +493,12 @@ def _format_kraken_latency_report(report: dict[str, Any]) -> str:
         f"- voice_buffered_projection_count: {report.get('voice_buffered_projection_count', 0)}",
         f"- normal_path_streaming_miss_count: {report.get('normal_path_streaming_miss_count', 0)}",
         f"- voice_first_chunk_before_complete_count: {report.get('voice_first_chunk_before_complete_count', 0)}",
+        f"- voice_sink_kind_counts: {report.get('voice_sink_kind_counts', {})}",
+        f"- voice_first_output_start_ms: {report.get('voice_first_output_start_ms', {})}",
+        f"- voice_null_sink_first_accept_ms: {report.get('voice_null_sink_first_accept_ms', {})}",
+        f"- voice_wake_loop_streaming_output_used_count: {report.get('voice_wake_loop_streaming_output_used_count', 0)}",
+        f"- voice_live_openai_smoke_run_count: {report.get('voice_live_openai_smoke_run_count', 0)}",
+        f"- voice_realtime_deferred_to_l6_count: {report.get('voice_realtime_deferred_to_l6_count', 0)}",
         f"- voice_streaming_fallback_count: {report.get('voice_streaming_fallback_count', 0)}",
         f"- voice_prewarm_used_count: {report.get('voice_prewarm_used_count', 0)}",
         f"- voice_partial_playback_count: {report.get('voice_partial_playback_count', 0)}",
@@ -691,12 +697,19 @@ def _kraken_latency_report(results: list[CommandEvalResult]) -> dict[str, Any]:
     continuation_runtime_by_handler: dict[str, list[float]] = defaultdict(list)
     voice_first_audio_values: list[float] = []
     voice_core_to_first_audio_values: list[float] = []
+    voice_first_output_values: list[float] = []
+    voice_null_sink_accept_values: list[float] = []
     voice_streaming_enabled_count = 0
     voice_transport_counts: Counter[str] = Counter()
+    voice_sink_counts: Counter[str] = Counter()
     voice_streaming_path_used_count = 0
     voice_buffered_projection_count = 0
     normal_path_streaming_miss_count = 0
     voice_first_chunk_before_complete_count = 0
+    voice_live_openai_smoke_run_count = 0
+    voice_wake_loop_streaming_output_used_count = 0
+    voice_realtime_deferred_to_l6_count = 0
+    voice_user_heard_claimed_count = 0
     voice_fallback_count = 0
     voice_prewarm_used_count = 0
     voice_partial_playback_count = 0
@@ -788,6 +801,9 @@ def _kraken_latency_report(results: list[CommandEvalResult]) -> dict[str, Any]:
         voice_transport = str(row.get("voice_streaming_transport_kind") or "")
         if voice_transport:
             voice_transport_counts[voice_transport] += 1
+        voice_sink = str(row.get("voice_sink_kind") or "")
+        if voice_sink:
+            voice_sink_counts[voice_sink] += 1
         if row.get("voice_stream_used_by_normal_path"):
             voice_streaming_path_used_count += 1
         elif row.get("voice_streaming_tts_enabled") and str(
@@ -804,6 +820,22 @@ def _kraken_latency_report(results: list[CommandEvalResult]) -> dict[str, Any]:
         voice_core_to_first_audio = float(row.get("voice_core_to_first_audio_ms") or 0.0)
         if voice_core_to_first_audio > 0:
             voice_core_to_first_audio_values.append(voice_core_to_first_audio)
+        voice_first_output = float(row.get("voice_first_output_start_ms") or 0.0)
+        if voice_first_output > 0:
+            voice_first_output_values.append(voice_first_output)
+        voice_null_sink_accept = float(
+            row.get("voice_null_sink_first_accept_ms") or 0.0
+        )
+        if voice_null_sink_accept > 0:
+            voice_null_sink_accept_values.append(voice_null_sink_accept)
+        if row.get("voice_live_openai_voice_smoke_run"):
+            voice_live_openai_smoke_run_count += 1
+        if row.get("voice_wake_loop_streaming_output_used"):
+            voice_wake_loop_streaming_output_used_count += 1
+        if row.get("voice_realtime_deferred_to_l6"):
+            voice_realtime_deferred_to_l6_count += 1
+        if row.get("voice_user_heard_claimed"):
+            voice_user_heard_claimed_count += 1
         if row.get("voice_streaming_fallback_used"):
             voice_fallback_count += 1
         if row.get("voice_prewarm_used"):
@@ -925,12 +957,24 @@ def _kraken_latency_report(results: list[CommandEvalResult]) -> dict[str, Any]:
         "p95_continuation_total_ms": _percentile(continuation_total_values, 0.95),
         "voice_first_audio_ms": _value_summary(voice_first_audio_values),
         "voice_core_to_first_audio_ms": _value_summary(voice_core_to_first_audio_values),
+        "voice_first_output_start_ms": _value_summary(voice_first_output_values),
+        "voice_null_sink_first_accept_ms": _value_summary(voice_null_sink_accept_values),
         "voice_streaming_enabled_count": voice_streaming_enabled_count,
         "voice_streaming_transport_kind_counts": dict(sorted(voice_transport_counts.items())),
+        "voice_sink_kind_counts": dict(sorted(voice_sink_counts.items())),
         "voice_streaming_path_used_count": voice_streaming_path_used_count,
         "voice_buffered_projection_count": voice_buffered_projection_count,
         "normal_path_streaming_miss_count": normal_path_streaming_miss_count,
         "voice_first_chunk_before_complete_count": voice_first_chunk_before_complete_count,
+        "voice_live_openai_smoke_run_count": voice_live_openai_smoke_run_count,
+        "voice_wake_loop_streaming_output_used_count": voice_wake_loop_streaming_output_used_count,
+        "voice_wake_loop_streaming_miss_count": sum(
+            1
+            for row in rows
+            if row.get("voice_wake_loop_streaming_miss_reason")
+        ),
+        "voice_realtime_deferred_to_l6_count": voice_realtime_deferred_to_l6_count,
+        "voice_user_heard_claimed_count": voice_user_heard_claimed_count,
         "voice_streaming_fallback_count": voice_fallback_count,
         "voice_prewarm_used_count": voice_prewarm_used_count,
         "voice_partial_playback_count": voice_partial_playback_count,
@@ -1523,6 +1567,14 @@ def _compact_latency_row(row: dict[str, Any]) -> dict[str, Any]:
         "voice_anchor_audio_level": row.get("voice_anchor_audio_level"),
         "voice_visualizer_update_hz": row.get("voice_visualizer_update_hz"),
         "voice_anchor_user_heard_claimed": row.get("voice_anchor_user_heard_claimed"),
+        "voice_sink_kind": row.get("voice_sink_kind"),
+        "voice_first_output_start_ms": row.get("voice_first_output_start_ms"),
+        "voice_null_sink_first_accept_ms": row.get("voice_null_sink_first_accept_ms"),
+        "voice_live_openai_voice_smoke_run": row.get("voice_live_openai_voice_smoke_run"),
+        "voice_wake_loop_streaming_output_used": row.get("voice_wake_loop_streaming_output_used"),
+        "voice_wake_loop_streaming_miss_reason": row.get("voice_wake_loop_streaming_miss_reason"),
+        "voice_realtime_deferred_to_l6": row.get("voice_realtime_deferred_to_l6"),
+        "voice_user_heard_claimed": row.get("voice_user_heard_claimed"),
         "hard_timeout": row.get("hard_timeout"),
         "failure_category": row.get("failure_category"),
     }

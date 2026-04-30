@@ -183,6 +183,58 @@ Env overrides: `STORMHELM_CALCULATIONS_ENABLED`, `STORMHELM_CALCULATIONS_PLANNER
 Sources: `config/default.toml`, `src/stormhelm/core/calculations/service.py`
 Tests: `tests/test_calculations.py`
 
+## Web Retrieval
+
+| Key | Type | Default | Required | Valid values | Read from | Behavior if missing/invalid |
+|---|---|---|---|---|---|---|
+| `web_retrieval.enabled` | bool | `true` | No | bool | TOML/env | Disables public web retrieval if false. |
+| `web_retrieval.planner_routing_enabled` | bool | `true` | No | bool | TOML/env | Allows summarize/read/render/extract URL requests to route here. |
+| `web_retrieval.debug_events_enabled` | bool | `true` | No | bool | TOML/env | Emits compact retrieval events without raw page text/html. |
+| `web_retrieval.default_provider` | string | `auto` | No | `auto`, `http`, `obscura`, `obscura_cdp` | TOML/env | Selects provider order; `auto` starts with HTTP unless rendering is requested. CDP is selected only by explicit CDP/richer-inspection requests or provider preference. |
+| `web_retrieval.max_url_count` | int | `8` | No | positive int | TOML/env | Caps URLs per request. |
+| `web_retrieval.max_url_chars` | int | `4096` | No | positive int | TOML/env | Blocks extremely long URLs before provider dispatch. |
+| `web_retrieval.max_parallel_pages` | int | `3` | No | positive int | TOML/env | Provider concurrency ceiling for future parallel retrieval. |
+| `web_retrieval.timeout_seconds` | number | `12.0` | No | seconds | TOML/env | Overall retrieval timeout default. |
+| `web_retrieval.max_text_chars` | int | `60000` | No | positive int | TOML/env | Caps extracted text stored in result payloads. |
+| `web_retrieval.max_html_chars` | int | `250000` | No | positive int | TOML/env | Caps optional extracted HTML. |
+| `web_retrieval.respect_robots` | bool | `true` | No | bool | TOML | Policy flag for providers that can honor robots metadata. |
+| `web_retrieval.allow_private_network_urls` | bool | `false` | No | bool | TOML/env | Blocks local/private/loopback URLs by default. |
+| `web_retrieval.allow_file_urls` | bool | `false` | No | bool | TOML | File URLs remain outside public web retrieval. |
+| `web_retrieval.allow_logged_in_context` | bool | `false` | No | bool | TOML | Logged-in browser context is not supported in this addition. |
+| `web_retrieval.http.enabled` | bool | `true` | No | bool | TOML/env | Enables static HTTP extraction baseline. |
+| `web_retrieval.http.timeout_seconds` | number | `8.0` | No | seconds | TOML/env | HTTP provider timeout. |
+| `web_retrieval.obscura.enabled` | bool | `false` | No | bool | TOML/env | Optional Obscura CLI provider; disabled by default. |
+| `web_retrieval.obscura.binary_path` | string | `obscura` | No | executable path/name | TOML/env | Missing binary reports `binary_missing` instead of silently falling back. |
+| `web_retrieval.obscura.allow_cdp_server` | bool | `false` | No | bool | TOML | Legacy CLI flag; managed CDP settings live under `web_retrieval.obscura.cdp`. |
+| `web_retrieval.obscura.stealth_enabled` | bool | `false` | No | bool | TOML | Anti-bot/stealth behavior is not enabled. |
+| `web_retrieval.obscura.allow_js_eval` | bool | `false` | No | bool | TOML | Arbitrary JS eval is out of scope. |
+| `web_retrieval.obscura.max_concurrency` | int | `3` | No | positive int | TOML/env | Obscura concurrency ceiling. |
+| `web_retrieval.obscura.cdp.enabled` | bool | `false` | No | bool | TOML/env | Enables optional managed Obscura CDP sessions. Disabled by default. |
+| `web_retrieval.obscura.cdp.binary_path` | string | `obscura` | No | executable path/name | TOML/env | Binary used for `obscura serve`; missing binary reports `binary_missing`. |
+| `web_retrieval.obscura.cdp.host` | string | `127.0.0.1` | No | localhost only | TOML/env | CDP server must bind locally; public binds are rejected. |
+| `web_retrieval.obscura.cdp.port` | int | `0` | No | `0` or local port | TOML/env | `0` chooses a dynamic local port. |
+| `web_retrieval.obscura.cdp.startup_timeout_seconds` | number | `8.0` | No | seconds | TOML | Maximum wait for `/json/version`. |
+| `web_retrieval.obscura.cdp.shutdown_timeout_seconds` | number | `4.0` | No | seconds | TOML | Graceful stop wait before forced cleanup. |
+| `web_retrieval.obscura.cdp.navigation_timeout_seconds` | number | `12.0` | No | seconds | TOML | CDP navigation/load wait bound. |
+| `web_retrieval.obscura.cdp.max_session_seconds` | number | `120.0` | No | seconds | TOML | Maximum session lifetime; no persistent background browser. |
+| `web_retrieval.obscura.cdp.max_pages_per_session` | int | `8` | No | positive int | TOML/env | Page inspection limit per session. |
+| `web_retrieval.obscura.cdp.max_dom_text_chars` | int | `60000` | No | positive int | TOML | DOM text output cap. |
+| `web_retrieval.obscura.cdp.max_html_chars` | int | `250000` | No | positive int | TOML | HTML excerpt cap. |
+| `web_retrieval.obscura.cdp.max_links` | int | `500` | No | positive int | TOML | Link output cap. |
+| `web_retrieval.obscura.cdp.allow_runtime_eval` | bool | `false` | No | bool | TOML | Runtime evaluation remains disabled; user-supplied JS is not exposed. |
+| `web_retrieval.obscura.cdp.allow_input_domain` | bool | `false` | No | bool | TOML | CDP click/type/keyboard/mouse operations are not enabled. |
+| `web_retrieval.obscura.cdp.allow_cookies` | bool | `false` | No | bool | TOML | Cookie/session access is disabled. |
+| `web_retrieval.obscura.cdp.allow_logged_in_context` | bool | `false` | No | bool | TOML | Logged-in browser context is not supported. |
+| `web_retrieval.obscura.cdp.allow_screenshots` | bool | `false` | No | bool | TOML | Screenshots are not a visible-screen truth source in this phase. |
+| `web_retrieval.obscura.cdp.debug_events_enabled` | bool | `true` | No | bool | TOML | Emits bounded lifecycle/extraction events without raw DOM text or HTML. |
+| `web_retrieval.chromium.enabled` | bool | `false` | No | bool | TOML | Chromium provider is a future placeholder. |
+| `web_retrieval.chromium.fallback_enabled` | bool | `true` | No | bool | TOML | Future fallback flag; no Chromium implementation in this pass. |
+
+Env overrides include `STORMHELM_WEB_RETRIEVAL_ENABLED`, `STORMHELM_WEB_RETRIEVAL_DEFAULT_PROVIDER`, `STORMHELM_WEB_RETRIEVAL_MAX_URL_COUNT`, `STORMHELM_WEB_RETRIEVAL_MAX_URL_CHARS`, `STORMHELM_WEB_RETRIEVAL_ALLOW_PRIVATE_NETWORK_URLS`, `STORMHELM_WEB_RETRIEVAL_HTTP_ENABLED`, `STORMHELM_OBSCURA_ENABLED`, `STORMHELM_OBSCURA_BINARY_PATH`, `STORMHELM_OBSCURA_MAX_CONCURRENCY`, `STORMHELM_OBSCURA_CDP_ENABLED`, `STORMHELM_OBSCURA_CDP_BINARY_PATH`, `STORMHELM_OBSCURA_CDP_HOST`, `STORMHELM_OBSCURA_CDP_PORT`, and `STORMHELM_OBSCURA_CDP_MAX_PAGES_PER_SESSION`.
+
+Sources: `config/default.toml`, `src/stormhelm/config/models.py`, `src/stormhelm/config/loader.py`, `src/stormhelm/core/web_retrieval/service.py`
+Tests: `tests/test_web_retrieval_config.py`, `tests/test_web_retrieval_safety.py`, `tests/test_web_retrieval_service.py`
+
 ## Software Control And Recovery
 
 | Key | Type | Default | Required | Valid values | Read from | Behavior if missing/invalid |
@@ -403,6 +455,7 @@ Tests: `tests/test_safety.py`, `tests/test_config_loader.py`
 | `tools.enabled.echo` | bool | `true` | No | bool | TOML/model | Enables echo. |
 | `tools.enabled.browser_context` | bool | `true` | No | bool | model default | Enables browser context tool. |
 | `tools.enabled.activity_summary` | bool | `true` | No | bool | model default | Enables activity summary tool. |
+| `tools.enabled.web_retrieval_fetch` | bool | `true` | No | bool | TOML/model | Enables public webpage evidence extraction tool. |
 | `tools.enabled.shell_command` | bool | `false` | No | bool | TOML/model | Tool disabled by default. |
 | `tools.enabled.deck_open_url` / `external_open_url` | bool | `true` | No | bool | TOML/model | Internal/external URL actions. |
 | `tools.enabled.deck_open_file` / `external_open_file` | bool | `true` | No | bool | TOML/model | Internal/external file actions. |

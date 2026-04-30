@@ -145,6 +145,7 @@ DEFAULT_AVAILABLE_TOOLS = {
     "external_open_url",
     "deck_open_file",
     "external_open_file",
+    "web_retrieval_fetch",
     "file_reader",
     "shell_command",
 }
@@ -1575,6 +1576,8 @@ class DeterministicPlanner:
             family = str(slots.get("family") or decision.structured_query.domain or "").strip()
             if family:
                 return self._canonical_route_family(family)
+            if decision.structured_query.query_shape == QueryShape.WEB_RETRIEVAL_REQUEST:
+                return "web_retrieval"
             if decision.structured_query.query_shape == QueryShape.TRUST_APPROVAL_REQUEST:
                 return "trust_approvals"
         if decision.request_type == "guardrail_clarify":
@@ -1588,6 +1591,8 @@ class DeterministicPlanner:
             return "trust_approvals"
         if semantic.query_shape == QueryShape.DISCORD_RELAY_REQUEST:
             return "discord_relay"
+        if semantic.query_shape == QueryShape.WEB_RETRIEVAL_REQUEST:
+            return "web_retrieval"
         if semantic.query_shape == QueryShape.OPEN_BROWSER_DESTINATION:
             return "browser_destination"
         if semantic.query_shape in {QueryShape.SEARCH_REQUEST, QueryShape.SEARCH_AND_OPEN}:
@@ -1621,6 +1626,8 @@ class DeterministicPlanner:
             return ["destination", "payload"]
         if semantic.query_shape == QueryShape.SOFTWARE_CONTROL_REQUEST:
             return ["software_target"]
+        if semantic.query_shape == QueryShape.WEB_RETRIEVAL_REQUEST:
+            return ["public_url"]
         if semantic.query_shape in {QueryShape.OPEN_BROWSER_DESTINATION, QueryShape.SEARCH_AND_OPEN}:
             return ["target"]
         if semantic.query_shape == QueryShape.TRUST_APPROVAL_REQUEST:
@@ -2425,6 +2432,27 @@ class DeterministicPlanner:
                     evidence_note="route_spine restored deterministic system-control shaping",
                 )
         if family in {"desktop_search", "file", "context_clarification"}:
+            source_case = str(decision.intent_frame.extracted_entities.get("source_case") or "").strip().lower()
+            requested_tool = str(decision.intent_frame.extracted_entities.get("tool_name") or "").strip().lower()
+            if family == "desktop_search" and (source_case == "recent_files" or requested_tool == "recent_files"):
+                return self._merge_route_spine_proposal(
+                    self._tool_proposal(
+                        query_shape=QueryShape.CURRENT_STATUS,
+                        domain="files",
+                        tool_name="recent_files",
+                        tool_arguments={},
+                        request_type_hint="direct_deterministic_fact",
+                        family="desktop_search",
+                        subject="recent_files",
+                        requested_metric="recent_files",
+                        confidence=decision.winner.score or 0.92,
+                        evidence=["desktop-search recent-files phrasing matched native recent-files status"],
+                        execution_type="retrieve_current_status",
+                        output_mode=ResponseMode.STATUS_SUMMARY.value,
+                    ),
+                    slots=slots,
+                    evidence_note="route_spine preserved desktop-search ownership while restoring recent-files status contract",
+                )
             search_request = self._desktop_search_request(message, lower, surface_mode=surface_mode)
             if search_request is not None:
                 return self._merge_route_spine_proposal(
@@ -2546,6 +2574,75 @@ class DeterministicPlanner:
             if decision.clarification_needed:
                 return self._route_spine_clarification_proposal(decision, slots=slots)
             requested_tool = str(decision.intent_frame.extracted_entities.get("tool_name") or "").strip()
+            if requested_tool == "routine_save":
+                routine_name = str(
+                    decision.intent_frame.target_text or active_request_state.get("subject") or "saved routine"
+                ).strip() or "saved routine"
+                precondition_state = self._routine_save_precondition_state(
+                    active_request_state=active_request_state,
+                    active_context=active_context,
+                    active_posture=active_posture,
+                )
+                missing_preconditions = list(precondition_state.get("missing_preconditions") or [])
+                if missing_preconditions:
+                    slots.update(
+                        {
+                            "routine_save_precondition_state": precondition_state,
+                            "routine_name": routine_name,
+                            "missing_evidence": list(missing_preconditions),
+                            "clarification": {
+                                "code": "missing_routine_context",
+                                "message": (
+                                    "I can save that as a routine, but I need the steps or the recent action you want me to reuse. "
+                                    "Send the workflow steps, or run the action first and then ask me to save it."
+                                ),
+                                "missing_slots": list(missing_preconditions),
+                            },
+                        }
+                    )
+                    return self._tool_proposal(
+                        query_shape=QueryShape.ROUTINE_REQUEST,
+                        domain="workflow",
+                        request_type_hint="routine_save_preflight",
+                        family="routine",
+                        subject="save",
+                        requested_action="save_routine",
+                        confidence=decision.winner.score or 0.95,
+                        evidence=["planner_v2 preserved pending routine-save preview but preconditions require clarification"],
+                        assistant_message=str(slots["clarification"]["message"]),
+                        execution_type="save_routine_preflight",
+                        output_mode=ResponseMode.CLARIFICATION.value,
+                        slots=slots,
+                    )
+                active_family = str(active_request_state.get("family") or "").strip().lower()
+                parameters = (
+                    active_request_state.get("parameters")
+                    if isinstance(active_request_state.get("parameters"), dict)
+                    else {}
+                )
+                routine_args = {
+                    "routine_name": routine_name,
+                    "execution_kind": active_family,
+                    "parameters": dict(parameters),
+                    "description": f"Saved {active_family or 'active'} routine for {routine_name}.",
+                    "routine_save_precondition_state": precondition_state,
+                }
+                return self._tool_proposal(
+                    query_shape=QueryShape.ROUTINE_REQUEST,
+                    domain="workflow",
+                    tool_name="routine_save",
+                    tool_arguments=routine_args,
+                    request_type_hint="routine_save",
+                    family="routine",
+                    subject="save",
+                    requested_action="save_routine",
+                    confidence=decision.winner.score or 0.95,
+                    evidence=["planner_v2 preserved pending routine-save preview through typed routine contract"],
+                    execution_type="save_routine",
+                    output_mode=ResponseMode.ACTION_RESULT.value,
+                    output_type="action",
+                    slots=slots,
+                )
             trusted_hook_register = self._trusted_hook_register_request(message, lower)
             if trusted_hook_register is not None or requested_tool == "trusted_hook_register":
                 hook_args = trusted_hook_register or {
@@ -2726,9 +2823,13 @@ class DeterministicPlanner:
             )
         if family == "browser_destination":
             url = self._route_spine_selected_value(decision) or str(decision.intent_frame.extracted_entities.get("url") or "")
+            requested_tool = str(decision.intent_frame.extracted_entities.get("tool_name") or "").strip()
             tool_name = (
-                "deck_open_url"
-                if surface_mode.strip().lower() == "deck" or "in the deck" in decision.intent_frame.normalized_text
+                requested_tool
+                if requested_tool in {"deck_open_url", "external_open_url"}
+                else "deck_open_url"
+                if surface_mode.strip().lower() == "deck"
+                or re.search(r"\b(?:in|inside|within)\s+(?:the\s+)?deck\b", decision.intent_frame.normalized_text)
                 else "external_open_url"
             )
             return self._tool_proposal(
@@ -2749,11 +2850,15 @@ class DeterministicPlanner:
             )
         if family == "file":
             path = self._route_spine_selected_value(decision) or str(decision.intent_frame.extracted_entities.get("path") or decision.intent_frame.target_text)
+            requested_tool = str(decision.intent_frame.extracted_entities.get("tool_name") or "").strip()
             tool_name = (
-                "file_reader"
+                requested_tool
+                if requested_tool in {"file_reader", "deck_open_file", "external_open_file"}
+                else "file_reader"
                 if decision.intent_frame.operation == "inspect"
                 else "deck_open_file"
-                if surface_mode.strip().lower() == "deck" or "in the deck" in decision.intent_frame.normalized_text
+                if surface_mode.strip().lower() == "deck"
+                or re.search(r"\b(?:in|inside|within)\s+(?:the\s+)?deck\b", decision.intent_frame.normalized_text)
                 else "external_open_file"
             )
             return self._tool_proposal(
@@ -3038,6 +3143,24 @@ class DeterministicPlanner:
                 slots=slots,
             )
         if family == "desktop_search":
+            source_case = str(decision.intent_frame.extracted_entities.get("source_case") or "").strip().lower()
+            requested_tool = str(decision.intent_frame.extracted_entities.get("tool_name") or "").strip().lower()
+            if source_case == "recent_files" or requested_tool == "recent_files":
+                return self._tool_proposal(
+                    query_shape=QueryShape.CURRENT_STATUS,
+                    domain="files",
+                    tool_name="recent_files",
+                    tool_arguments={},
+                    request_type_hint="direct_deterministic_fact",
+                    family="desktop_search",
+                    subject="recent_files",
+                    requested_metric="recent_files",
+                    confidence=decision.winner.score or 0.9,
+                    evidence=["route_spine selected desktop_search recent-files status contract"],
+                    execution_type="retrieve_current_status",
+                    output_mode=ResponseMode.STATUS_SUMMARY.value,
+                    slots=slots,
+                )
             search_request = self._desktop_search_request(message, lower, surface_mode=surface_mode) or {
                 "query": decision.intent_frame.target_text or message,
                 "domains": ["files"],
@@ -3148,6 +3271,9 @@ class DeterministicPlanner:
         tool_name = str(getattr(plan, "tool_name", "") or "").strip()
         if not tool_name:
             return None
+        frame = getattr(trace, "intent_frame", None)
+        entities = getattr(frame, "extracted_entities", {}) if frame is not None else {}
+        selected_context = entities.get("selected_context") if isinstance(entities, dict) else {}
         rich_route_spine_families = {
             "app_control",
             "browser_destination",
@@ -3178,23 +3304,10 @@ class DeterministicPlanner:
         }
         if family in rich_route_spine_families:
             return None
-        frame = getattr(trace, "intent_frame", None)
-        entities = getattr(frame, "extracted_entities", {}) if frame is not None else {}
-        selected_context = entities.get("selected_context") if isinstance(entities, dict) else {}
-        active_state_contextual = bool(
-            isinstance(selected_context, dict)
-            and str(selected_context.get("source") or "").startswith("active_request_state")
-        ) or bool(
-            isinstance(entities, dict)
-            and (
-                entities.get("pending_preview")
-                or entities.get("alternate_target")
-                or entities.get("previous_choice")
-            )
-        )
 
         planner_v2_passthrough_families = {
             "development",
+            "web_retrieval",
             "time",
             "storage",
             "location",
@@ -3358,6 +3471,14 @@ class DeterministicPlanner:
             requested_action = "open"
             request_type_hint = request_type_hint or "direct_action"
             execution_type = execution_type or "resolve_url_then_open_in_browser"
+        elif family == "web_retrieval":
+            query_shape = QueryShape.WEB_RETRIEVAL_REQUEST
+            domain = "web_retrieval"
+            output_mode = ResponseMode.WEB_EVIDENCE_RESULT.value
+            output_type = "web_evidence"
+            requested_action = str(tool_arguments.get("intent") or "read_page")
+            request_type_hint = request_type_hint or "web_retrieval_response"
+            execution_type = execution_type or "web_retrieval_extract"
         elif family == "file":
             query_shape = QueryShape.CONTROL_COMMAND
             domain = "files"
@@ -4832,6 +4953,26 @@ class DeterministicPlanner:
                 execution_type="execute_control_command",
                 output_mode=ResponseMode.ACTION_RESULT.value,
             )
+        app_control_follow_up = self._app_control_selection_follow_up(
+            lower,
+            active_request_state=active_request_state,
+        )
+        if app_control_follow_up is not None:
+            return self._tool_proposal(
+                query_shape=QueryShape.CONTROL_COMMAND,
+                domain="applications",
+                tool_name="app_control",
+                tool_arguments=app_control_follow_up,
+                request_type_hint="direct_action",
+                family="app_control",
+                subject=str(app_control_follow_up.get("app_name") or "app_control"),
+                requested_action=str(app_control_follow_up.get("action") or "close"),
+                confidence=0.96,
+                evidence=["app-control clarification follow-up selected previous candidates"],
+                follow_up=True,
+                execution_type="execute_control_command",
+                output_mode=ResponseMode.ACTION_RESULT.value,
+            )
         window_control = self._window_control_request(message, lower)
         if window_control is not None:
             return self._tool_proposal(
@@ -5464,6 +5605,10 @@ class DeterministicPlanner:
             output_mode = output_mode or ResponseMode.ACTION_RESULT.value
             output_type = output_type or "action"
             execution_type = execution_type or "discord_relay_preview"
+        elif query_shape == QueryShape.WEB_RETRIEVAL_REQUEST:
+            output_mode = output_mode or ResponseMode.WEB_EVIDENCE_RESULT.value
+            output_type = output_type or "web_evidence"
+            execution_type = execution_type or "web_retrieval_extract"
         elif query_shape == QueryShape.TRUST_APPROVAL_REQUEST:
             output_mode = output_mode or ResponseMode.SUMMARY_RESULT.value
             output_type = output_type or "trust"
@@ -5526,6 +5671,8 @@ class DeterministicPlanner:
             capability_requirements.extend(["screen_observation", "screen_interpretation"])
         elif query_shape == QueryShape.DISCORD_RELAY_REQUEST:
             capability_requirements.append("discord_relay")
+        elif query_shape == QueryShape.WEB_RETRIEVAL_REQUEST:
+            capability_requirements.append("public_web_retrieval")
         elif query_shape == QueryShape.TRUST_APPROVAL_REQUEST:
             capability_requirements.append("trust_state")
         elif query_shape == QueryShape.DIAGNOSTIC_CAUSAL:
@@ -5623,6 +5770,8 @@ class DeterministicPlanner:
             freshness_expectation = "current"
         elif structured_query.query_shape == QueryShape.DISCORD_RELAY_REQUEST:
             freshness_expectation = "current"
+        elif structured_query.query_shape == QueryShape.WEB_RETRIEVAL_REQUEST:
+            freshness_expectation = "public_snapshot"
         elif structured_query.query_shape == QueryShape.TRUST_APPROVAL_REQUEST:
             freshness_expectation = "current"
         elif structured_query.query_shape in {QueryShape.CONTROL_COMMAND, QueryShape.REPAIR_REQUEST}:
@@ -8585,7 +8734,7 @@ class DeterministicPlanner:
         if lower.startswith("open up "):
             return None
         if any(token in lower for token in {" setup", " environment", "workspace", "context"}) and not any(
-            lower.startswith(prefix) for prefix in {"force quit ", "quit ", "close ", "restart ", "relaunch "}
+            lower.startswith(prefix) for prefix in {"force quit ", "quit ", "exit ", "close ", "restart ", "relaunch "}
         ):
             return None
         patterns = (
@@ -8596,7 +8745,7 @@ class DeterministicPlanner:
             (r"^(?:maximize)\s+(.+)$", "maximize"),
             (r"^(?:restore|restore window|restore app|unminimize)\s+(.+)$", "restore"),
             (r"^(?:force quit|force close|kill)\s+(.+)$", "force_quit"),
-            (r"^(?:quit)\s+(.+)$", "quit"),
+            (r"^(?:quit|exit)\s+(.+)$", "quit"),
             (r"^(?:close)\s+(.+)$", "close"),
             (r"^(?:restart|relaunch)\s+(.+)$", "restart"),
             (r"^(?:launch|start)\s+(.+)$", "launch"),
@@ -8614,8 +8763,58 @@ class DeterministicPlanner:
             }
         return None
 
+    def _app_control_selection_follow_up(
+        self,
+        lower: str,
+        *,
+        active_request_state: dict[str, Any],
+    ) -> dict[str, object] | None:
+        normalized = normalize_phrase(lower)
+        if normalized not in {"both", "all", "close both", "close all", "all of them"}:
+            return None
+        if str(active_request_state.get("family") or "").strip().lower() != "app_control":
+            return None
+        parameters = (
+            active_request_state.get("parameters")
+            if isinstance(active_request_state.get("parameters"), dict)
+            else {}
+        )
+        action = str(
+            parameters.get("action")
+            or parameters.get("requested_action")
+            or active_request_state.get("requested_action")
+            or "close"
+        ).strip().lower()
+        if normalized.startswith("close "):
+            action = "close"
+        if action not in {"close", "quit"}:
+            return None
+        has_candidate_set = bool(
+            parameters.get("selection_mode") == "ambiguous_candidate_set"
+            or parameters.get("candidate_targets")
+            or parameters.get("candidates")
+        )
+        if not has_candidate_set:
+            return None
+        target = str(
+            parameters.get("app_name")
+            or parameters.get("target_name")
+            or active_request_state.get("subject")
+            or ""
+        ).strip()
+        if not target or normalize_phrase(target) in {"both", "all", "all of them"}:
+            return None
+        return {"action": action, "app_name": target}
+
     def _window_control_request(self, message: str, lower: str) -> dict[str, object] | None:
         deictic_targets = {"this", "that", "this window", "that window", "current window", "focused window", "current app", "focused app"}
+
+        close_match = re.match(r"^(?:close|quit|exit)\s+(.+)$", lower)
+        if close_match:
+            raw_target = " ".join(str(close_match.group(1) or "").split()).strip()
+            normalized_target = normalize_phrase(raw_target)
+            if normalized_target in deictic_targets:
+                return {"action": "close", "target_mode": "focused"}
 
         direct_state = (
             (r"^(maximize|minimize|restore)\s+(.+)$", None),

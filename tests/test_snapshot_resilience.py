@@ -18,6 +18,7 @@ from stormhelm.core.workspace.service import WorkspaceService
 
 _SNAPSHOT_PARAMS = {
     "session_id": "default",
+    "profile": "deck_detail",
     "event_since_id": 0,
     "event_limit": 100,
     "job_limit": 50,

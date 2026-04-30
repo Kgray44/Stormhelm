@@ -84,6 +84,11 @@ problem_solving_enabled = true
 workflow_learning_enabled = true
 brain_integration_enabled = true
 power_features_enabled = true
+screen_capture_enabled = true
+screen_capture_scope = "active_window"
+screen_capture_ocr_enabled = true
+screen_capture_provider_vision_enabled = false
+screen_capture_store_raw_images = false
 
 [calculations]
 enabled = true
@@ -117,6 +122,66 @@ session_grant_ttl_seconds = 14400.0
 once_grant_ttl_seconds = 900.0
 pending_request_ttl_seconds = 3600.0
 audit_recent_limit = 24
+
+[web_retrieval]
+enabled = true
+planner_routing_enabled = true
+debug_events_enabled = true
+default_provider = "auto"
+max_url_count = 8
+max_url_chars = 4096
+max_parallel_pages = 3
+timeout_seconds = 12.0
+max_text_chars = 60000
+max_html_chars = 250000
+cache_snapshots = true
+respect_robots = true
+allow_private_network_urls = false
+allow_file_urls = false
+allow_logged_in_context = false
+
+[web_retrieval.http]
+enabled = true
+timeout_seconds = 8.0
+
+[web_retrieval.obscura]
+enabled = false
+binary_path = "obscura"
+mode = "cli"
+allow_cdp_server = false
+serve_port = 9222
+stealth_enabled = false
+obey_robots = true
+workers = 1
+max_concurrency = 3
+wait_until = "networkidle0"
+dump_format = "text"
+allow_js_eval = false
+max_eval_chars = 2000
+
+[web_retrieval.obscura.cdp]
+enabled = false
+binary_path = "obscura"
+host = "127.0.0.1"
+port = 0
+startup_timeout_seconds = 8.0
+shutdown_timeout_seconds = 4.0
+navigation_timeout_seconds = 12.0
+max_session_seconds = 120.0
+max_pages_per_session = 8
+max_dom_text_chars = 60000
+max_html_chars = 250000
+max_links = 500
+allow_runtime_eval = false
+allow_input_domain = false
+allow_cookies = false
+allow_logged_in_context = false
+allow_screenshots = false
+debug_events_enabled = true
+
+[web_retrieval.chromium]
+enabled = false
+fallback_enabled = true
 
 [discord_relay]
 enabled = true
@@ -332,3 +397,4 @@ workspace_tag = true
 workspace_list = true
 workspace_where_left_off = true
 workspace_next_steps = true
+web_retrieval_fetch = true

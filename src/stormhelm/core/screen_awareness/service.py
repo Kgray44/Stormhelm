@@ -61,9 +61,13 @@ from stormhelm.core.screen_awareness.observation import NativeContextObservation
 from stormhelm.core.screen_awareness.observation import best_live_visible_text
 from stormhelm.core.screen_awareness.observation import best_visible_text
 from stormhelm.core.screen_awareness.observation import has_direct_screen_signal
+from stormhelm.core.screen_awareness.observation import has_focus_only_signal
+from stormhelm.core.screen_awareness.observation import has_screen_content_signal
 from stormhelm.core.screen_awareness.planner import ScreenAwarenessPlannerSeam
 from stormhelm.core.screen_awareness.response import ScreenResponseComposer
 from stormhelm.core.screen_awareness.verification import DeterministicVerificationEngine
+from stormhelm.core.screen_awareness.visual_capture import ScreenVisualGrounder
+from stormhelm.core.screen_awareness.visual_capture import source_labels_for_observation
 
 
 @dataclass(slots=True)
@@ -109,13 +113,20 @@ class ScreenAwarenessSubsystem:
     power_features_engine: DeterministicPowerFeaturesEngine = field(default_factory=DeterministicPowerFeaturesEngine)
     response_composer: ScreenResponseComposer = field(default_factory=ScreenResponseComposer)
     observation_source: Any | None = None
+    screen_capture_provider: Any | None = None
     action_executor: Any | None = None
     adapter_registry: SemanticAdapterRegistry = field(init=False)
+    visual_grounder: ScreenVisualGrounder = field(init=False)
     _recent_trace_summaries: deque[dict[str, Any]] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.planner_seam = ScreenAwarenessPlannerSeam(self.config)
         self.native_observer = self.observation_source or NativeContextObservationSource(system_probe=self.system_probe)
+        self.visual_grounder = ScreenVisualGrounder(
+            config=self.config,
+            provider=self.provider,
+            capture_provider=self.screen_capture_provider,
+        )
         self.adapter_registry = SemanticAdapterRegistry()
         self.grounding_engine = DeterministicGroundingEngine(provider=self.provider)
         self.navigation_engine = DeterministicNavigationEngine(grounding_engine=self.grounding_engine)
@@ -142,6 +153,7 @@ class ScreenAwarenessSubsystem:
             "debug_events_enabled": self.config.debug_events_enabled,
             "action_policy_mode": self.config.action_policy_mode,
             "capabilities": self.config.capability_flags(),
+            "visual_grounding": self.visual_grounder.status_snapshot(),
             "policy_state": policy_state.to_dict(),
             "hardening": {
                 "enabled": self._phase12_enabled(),
@@ -155,6 +167,7 @@ class ScreenAwarenessSubsystem:
             "extension_points": dict(self.extension_points),
             "runtime_hooks": {
                 "native_observer_ready": True,
+                "screen_capture_available": bool(self.visual_grounder.status_snapshot()["screen_capture"].get("available")),
                 "grounding_engine_ready": True,
                 "navigation_engine_ready": True,
                 "verification_engine_ready": True,
@@ -266,7 +279,11 @@ class ScreenAwarenessSubsystem:
             or problem_solving_result.ambiguity_state.value in {"partial", "ambiguous", "insufficient_evidence"}
         ):
             trigger_conditions.append(f"problem_{problem_solving_result.ambiguity_state.value}")
-            unresolved_conditions.append(problem_solving_result.explanation_summary or "Problem interpretation remains incomplete.")
+            unresolved_conditions.append(
+                problem_solving_result.answer_summary
+                or problem_solving_result.refusal_reason
+                or "Problem interpretation remains incomplete."
+            )
 
         retry_behavior: str | None = None
         if any(code in limitation_codes for code in {ScreenLimitationCode.OBSERVATION_UNAVAILABLE, ScreenLimitationCode.PRIOR_OBSERVATION_REQUIRED}):
@@ -422,6 +439,7 @@ class ScreenAwarenessSubsystem:
                 "fallback_reason": analysis.fallback_reason,
                 "total_duration_ms": analysis.latency_trace.total_duration_ms,
                 "slowest_stage": analysis.latency_trace.slowest_stage,
+                "source_labels": source_labels_for_observation(analysis.observation),
                 "audit_passed": analysis.truthfulness_audit.passed if analysis.truthfulness_audit is not None else True,
                 "audit_error_count": analysis.truthfulness_audit.error_count if analysis.truthfulness_audit is not None else 0,
                 "audit_warning_count": analysis.truthfulness_audit.warning_count if analysis.truthfulness_audit is not None else 0,
@@ -474,6 +492,19 @@ class ScreenAwarenessSubsystem:
         )
         record_stage("observation", stage_started)
         stage_started = monotonic()
+        observation = self.visual_grounder.augment(
+            observation=observation,
+            intent=intent,
+            operator_text=operator_text,
+        )
+        screen_capture_status = observation.visual_metadata.get("screen_capture", {})
+        record_stage(
+            "visual_grounding",
+            stage_started,
+            status="completed" if screen_capture_status.get("captured") else "skipped",
+            note=str(screen_capture_status.get("reason") or "screen_capture_checked"),
+        )
+        stage_started = monotonic()
         interpretation = self.interpreter.interpret(observation, operator_text=operator_text)
         record_stage("interpretation", stage_started)
         stage_started = monotonic()
@@ -513,6 +544,40 @@ class ScreenAwarenessSubsystem:
 
         limitations: list[ScreenLimitation] = []
         fallback_reason: str | None = None
+        screen_capture_reason = str(screen_capture_status.get("reason") or "").strip()
+        if (
+            screen_capture_reason == "screen_capture_disabled"
+            and not has_screen_content_signal(observation)
+        ):
+            limitations.append(
+                ScreenLimitation(
+                    code=ScreenLimitationCode.SCREEN_CAPTURE_DISABLED,
+                    message="Real screen capture is disabled, so focused-window metadata cannot be treated as visual screen inspection.",
+                    truth_state=ScreenTruthState.UNAVAILABLE,
+                )
+            )
+            fallback_reason = "screen_capture_disabled"
+        elif (
+            screen_capture_reason in {"screen_capture_unavailable", "screen_capture_failed", "screen_capture_timeout", "capture_bounds_unavailable"}
+            and not has_screen_content_signal(observation)
+        ):
+            limitations.append(
+                ScreenLimitation(
+                    code=ScreenLimitationCode.SCREEN_CAPTURE_UNAVAILABLE,
+                    message="Real screen capture was enabled but unavailable, so only native hints could be used.",
+                    truth_state=ScreenTruthState.UNAVAILABLE,
+                )
+            )
+            fallback_reason = "screen_capture_unavailable"
+        if screen_capture_reason == "sensitive_window_blocked":
+            limitations.append(
+                ScreenLimitation(
+                    code=ScreenLimitationCode.SENSITIVE_CONTENT_RESTRICTED,
+                    message="The focused surface appears sensitive, so screenshot capture was blocked before pixels were inspected.",
+                    truth_state=ScreenTruthState.UNAVAILABLE,
+                )
+            )
+            fallback_reason = "sensitive_content_restricted"
         if not has_direct_screen_signal(observation):
             limitations.append(
                 ScreenLimitation(
@@ -522,11 +587,11 @@ class ScreenAwarenessSubsystem:
                 )
             )
             fallback_reason = "observation_unavailable"
-        elif not observation.selected_text and not best_live_visible_text(observation):
+        elif has_focus_only_signal(observation) or not observation.selected_text and not best_live_visible_text(observation):
             limitations.append(
                 ScreenLimitation(
                     code=ScreenLimitationCode.LOW_CONFIDENCE,
-                    message="The visible signal is partial because no direct selected text or live visible cue was available.",
+                    message="The visible signal is partial because only focused-window metadata or a weak live cue was available.",
                     truth_state=ScreenTruthState.UNVERIFIED,
                 )
             )
@@ -899,7 +964,7 @@ class ScreenAwarenessSubsystem:
         if any(limitation.code == ScreenLimitationCode.OBSERVATION_UNAVAILABLE for limitation in limitations):
             overall_score = 0.0
         elif any(limitation.code == ScreenLimitationCode.LOW_CONFIDENCE for limitation in limitations):
-            overall_score = min(overall_score, 0.45)
+            overall_score = min(overall_score, 0.34)
         verification_state = ScreenTruthState.UNVERIFIED
         if action_result is not None and action_result.status.value == "verified_success":
             verification_state = ScreenTruthState.OBSERVED
@@ -980,6 +1045,7 @@ class ScreenAwarenessSubsystem:
                     "trace_id": trace_id if hardening_enabled else None,
                     "phase": self.config.phase,
                     "slowest_stage": analysis.latency_trace.slowest_stage if analysis.latency_trace is not None else None,
+                    "source_labels": source_labels_for_observation(analysis.observation),
                 },
                 "timing": analysis.latency_trace.to_dict() if analysis.latency_trace is not None else None,
                 "truthfulness_audit": analysis.truthfulness_audit.to_dict() if analysis.truthfulness_audit is not None else None,
@@ -1008,6 +1074,7 @@ def build_screen_awareness_subsystem(
     provider: Any | None = None,
     calculations: Any | None = None,
     observation_source: Any | None = None,
+    screen_capture_provider: Any | None = None,
     action_executor: Any | None = None,
 ) -> ScreenAwarenessSubsystem:
     return ScreenAwarenessSubsystem(
@@ -1016,5 +1083,6 @@ def build_screen_awareness_subsystem(
         provider=provider,
         calculations=calculations or build_calculations_subsystem(CalculationsConfig()),
         observation_source=observation_source,
+        screen_capture_provider=screen_capture_provider,
         action_executor=action_executor,
     )

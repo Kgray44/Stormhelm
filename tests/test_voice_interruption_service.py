@@ -209,6 +209,26 @@ def test_muting_spoken_output_blocks_future_synthesis_until_unmuted() -> None:
     assert snapshot["capture"]["enabled"] is True
 
 
+def test_unmuting_spoken_output_clears_stale_current_response_suppression() -> None:
+    service = _service()
+
+    suppressed = asyncio.run(
+        service.suppress_current_response(session_id="voice-session")
+    )
+    blocked = asyncio.run(service.synthesize_speech_text("Bearing acquired."))
+    unmuted = asyncio.run(
+        service.set_spoken_output_muted(False, scope="session", reason="trace_reset")
+    )
+    allowed = asyncio.run(service.synthesize_speech_text("Bearing acquired."))
+    snapshot = service.status_snapshot()
+
+    assert suppressed.status == "completed"
+    assert blocked.error_code == "current_response_suppressed"
+    assert unmuted.intent == VoiceInterruptionIntent.UNMUTE_SPOKEN_RESPONSES
+    assert allowed.ok is True
+    assert snapshot["interruption"]["current_response_suppressed"] is False
+
+
 def test_cancel_capture_interruption_does_not_cancel_core_task() -> None:
     service = _service()
     session = asyncio.run(service.start_push_to_talk_capture(session_id="voice-session"))

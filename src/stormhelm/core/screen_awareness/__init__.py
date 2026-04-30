@@ -172,6 +172,9 @@ from stormhelm.core.screen_awareness.planner import ScreenAwarenessPlannerSeam
 from stormhelm.core.screen_awareness.planner import ScreenPlannerEvaluation
 from stormhelm.core.screen_awareness.service import ScreenAwarenessSubsystem
 from stormhelm.core.screen_awareness.service import build_screen_awareness_subsystem
+from stormhelm.core.screen_awareness.visual_capture import ScreenCaptureResult
+from stormhelm.core.screen_awareness.visual_capture import ScreenVisualGrounder
+from stormhelm.core.screen_awareness.visual_capture import WindowsScreenCaptureProvider
 
 __all__ = [
     "ActionExecutor",
@@ -267,6 +270,7 @@ __all__ = [
     "ScreenCalculationActivity",
     "ScreenAwarenessPlannerSeam",
     "ScreenAwarenessSubsystem",
+    "ScreenCaptureResult",
     "ScreenConfidence",
     "ScreenConfidenceLevel",
     "ScreenIntentType",
@@ -345,7 +349,9 @@ __all__ = [
     "NotificationEvent",
     "CrossMonitorTargetContext",
     "WindowsNativeActionExecutor",
+    "WindowsScreenCaptureProvider",
     "DeterministicPowerFeaturesEngine",
     "DeterministicWorkflowLearningEngine",
+    "ScreenVisualGrounder",
     "build_screen_awareness_subsystem",
 ]

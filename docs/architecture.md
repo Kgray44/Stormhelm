@@ -19,6 +19,7 @@ Stormhelm is split into a local core service and a desktop shell. The core is th
 | `src/stormhelm/core/screen_awareness` | Screen observation, interpretation, grounding, action, verification, problem-solving, workflow learning. |
 | `src/stormhelm/core/software_control` | Software target catalog, planner seam, operation planning/execution status. |
 | `src/stormhelm/core/software_recovery` | Local/cloud-advisory recovery planning. |
+| `src/stormhelm/core/web_retrieval` | Public URL safety including redirect checks, HTTP/Obscura CLI/Obscura CDP retrieval providers, managed headless CDP sessions, evidence bundles, and trace models. |
 | `src/stormhelm/core/discord_relay` | Discord alias/payload/preview/dispatch subsystem. |
 | `src/stormhelm/core/voice` | Disabled-by-default voice config/state, manual turns, controlled STT/TTS, capture/playback boundaries, diagnostics, and events. |
 | `src/stormhelm/core/system`, `core/network`, `core/power`, `core/operations` | Machine state, native control, telemetry, diagnostics. |
@@ -118,6 +119,7 @@ Tracked route-support sources include:
 - Planner models: `src/stormhelm/core/orchestrator/planner_models.py`
 - Main planner: `src/stormhelm/core/orchestrator/planner.py`
 - Browser destinations: `src/stormhelm/core/orchestrator/browser_destinations.py`
+- Web retrieval: `src/stormhelm/core/web_retrieval/*`
 - Fuzzy eval: `src/stormhelm/core/orchestrator/fuzzy_eval/*`
 
 Active worktree note: route-v2 files were present during this rewrite but not listed by `git ls-files`. Treat route-v2-specific guarantees as needs-verification until those files are intentionally added to the repository.
@@ -156,14 +158,15 @@ Tests: `tests/test_ui_bridge.py`, `tests/test_ui_bridge_authority_contracts.py`,
 | Trust | Approval/grant/audit state. | UI-only confirmation without backend decision. |
 | Tasks | Durable task state and continuity. | Workspace fallback masquerading as durable task memory. |
 | Voice | Manual voice turns, controlled STT/TTS, explicit capture/playback state, diagnostics, and voice events. | Wake word, always-listening, Realtime, VAD, direct tool execution, or bypassing trust/safety. |
+| Web retrieval | Public URL safety validation, final redirect safety checks, HTTP extraction, optional Obscura CLI rendering/extraction, optional Obscura CDP localhost managed sessions for headless title/final URL/DOM/link/network/console inspection, evidence bundles, traces, fallback provenance, and typed provider failures. | Browser opening, Playwright/Puppeteer, CDP input actions, logged-in context, cookies/session reuse, form/click/type/scroll automation, CAPTCHA/anti-bot bypass, independent truth checking, or claims about the user's visible screen. |
 | UI bridge | Presentation state and local UI actions. | Backend truth or safety policy. |
 
-Sources: `src/stormhelm/core/calculations/service.py`, `src/stormhelm/core/screen_awareness/service.py`, `src/stormhelm/core/software_control/service.py`, `src/stormhelm/core/software_recovery/service.py`, `src/stormhelm/core/discord_relay/service.py`, `src/stormhelm/core/trust/service.py`, `src/stormhelm/core/tasks/service.py`, `src/stormhelm/core/voice/service.py`, `src/stormhelm/ui/bridge.py`
-Tests: `tests/test_calculations.py`, `tests/test_screen_awareness_service.py`, `tests/test_software_control.py`, `tests/test_software_recovery.py`, `tests/test_discord_relay.py`, `tests/test_trust_service.py`, `tests/test_task_graph.py`, `tests/test_voice_manual_turn.py`, `tests/test_voice_audio_turn.py`
+Sources: `src/stormhelm/core/calculations/service.py`, `src/stormhelm/core/screen_awareness/service.py`, `src/stormhelm/core/software_control/service.py`, `src/stormhelm/core/software_recovery/service.py`, `src/stormhelm/core/web_retrieval/service.py`, `src/stormhelm/core/discord_relay/service.py`, `src/stormhelm/core/trust/service.py`, `src/stormhelm/core/tasks/service.py`, `src/stormhelm/core/voice/service.py`, `src/stormhelm/ui/bridge.py`
+Tests: `tests/test_calculations.py`, `tests/test_screen_awareness_service.py`, `tests/test_software_control.py`, `tests/test_software_recovery.py`, `tests/test_web_retrieval_service.py`, `tests/test_discord_relay.py`, `tests/test_trust_service.py`, `tests/test_task_graph.py`, `tests/test_voice_manual_turn.py`, `tests/test_voice_audio_turn.py`
 
 ## Adapter Boundaries
 
-Adapter contracts describe whether a tool/action has preview, approval, verification, rollback, and trust-tier metadata. The safety policy and tool executor use contract status to avoid executing invalid adapter routes.
+Adapter contracts describe whether a tool/action has preview, approval, verification, rollback, and trust-tier metadata. The safety policy and tool executor use contract status to avoid executing invalid adapter routes. `web_retrieval.obscura.cli` is registered as an external-network/local-process adapter with preview support, no approval requirement, no rollback, and a maximum claim of observed rendered-page evidence. `web_retrieval.obscura.cdp` is registered separately as a localhost managed-session adapter with the `headless_cdp_page_evidence` ceiling and no declared browser input, cookie, visible-screen, truth-verification, or Playwright capabilities.
 
 Sources: `src/stormhelm/core/adapters/contracts.py`, `src/stormhelm/core/tools/executor.py`, `src/stormhelm/core/safety/policy.py`
 Tests: `tests/test_adapter_contracts.py`, `tests/test_safety.py`

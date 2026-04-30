@@ -147,3 +147,75 @@ def test_load_config_applies_voice_environment_overrides(temp_project_root) -> N
     assert config.voice.openai.persist_tts_outputs is True
     assert config.voice.openai.realtime_model == "gpt-realtime-1.5"
     assert config.voice.openai.vad_mode == "semantic_vad"
+
+
+def test_load_config_reads_local_env_voice_runtime_gates_without_leaking_key(
+    temp_project_root,
+) -> None:
+    secret = "present-test-value"
+    (temp_project_root / ".env").write_text(
+        "\n".join(
+            [
+                f"OPENAI_API_KEY={secret}",
+                "STORMHELM_OPENAI_ENABLED=1",
+                "STORMHELM_VOICE_ENABLED=1",
+                "STORMHELM_VOICE_MODE=output_only",
+                "STORMHELM_VOICE_SPOKEN_RESPONSES_ENABLED=1",
+                "STORMHELM_VOICE_DEBUG_MOCK_PROVIDER=false",
+                "STORMHELM_VOICE_OPENAI_STREAM_TTS_OUTPUTS=true",
+                "STORMHELM_VOICE_OPENAI_TTS_LIVE_FORMAT=pcm",
+                "STORMHELM_VOICE_PLAYBACK_ENABLED=true",
+                "STORMHELM_VOICE_PLAYBACK_PROVIDER=local",
+                "STORMHELM_VOICE_PLAYBACK_ALLOW_DEV_PLAYBACK=true",
+                "STORMHELM_VOICE_PLAYBACK_STREAMING_ENABLED=true",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(project_root=temp_project_root, env={})
+    serialized = str(config.to_dict())
+
+    assert config.openai.api_key == secret
+    assert config.openai.enabled is True
+    assert config.voice.enabled is True
+    assert config.voice.mode == "output_only"
+    assert config.voice.spoken_responses_enabled is True
+    assert config.voice.debug_mock_provider is False
+    assert config.voice.openai.stream_tts_outputs is True
+    assert config.voice.openai.tts_live_format == "pcm"
+    assert config.voice.playback.enabled is True
+    assert config.voice.playback.provider == "local"
+    assert config.voice.playback.allow_dev_playback is True
+    assert config.voice.playback.streaming_enabled is True
+    assert secret not in serialized
+
+
+def test_l6_voice_input_aliases_match_windows_manual_conversation_env(
+    temp_project_root,
+) -> None:
+    config = load_config(
+        project_root=temp_project_root,
+        env={
+            "STORMHELM_VOICE_ENABLED": "1",
+            "STORMHELM_VOICE_INPUT_ENABLED": "1",
+            "STORMHELM_VOICE_MICROPHONE_ENABLED": "1",
+            "STORMHELM_VOICE_PUSH_TO_TALK_ENABLED": "1",
+            "STORMHELM_VOICE_INPUT_PROVIDER": "openai",
+            "STORMHELM_VOICE_STT_PROVIDER": "openai",
+            "STORMHELM_VOICE_STT_MODEL": "gpt-4o-mini-transcribe",
+            "STORMHELM_VOICE_INPUT_LANGUAGE": "en",
+            "STORMHELM_VOICE_ENDPOINT_SILENCE_MS": "700",
+            "STORMHELM_VOICE_MAX_UTTERANCE_SECONDS": "20",
+        },
+    )
+
+    assert config.voice.enabled is True
+    assert config.voice.capture.enabled is True
+    assert config.voice.manual_input_enabled is True
+    assert config.voice.provider == "openai"
+    assert config.voice.openai.stt_model == "gpt-4o-mini-transcribe"
+    assert config.voice.openai.transcription_language == "en"
+    assert config.voice.vad.silence_ms == 700
+    assert config.voice.capture.max_duration_ms == 20000
+    assert config.voice.vad.max_utterance_ms == 20000

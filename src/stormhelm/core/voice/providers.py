@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import struct
 import sys
 import tempfile
 import threading
@@ -51,6 +53,22 @@ from stormhelm.core.voice.models import VoiceTranscriptionResult
 from stormhelm.core.voice.models import VoiceVADSession
 from stormhelm.core.voice.models import VoiceWakeEvent
 from stormhelm.shared.time import utc_now_iso
+
+
+VoiceStreamingChunkCallback = Callable[
+    [VoiceStreamingTTSChunk], Awaitable[None] | None
+]
+
+
+async def _dispatch_streaming_chunk(
+    callback: VoiceStreamingChunkCallback | None,
+    chunk: VoiceStreamingTTSChunk,
+) -> None:
+    if callback is None:
+        return
+    result = callback(chunk)
+    if inspect.isawaitable(result):
+        await result
 
 
 @dataclass(slots=True, frozen=True)
@@ -115,6 +133,12 @@ class TextToSpeechProvider(Protocol):
     def stream_speech(
         self,
         request: VoiceStreamingTTSRequest,
+    ) -> VoiceStreamingTTSResult | Awaitable[VoiceStreamingTTSResult]: ...
+
+    def stream_speech_progressive(
+        self,
+        request: VoiceStreamingTTSRequest,
+        on_chunk: VoiceStreamingChunkCallback,
     ) -> VoiceStreamingTTSResult | Awaitable[VoiceStreamingTTSResult]: ...
 
     def prewarm_speech_provider(
@@ -320,6 +344,10 @@ class LocalCaptureBackend(Protocol):
 
     def stop(self, handle: dict[str, Any], *, reason: str) -> dict[str, Any]: ...
 
+    def wait_for_endpoint(
+        self, handle: dict[str, Any], *, timeout_ms: int
+    ) -> dict[str, Any]: ...
+
     def cancel(self, handle: dict[str, Any], *, reason: str) -> None: ...
 
     def cleanup(self, path: str | Path) -> None: ...
@@ -336,6 +364,8 @@ class MockCaptureProvider:
     error_message: str | None = None
     capture_audio_bytes: bytes = b"mock captured audio"
     duration_ms: int = 1000
+    endpoint_reason: str = "speech_ended"
+    speech_detected: bool = True
     start_call_count: int = 0
     stop_call_count: int = 0
     cancel_call_count: int = 0
@@ -568,6 +598,34 @@ class MockCaptureProvider:
             wake_word_claimed=False,
         )
 
+    def wait_for_endpoint(
+        self,
+        capture_id: str | None = None,
+        *,
+        timeout_ms: int | None = None,
+    ) -> dict[str, Any]:
+        active = self._active_capture
+        del timeout_ms
+        if active is None or (capture_id and capture_id != active.capture_id):
+            return {
+                "ok": False,
+                "reason": "no_active_capture",
+                "error_code": "no_active_capture",
+                "speech_detected": False,
+                "raw_audio_logged": False,
+                "raw_secret_logged": False,
+            }
+        return {
+            "ok": True,
+            "capture_id": active.capture_id,
+            "reason": self.endpoint_reason,
+            "speech_detected": self.speech_detected,
+            "speech_detected_ms": 0 if self.speech_detected else None,
+            "endpoint_ms": self.duration_ms,
+            "raw_audio_logged": False,
+            "raw_secret_logged": False,
+        }
+
     def get_active_capture(self) -> VoiceCaptureSession | None:
         return self._active_capture
 
@@ -660,6 +718,21 @@ class SoundDeviceWavCaptureBackend:
         wav_file.setnchannels(request.channels)
         wav_file.setsampwidth(2)
         wav_file.setframerate(request.sample_rate)
+        endpointing_enabled = bool(
+            dict(request.metadata or {}).get("endpointing_enabled")
+        )
+        endpoint_silence_ms = int(
+            dict(request.metadata or {}).get("endpoint_silence_ms") or 700
+        )
+        speech_start_rms = self._rms_threshold(
+            dict(request.metadata or {}).get("speech_start_threshold"),
+            fallback=650,
+        )
+        speech_stop_rms = self._rms_threshold(
+            dict(request.metadata or {}).get("speech_stop_threshold"),
+            fallback=420,
+        )
+        endpoint_event = threading.Event()
         handle: dict[str, Any] = {
             "output_path": str(output_path),
             "wav_file": wav_file,
@@ -670,6 +743,17 @@ class SoundDeviceWavCaptureBackend:
             "platform": self.platform_name,
             "dependency": self.dependency_name,
             "permission_state": "granted",
+            "endpointing_enabled": endpointing_enabled,
+            "endpoint_event": endpoint_event,
+            "endpoint_reason": None,
+            "endpoint_silence_ms": endpoint_silence_ms,
+            "speech_start_rms": speech_start_rms,
+            "speech_stop_rms": speech_stop_rms,
+            "speech_detected": False,
+            "speech_detected_ms": None,
+            "last_speech_ms": None,
+            "last_audio_level_rms": 0,
+            "last_audio_level_peak": 0,
         }
 
         def callback(indata: Any, frames: int, time_info: Any, status: Any) -> None:
@@ -684,7 +768,11 @@ class SoundDeviceWavCaptureBackend:
                 handle["overflow"] = True
             wav_file.writeframes(payload)
             handle["bytes_written"] = int(handle["bytes_written"]) + len(payload)
+            self._update_endpoint_state(handle, payload, request=request)
             if handle["overflow"]:
+                self._mark_endpoint(handle, "max_duration")
+                raise sd.CallbackStop
+            if handle.get("endpoint_reason"):
                 raise sd.CallbackStop
 
         device = None if request.device.strip().lower() == "default" else request.device
@@ -703,6 +791,23 @@ class SoundDeviceWavCaptureBackend:
             output_path.unlink(missing_ok=True)
             raise
         return handle
+
+    def wait_for_endpoint(
+        self, handle: dict[str, Any], *, timeout_ms: int
+    ) -> dict[str, Any]:
+        endpoint_event = handle.get("endpoint_event")
+        if not isinstance(endpoint_event, threading.Event):
+            return self._endpoint_payload(handle, reason="manual_stop_required")
+        timeout = max(0.001, timeout_ms / 1000.0)
+        if not endpoint_event.wait(timeout):
+            self._mark_endpoint(handle, "max_duration")
+            stream = handle.get("stream")
+            if stream is not None:
+                try:
+                    stream.stop()
+                except Exception:
+                    pass
+        return self._endpoint_payload(handle)
 
     def stop(self, handle: dict[str, Any], *, reason: str) -> dict[str, Any]:
         del reason
@@ -731,11 +836,14 @@ class SoundDeviceWavCaptureBackend:
                 "dependency": self.dependency_name,
                 "platform": self.platform_name,
                 "overflow": bool(handle.get("overflow")),
+                "endpoint": self._endpoint_payload(handle),
             },
+            "endpoint": self._endpoint_payload(handle),
         }
 
     def timeout(self, handle: dict[str, Any]) -> None:
         handle["timed_out"] = True
+        self._mark_endpoint(handle, "max_duration")
         stream = handle.get("stream")
         if stream is not None:
             stream.stop()
@@ -756,6 +864,103 @@ class SoundDeviceWavCaptureBackend:
     def cleanup(self, path: str | Path) -> None:
         if path:
             Path(path).unlink(missing_ok=True)
+
+    def _update_endpoint_state(
+        self,
+        handle: dict[str, Any],
+        payload: bytes,
+        *,
+        request: VoiceCaptureRequest,
+    ) -> None:
+        if not handle.get("endpointing_enabled") or handle.get("endpoint_reason"):
+            return
+        elapsed_ms = int(
+            (time.perf_counter() - float(handle.get("started_at", time.perf_counter())))
+            * 1000
+        )
+        rms, peak = self._pcm16_levels(payload)
+        handle["last_audio_level_rms"] = rms
+        handle["last_audio_level_peak"] = peak
+        if rms >= int(handle.get("speech_start_rms") or 650):
+            handle["speech_detected"] = True
+            handle["last_speech_ms"] = elapsed_ms
+            if handle.get("speech_detected_ms") is None:
+                handle["speech_detected_ms"] = elapsed_ms
+        elif handle.get("speech_detected") and rms >= int(
+            handle.get("speech_stop_rms") or 420
+        ):
+            handle["last_speech_ms"] = elapsed_ms
+
+        if bool(handle.get("speech_detected")):
+            last_speech_ms = int(handle.get("last_speech_ms") or elapsed_ms)
+            silence_ms = int(handle.get("endpoint_silence_ms") or 700)
+            if elapsed_ms - last_speech_ms >= silence_ms:
+                self._mark_endpoint(handle, "speech_ended")
+                return
+        if elapsed_ms >= int(request.max_duration_ms or 0):
+            self._mark_endpoint(
+                handle,
+                "max_duration" if handle.get("speech_detected") else "no_speech_detected",
+            )
+
+    def _mark_endpoint(self, handle: dict[str, Any], reason: str) -> None:
+        if not handle.get("endpoint_reason"):
+            handle["endpoint_reason"] = reason
+        if reason == "max_duration":
+            handle["timed_out"] = True
+        endpoint_event = handle.get("endpoint_event")
+        if isinstance(endpoint_event, threading.Event):
+            endpoint_event.set()
+
+    def _endpoint_payload(
+        self, handle: dict[str, Any], *, reason: str | None = None
+    ) -> dict[str, Any]:
+        resolved_reason = str(
+            reason or handle.get("endpoint_reason") or "manual_stop_required"
+        )
+        elapsed_ms = int(
+            (time.perf_counter() - float(handle.get("started_at", time.perf_counter())))
+            * 1000
+        )
+        return {
+            "reason": resolved_reason,
+            "speech_detected": bool(handle.get("speech_detected")),
+            "speech_detected_ms": handle.get("speech_detected_ms"),
+            "endpoint_ms": elapsed_ms,
+            "silence_ms": handle.get("endpoint_silence_ms"),
+            "level_rms": int(handle.get("last_audio_level_rms") or 0),
+            "level_peak": int(handle.get("last_audio_level_peak") or 0),
+            "raw_audio_logged": False,
+            "raw_secret_logged": False,
+        }
+
+    def _pcm16_levels(self, payload: bytes) -> tuple[int, int]:
+        usable = len(payload) - (len(payload) % 2)
+        if usable <= 0:
+            return 0, 0
+        count = usable // 2
+        total = 0
+        peak = 0
+        try:
+            for (sample,) in struct.iter_unpack("<h", payload[:usable]):
+                total += sample * sample
+                level = abs(sample)
+                if level > peak:
+                    peak = level
+        except Exception:
+            return 0, 0
+        return int((total / max(1, count)) ** 0.5), int(peak)
+
+    def _rms_threshold(self, value: Any, *, fallback: int) -> int:
+        try:
+            threshold = float(value)
+        except (TypeError, ValueError):
+            return fallback
+        if threshold <= 0:
+            return 0
+        if threshold <= 1:
+            return max(1, int(threshold * 32767))
+        return int(threshold)
 
 
 @dataclass(slots=True)
@@ -1021,6 +1226,9 @@ class LocalCaptureProvider:
         if not isinstance(payload, dict):
             payload = {}
         output_path = Path(str(payload.get("output_path") or output_path or ""))
+        endpoint = self._endpoint_payload_from(payload, handle)
+        endpoint_reason = str(endpoint.get("reason") or reason or "").strip()
+        effective_stop_reason = endpoint_reason or reason
         duration_ms = self._optional_int(payload.get("duration_ms"))
         size_bytes = self._resolved_size(output_path, payload.get("size_bytes"))
         timed_out = (
@@ -1033,8 +1241,33 @@ class LocalCaptureProvider:
             "capture": active.to_dict(),
             "file": file_metadata,
             "backend": dict(payload.get("metadata") or {}),
+            "endpoint": endpoint,
             "cleanup_warning": self._last_cleanup_warning,
         }
+        if (
+            endpoint_reason == "no_speech_detected"
+            and self._request_endpointing_enabled(request)
+        ):
+            self._clear_active_capture(cleanup_path=output_path)
+            return VoiceCaptureResult(
+                ok=False,
+                capture_request_id=active.capture_request_id,
+                capture_id=active.capture_id,
+                status="failed",
+                provider=self.provider_name,
+                device=active.device,
+                duration_ms=duration_ms,
+                size_bytes=size_bytes,
+                stopped_at=utc_now_iso(),
+                stop_reason="no_speech_detected",
+                error_code="no_speech_detected",
+                error_message="No speech was detected during the listen session.",
+                metadata=base_metadata,
+                raw_audio_persisted=False,
+                microphone_was_active=True,
+                always_listening_claimed=False,
+                wake_word_claimed=False,
+            )
         if timed_out:
             self._clear_active_capture(cleanup_path=output_path)
             return VoiceCaptureResult(
@@ -1047,7 +1280,7 @@ class LocalCaptureProvider:
                 duration_ms=duration_ms or active.max_duration_ms,
                 size_bytes=size_bytes,
                 stopped_at=utc_now_iso(),
-                stop_reason=reason,
+                stop_reason=effective_stop_reason,
                 error_code="capture_timeout",
                 error_message="Local capture reached the configured max duration.",
                 metadata=base_metadata,
@@ -1137,7 +1370,7 @@ class LocalCaptureProvider:
             duration_ms=duration_ms,
             size_bytes=audio.size_bytes,
             stopped_at=utc_now_iso(),
-            stop_reason=reason,
+            stop_reason=effective_stop_reason,
             metadata={**base_metadata, "audio_input": audio.to_metadata()},
             raw_audio_persisted=bool(request and request.persist_audio),
             microphone_was_active=True,
@@ -1186,6 +1419,44 @@ class LocalCaptureProvider:
         )
         self._clear_active_capture(cleanup_path=output_path)
         return result
+
+    def wait_for_endpoint(
+        self,
+        capture_id: str | None = None,
+        *,
+        timeout_ms: int | None = None,
+    ) -> dict[str, Any]:
+        active = self._active_capture
+        if active is None or (capture_id and capture_id != active.capture_id):
+            return {
+                "ok": False,
+                "reason": "no_active_capture",
+                "error_code": "no_active_capture",
+                "speech_detected": False,
+                "raw_audio_logged": False,
+                "raw_secret_logged": False,
+            }
+        handle = self._active_handle or {}
+        wait = getattr(self.backend, "wait_for_endpoint", None)
+        if not callable(wait):
+            return {
+                "ok": True,
+                "capture_id": active.capture_id,
+                "reason": "manual_stop_required",
+                "speech_detected": False,
+                "raw_audio_logged": False,
+                "raw_secret_logged": False,
+            }
+        payload = wait(
+            handle,
+            timeout_ms=timeout_ms or active.max_duration_ms or 30_000,
+        )
+        endpoint = dict(payload or {})
+        endpoint.setdefault("ok", True)
+        endpoint.setdefault("capture_id", active.capture_id)
+        endpoint.setdefault("raw_audio_logged", False)
+        endpoint.setdefault("raw_secret_logged", False)
+        return endpoint
 
     def get_active_capture(self) -> VoiceCaptureSession | None:
         return self._active_capture
@@ -1353,6 +1624,30 @@ class LocalCaptureProvider:
             return int(value) if value is not None else None
         except (TypeError, ValueError):
             return None
+
+    def _endpoint_payload_from(
+        self, payload: dict[str, Any], handle: dict[str, Any]
+    ) -> dict[str, Any]:
+        endpoint = payload.get("endpoint")
+        if not isinstance(endpoint, dict):
+            metadata = payload.get("metadata")
+            if isinstance(metadata, dict) and isinstance(metadata.get("endpoint"), dict):
+                endpoint = metadata.get("endpoint")
+        if not isinstance(endpoint, dict):
+            endpoint = handle.get("endpoint")
+        clean = dict(endpoint) if isinstance(endpoint, dict) else {}
+        clean.setdefault("reason", None)
+        clean.setdefault("speech_detected", False)
+        clean.setdefault("raw_audio_logged", False)
+        clean.setdefault("raw_secret_logged", False)
+        return clean
+
+    def _request_endpointing_enabled(
+        self, request: VoiceCaptureRequest | None
+    ) -> bool:
+        if request is None:
+            return False
+        return bool(dict(request.metadata or {}).get("endpointing_enabled"))
 
     def _mime_type_for_format(self, format_name: str) -> str:
         normalized = str(format_name or "wav").strip().lower() or "wav"
@@ -1839,6 +2134,143 @@ class MockPlaybackProvider:
         )
 
 
+@dataclass(slots=True)
+class NullStreamingPlaybackProvider(MockPlaybackProvider):
+    """Silent live-playback sink for first-output timing and CI smoke runs."""
+
+    provider_name: str = "null_stream"
+    complete_immediately: bool = False
+    _stream_started_monotonic_ms: int | None = field(
+        default=None, init=False, repr=False
+    )
+    _first_accept_monotonic_ms: int | None = field(
+        default=None, init=False, repr=False
+    )
+
+    @property
+    def is_mock(self) -> bool:
+        return False
+
+    def _now_monotonic_ms(self) -> int:
+        return int(time.perf_counter() * 1000)
+
+    def _null_metadata(self, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = dict(extra or {})
+        payload.update(
+            {
+                "mock": False,
+                "sink_kind": "null_stream",
+                "null_sink": True,
+                "audible_playback": False,
+                "raw_audio_present": False,
+                "raw_audio_logged": False,
+                "user_heard_claimed": False,
+            }
+        )
+        if self._first_accept_monotonic_ms is not None:
+            payload["null_sink_first_accept_ms"] = max(
+                0,
+                self._first_accept_monotonic_ms
+                - int(
+                    self._stream_started_monotonic_ms
+                    or self._first_accept_monotonic_ms
+                ),
+            )
+            payload["first_output_start_ms"] = payload[
+                "null_sink_first_accept_ms"
+            ]
+        return payload
+
+    def get_availability(self) -> dict[str, Any]:
+        return {
+            **MockPlaybackProvider.get_availability(self),
+            "provider": self.provider_name,
+            "mock": False,
+            "sink_kind": "null_stream",
+            "null_sink": True,
+            "audible_playback": False,
+            "raw_audio_logged": False,
+            "user_heard_claimed": False,
+        }
+
+    def prewarm_playback(
+        self, request: VoicePlaybackPrewarmRequest
+    ) -> VoicePlaybackPrewarmResult:
+        result = MockPlaybackProvider.prewarm_playback(self, request)
+        return replace(
+            result,
+            provider=self.provider_name,
+            metadata=self._null_metadata(dict(result.metadata)),
+        )
+
+    def start_stream(
+        self, request: VoiceLivePlaybackRequest
+    ) -> VoiceLivePlaybackSession:
+        self._stream_started_monotonic_ms = self._now_monotonic_ms()
+        self._first_accept_monotonic_ms = None
+        session = MockPlaybackProvider.start_stream(self, request)
+        session = replace(
+            session,
+            provider=self.provider_name,
+            metadata=self._null_metadata(dict(session.metadata)),
+            user_heard_claimed=False,
+        )
+        if session.status in {"started", "playing"}:
+            self._active_stream = session
+        return session
+
+    def feed_stream_chunk(
+        self,
+        playback_stream_id: str,
+        data: bytes,
+        *,
+        chunk_index: int | None = None,
+    ) -> VoiceLivePlaybackChunkResult:
+        result = MockPlaybackProvider.feed_stream_chunk(
+            self,
+            playback_stream_id,
+            data,
+            chunk_index=chunk_index,
+        )
+        if result.ok and self._first_accept_monotonic_ms is None:
+            self._first_accept_monotonic_ms = self._now_monotonic_ms()
+        metadata = self._null_metadata(dict(result.metadata))
+        updated_result = replace(result, metadata=metadata)
+        if self._active_stream is not None:
+            self._active_stream = replace(
+                self._active_stream,
+                provider=self.provider_name,
+                metadata=self._null_metadata(dict(self._active_stream.metadata)),
+                user_heard_claimed=False,
+            )
+        return updated_result
+
+    def complete_stream(self, playback_stream_id: str) -> VoiceLivePlaybackResult:
+        result = MockPlaybackProvider.complete_stream(self, playback_stream_id)
+        return replace(
+            result,
+            provider=self.provider_name,
+            metadata=self._null_metadata(dict(result.metadata)),
+            user_heard_claimed=False,
+        )
+
+    def cancel_stream(
+        self,
+        playback_stream_id: str | None = None,
+        *,
+        reason: str = "user_requested",
+    ) -> VoiceLivePlaybackResult:
+        result = MockPlaybackProvider.cancel_stream(
+            self, playback_stream_id, reason=reason
+        )
+        return replace(
+            result,
+            provider=self.provider_name,
+            metadata=self._null_metadata(dict(result.metadata)),
+            user_heard_claimed=False,
+        )
+
+
 class WindowsMCIPlaybackBackend:
     """Small Windows-only MP3/WAV player using the stdlib MCI binding."""
 
@@ -1847,6 +2279,7 @@ class WindowsMCIPlaybackBackend:
     def __init__(self) -> None:
         self.platform_name = sys.platform
         self._aliases: dict[str, str] = {}
+        self._stream_handles: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
 
     def get_availability(self, config: VoiceConfig) -> dict[str, Any]:
@@ -1983,6 +2416,213 @@ class WindowsMCIPlaybackBackend:
                 pass
         return {"status": "stopped", "elapsed_ms": 0}
 
+    def start_stream(self, *, request: VoiceLivePlaybackRequest) -> dict[str, Any]:
+        if str(request.audio_format or "").strip().lower() != "pcm":
+            return {
+                "status": "unsupported",
+                "error_code": "unsupported_live_format",
+                "error_message": "Windows speaker streaming currently requires PCM audio.",
+                "raw_audio_present": False,
+            }
+        availability = self._stream_request_availability(request)
+        if not bool(availability.get("available")):
+            reason = str(
+                availability.get("unavailable_reason") or "local_playback_unavailable"
+            )
+            return {
+                "status": "unavailable",
+                "error_code": reason,
+                "error_message": f"Local speaker streaming unavailable: {reason}.",
+                "raw_audio_present": False,
+            }
+        sample_rate = self._stream_int_metadata(request, "sample_rate", 24000)
+        channels = self._stream_int_metadata(request, "channels", 1)
+        sample_width = self._stream_int_metadata(request, "sample_width_bytes", 2)
+        try:
+            wave_out = self._waveout_open(
+                sample_rate=sample_rate,
+                channels=channels,
+                sample_width_bytes=sample_width,
+            )
+            volume = int(max(0.0, min(1.0, float(request.volume))) * 0xFFFF)
+            try:
+                self._waveout_set_volume(wave_out, volume)
+            except Exception:
+                pass
+        except Exception as error:
+            return {
+                "status": "failed",
+                "error_code": "local_speaker_stream_start_failed",
+                "error_message": str(error),
+                "raw_audio_present": False,
+            }
+        handle = {
+            "wave_out": wave_out,
+            "buffers": [],
+            "started": time.perf_counter(),
+            "sample_rate": sample_rate,
+            "channels": channels,
+            "sample_width_bytes": sample_width,
+            "chunk_count": 0,
+            "bytes_received": 0,
+            "first_chunk_received_at": None,
+            "playback_started_at": None,
+            "audible_playback": False,
+        }
+        with self._lock:
+            self._stream_handles[request.playback_stream_id] = handle
+        return {
+            "status": "started",
+            "backend": "winmm_waveout",
+            "streaming_supported": True,
+            "sample_rate": sample_rate,
+            "channels": channels,
+            "sample_width_bytes": sample_width,
+            "audible_playback": False,
+            "user_heard_claimed": False,
+            "raw_audio_present": False,
+        }
+
+    def feed_stream_chunk(
+        self,
+        playback_stream_id: str,
+        data: bytes,
+        *,
+        chunk_index: int | None = None,
+    ) -> dict[str, Any]:
+        payload = bytes(data or b"")
+        with self._lock:
+            handle = self._stream_handles.get(playback_stream_id)
+        if handle is None:
+            return {
+                "ok": False,
+                "status": "unavailable",
+                "chunk_index": chunk_index or 0,
+                "error_code": "no_active_playback_stream",
+                "error_message": "No active local speaker stream exists.",
+                "raw_audio_present": False,
+            }
+        if not payload:
+            return {
+                "ok": True,
+                "status": "playing",
+                "chunk_index": chunk_index or int(handle.get("chunk_count") or 0),
+                "playback_started": bool(handle.get("audible_playback")),
+                "raw_audio_present": False,
+            }
+        try:
+            self._waveout_write(handle, payload)
+        except Exception as error:
+            return {
+                "ok": False,
+                "status": "failed",
+                "chunk_index": chunk_index or int(handle.get("chunk_count") or 0),
+                "error_code": "local_speaker_stream_chunk_failed",
+                "error_message": str(error),
+                "raw_audio_present": False,
+            }
+        now = utc_now_iso()
+        if handle.get("first_chunk_received_at") is None:
+            handle["first_chunk_received_at"] = now
+        if handle.get("playback_started_at") is None:
+            handle["playback_started_at"] = now
+        handle["chunk_count"] = int(handle.get("chunk_count") or 0) + 1
+        handle["bytes_received"] = int(handle.get("bytes_received") or 0) + len(payload)
+        handle["audible_playback"] = True
+        return {
+            "ok": True,
+            "status": "playing",
+            "chunk_index": chunk_index
+            if chunk_index is not None
+            else int(handle["chunk_count"]) - 1,
+            "first_chunk_received_at": handle["first_chunk_received_at"],
+            "playback_started_at": handle["playback_started_at"],
+            "playback_started": True,
+            "audible_playback": True,
+            "user_heard_claimed": True,
+            "raw_audio_present": False,
+        }
+
+    def complete_stream(self, playback_stream_id: str) -> dict[str, Any]:
+        with self._lock:
+            handle = self._stream_handles.pop(playback_stream_id, None)
+        if handle is None:
+            return {
+                "status": "unavailable",
+                "error_code": "no_active_playback_stream",
+                "error_message": "No active local speaker stream exists.",
+                "raw_audio_present": False,
+            }
+        error: str | None = None
+        try:
+            self._waveout_wait_and_close(handle)
+        except Exception as exc:
+            error = str(exc)
+        elapsed_ms = int((time.perf_counter() - float(handle.get("started") or time.perf_counter())) * 1000)
+        heard = bool(handle.get("audible_playback") and handle.get("chunk_count"))
+        return {
+            "status": "failed" if error else "completed",
+            "elapsed_ms": elapsed_ms,
+            "error_code": "local_speaker_stream_complete_failed" if error else None,
+            "error_message": error,
+            "chunk_count": int(handle.get("chunk_count") or 0),
+            "bytes_received": int(handle.get("bytes_received") or 0),
+            "first_chunk_received_at": handle.get("first_chunk_received_at"),
+            "playback_started_at": handle.get("playback_started_at"),
+            "audible_playback": heard,
+            "user_heard_claimed": heard,
+            "raw_audio_present": False,
+        }
+
+    def cancel_stream(
+        self,
+        playback_stream_id: str | None = None,
+        *,
+        reason: str = "user_requested",
+    ) -> dict[str, Any]:
+        with self._lock:
+            if playback_stream_id:
+                handles = {
+                    playback_stream_id: self._stream_handles.pop(playback_stream_id, None)
+                }
+            else:
+                handles = dict(self._stream_handles)
+                self._stream_handles.clear()
+        handles = {key: value for key, value in handles.items() if value is not None}
+        if not handles:
+            return {
+                "status": "unavailable",
+                "error_code": "no_active_playback_stream",
+                "error_message": "No active local speaker stream exists.",
+                "raw_audio_present": False,
+            }
+        heard = False
+        chunk_count = 0
+        bytes_received = 0
+        first_chunk_received_at = None
+        playback_started_at = None
+        for handle in handles.values():
+            heard = heard or bool(handle.get("audible_playback") and handle.get("chunk_count"))
+            chunk_count += int(handle.get("chunk_count") or 0)
+            bytes_received += int(handle.get("bytes_received") or 0)
+            first_chunk_received_at = first_chunk_received_at or handle.get("first_chunk_received_at")
+            playback_started_at = playback_started_at or handle.get("playback_started_at")
+            try:
+                self._waveout_reset_and_close(handle)
+            except Exception:
+                pass
+        return {
+            "status": "cancelled",
+            "cancel_reason": reason,
+            "chunk_count": chunk_count,
+            "bytes_received": bytes_received,
+            "first_chunk_received_at": first_chunk_received_at,
+            "playback_started_at": playback_started_at,
+            "audible_playback": heard,
+            "user_heard_claimed": heard,
+            "raw_audio_present": False,
+        }
+
     def _mci(self, command: str) -> str:
         import ctypes
 
@@ -1997,6 +2637,220 @@ class WindowsMCIPlaybackBackend:
         except Exception:
             message = f"MCI error {result}"
         raise RuntimeError(message)
+
+    def _stream_request_availability(
+        self, request: VoiceLivePlaybackRequest
+    ) -> dict[str, Any]:
+        device = str(request.device or "default").strip() or "default"
+        device_available = device.lower() == "default"
+        if not sys.platform.startswith("win"):
+            return {
+                "provider": "local",
+                "backend": "winmm_waveout",
+                "platform": sys.platform,
+                "dependency": "winmm",
+                "dependency_available": False,
+                "device": device,
+                "device_available": device_available,
+                "available": False,
+                "unavailable_reason": "local_playback_platform_unsupported",
+            }
+        try:
+            import ctypes
+
+            getattr(ctypes.windll, "winmm")
+        except Exception:
+            return {
+                "provider": "local",
+                "backend": "winmm_waveout",
+                "platform": sys.platform,
+                "dependency": "winmm",
+                "dependency_available": False,
+                "device": device,
+                "device_available": device_available,
+                "available": False,
+                "unavailable_reason": "local_playback_dependency_missing",
+            }
+        if not device_available:
+            return {
+                "provider": "local",
+                "backend": "winmm_waveout",
+                "platform": sys.platform,
+                "dependency": "winmm",
+                "dependency_available": True,
+                "device": device,
+                "device_available": False,
+                "available": False,
+                "unavailable_reason": "device_unavailable",
+            }
+        return {
+            "provider": "local",
+            "backend": "winmm_waveout",
+            "platform": sys.platform,
+            "dependency": "winmm",
+            "dependency_available": True,
+            "device": device,
+            "device_available": True,
+            "available": True,
+            "unavailable_reason": None,
+        }
+
+    def _stream_int_metadata(
+        self,
+        request: VoiceLivePlaybackRequest,
+        key: str,
+        default: int,
+    ) -> int:
+        value = request.metadata.get(key)
+        try:
+            return max(1, int(value if value is not None else default))
+        except (TypeError, ValueError):
+            return default
+
+    def _waveout_open(
+        self,
+        *,
+        sample_rate: int,
+        channels: int,
+        sample_width_bytes: int,
+    ) -> Any:
+        import ctypes
+        from ctypes import wintypes
+
+        class WAVEFORMATEX(ctypes.Structure):
+            _fields_ = [
+                ("wFormatTag", wintypes.WORD),
+                ("nChannels", wintypes.WORD),
+                ("nSamplesPerSec", wintypes.DWORD),
+                ("nAvgBytesPerSec", wintypes.DWORD),
+                ("nBlockAlign", wintypes.WORD),
+                ("wBitsPerSample", wintypes.WORD),
+                ("cbSize", wintypes.WORD),
+            ]
+
+        fmt = WAVEFORMATEX()
+        fmt.wFormatTag = 1
+        fmt.nChannels = channels
+        fmt.nSamplesPerSec = sample_rate
+        fmt.nBlockAlign = channels * sample_width_bytes
+        fmt.nAvgBytesPerSec = sample_rate * fmt.nBlockAlign
+        fmt.wBitsPerSample = sample_width_bytes * 8
+        fmt.cbSize = 0
+        wave_out = ctypes.c_void_p()
+        result = ctypes.windll.winmm.waveOutOpen(
+            ctypes.byref(wave_out),
+            ctypes.c_uint(-1).value,
+            ctypes.byref(fmt),
+            0,
+            0,
+            0,
+        )
+        if result:
+            raise RuntimeError(self._winmm_error(result))
+        return wave_out
+
+    def _waveout_set_volume(self, wave_out: Any, volume: int) -> None:
+        import ctypes
+
+        packed = (volume & 0xFFFF) | ((volume & 0xFFFF) << 16)
+        ctypes.windll.winmm.waveOutSetVolume(wave_out, packed)
+
+    def _waveout_write(self, handle: dict[str, Any], payload: bytes) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        class WAVEHDR(ctypes.Structure):
+            _fields_ = [
+                ("lpData", ctypes.c_void_p),
+                ("dwBufferLength", wintypes.DWORD),
+                ("dwBytesRecorded", wintypes.DWORD),
+                ("dwUser", ctypes.c_size_t),
+                ("dwFlags", wintypes.DWORD),
+                ("dwLoops", wintypes.DWORD),
+                ("lpNext", ctypes.c_void_p),
+                ("reserved", ctypes.c_size_t),
+            ]
+
+        buffer = ctypes.create_string_buffer(payload)
+        header = WAVEHDR()
+        header.lpData = ctypes.cast(buffer, ctypes.c_void_p)
+        header.dwBufferLength = len(payload)
+        wave_out = handle["wave_out"]
+        prepare = ctypes.windll.winmm.waveOutPrepareHeader(
+            wave_out,
+            ctypes.byref(header),
+            ctypes.sizeof(header),
+        )
+        if prepare:
+            raise RuntimeError(self._winmm_error(prepare))
+        write = ctypes.windll.winmm.waveOutWrite(
+            wave_out,
+            ctypes.byref(header),
+            ctypes.sizeof(header),
+        )
+        if write:
+            try:
+                ctypes.windll.winmm.waveOutUnprepareHeader(
+                    wave_out,
+                    ctypes.byref(header),
+                    ctypes.sizeof(header),
+                )
+            except Exception:
+                pass
+            raise RuntimeError(self._winmm_error(write))
+        handle["buffers"].append((header, buffer))
+
+    def _waveout_wait_and_close(self, handle: dict[str, Any]) -> None:
+        deadline = time.perf_counter() + 10.0
+        while time.perf_counter() < deadline:
+            if all(header.dwFlags & 0x00000001 for header, _ in handle["buffers"]):
+                break
+            time.sleep(0.01)
+        self._waveout_reset_and_close(handle, reset=False)
+
+    def _waveout_reset_and_close(
+        self,
+        handle: dict[str, Any],
+        *,
+        reset: bool = True,
+    ) -> None:
+        import ctypes
+
+        wave_out = handle.get("wave_out")
+        if wave_out is None:
+            return
+        if reset:
+            try:
+                ctypes.windll.winmm.waveOutReset(wave_out)
+            except Exception:
+                pass
+        for header, _buffer in list(handle.get("buffers") or []):
+            try:
+                ctypes.windll.winmm.waveOutUnprepareHeader(
+                    wave_out,
+                    ctypes.byref(header),
+                    ctypes.sizeof(header),
+                )
+            except Exception:
+                pass
+        try:
+            ctypes.windll.winmm.waveOutClose(wave_out)
+        except Exception:
+            pass
+        handle["wave_out"] = None
+        handle["buffers"] = []
+
+    def _winmm_error(self, code: int) -> str:
+        import ctypes
+
+        error_buffer = ctypes.create_unicode_buffer(512)
+        try:
+            ctypes.windll.winmm.waveOutGetErrorTextW(
+                code, error_buffer, len(error_buffer)
+            )
+            return error_buffer.value or f"winmm error {code}"
+        except Exception:
+            return f"winmm error {code}"
 
     def _request_availability(self, request: VoicePlaybackRequest) -> dict[str, Any]:
         device = str(request.device or "default").strip() or "default"
@@ -2291,7 +3145,14 @@ class LocalPlaybackProvider:
         session = self._stream_session(
             request,
             status=str(payload.get("status") or "started"),
-            metadata={"availability": availability, "backend": availability.get("backend")},
+            metadata={
+                "availability": availability,
+                "backend": payload.get("backend") or availability.get("backend"),
+                "streaming_supported": bool(payload.get("streaming_supported")),
+                "audible_playback": bool(payload.get("audible_playback")),
+                "user_heard_claimed": False,
+                "raw_audio_present": False,
+            },
         )
         with self._lock:
             self._active_stream = session
@@ -2355,7 +3216,11 @@ class LocalPlaybackProvider:
             first_chunk_received_at=str(result.get("first_chunk_received_at") or now),
             playback_started_at=str(result.get("playback_started_at") or now),
             playback_started=bool(result.get("playback_started", True)),
-            metadata={"raw_audio_present": False},
+            metadata={
+                "raw_audio_present": False,
+                "audible_playback": bool(result.get("audible_playback")),
+                "user_heard_claimed": bool(result.get("user_heard_claimed")),
+            },
         )
         with self._lock:
             active_stream = self._active_stream
@@ -2369,7 +3234,37 @@ class LocalPlaybackProvider:
                     or chunk_result.playback_started_at,
                     chunk_count=active_stream.chunk_count + 1,
                     bytes_received=active_stream.bytes_received + len(payload),
+                    metadata={
+                        **dict(active_stream.metadata),
+                        "audible_playback": bool(
+                            active_stream.metadata.get("audible_playback")
+                            or result.get("audible_playback")
+                        ),
+                        "user_heard_claimed": bool(
+                            active_stream.metadata.get("user_heard_claimed")
+                            or result.get("user_heard_claimed")
+                        ),
+                        "raw_audio_present": False,
+                    },
                 )
+                if self._active_playback is not None:
+                    self._active_playback = replace(
+                        self._active_playback,
+                        played_locally=bool(
+                            self._active_playback.played_locally
+                            or result.get("audible_playback")
+                        ),
+                        user_heard_claimed=bool(
+                            self._active_playback.user_heard_claimed
+                            or result.get("user_heard_claimed")
+                        ),
+                        output_metadata={
+                            **dict(self._active_playback.output_metadata),
+                            "audible_playback": bool(result.get("audible_playback")),
+                            "user_heard_claimed": bool(result.get("user_heard_claimed")),
+                            "raw_audio_present": False,
+                        },
+                    )
         return chunk_result
 
     def complete_stream(self, playback_stream_id: str) -> VoiceLivePlaybackResult:
@@ -2381,6 +3276,7 @@ class LocalPlaybackProvider:
                 metadata = dict(self.backend.complete_stream(playback_stream_id) or {})  # type: ignore[attr-defined]
             except Exception as error:
                 metadata = {"error_code": "local_stream_complete_failed", "error_message": str(error)}
+        heard_claimed = self._stream_user_heard_claimed(metadata, active_stream)
         with self._lock:
             self._active_playback = None
             self._active_stream = None
@@ -2407,7 +3303,7 @@ class LocalPlaybackProvider:
             error_code=metadata.get("error_code"),
             error_message=metadata.get("error_message"),
             metadata={**metadata, "raw_audio_present": False},
-            user_heard_claimed=False,
+            user_heard_claimed=heard_claimed,
         )
 
     def cancel_stream(
@@ -2418,11 +3314,16 @@ class LocalPlaybackProvider:
     ) -> VoiceLivePlaybackResult:
         active = self._active_playback
         active_stream = self._active_stream
+        metadata: dict[str, Any] = {}
         if self.backend is not None and hasattr(self.backend, "cancel_stream"):
             try:
-                self.backend.cancel_stream(playback_stream_id, reason=reason)  # type: ignore[attr-defined]
+                metadata = dict(
+                    self.backend.cancel_stream(playback_stream_id, reason=reason)  # type: ignore[attr-defined]
+                    or {}
+                )
             except Exception:
                 pass
+        heard_claimed = self._stream_user_heard_claimed(metadata, active_stream)
         with self._lock:
             self._active_playback = None
             self._active_stream = None
@@ -2451,8 +3352,8 @@ class LocalPlaybackProvider:
             ),
             error_code=None if active else "no_active_playback_stream",
             error_message=None if active else "No active playback stream exists.",
-            metadata={"cancel_reason": reason, "raw_audio_present": False},
-            user_heard_claimed=False,
+            metadata={**metadata, "cancel_reason": reason, "raw_audio_present": False},
+            user_heard_claimed=heard_claimed,
         )
 
     def get_active_playback_stream(self) -> VoiceLivePlaybackSession | None:
@@ -2482,6 +3383,23 @@ class LocalPlaybackProvider:
             error_code=error_code,
             error_message=error_message,
             metadata=dict(metadata or {}),
+        )
+
+    def _stream_user_heard_claimed(
+        self,
+        metadata: dict[str, Any],
+        stream: VoiceLivePlaybackSession | None,
+    ) -> bool:
+        if stream is None or stream.chunk_count <= 0 or stream.playback_started_at is None:
+            return False
+        return bool(
+            self.provider_name == "local"
+            and (
+                metadata.get("user_heard_claimed")
+                or metadata.get("audible_playback")
+                or stream.metadata.get("user_heard_claimed")
+                or stream.metadata.get("audible_playback")
+            )
         )
 
     async def _play_foreground(
@@ -4171,6 +5089,13 @@ class MockVoiceProvider:
     async def stream_speech(
         self, request: VoiceStreamingTTSRequest
     ) -> VoiceStreamingTTSResult:
+        return await self.stream_speech_progressive(request, None)
+
+    async def stream_speech_progressive(
+        self,
+        request: VoiceStreamingTTSRequest,
+        on_chunk: VoiceStreamingChunkCallback | None,
+    ) -> VoiceStreamingTTSResult:
         speech_request = request.speech_request
         self.tts_call_count += 1
         if self.tts_stream_error_code and not self.tts_stream_fail_after_chunks:
@@ -4235,6 +5160,7 @@ class MockVoiceProvider:
                 data=chunk_bytes,
             )
             chunks.append(chunk)
+            await _dispatch_streaming_chunk(on_chunk, chunk)
             if (
                 self.tts_stream_fail_after_chunks is not None
                 and len(chunks) >= self.tts_stream_fail_after_chunks
@@ -4958,6 +5884,13 @@ class OpenAIVoiceProvider(OpenAIVoiceProviderStub):
     async def stream_speech(
         self, request: VoiceStreamingTTSRequest
     ) -> VoiceStreamingTTSResult:
+        return await self.stream_speech_progressive(request, None)
+
+    async def stream_speech_progressive(
+        self,
+        request: VoiceStreamingTTSRequest,
+        on_chunk: VoiceStreamingChunkCallback | None,
+    ) -> VoiceStreamingTTSResult:
         speech_request = request.speech_request
         if not self.openai_config.enabled or not self.openai_config.api_key:
             return self._stream_failure(
@@ -4984,28 +5917,28 @@ class OpenAIVoiceProvider(OpenAIVoiceProviderStub):
                 bytes_total += len(chunk_bytes)
                 index = len(chunks)
                 elapsed = _elapsed_ms(start)
-                chunks.append(
-                    VoiceStreamingTTSChunk(
-                        tts_stream_id=request.tts_stream_id,
-                        speech_request_id=speech_request.speech_request_id,
-                        chunk_index=index,
-                        size_bytes=len(chunk_bytes),
-                        live_format=request.live_format or self.tts_live_format,
-                        provider="openai",
-                        model=speech_request.model or self.tts_model,
-                        voice=speech_request.voice or self.tts_voice,
-                        session_id=speech_request.session_id,
-                        turn_id=speech_request.turn_id,
-                        first_chunk=index == 0,
-                        final_chunk=False,
-                        duration_ms=elapsed,
-                        metadata={
-                            "response_kind": "stream_bytes",
-                            "raw_audio_present": False,
-                        },
-                        data=chunk_bytes,
-                    )
+                chunk = VoiceStreamingTTSChunk(
+                    tts_stream_id=request.tts_stream_id,
+                    speech_request_id=speech_request.speech_request_id,
+                    chunk_index=index,
+                    size_bytes=len(chunk_bytes),
+                    live_format=request.live_format or self.tts_live_format,
+                    provider="openai",
+                    model=speech_request.model or self.tts_model,
+                    voice=speech_request.voice or self.tts_voice,
+                    session_id=speech_request.session_id,
+                    turn_id=speech_request.turn_id,
+                    first_chunk=index == 0,
+                    final_chunk=False,
+                    duration_ms=elapsed,
+                    metadata={
+                        "response_kind": "stream_bytes",
+                        "raw_audio_present": False,
+                    },
+                    data=chunk_bytes,
                 )
+                chunks.append(chunk)
+                await _dispatch_streaming_chunk(on_chunk, chunk)
         except TimeoutError:
             return self._stream_failure(
                 request,

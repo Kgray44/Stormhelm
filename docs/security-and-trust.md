@@ -13,6 +13,7 @@ Stormhelm is local-first by default, but it can still affect local files, apps, 
 | Routing | Yes | Deterministic planner and slash router. |
 | Tools | Yes | Built-in local tools unless provider/integration explicitly used. |
 | Voice state/control | Yes | Voice status, capture controls, and UI state are local. OpenAI STT/TTS is external only when enabled/invoked. |
+| Web retrieval | External public web when used | HTTP and optional Obscura retrieval only fetch public `http`/`https` URLs after safety validation. Private/local/file/credential URLs are blocked by default. |
 | OpenAI | No, external | Disabled by default; enabling sends prompt/context to configured API. |
 | Weather | External provider | Weather tool uses configured provider URL when used. |
 | Discord relay | External effect | Local client automation can send material outside Stormhelm after preview/trust. |
@@ -65,6 +66,26 @@ Tests: `tests/test_trust_service.py`, `tests/test_safety.py`
 
 Sources: `src/stormhelm/core/safety/policy.py`, `src/stormhelm/core/tools/builtins/__init__.py`
 Tests: `tests/test_safety.py`, `tests/test_tool_registry.py`
+
+## Public Web Retrieval
+
+Web retrieval is read-only and does not require trust approval by default, but it is still an external network path. It uses a public URL safety gate before any provider runs and re-checks final URLs after redirects.
+
+| Boundary | Current behavior |
+|---|---|
+| URL schemes | Only `http` and `https` public URLs are accepted; unsupported schemes are blocked. |
+| Local/private targets | Localhost, loopback, private/link-local IPs, IPv4/IPv6 encoding tricks, `.local`, and file URLs are blocked by default. |
+| Redirects | A public-looking URL cannot redirect into localhost/private/file/credential territory. |
+| Credentials | Credential-bearing URLs are blocked and credentials are redacted from errors. |
+| Providers | HTTP extraction is enabled by default; Obscura CLI and Obscura CDP are optional and disabled by default. |
+| Output limits | URL length, text, and optional HTML are bounded by config limits. |
+| Events | Events include provider/status/counts/claim ceiling, not raw page text or HTML. |
+| CDP lifecycle | Managed Obscura CDP binds to localhost only, starts only for CDP provider requests, probes readiness, caps session lifetime/page count, and stops after inspection. |
+| Claim ceiling | HTTP/CLI results are rendered page evidence only. CDP results are `headless_cdp_page_evidence` only. Stormhelm does not independently check source claims and does not treat extraction as the user's visible screen. |
+| Out of scope | Logged-in browser context, cookies/session reuse, form submission, clicking, typing, scrolling, credentials, CAPTCHA/anti-bot bypass, stealth bypass behavior, Playwright/Puppeteer integration, visible-screen verification, and webpage truth verification. |
+
+Sources: `src/stormhelm/core/web_retrieval/safety.py`, `src/stormhelm/core/web_retrieval/service.py`, `src/stormhelm/core/web_retrieval/obscura_provider.py`, `src/stormhelm/core/web_retrieval/cdp.py`, `src/stormhelm/core/web_retrieval/cdp_provider.py`, `src/stormhelm/core/adapters/contracts.py`, `config/default.toml`
+Tests: `tests/test_web_retrieval_safety.py`, `tests/test_web_retrieval_service.py`, `tests/test_web_retrieval_providers.py`, `tests/test_web_retrieval_cdp.py`, `tests/test_adapter_contracts.py`
 
 ## Destructive Action Rules
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 from stormhelm.config.models import OpenAIConfig
@@ -16,11 +17,15 @@ from stormhelm.core.voice.models import VoiceLivePlaybackSession
 from stormhelm.core.voice.models import VoicePlaybackPrewarmRequest
 from stormhelm.core.voice.models import VoiceProviderPrewarmRequest
 from stormhelm.core.voice.models import VoiceSpeechRequest
+from stormhelm.core.voice.models import VoiceStreamingTTSResult
 from stormhelm.core.voice.models import VoiceStreamingTTSRequest
 from stormhelm.core.voice.providers import MockPlaybackProvider
 from stormhelm.core.voice.providers import MockVoiceProvider
+from stormhelm.core.voice.providers import NullStreamingPlaybackProvider
+from stormhelm.core.voice.providers import LocalPlaybackProvider
 from stormhelm.core.voice.providers import OpenAIVoiceProvider
 from stormhelm.core.voice.service import build_voice_subsystem
+from tests.test_voice_playback_provider import FakeStreamingSpeakerBackend
 
 
 def _openai_config(
@@ -95,6 +100,157 @@ def _service(*, events: EventBuffer | None = None):
     )
     service.playback_provider = MockPlaybackProvider(complete_immediately=False)
     return service
+
+
+class UnsupportedStreamingPlaybackProvider(MockPlaybackProvider):
+    provider_name = "local"
+    name = "local"
+
+    def start_stream(
+        self, request: VoiceLivePlaybackRequest
+    ) -> VoiceLivePlaybackSession:
+        return VoiceLivePlaybackSession(
+            playback_stream_id=request.playback_stream_id,
+            playback_request_id=request.playback_request_id,
+            provider="local",
+            device=request.device,
+            audio_format=request.audio_format,
+            status="unsupported",
+            session_id=request.session_id,
+            turn_id=request.turn_id,
+            tts_stream_id=request.tts_stream_id,
+            speech_request_id=request.speech_request_id,
+            error_code="streaming_playback_backend_unsupported",
+            error_message="Live streaming playback is unsupported by this backend.",
+            user_heard_claimed=False,
+        )
+
+
+class RecordingNullPlaybackProvider(NullStreamingPlaybackProvider):
+    def __init__(self) -> None:
+        super().__init__(complete_immediately=False)
+        self.feed_times: list[float] = []
+
+    def feed_stream_chunk(self, playback_stream_id: str, data: bytes, *, chunk_index: int | None = None):
+        self.feed_times.append(time.perf_counter())
+        return super().feed_stream_chunk(
+            playback_stream_id,
+            data,
+            chunk_index=chunk_index,
+        )
+
+
+class DelayedProgressiveMockVoiceProvider(MockVoiceProvider):
+    def __init__(self) -> None:
+        super().__init__(
+            tts_audio_bytes=b"first-second-third-fourth",
+            tts_stream_chunk_size=6,
+        )
+        self.progressive_callback_times: list[float] = []
+        self.accumulated_completed_at: float | None = None
+        self.progressive_completed_at: float | None = None
+
+    async def stream_speech(self, request: VoiceStreamingTTSRequest) -> VoiceStreamingTTSResult:
+        await asyncio.sleep(0.03)
+        result = await MockVoiceProvider.stream_speech_progressive(self, request, None)
+        self.accumulated_completed_at = time.perf_counter()
+        return result
+
+    async def stream_speech_progressive(
+        self,
+        request: VoiceStreamingTTSRequest,
+        on_chunk,
+    ) -> VoiceStreamingTTSResult:
+        async def delayed_callback(chunk):
+            await asyncio.sleep(0.01)
+            await on_chunk(chunk)
+            self.progressive_callback_times.append(time.perf_counter())
+
+        result = await MockVoiceProvider.stream_speech_progressive(
+            self,
+            request,
+            delayed_callback,
+        )
+        self.progressive_completed_at = time.perf_counter()
+        return result
+
+
+def test_service_feeds_null_sink_progressively_before_provider_completion() -> None:
+    service = _service()
+    provider = DelayedProgressiveMockVoiceProvider()
+    playback = RecordingNullPlaybackProvider()
+    service.provider = provider
+    service.playback_provider = playback
+
+    result = asyncio.run(
+        service.stream_core_approved_spoken_text(
+            "Core approved progressive speech.",
+            speak_allowed=True,
+            session_id="voice-session",
+            turn_id="voice-turn-progressive",
+            core_result_completed_ms=20,
+            request_started_ms=0,
+        )
+    )
+
+    assert result.ok is True
+    assert provider.progressive_callback_times
+    assert provider.progressive_completed_at is not None
+    assert playback.feed_times
+    assert playback.feed_times[0] < provider.progressive_completed_at
+    assert result.first_chunk_before_complete is True
+    assert result.latency.first_output_start_ms is not None
+    assert result.latency.stream_complete_ms is not None
+    assert result.latency.first_output_start_ms < result.latency.stream_complete_ms
+    assert result.latency.null_sink_first_accept_ms is not None
+    assert result.playback_result is not None
+    assert result.playback_result.user_heard_claimed is False
+
+
+def test_service_feeds_local_speaker_sink_progressively_and_claims_real_output() -> None:
+    service = _service()
+    provider = DelayedProgressiveMockVoiceProvider()
+    speaker_backend = FakeStreamingSpeakerBackend()
+    playback = LocalPlaybackProvider(
+        config=_voice_config(
+            playback=VoicePlaybackConfig(
+                enabled=True,
+                provider="local",
+                device="test-device",
+                volume=0.5,
+                allow_dev_playback=True,
+                streaming_enabled=True,
+            )
+        ),
+        backend=speaker_backend,
+    )
+    service.provider = provider
+    service.playback_provider = playback
+
+    result = asyncio.run(
+        service.stream_core_approved_spoken_text(
+            "Core approved progressive speaker speech.",
+            speak_allowed=True,
+            session_id="voice-session",
+            turn_id="voice-turn-progressive-speaker",
+            core_result_completed_ms=20,
+            request_started_ms=0,
+        )
+    )
+    payload = result.to_dict()
+
+    assert result.ok is True
+    assert provider.progressive_completed_at is not None
+    assert speaker_backend.stream_feed_calls
+    assert provider.progressive_callback_times[0] < provider.progressive_completed_at
+    assert result.playback_result is not None
+    assert result.playback_result.provider == "local"
+    assert result.playback_result.user_heard_claimed is True
+    assert result.latency.user_heard_claimed is True
+    assert payload["user_heard_claimed"] is True
+    assert result.latency.first_output_start_ms is not None
+    assert result.latency.stream_complete_ms is not None
+    assert result.latency.first_output_start_ms < result.latency.stream_complete_ms
 
 
 def test_streaming_tts_models_are_bounded_and_redact_audio_bytes() -> None:
@@ -257,6 +413,33 @@ def test_streaming_pipeline_waits_for_approved_text_and_speak_allowed() -> None:
     assert spoken.latency.tts_start_to_first_chunk_ms is not None
 
 
+def test_unsupported_live_playback_does_not_claim_first_audio_started() -> None:
+    service = _service()
+    service.playback_provider = UnsupportedStreamingPlaybackProvider(
+        complete_immediately=False
+    )
+
+    result = asyncio.run(
+        service.stream_core_approved_spoken_text(
+            "Core approved this spoken sentence.",
+            speak_allowed=True,
+            session_id="voice-session",
+            turn_id="voice-turn-unsupported-playback",
+            core_result_completed_ms=20,
+            request_started_ms=0,
+        )
+    )
+    payload = result.to_dict()
+
+    assert result.ok is False
+    assert result.status == "unsupported"
+    assert result.first_audio_available is False
+    assert result.error_code == "streaming_playback_backend_unsupported"
+    assert result.latency.first_audio_available is False
+    assert result.latency.first_output_start_ms is None
+    assert payload["user_heard_claimed"] is False
+
+
 def test_streaming_failure_before_first_audio_uses_explicit_buffered_fallback() -> None:
     service = _service()
     service.provider.tts_stream_error_code = "stream_failed_before_audio"
@@ -333,6 +516,126 @@ def test_stop_speaking_cancels_active_stream_without_cancelling_core_task() -> N
     assert result.playback_result.status == "cancelled"
     assert result.playback_result.partial_playback is False
     assert result.playback_result.user_heard_claimed is False
+
+
+def test_stop_speaking_suppresses_pending_stream_before_playback_starts() -> None:
+    service = _service()
+    request = _speech_request("Core approved pending streaming speech.")
+    service.last_speech_request = request
+    service.last_streaming_tts_request = VoiceStreamingTTSRequest.from_speech_request(
+        request,
+        live_format="pcm",
+        artifact_format="mp3",
+    )
+
+    result = asyncio.run(
+        service.stop_speaking(session_id="voice-session", reason="user_requested")
+    )
+
+    assert result.status == "completed"
+    assert result.spoken_output_suppressed is True
+    assert result.output_stopped is True
+    assert result.core_task_cancelled is False
+    assert result.core_result_mutated is False
+    assert service.current_response_suppressed is True
+    assert service._speech_output_block_reason(None) == "current_response_suppressed"
+
+
+def test_stream_cancelled_before_feed_does_not_claim_first_audio_started() -> None:
+    service = _service()
+
+    class SuppressingVoiceProvider(MockVoiceProvider):
+        async def stream_speech_progressive(
+            self,
+            request: VoiceStreamingTTSRequest,
+            on_chunk,
+        ):
+            service.current_response_suppressed = True
+            return await super().stream_speech_progressive(request, on_chunk)
+
+    service.provider = SuppressingVoiceProvider(
+        tts_audio_bytes=b"first-second-third",
+        tts_stream_chunk_size=5,
+    )
+
+    result = asyncio.run(
+        service.stream_core_approved_spoken_text(
+            "Core approved but operator stopped speech.",
+            speak_allowed=True,
+            session_id="voice-session",
+            turn_id="voice-turn-cancel-before-feed",
+            core_result_completed_ms=20,
+            request_started_ms=0,
+        )
+    )
+
+    assert result.status == "cancelled"
+    assert result.first_audio_available is False
+    assert result.partial_playback is False
+    assert result.latency.first_audio_available is False
+    assert result.latency.first_output_start_ms is None
+    assert result.playback_result is not None
+    assert result.playback_result.user_heard_claimed is False
+
+
+def test_stop_speaking_after_progressive_first_chunk_marks_partial_output() -> None:
+    service = _service()
+    first_chunk_fed = asyncio.Event()
+    release_stream = asyncio.Event()
+
+    class PausingProgressiveProvider(MockVoiceProvider):
+        async def stream_speech_progressive(
+            self,
+            request: VoiceStreamingTTSRequest,
+            on_chunk,
+        ) -> VoiceStreamingTTSResult:
+            async def pausing_callback(chunk):
+                await on_chunk(chunk)
+                if chunk.chunk_index == 0:
+                    first_chunk_fed.set()
+                    await release_stream.wait()
+
+            return await MockVoiceProvider.stream_speech_progressive(
+                self,
+                request,
+                pausing_callback,
+            )
+
+    service.provider = PausingProgressiveProvider(
+        tts_audio_bytes=b"first-second-third",
+        tts_stream_chunk_size=5,
+    )
+    service.playback_provider = RecordingNullPlaybackProvider()
+
+    async def scenario():
+        stream_task = asyncio.create_task(
+            service.stream_core_approved_spoken_text(
+                "Core approved interruptible speech.",
+                speak_allowed=True,
+                session_id="voice-session",
+                turn_id="voice-turn-stop-after-first",
+                core_result_completed_ms=20,
+                request_started_ms=0,
+            )
+        )
+        await asyncio.wait_for(first_chunk_fed.wait(), timeout=1)
+        stop_result = await service.stop_speaking(
+            session_id="voice-session",
+            reason="user_requested",
+        )
+        release_stream.set()
+        return stop_result, await stream_task
+
+    stop_result, stream_result = asyncio.run(scenario())
+
+    assert stop_result.core_task_cancelled is False
+    assert stop_result.core_result_mutated is False
+    assert stream_result.status == "cancelled"
+    assert stream_result.first_audio_available is True
+    assert stream_result.partial_playback is True
+    assert stream_result.playback_result is not None
+    assert stream_result.playback_result.partial_playback is True
+    assert stream_result.playback_result.user_heard_claimed is False
 
 
 def test_mute_blocks_new_streaming_speech() -> None:

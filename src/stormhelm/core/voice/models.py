@@ -491,7 +491,7 @@ class VoicePlaybackResult:
             "created_at": self.created_at,
             "played_locally": self.played_locally,
             "partial_playback": self.partial_playback,
-            "user_heard_claimed": False,
+            "user_heard_claimed": bool(self.user_heard_claimed),
         }
 
 
@@ -788,7 +788,10 @@ class VoiceLivePlaybackSession:
             "chunk_count": self.chunk_count,
             "bytes_received": self.bytes_received,
             "partial_playback": self.partial_playback,
-            "user_heard_claimed": False,
+            "user_heard_claimed": bool(
+                self.user_heard_claimed
+                or self.metadata.get("user_heard_claimed") is True
+            ),
             "error_code": self.error_code,
             "error_message": self.error_message,
             "metadata": dict(self.metadata),
@@ -877,7 +880,7 @@ class VoiceLivePlaybackResult:
             "error_code": self.error_code,
             "error_message": self.error_message,
             "metadata": dict(self.metadata),
-            "user_heard_claimed": False,
+            "user_heard_claimed": bool(self.user_heard_claimed),
             "raw_audio_present": False,
         }
 
@@ -1054,10 +1057,15 @@ class VoiceFirstAudioLatency:
     core_result_to_tts_start_ms: int | None = None
     tts_start_to_first_chunk_ms: int | None = None
     first_chunk_to_playback_start_ms: int | None = None
+    first_chunk_to_sink_accept_ms: int | None = None
     core_result_to_first_audio_ms: int | None = None
+    core_result_to_first_output_start_ms: int | None = None
     request_to_first_audio_ms: int | None = None
+    first_output_start_ms: int | None = None
+    null_sink_first_accept_ms: int | None = None
     streaming_enabled: bool = False
     streaming_transport_kind: str = ""
+    sink_kind: str = ""
     first_chunk_before_complete: bool = False
     stream_complete_ms: int | None = None
     playback_complete_ms: int | None = None
@@ -1073,6 +1081,13 @@ class VoiceFirstAudioLatency:
     partial_playback: bool = False
     voice_stream_used_by_normal_path: bool = False
     streaming_miss_reason: str = ""
+    live_openai_voice_smoke_run: bool = False
+    live_openai_first_chunk_ms: int | None = None
+    wake_loop_streaming_output_used: bool = False
+    wake_loop_streaming_miss_reason: str = ""
+    realtime_deferred_to_l6: bool = False
+    realtime_session_creation_attempted: bool = False
+    raw_audio_logged: bool = False
     user_heard_claimed: bool = False
 
     def to_dict(self) -> dict[str, Any]:
@@ -1080,10 +1095,15 @@ class VoiceFirstAudioLatency:
             "core_result_to_tts_start_ms": self.core_result_to_tts_start_ms,
             "tts_start_to_first_chunk_ms": self.tts_start_to_first_chunk_ms,
             "first_chunk_to_playback_start_ms": self.first_chunk_to_playback_start_ms,
+            "first_chunk_to_sink_accept_ms": self.first_chunk_to_sink_accept_ms,
             "core_result_to_first_audio_ms": self.core_result_to_first_audio_ms,
+            "core_result_to_first_output_start_ms": self.core_result_to_first_output_start_ms,
             "request_to_first_audio_ms": self.request_to_first_audio_ms,
+            "first_output_start_ms": self.first_output_start_ms,
+            "null_sink_first_accept_ms": self.null_sink_first_accept_ms,
             "streaming_enabled": self.streaming_enabled,
             "streaming_transport_kind": self.streaming_transport_kind,
+            "sink_kind": self.sink_kind,
             "first_chunk_before_complete": bool(self.first_chunk_before_complete),
             "stream_complete_ms": self.stream_complete_ms,
             "playback_complete_ms": self.playback_complete_ms,
@@ -1101,7 +1121,18 @@ class VoiceFirstAudioLatency:
                 self.voice_stream_used_by_normal_path
             ),
             "streaming_miss_reason": self.streaming_miss_reason,
-            "user_heard_claimed": False,
+            "live_openai_voice_smoke_run": bool(self.live_openai_voice_smoke_run),
+            "live_openai_first_chunk_ms": self.live_openai_first_chunk_ms,
+            "wake_loop_streaming_output_used": bool(
+                self.wake_loop_streaming_output_used
+            ),
+            "wake_loop_streaming_miss_reason": self.wake_loop_streaming_miss_reason,
+            "realtime_deferred_to_l6": bool(self.realtime_deferred_to_l6),
+            "realtime_session_creation_attempted": bool(
+                self.realtime_session_creation_attempted
+            ),
+            "raw_audio_logged": False,
+            "user_heard_claimed": bool(self.user_heard_claimed),
         }
 
 
@@ -1166,7 +1197,13 @@ class VoiceStreamingSpeechOutputResult:
             "error_message": self.error_message,
             "created_at": self.created_at,
             "metadata": dict(self.metadata),
-            "user_heard_claimed": False,
+            "user_heard_claimed": bool(
+                self.latency.user_heard_claimed
+                or (
+                    self.playback_result is not None
+                    and self.playback_result.user_heard_claimed
+                )
+            ),
             "raw_audio_present": False,
         }
 
@@ -2027,6 +2064,12 @@ class VoiceWakeSupervisedLoopResult:
     verification_posture: str | None = None
     transcript_preview: str = ""
     spoken_preview: str = ""
+    wake_loop_streaming_output_used: bool = False
+    wake_loop_streaming_miss_reason: str = "not_started"
+    streaming_transport_kind: str = ""
+    sink_kind: str = ""
+    first_output_start_ms: int | None = None
+    first_chunk_before_complete: bool = False
     truth_flags: dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=utc_now_iso)
     completed_at: str | None = None
@@ -2049,6 +2092,9 @@ class VoiceWakeSupervisedLoopResult:
             "vad_semantic_completion_claimed": False,
             "post_wake_listen_is_bounded": True,
             "listen_window_does_not_route_core": True,
+            "wake_alone_authorizes_speech": False,
+            "stt_final_authorizes_speech": False,
+            "null_sink_started_is_user_heard_audio": False,
         }
         truth_flags.update(dict(self.truth_flags or {}))
         object.__setattr__(self, "truth_flags", truth_flags)

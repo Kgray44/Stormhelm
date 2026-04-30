@@ -38,6 +38,7 @@ class UiBridge(QtCore.QObject):
     voiceCancelCaptureRequested = QtCore.Signal(dict)
     voiceSubmitCapturedAudioTurnRequested = QtCore.Signal(dict)
     voiceCaptureAndSubmitTurnRequested = QtCore.Signal(dict)
+    voiceListenAndSubmitTurnRequested = QtCore.Signal(dict)
     voiceStopPlaybackRequested = QtCore.Signal(dict)
     voiceStopSpeakingRequested = QtCore.Signal(dict)
     voiceSuppressCurrentResponseRequested = QtCore.Signal(dict)
@@ -132,6 +133,13 @@ class UiBridge(QtCore.QObject):
         self._clock_timer.setInterval(30_000)
         self._clock_timer.timeout.connect(self._refresh_clock)
         self._clock_timer.start()
+
+        self._stream_collections_timer = QtCore.QTimer(self)
+        self._stream_collections_timer.setSingleShot(True)
+        self._stream_collections_timer.setInterval(75)
+        self._stream_collections_timer.timeout.connect(
+            self._flush_stream_collections_changed
+        )
 
         self._ghost_hide_timer = QtCore.QTimer(self)
         self._ghost_hide_timer.setSingleShot(True)
@@ -619,6 +627,23 @@ class UiBridge(QtCore.QObject):
             }
         )
 
+    @QtCore.Slot(str, bool)
+    def listenAndSubmitTurn(
+        self,
+        mode: str = "ghost",
+        play_response: bool = True,
+    ) -> None:
+        normalized_mode = str(mode or self._mode or "ghost").strip().lower() or "ghost"
+        self._status_line = "Listening for one voice request."
+        self.statusChanged.emit()
+        self.voiceListenAndSubmitTurnRequested.emit(
+            {
+                "session_id": "default",
+                "mode": normalized_mode,
+                "play_response": bool(play_response),
+            }
+        )
+
     @QtCore.Slot(str)
     def stopVoicePlayback(self, playback_id: str = "") -> None:
         self._status_line = "Stopping voice playback."
@@ -871,6 +896,9 @@ class UiBridge(QtCore.QObject):
                 False,
                 False,
             )
+            return
+        if normalized == "voice.listenandsubmitturn":
+            self.listenAndSubmitTurn(self._mode, True)
             return
         if normalized == "voice.stopplayback":
             self.stopVoicePlayback(
@@ -1292,6 +1320,8 @@ class UiBridge(QtCore.QObject):
         visibility = str(event.get("visibility_scope", "")).strip().lower()
         severity = str(event.get("severity", event.get("level", ""))).strip().lower()
         message = str(event.get("message", "")).strip()
+        event_type = str(event.get("event_type") or event.get("type") or "").strip()
+        is_voice_event = event_type.startswith("voice.")
         if visibility in {"ghost_hint", "operator_blocking"} and message:
             self._status_line = message
             if (
@@ -1301,14 +1331,14 @@ class UiBridge(QtCore.QObject):
                 self._set_assistant_state("warning")
             self.statusChanged.emit()
 
-        if visibility != "internal_only" or self._module_requires_live_status_refresh():
-            self._rebuild_surface_models()
-            self.collectionsChanged.emit()
-
-        if str(event.get("event_type") or event.get("type") or "").startswith("voice."):
-            if self._refresh_voice_state():
+        if is_voice_event:
+            if self._apply_voice_state_from_stream_event(event):
                 self._apply_voice_assistant_state()
                 self.voiceStateChanged.emit()
+            return
+
+        if visibility != "internal_only" or self._module_requires_live_status_refresh():
+            self._queue_stream_collections_changed()
 
     def apply_voice_action_result(self, payload: dict[str, Any]) -> None:
         action = str(payload.get("action") or "voice.action").strip()
@@ -1378,6 +1408,79 @@ class UiBridge(QtCore.QObject):
         if self._pending_activity is None:
             self._status_line = "Recent event window expired; refreshing from snapshot."
             self.statusChanged.emit()
+
+    def _queue_stream_collections_changed(self) -> None:
+        if self._stream_collections_timer.isActive():
+            return
+        self._stream_collections_timer.start()
+
+    def _flush_stream_collections_changed(self) -> None:
+        self._rebuild_surface_models()
+        self.collectionsChanged.emit()
+
+    def _apply_voice_state_from_stream_event(self, event: dict[str, Any]) -> bool:
+        event_payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        voice_payload = event.get("voice") if isinstance(event.get("voice"), dict) else None
+        if voice_payload is None:
+            candidate = event_payload.get("voice")
+            if isinstance(candidate, dict):
+                voice_payload = candidate
+        if voice_payload is None:
+            status_payload = event_payload.get("status")
+            if isinstance(status_payload, dict) and isinstance(status_payload.get("voice"), dict):
+                voice_payload = status_payload.get("voice")
+        if voice_payload is None:
+            metadata_payload = event_payload.get("metadata")
+            if isinstance(metadata_payload, dict):
+                candidate = metadata_payload.get("voice")
+                if isinstance(candidate, dict):
+                    voice_payload = candidate
+        if voice_payload is None:
+            anchor_keys = {
+                "voice_anchor_state",
+                "speaking_visual_active",
+                "voice_motion_intensity",
+                "voice_audio_level",
+                "voice_audio_level_raw",
+                "voice_instant_audio_level",
+                "voice_fast_audio_level",
+                "voice_smoothed_output_level",
+                "voice_visual_drive_level",
+                "voice_visual_drive_peak",
+                "voice_center_blob_drive",
+                "voice_center_blob_scale_drive",
+                "voice_center_blob_scale",
+                "voice_outer_speaking_motion",
+                "voice_visual_gain",
+                "audioDriveLevel",
+                "voice_audio_reactive_available",
+                "voice_audio_reactive_source",
+                "voice_anchor_debug",
+                "streaming_tts_active",
+                "live_playback_active",
+                "first_audio_started",
+                "active_playback_status",
+            }
+            direct_voice = {
+                key: event_payload.get(key)
+                for key in anchor_keys
+                if key in event_payload
+            }
+            voice_payload = direct_voice or None
+        if not isinstance(voice_payload, dict) or not voice_payload:
+            return False
+        next_status = dict(self._status)
+        current_voice = (
+            dict(next_status.get("voice"))
+            if isinstance(next_status.get("voice"), dict)
+            else {}
+        )
+        current_voice.update(voice_payload)
+        next_status["voice"] = current_voice
+        if next_status == self._status:
+            return False
+        self._status = next_status
+        return self._refresh_voice_state()
 
     def apply_chat_result(self, payload: dict[str, Any]) -> None:
         user_message = payload.get("user_message")

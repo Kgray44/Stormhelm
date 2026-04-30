@@ -60,6 +60,7 @@ def build_voice_ui_state(status: dict[str, Any] | None) -> dict[str, Any]:
         availability = _dict(provider.get("availability"))
     openai = _dict(voice.get("openai"))
     capture = _dict(voice.get("capture"))
+    voice_input = _dict(voice.get("voice_input"))
     wake = _dict(voice.get("wake"))
     post_wake = _dict(voice.get("post_wake_listen"))
     vad = _dict(voice.get("vad"))
@@ -71,6 +72,8 @@ def build_voice_ui_state(status: dict[str, Any] | None) -> dict[str, Any]:
     interruption = _dict(voice.get("interruption"))
     confirmation = _dict(voice.get("spoken_confirmation"))
     runtime_truth = _dict(voice.get("runtime_truth"))
+    runtime_gate_snapshot = _dict(voice.get("runtime_gate_snapshot"))
+    last_voice_speak_decision = _sanitize(voice.get("last_voice_speak_decision"))
     readiness = _readiness_payload(_dict(voice.get("readiness")))
     runtime_mode = _runtime_mode_payload(
         _dict(voice.get("runtime_mode") or readiness.get("runtime_mode"))
@@ -98,6 +101,10 @@ def build_voice_ui_state(status: dict[str, Any] | None) -> dict[str, Any]:
     provider_kind = _provider_kind(capture_provider, capture)
     active_playback_id = _text(playback.get("active_playback_id")) or None
     active_playback_status = _text(playback.get("active_playback_status")) or None
+    playback_provider = _text(playback.get("provider")) or None
+    speaker_backend = _text(playback.get("speaker_backend")) or None
+    speaker_backend_available = bool(playback.get("speaker_backend_available"))
+    user_heard_claimed = bool(playback.get("user_heard_claimed"))
     wake_ghost = _dict(voice.get("wake_ghost") or wake.get("ghost"))
     wake_ghost_active = bool(wake_ghost.get("active", False))
     current_phase = _current_phase(
@@ -273,12 +280,20 @@ def build_voice_ui_state(status: dict[str, Any] | None) -> dict[str, Any]:
         realtime=realtime,
     )
     voice_anchor = build_voice_anchor_payload(voice)
+    voice_output_envelope = _first_dict(
+        voice.get("voice_output_envelope"),
+        playback.get("voice_output_envelope"),
+        playback.get("last_audio_envelope"),
+        tts.get("voice_output_envelope"),
+        tts.get("last_audio_envelope"),
+    )
     anchor_truth_flags = {
-        "user_heard_claimed": False,
+        "user_heard_claimed": user_heard_claimed,
         "playback_started_does_not_mean_user_heard": True,
         "speaking_visual_is_not_completion": True,
         "speaking_visual_is_not_verification": True,
     }
+    anchor_debug = _voice_anchor_debug_payload(voice_anchor)
 
     return {
         "voice_available": voice_available,
@@ -292,9 +307,40 @@ def build_voice_ui_state(status: dict[str, Any] | None) -> dict[str, Any]:
         ),
         "voice_motion_intensity": voice_anchor.get("motion_intensity", 0.0),
         "voice_audio_level": voice_anchor.get("output_level_rms", 0.0),
+        "voice_audio_level_raw": voice_anchor.get("audio_level_raw", 0.0),
         "voice_output_level_peak": voice_anchor.get("output_level_peak", 0.0),
+        "voice_instant_audio_level": voice_anchor.get("instant_audio_level", 0.0),
+        "voice_fast_audio_level": voice_anchor.get("fast_audio_level", 0.0),
         "voice_smoothed_output_level": voice_anchor.get("smoothed_output_level", 0.0),
         "voice_speech_energy": voice_anchor.get("speech_energy", 0.0),
+        "voice_visual_drive_level": _number(
+            voice_anchor.get("visual_drive_level"),
+            voice_output_envelope.get("visual_drive_level", 0.0),
+        ),
+        "voice_visual_drive_peak": _number(
+            voice_anchor.get("visual_drive_peak"),
+            voice_output_envelope.get("visual_drive_peak", 0.0),
+        ),
+        "voice_center_blob_drive": _number(
+            voice_anchor.get("center_blob_drive"),
+            voice_output_envelope.get("center_blob_drive", 0.0),
+        ),
+        "voice_center_blob_scale_drive": _number(
+            voice_anchor.get("center_blob_scale_drive"),
+            voice_output_envelope.get("center_blob_scale_drive", 0.0),
+        ),
+        "voice_center_blob_scale": _number(
+            voice_anchor.get("center_blob_scale"),
+            voice_output_envelope.get("center_blob_scale", 1.0),
+        ),
+        "voice_outer_speaking_motion": _number(
+            voice_anchor.get("outer_speaking_motion"),
+            voice_output_envelope.get("outer_speaking_motion", 0.0),
+        ),
+        "voice_visual_gain": _number(
+            voice_anchor.get("visual_gain"), voice_output_envelope.get("visual_gain", 1.0)
+        ),
+        "audioDriveLevel": voice_anchor.get("audio_drive_level", 0.0),
         "voice_audio_reactive_available": bool(
             voice_anchor.get("audio_reactive_available", False)
         ),
@@ -305,6 +351,7 @@ def build_voice_ui_state(status: dict[str, Any] | None) -> dict[str, Any]:
         "voice_visualizer_last_update_at": voice_anchor.get(
             "visualizer_last_update_at"
         ),
+        "voice_anchor_debug": anchor_debug,
         "voice_anchor_truth_flags": anchor_truth_flags,
         "provider_name": _text(
             availability.get("provider_name")
@@ -318,7 +365,42 @@ def build_voice_ui_state(status: dict[str, Any] | None) -> dict[str, Any]:
         ),
         "openai_enabled": bool(openai.get("enabled", False)),
         "unavailable_reason": unavailable_reason or None,
+        "spoken_responses_enabled": bool(voice.get("spoken_responses_enabled")),
+        "typed_response_speech_enabled": bool(
+            voice.get("typed_response_speech_enabled")
+        ),
+        "voice_runtime_gate_snapshot": runtime_gate_snapshot,
+        "last_voice_speak_decision": last_voice_speak_decision,
+        "last_voice_speak_skip_reason": _text(
+            _dict(last_voice_speak_decision).get("skipped_reason")
+        )
+        or None,
+        "playback_provider": playback_provider,
+        "playback_available": bool(playback.get("available", False)),
+        "speaker_backend": speaker_backend,
+        "speaker_backend_available": speaker_backend_available,
+        "currently_speaking": bool(
+            playback.get("currently_speaking")
+            or playback.get("playback_streaming_active")
+            or active_playback_status in {"started", "playing"}
+        ),
+        "user_heard_claimed": user_heard_claimed,
+        "playback_user_heard_claim_basis": _text(
+            playback.get("user_heard_claim_basis")
+        )
+        or None,
         "capture_enabled": capture_enabled,
+        "voice_input_enabled": bool(voice_input.get("voice_input_enabled")),
+        "microphone_enabled": bool(voice_input.get("microphone_enabled")),
+        "microphone_available": bool(voice_input.get("microphone_available")),
+        "voice_input_provider": _text(voice_input.get("input_provider")) or None,
+        "voice_stt_provider": _text(voice_input.get("stt_provider")) or None,
+        "last_listen_result": _sanitize(voice_input.get("last_listen_result")),
+        "last_voice_dispatch_result": _sanitize(
+            voice_input.get("last_voice_dispatch_result")
+        ),
+        "last_voice_input_skip_reason": _text(voice_input.get("last_skip_reason"))
+        or None,
         "capture_available": capture_available,
         "capture_provider": capture_provider,
         "capture_provider_kind": provider_kind,
@@ -511,6 +593,46 @@ def build_voice_command_station(voice_state: dict[str, Any] | None) -> dict[str,
     state = dict(voice_state or {})
     ghost = _dict(state.get("ghost"))
     deck = _dict(state.get("deck"))
+    sections = list(deck.get("sections") or [])
+    anchor_debug = _dict(state.get("voice_anchor_debug"))
+    if anchor_debug:
+        sections.insert(
+            0,
+            {
+                "title": "Anchor Reactivity",
+                "entries": [
+                    _entry(
+                        "State",
+                        _title(_text(anchor_debug.get("state"))),
+                        "Speaking visual active"
+                        if anchor_debug.get("speaking_visual_active")
+                        else "",
+                    ),
+                    _entry(
+                        "Source",
+                        _text(anchor_debug.get("source")) or "unavailable",
+                        "Synthetic fallback"
+                        if anchor_debug.get("synthetic_fallback")
+                        else "",
+                    ),
+                    _entry(
+                        "Smoothed Level",
+                        _number_text(anchor_debug.get("smoothed_level")),
+                        _number_text(anchor_debug.get("visual_drive_level")),
+                    ),
+                    _entry(
+                        "Center Drive",
+                        _number_text(anchor_debug.get("center_blob_scale_drive")),
+                        _number_text(anchor_debug.get("outer_speaking_motion")),
+                    ),
+                    _entry(
+                        "Motion",
+                        _number_text(anchor_debug.get("motion_intensity")),
+                        f"{_number_text(anchor_debug.get('update_hz'))} Hz",
+                    ),
+                ],
+            },
+        )
     chips = [
         _chip(
             "Capture",
@@ -559,7 +681,7 @@ def build_voice_command_station(voice_state: dict[str, Any] | None) -> dict[str,
         if state.get("active_capture_id")
         else ("blocked" if not state.get("capture_available") else "prepared"),
         "chips": chips,
-        "sections": list(deck.get("sections") or []),
+        "sections": sections,
         "invalidations": [],
         "actions": actions,
         "layoutSlot": "secondary" if state.get("active_capture_id") else "tertiary",
@@ -572,8 +694,57 @@ def _voice_status(status: dict[str, Any] | None) -> dict[str, Any]:
     return dict(voice) if isinstance(voice, dict) else payload
 
 
+def _voice_anchor_debug_payload(voice_anchor: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "state": voice_anchor.get("state", "idle"),
+        "source": voice_anchor.get("audio_reactive_source", "unavailable"),
+        "smoothed_level": voice_anchor.get("smoothed_output_level", 0.0),
+        "instant_audio_level": voice_anchor.get("instant_audio_level", 0.0),
+        "fast_audio_level": voice_anchor.get("fast_audio_level", 0.0),
+        "visual_drive_level": voice_anchor.get("visual_drive_level", 0.0),
+        "visual_drive_peak": voice_anchor.get("visual_drive_peak", 0.0),
+        "center_blob_drive": voice_anchor.get("center_blob_drive", 0.0),
+        "center_blob_scale_drive": voice_anchor.get("center_blob_scale_drive", 0.0),
+        "center_blob_scale": voice_anchor.get("center_blob_scale", 1.0),
+        "outer_speaking_motion": voice_anchor.get("outer_speaking_motion", 0.0),
+        "visual_gain": voice_anchor.get("visual_gain", 1.0),
+        "motion_intensity": voice_anchor.get("motion_intensity", 0.0),
+        "speaking_visual_active": bool(
+            voice_anchor.get("speaking_visual_active", False)
+        ),
+        "update_hz": voice_anchor.get("visualizer_update_hz", 30),
+        "last_update_at": voice_anchor.get("visualizer_last_update_at"),
+        "synthetic_fallback": bool(voice_anchor.get("synthetic_fallback", False)),
+        "raw_audio_present": False,
+    }
+
+
 def _dict(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _first_dict(*values: Any) -> dict[str, Any]:
+    for value in values:
+        payload = _dict(value)
+        if payload:
+            return payload
+    return {}
+
+
+def _number(value: Any, default: Any = 0.0) -> float:
+    try:
+        if value in {None, ""}:
+            return float(default or 0.0)
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default or 0.0)
+
+
+def _number_text(value: Any) -> str:
+    number = _number(value, 0.0)
+    if float(number).is_integer():
+        return str(int(number))
+    return f"{number:.3f}".rstrip("0").rstrip(".")
 
 
 def _readiness_payload(readiness: dict[str, Any]) -> dict[str, Any]:
@@ -1085,15 +1256,24 @@ def _ghost_payload(
         elif _text(wake_supervised_loop.get("final_status")) in _WAKE_LOOP_CARD_STATUSES:
             label = _wake_loop_label(wake_supervised_loop)
             detail = _wake_loop_detail(wake_supervised_loop)
-            actions = [_action("Start capture", "voice.startPushToTalkCapture")]
+            actions = [
+                _action("Listen", "voice.listenAndSubmitTurn"),
+                _action("Start capture", "voice.startPushToTalkCapture"),
+            ]
         elif last_capture_status == "cancelled":
             label = "Capture cancelled."
             detail = "Capture stopped without routing audio."
-            actions = [_action("Start capture", "voice.startPushToTalkCapture")]
+            actions = [
+                _action("Listen", "voice.listenAndSubmitTurn"),
+                _action("Start capture", "voice.startPushToTalkCapture"),
+            ]
         elif last_capture_status in {"failed", "timeout"}:
             label = "Capture failed."
             detail = "Captured audio was not routed."
-            actions = [_action("Start capture", "voice.startPushToTalkCapture")]
+            actions = [
+                _action("Listen", "voice.listenAndSubmitTurn"),
+                _action("Start capture", "voice.startPushToTalkCapture"),
+            ]
         elif last_capture_status in {"completed", "stopped"}:
             label = "Capture stopped."
             detail = (
@@ -1102,12 +1282,16 @@ def _ghost_payload(
             )
             actions = [
                 _action("Submit through Core", "voice.submitCapturedAudioTurn"),
+                _action("Listen", "voice.listenAndSubmitTurn"),
                 _action("Start capture", "voice.startPushToTalkCapture"),
             ]
         else:
-            label = "Start capture"
-            detail = "Explicit push-to-talk capture only."
-            actions = [_action("Start capture", "voice.startPushToTalkCapture")]
+            label = "Listen"
+            detail = "Ready for one explicit voice request."
+            actions = [
+                _action("Listen", "voice.listenAndSubmitTurn"),
+                _action("Start capture", "voice.startPushToTalkCapture"),
+            ]
     if spoken_output_muted:
         actions.append(_action("Unmute voice", "voice.unmuteSpokenResponses"))
     elif current_phase not in {"unavailable", "capture_disabled"}:

@@ -184,6 +184,8 @@ class DeterministicScreenInterpreter:
         content_score = (
             0.95
             if observation.selected_text
+            else 0.88
+            if observation.visual_text
             else 0.78
             if live_visible_text
             else 0.32
@@ -193,10 +195,13 @@ class DeterministicScreenInterpreter:
         interpretation_score = 0.9 if visible_errors or _looks_like_math_expression(visible_text) else 0.7 if visible_purpose else 0.4 if environment else 0.0
 
         uncertainty_notes: list[str] = []
-        if not observation.selected_text and not observation.clipboard_text:
+        if not observation.selected_text and not observation.visual_text and not observation.clipboard_text:
             uncertainty_notes.append("Only partial native context was available; no direct selected text was present.")
         if observation.clipboard_text and not has_live_screen_signal(observation):
             uncertainty_notes.append("Only clipboard text was available, and it may not match the live current screen.")
+        screen_capture = observation.visual_metadata.get("screen_capture") if isinstance(observation.visual_metadata, dict) else None
+        if isinstance(screen_capture, dict) and screen_capture.get("captured") and not observation.visual_text:
+            uncertainty_notes.append("A screenshot was captured, but no local OCR or provider vision text was available.")
         if visible_text is None:
             uncertainty_notes.append("The visible content signal was incomplete.")
 
@@ -249,6 +254,8 @@ class DeterministicContextSynthesizer:
                 summary_parts.append(f"The current window appears to be \"{title}\"")
         if observation.selected_text:
             summary_parts.append(f"Selected text reads: {_preview(observation.selected_text)}")
+        elif observation.visual_text:
+            summary_parts.append(f"Visible text reads: {_preview(observation.visual_text)}")
         elif live_visible_text:
             summary_parts.append(f"Visible cue: {_preview(live_visible_text)}")
         elif observation.clipboard_text:

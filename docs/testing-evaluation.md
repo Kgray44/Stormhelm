@@ -36,6 +36,16 @@ Tests: all files under `tests/`
 | Voice | Config, availability, manual/audio turns, STT/TTS, capture, playback, events, diagnostics, UI bridge state. | `.\.venv\Scripts\python.exe -m pytest tests/test_voice_config.py tests/test_voice_availability.py tests/test_voice_state.py tests/test_voice_events.py -q` | `src/stormhelm/core/voice`, `src/stormhelm/ui/bridge.py` |
 | Trust/tasks/memory/workspace | Durable state and retrieval. | `.\.venv\Scripts\python.exe -m pytest tests/test_trust_service.py tests/test_task_graph.py tests/test_semantic_memory.py tests/test_workspace_service.py -q` | `src/stormhelm/core/trust`, `core/tasks`, `core/memory`, `core/workspace` |
 | System/network/telemetry | Native/system state and diagnostics. | `.\.venv\Scripts\python.exe -m pytest tests/test_system_probe.py tests/test_network_monitor.py tests/test_network_analysis.py tests/test_hardware_telemetry.py -q` | `src/stormhelm/core/system`, `core/network` |
+| App/window graceful close | Native close routing, WM_CLOSE request, verification, prompt detection, force-close approval posture. | `.\.venv\Scripts\python.exe -m pytest tests/test_app_window_graceful_close.py -q` | `src/stormhelm/core/system/probe.py`, `src/stormhelm/core/tools/builtins/system_state.py`, `src/stormhelm/core/orchestrator/planner.py`, `src/stormhelm/core/adapters/contracts.py` |
+
+## App / Window Close Smoke
+
+Use these only on normal visible user apps. Do not use taskkill for graceful-close smoke, and do not click save/discard prompts unless the operator explicitly approved that action.
+
+1. Open Notepad with no unsaved text, then ask Stormhelm: `close Notepad`. Expected: `close_result_state=closed_verified`, `graceful_close_requested=true`, and no force close offered.
+2. Open Notepad with unsaved text, then ask Stormhelm: `close Notepad`. Expected: `close_result_state=close_confirmation_required`; Stormhelm should expose safe next actions and leave the prompt untouched.
+3. Open Arduino IDE 1.x or 2.x, then ask Stormhelm: `close Arduino IDE`. Expected: match by title/process such as `Arduino IDE`, `Arduino IDE.exe`, or Arduino sketch window title; report either `closed_verified` or `close_confirmation_required`.
+4. If Stormhelm reports `close_failed`, verify `close_trace` fields for the target process/window, request timing, verification timing, and `force_close_requires_approval=true`.
 
 ## Command / Fuzzy Evaluation
 

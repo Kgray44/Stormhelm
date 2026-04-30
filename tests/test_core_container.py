@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from stormhelm.core.container import build_container
+from stormhelm.core.system.probe import SystemProbe
 
 
 class FakeOperationalProbe:
@@ -118,6 +119,29 @@ def test_core_container_status_snapshot_includes_operational_surface_state(temp_
     assert snapshot["watch_state"]["tasks"] == []
     assert any(signal["title"] == "Battery drain elevated" for signal in snapshot["signal_state"]["signals"])
     assert snapshot["system_state"]["network"]["throughput"]["download_mbps"] == 84.25
+
+
+def test_core_container_status_snapshot_defers_live_system_probes_for_real_probe(
+    temp_config, monkeypatch
+) -> None:
+    container = build_container(temp_config)
+
+    def fail_live_probe(self, *args, **kwargs):  # noqa: ANN001
+        raise AssertionError("status snapshot should not run live system probes")
+
+    monkeypatch.setattr(SystemProbe, "power_status", fail_live_probe)
+    monkeypatch.setattr(SystemProbe, "resource_status", fail_live_probe)
+    monkeypatch.setattr(SystemProbe, "hardware_telemetry_snapshot", fail_live_probe)
+    monkeypatch.setattr(SystemProbe, "storage_status", fail_live_probe)
+    monkeypatch.setattr(SystemProbe, "network_status", fail_live_probe)
+    monkeypatch.setattr(SystemProbe, "resolve_location", fail_live_probe)
+
+    snapshot = container.status_snapshot()
+
+    assert snapshot["system_state"]["status_profile"] == "fast_status"
+    assert snapshot["system_state"]["detail_load_deferred"] is True
+    assert snapshot["system_state"]["hardware"]["freshness"]["detail_load_deferred"] is True
+    assert snapshot["voice"]["configured"] is True
 
 
 def test_core_container_status_snapshot_includes_screen_awareness_phase1_state(temp_config) -> None:

@@ -1,4 +1,4 @@
-# Latency Tracing L0/L1/L2/L3/L4/L4.1/L4.2/L4.3/L4.5/L5/L5A/L5.1/L5.2
+# Latency Tracing L0/L1/L2/L3/L4/L4.1/L4.2/L4.3/L4.5/L5/L5A/L5.1/L5.2/L5.3/L5.4/L5.5/L5.6/L6
 
 Stormhelm latency tracing is the shared observability contract for core
 requests, route handling, voice evaluation, and command/Kraken evaluation rows.
@@ -41,6 +41,28 @@ later work does not mistake installed contracts for product behavior.
 L5.2 adds backend-owned voice anchor visual state and safe output-envelope
 metadata. QML renders state and motion from status payloads; it does not infer
 command truth locally, inspect raw audio, or claim the user heard playback.
+L5.3 adds device-independent live voice proof fields: a null streaming playback
+sink, first sink-accept timing, wake-loop streaming-output evidence after
+Core-approved spoken text, opt-in live OpenAI smoke artifacts, and explicit
+Realtime-deferred labels.
+L5.4 adds Windows local speaker progressive playback for PCM live TTS chunks:
+the same Core-approved streaming path can now feed the system audio output as
+chunks arrive, while mock and null sinks still avoid audible/user-heard claims.
+L5.5 completes the Windows runtime surface for typed-response voice output:
+speaker playback truth now reaches `/status`, `/snapshot`, bridge/UI state, and
+the voice doctor script. Cross-platform speaker streaming remains unsupported;
+the Windows OpenAI streaming TTS to progressive local speaker path is not future
+work when explicitly configured.
+L5.6 closes the typed-runtime speech diagnostic gap: normal `/chat/send`
+responses now record a safe `VOICE_SPEAK_DECISION` and a
+`runtime_gate_snapshot`, expose skip/failure reasons in status/bridge payloads,
+and can be smoke-tested through the real typed Core path with
+`scripts\voice_typed_response_smoke.py`.
+L6 adds the Windows manual voice input conversation timing surface: explicit
+listen trigger, microphone start, speech detection, endpointing, OpenAI STT,
+Core dispatch from transcript, visible response, streaming TTS, speaker output,
+and completion/stop state are measured and reported without raw audio or
+secrets.
 
 Fast route triage is advisory. It does not execute tools, approve actions,
 verify results, mutate trust/session state, or replace the deterministic planner.
@@ -119,16 +141,33 @@ status. L1 rows also include `execution_mode`, `partial_response_returned`,
 `voice_streaming_transport_kind`, `voice_first_chunk_before_complete`,
 `voice_stream_used_by_normal_path`, `voice_streaming_miss_reason`,
 `voice_live_format`, `voice_streaming_fallback_used`, `voice_prewarm_used`,
-and `voice_partial_playback`. L5.2 rows add `voice_anchor_state`,
+and `voice_partial_playback`. L5.3 rows add `voice_sink_kind`,
+`voice_first_chunk_to_sink_accept_ms`, `voice_first_output_start_ms`,
+`voice_null_sink_first_accept_ms`, `voice_live_openai_voice_smoke_run`,
+`voice_live_openai_first_chunk_ms`, `voice_wake_loop_streaming_output_used`,
+`voice_wake_loop_streaming_miss_reason`, `voice_realtime_deferred_to_l6`,
+`voice_realtime_session_creation_attempted`, and `voice_user_heard_claimed`.
+L5.2 rows add `voice_anchor_state`,
 `voice_speaking_visual_active`, `voice_audio_reactive_source`,
 `voice_audio_reactive_available`, `voice_anchor_motion_intensity`,
 `voice_anchor_audio_level`, `voice_visualizer_update_hz`, and
-`voice_anchor_user_heard_claimed`.
+`voice_anchor_user_heard_claimed`. L6 manual voice conversation smokes and
+status payloads add `voice_listen_trigger_to_mic_start_ms`,
+`voice_speech_detected_ms`, `voice_endpoint_ms`,
+`voice_endpoint_to_transcription_complete_ms`,
+`voice_transcription_to_core_dispatch_ms`, `voice_core_response_ms`,
+`voice_response_to_first_tts_chunk_ms`,
+`voice_first_tts_chunk_to_speaker_output_ms`, and
+`voice_voice_conversation_total_ms` when those marks are available.
+L5.6 status/event payloads also expose `runtime_gate_snapshot`,
+`typed_response_speech_enabled`, and `last_voice_speak_decision` for debugging
+text-visible/no-speech cases. These are diagnostic fields, not route authority.
 
 Voice release/evaluation latency still exposes `VoiceLatencyBreakdown`, with a
 compatible `latency_summary` projection for comparing voice stages against core
-request traces. In L5 that projection also includes first-audio timings and
-explicit `user_heard_claimed=false`.
+request traces. In L5 that projection also includes first-audio timings. Mock
+and null sinks keep `user_heard_claimed=false`; L5.4 permits `true` only after
+the real local speaker sink successfully starts output.
 
 ## Stage Meaning
 
@@ -201,11 +240,20 @@ L5 records voice first-audio fields:
 - `core_result_to_tts_start_ms`: time from Core-approved spoken text to TTS request start.
 - `tts_start_to_first_chunk_ms`: time from TTS request start to the first safe audio chunk.
 - `first_chunk_to_playback_start_ms`: time from first chunk receipt to live playback start.
+- `first_chunk_to_sink_accept_ms`: time from first chunk receipt to the first live/null sink accept.
 - `core_result_to_first_audio_ms`: time from Core-approved text to playback start.
+- `core_result_to_first_output_start_ms`: time from Core-approved text to first sink/output start.
 - `request_to_first_audio_ms` / `voice_first_audio_ms`: total request-to-first-audio timing when available.
+- `first_output_start_ms` / `voice_first_output_start_ms`: request-to-first-output timing for live/null sinks.
+- `null_sink_first_accept_ms` / `voice_null_sink_first_accept_ms`: first accepted chunk timing from the null sink.
+- `sink_kind` / `voice_sink_kind`: `null_stream`, `mock`, `local`, `speaker`, `buffered_file`, or a provider-specific sink label.
 - `streaming_enabled`, `streaming_transport_kind`, `first_chunk_before_complete`, `live_format`, `artifact_format`, `fallback_used`, and `prewarm_used`: live-output posture.
 - `voice_stream_used_by_normal_path`: normal assistant/capture voice output used the streaming service path rather than legacy buffered synthesize/playback.
 - `voice_streaming_miss_reason`: why a voice row did not use streaming when streaming was expected or configured.
+- `voice_wake_loop_streaming_output_used`: wake-loop playback reached Core-approved streaming output.
+- `voice_wake_loop_streaming_miss_reason`: why the wake-loop did not reach streaming output.
+- `voice_live_openai_voice_smoke_run`: a live OpenAI smoke row was actually executed behind the explicit env gate.
+- `voice_realtime_deferred_to_l6`: Realtime warmup/reuse remains out of scope for these first-output measurements.
 - `partial_playback`: audio began but the stream did not complete.
 - `voice_anchor_state`: backend-owned visual state for the Ghost/voice anchor.
 - `voice_audio_reactive_source`: `playback_output_envelope`, `streaming_chunk_envelope`, `precomputed_artifact_envelope`, `synthetic_fallback_envelope`, or `unavailable`.
@@ -213,8 +261,24 @@ L5 records voice first-audio fields:
 - `voice_speaking_visual_active`: speaking motion is active. This is not completion, verification, or proof the user heard audio.
 - `voice_anchor_motion_intensity`, `voice_anchor_audio_level`, and `voice_visualizer_update_hz`: bounded QML visualizer controls.
 
-Playback started or completed is playback-provider state only. It is not proof
-that the user heard the audio and it is not command/task completion.
+Playback started or completed is playback-provider state only. It is not
+command/task completion. Mock and null sinks never claim the user heard audio;
+the Windows local speaker sink may set `voice_user_heard_claimed=true` only
+after the output device accepts audio for playback.
+
+L6 records manual voice input conversation timings:
+
+- `listen_trigger_to_mic_start_ms`: user/API listen request to capture provider start.
+- `speech_detected_ms`: capture-relative time when speech first crosses the endpointing threshold.
+- `endpoint_ms`: capture-relative time when silence, max duration, cancellation, no speech, or mic error ends the utterance.
+- `endpoint_to_transcription_complete_ms`: endpoint/stop to OpenAI STT completion when live STT runs.
+- `transcription_to_core_dispatch_ms`: transcript availability to Core bridge submission.
+- `core_response_ms`: Core bridge response time for the transcript.
+- `response_to_first_tts_chunk_ms`: Core-approved spoken response to first TTS chunk.
+- `first_tts_chunk_to_speaker_output_ms`: first chunk to the Windows speaker sink accepting or starting output.
+- `voice_conversation_total_ms`: whole explicit listen request through completion or stopped stage.
+
+These are diagnostic timings. They must not be invented when a stage is skipped, and they do not change routing authority, trust, verification, or speech permission.
 
 Aggregate boundary fields such as `total_latency_ms`, `http_boundary_ms`, and
 `endpoint_dispatch_ms` remain visible but are not treated as the "longest stage"
@@ -230,19 +294,21 @@ Current audit labels that matter for future work:
 
 - L0 tracing, L2 route triage, worker lane/timing, inline fast-path protection,
   workspace assemble continuation, L4.4 reporting, priority scheduler/caps,
-  streaming TTS contracts, normal assistant voice-output streaming, and voice
-  first-audio metrics are live and used.
+  streaming TTS contracts, true OpenAI HTTP streaming, Windows local speaker
+  progressive playback, normal assistant voice-output streaming, and voice
+  first-audio metrics are live and used when their explicit gates are enabled.
 - Partial response posture, snapshot policy breadth, snapshot invalidation,
   async route progress contracts, most L4.3 continuation handlers,
-  retry/yield/cancel cooperation, true OpenAI provider smoke proof, local live
-  playback hooks, and UI rendering depth are partial.
+  retry/yield/cancel cooperation, non-Windows live speaker playback, and broad
+  Deck rendering depth are partial or out of scope.
 - Background refresh is a hook, not broad refresh coverage.
 - `screen_awareness.verify_change` is policy-known but handler-missing.
 - Broad software execute continuation is policy-known and deferred until the
   trust/side-effect front half is proofed.
 - True OpenAI HTTP streaming code is present and unit-tested with injected
-  transport, but live OpenAI/network and real-device playback proof remain
-  opt-in validation work.
+  transport. L5.4/L5.5 add the Windows speaker sink and status/UI truth
+  propagation; live OpenAI/network and physical device validation remain
+  explicit opt-in smoke work, not CI behavior.
 
 These labels are product-truth boundaries. A field may exist in traces or
 reports before the corresponding behavior is normal-path live.
@@ -805,11 +871,16 @@ Use these fields to decide whether further scheduler cleanup is needed before
 moving to L5 voice work. Scheduler pressure is operational evidence; it is not a
 route correctness failure by itself.
 
-L5/L5.1 adds voice streaming and first-audio aggregates:
+L5/L5.1/L5.3 adds voice streaming and first-audio aggregates:
 
 - first-audio p50/p90/p95/max when voice rows carry `voice_first_audio_ms`
+- first-output and null-sink p50/p90/p95/max when rows carry `voice_first_output_start_ms` or `voice_null_sink_first_accept_ms`
 - transport counts by `voice_streaming_transport_kind`
+- sink counts by `voice_sink_kind`
 - `voice_streaming_path_used_count` for normal assistant/capture voice paths
+- `voice_wake_loop_streaming_output_used_count` for wake-loop approved output proof
+- `voice_live_openai_smoke_run_count` for explicitly gated live OpenAI runs
+- `voice_realtime_deferred_to_l6_count` for rows that intentionally keep Realtime warmup/reuse deferred
 - `voice_buffered_projection_count` for buffered helper output labeled as chunk projection
 - `normal_path_streaming_miss_count` for voice rows that had streaming enabled but did not use the normal streaming path
 - fallback, prewarm, and partial-playback counts from the L5 fields

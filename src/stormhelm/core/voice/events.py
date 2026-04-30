@@ -78,6 +78,7 @@ class VoiceEventType(str, Enum):
     SYNTHESIS_FAILED = "voice.synthesis_failed"
     TTS_STREAM_STARTED = "voice.tts_stream_started"
     TTS_FIRST_CHUNK_RECEIVED = "voice.tts_first_chunk_received"
+    TTS_STREAM_CHUNK = "voice.tts_stream_chunk"
     TTS_STREAM_COMPLETED = "voice.tts_stream_completed"
     AUDIO_OUTPUT_CREATED = "voice.audio_output_created"
     PLAYBACK_REQUEST_CREATED = "voice.playback_request_created"

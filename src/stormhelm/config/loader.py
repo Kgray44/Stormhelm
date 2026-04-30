@@ -23,6 +23,11 @@ from stormhelm.config.models import (
     SoftwareControlConfig,
     SoftwareRecoveryConfig,
     TrustConfig,
+    WebRetrievalChromiumConfig,
+    WebRetrievalConfig,
+    WebRetrievalHttpConfig,
+    WebRetrievalObscuraCDPConfig,
+    WebRetrievalObscuraConfig,
     WeatherConfig,
     RuntimePathConfig,
     SafetyConfig,
@@ -285,6 +290,22 @@ def _build_app_config(
         power_features_enabled=bool(
             screen_awareness_data.get("power_features_enabled", True)
         ),
+        screen_capture_enabled=bool(
+            screen_awareness_data.get("screen_capture_enabled", True)
+        ),
+        screen_capture_scope=str(
+            screen_awareness_data.get("screen_capture_scope", "active_window")
+        ).strip()
+        or "active_window",
+        screen_capture_ocr_enabled=bool(
+            screen_awareness_data.get("screen_capture_ocr_enabled", True)
+        ),
+        screen_capture_provider_vision_enabled=bool(
+            screen_awareness_data.get("screen_capture_provider_vision_enabled", False)
+        ),
+        screen_capture_store_raw_images=bool(
+            screen_awareness_data.get("screen_capture_store_raw_images", False)
+        ),
     )
 
     calculations_data = data.get("calculations", {})
@@ -358,6 +379,154 @@ def _build_app_config(
             trust_data.get("pending_request_ttl_seconds", 3600.0)
         ),
         audit_recent_limit=int(trust_data.get("audit_recent_limit", 24)),
+    )
+
+    web_retrieval_data = data.get("web_retrieval", {})
+    web_retrieval_http_data = (
+        web_retrieval_data.get("http", {})
+        if isinstance(web_retrieval_data.get("http"), dict)
+        else {}
+    )
+    web_retrieval_obscura_data = (
+        web_retrieval_data.get("obscura", {})
+        if isinstance(web_retrieval_data.get("obscura"), dict)
+        else {}
+    )
+    web_retrieval_obscura_cdp_data = (
+        web_retrieval_obscura_data.get("cdp", {})
+        if isinstance(web_retrieval_obscura_data.get("cdp"), dict)
+        else {}
+    )
+    web_retrieval_chromium_data = (
+        web_retrieval_data.get("chromium", {})
+        if isinstance(web_retrieval_data.get("chromium"), dict)
+        else {}
+    )
+    web_retrieval_config = WebRetrievalConfig(
+        enabled=bool(web_retrieval_data.get("enabled", True)),
+        planner_routing_enabled=bool(
+            web_retrieval_data.get("planner_routing_enabled", True)
+        ),
+        debug_events_enabled=bool(
+            web_retrieval_data.get("debug_events_enabled", True)
+        ),
+        default_provider=str(
+            web_retrieval_data.get("default_provider", "auto")
+        ).strip().lower()
+        or "auto",
+        max_url_count=int(web_retrieval_data.get("max_url_count", 8)),
+        max_url_chars=int(web_retrieval_data.get("max_url_chars", 4096)),
+        max_parallel_pages=int(web_retrieval_data.get("max_parallel_pages", 3)),
+        timeout_seconds=float(web_retrieval_data.get("timeout_seconds", 12.0)),
+        max_text_chars=int(web_retrieval_data.get("max_text_chars", 60000)),
+        max_html_chars=int(web_retrieval_data.get("max_html_chars", 250000)),
+        cache_snapshots=bool(web_retrieval_data.get("cache_snapshots", True)),
+        respect_robots=bool(web_retrieval_data.get("respect_robots", True)),
+        allow_private_network_urls=bool(
+            web_retrieval_data.get("allow_private_network_urls", False)
+        ),
+        allow_file_urls=bool(web_retrieval_data.get("allow_file_urls", False)),
+        allow_logged_in_context=bool(
+            web_retrieval_data.get("allow_logged_in_context", False)
+        ),
+        http=WebRetrievalHttpConfig(
+            enabled=bool(web_retrieval_http_data.get("enabled", True)),
+            timeout_seconds=float(
+                web_retrieval_http_data.get("timeout_seconds", 8.0)
+            ),
+        ),
+        obscura=WebRetrievalObscuraConfig(
+            enabled=bool(web_retrieval_obscura_data.get("enabled", False)),
+            binary_path=str(
+                web_retrieval_obscura_data.get("binary_path", "obscura")
+            ).strip()
+            or "obscura",
+            mode=str(web_retrieval_obscura_data.get("mode", "cli")).strip().lower()
+            or "cli",
+            allow_cdp_server=bool(
+                web_retrieval_obscura_data.get("allow_cdp_server", False)
+            ),
+            serve_port=int(web_retrieval_obscura_data.get("serve_port", 9222)),
+            stealth_enabled=bool(
+                web_retrieval_obscura_data.get("stealth_enabled", False)
+            ),
+            obey_robots=bool(web_retrieval_obscura_data.get("obey_robots", True)),
+            workers=int(web_retrieval_obscura_data.get("workers", 1)),
+            max_concurrency=int(
+                web_retrieval_obscura_data.get("max_concurrency", 3)
+            ),
+            wait_until=str(
+                web_retrieval_obscura_data.get("wait_until", "networkidle0")
+            ).strip()
+            or "networkidle0",
+            dump_format=str(
+                web_retrieval_obscura_data.get("dump_format", "text")
+            ).strip().lower()
+            or "text",
+            allow_js_eval=bool(
+                web_retrieval_obscura_data.get("allow_js_eval", False)
+            ),
+            max_eval_chars=int(web_retrieval_obscura_data.get("max_eval_chars", 2000)),
+            cdp=WebRetrievalObscuraCDPConfig(
+                enabled=bool(web_retrieval_obscura_cdp_data.get("enabled", False)),
+                binary_path=str(
+                    web_retrieval_obscura_cdp_data.get(
+                        "binary_path",
+                        web_retrieval_obscura_data.get("binary_path", "obscura"),
+                    )
+                ).strip()
+                or "obscura",
+                host=str(web_retrieval_obscura_cdp_data.get("host", "127.0.0.1")).strip()
+                or "127.0.0.1",
+                port=int(web_retrieval_obscura_cdp_data.get("port", 0)),
+                startup_timeout_seconds=float(
+                    web_retrieval_obscura_cdp_data.get("startup_timeout_seconds", 8.0)
+                ),
+                shutdown_timeout_seconds=float(
+                    web_retrieval_obscura_cdp_data.get("shutdown_timeout_seconds", 4.0)
+                ),
+                navigation_timeout_seconds=float(
+                    web_retrieval_obscura_cdp_data.get("navigation_timeout_seconds", 12.0)
+                ),
+                max_session_seconds=float(
+                    web_retrieval_obscura_cdp_data.get("max_session_seconds", 120.0)
+                ),
+                max_pages_per_session=int(
+                    web_retrieval_obscura_cdp_data.get("max_pages_per_session", 8)
+                ),
+                max_dom_text_chars=int(
+                    web_retrieval_obscura_cdp_data.get("max_dom_text_chars", 60000)
+                ),
+                max_html_chars=int(
+                    web_retrieval_obscura_cdp_data.get("max_html_chars", 250000)
+                ),
+                max_links=int(web_retrieval_obscura_cdp_data.get("max_links", 500)),
+                allow_runtime_eval=bool(
+                    web_retrieval_obscura_cdp_data.get("allow_runtime_eval", False)
+                ),
+                allow_input_domain=bool(
+                    web_retrieval_obscura_cdp_data.get("allow_input_domain", False)
+                ),
+                allow_cookies=bool(
+                    web_retrieval_obscura_cdp_data.get("allow_cookies", False)
+                ),
+                allow_logged_in_context=bool(
+                    web_retrieval_obscura_cdp_data.get("allow_logged_in_context", False)
+                ),
+                allow_screenshots=bool(
+                    web_retrieval_obscura_cdp_data.get("allow_screenshots", False)
+                ),
+                debug_events_enabled=bool(
+                    web_retrieval_obscura_cdp_data.get("debug_events_enabled", True)
+                ),
+            ),
+        ),
+        chromium=WebRetrievalChromiumConfig(
+            enabled=bool(web_retrieval_chromium_data.get("enabled", False)),
+            fallback_enabled=bool(
+                web_retrieval_chromium_data.get("fallback_enabled", True)
+            ),
+        ),
     )
 
     discord_relay_data = data.get("discord_relay", {})
@@ -813,6 +982,9 @@ def _build_app_config(
                 enabled_data.get("workspace_where_left_off", True)
             ),
             workspace_next_steps=bool(enabled_data.get("workspace_next_steps", True)),
+            web_retrieval_fetch=bool(
+                enabled_data.get("web_retrieval_fetch", True)
+            ),
         ),
         max_file_read_bytes=int(tool_data.get("max_file_read_bytes", 32768)),
     )
@@ -864,6 +1036,7 @@ def _build_app_config(
         software_control=software_control_config,
         software_recovery=software_recovery_config,
         trust=trust_config,
+        web_retrieval=web_retrieval_config,
         discord_relay=discord_relay_config,
         openai=openai_config,
         voice=voice_config,
@@ -952,6 +1125,90 @@ def _apply_env_overrides(data: ConfigDict, env: Mapping[str, str]) -> ConfigDict
             float,
         ),
         "STORMHELM_CORE_RESTART_BACKOFF_MS": ("lifecycle.core_restart_backoff_ms", int),
+        "STORMHELM_WEB_RETRIEVAL_ENABLED": (
+            "web_retrieval.enabled",
+            _parse_bool,
+        ),
+        "STORMHELM_WEB_RETRIEVAL_PLANNER_ROUTING_ENABLED": (
+            "web_retrieval.planner_routing_enabled",
+            _parse_bool,
+        ),
+        "STORMHELM_WEB_RETRIEVAL_DEBUG_EVENTS_ENABLED": (
+            "web_retrieval.debug_events_enabled",
+            _parse_bool,
+        ),
+        "STORMHELM_WEB_RETRIEVAL_DEFAULT_PROVIDER": (
+            "web_retrieval.default_provider",
+            str,
+        ),
+        "STORMHELM_WEB_RETRIEVAL_MAX_URL_COUNT": (
+            "web_retrieval.max_url_count",
+            int,
+        ),
+        "STORMHELM_WEB_RETRIEVAL_MAX_URL_CHARS": (
+            "web_retrieval.max_url_chars",
+            int,
+        ),
+        "STORMHELM_WEB_RETRIEVAL_MAX_PARALLEL_PAGES": (
+            "web_retrieval.max_parallel_pages",
+            int,
+        ),
+        "STORMHELM_WEB_RETRIEVAL_TIMEOUT_SECONDS": (
+            "web_retrieval.timeout_seconds",
+            float,
+        ),
+        "STORMHELM_WEB_RETRIEVAL_MAX_TEXT_CHARS": (
+            "web_retrieval.max_text_chars",
+            int,
+        ),
+        "STORMHELM_WEB_RETRIEVAL_MAX_HTML_CHARS": (
+            "web_retrieval.max_html_chars",
+            int,
+        ),
+        "STORMHELM_WEB_RETRIEVAL_ALLOW_PRIVATE_NETWORK_URLS": (
+            "web_retrieval.allow_private_network_urls",
+            _parse_bool,
+        ),
+        "STORMHELM_WEB_RETRIEVAL_HTTP_ENABLED": (
+            "web_retrieval.http.enabled",
+            _parse_bool,
+        ),
+        "STORMHELM_WEB_RETRIEVAL_HTTP_TIMEOUT_SECONDS": (
+            "web_retrieval.http.timeout_seconds",
+            float,
+        ),
+        "STORMHELM_OBSCURA_ENABLED": (
+            "web_retrieval.obscura.enabled",
+            _parse_bool,
+        ),
+        "STORMHELM_OBSCURA_BINARY_PATH": (
+            "web_retrieval.obscura.binary_path",
+            str,
+        ),
+        "STORMHELM_OBSCURA_MAX_CONCURRENCY": (
+            "web_retrieval.obscura.max_concurrency",
+            int,
+        ),
+        "STORMHELM_OBSCURA_CDP_ENABLED": (
+            "web_retrieval.obscura.cdp.enabled",
+            _parse_bool,
+        ),
+        "STORMHELM_OBSCURA_CDP_BINARY_PATH": (
+            "web_retrieval.obscura.cdp.binary_path",
+            str,
+        ),
+        "STORMHELM_OBSCURA_CDP_HOST": (
+            "web_retrieval.obscura.cdp.host",
+            str,
+        ),
+        "STORMHELM_OBSCURA_CDP_PORT": (
+            "web_retrieval.obscura.cdp.port",
+            int,
+        ),
+        "STORMHELM_OBSCURA_CDP_MAX_PAGES_PER_SESSION": (
+            "web_retrieval.obscura.cdp.max_pages_per_session",
+            int,
+        ),
         "STORMHELM_OPENAI_ENABLED": ("openai.enabled", _parse_bool),
         "STORMHELM_OPENAI_BASE_URL": ("openai.base_url", str),
         "STORMHELM_OPENAI_MODEL": ("openai.model", str),
@@ -976,13 +1233,28 @@ def _apply_env_overrides(data: ConfigDict, env: Mapping[str, str]) -> ConfigDict
             "voice.spoken_responses_enabled",
             _parse_bool,
         ),
+        "STORMHELM_VOICE_SPEAK_TYPED_RESPONSES": (
+            "voice.spoken_responses_enabled",
+            _parse_bool,
+        ),
         "STORMHELM_VOICE_MANUAL_INPUT_ENABLED": (
+            "voice.manual_input_enabled",
+            _parse_bool,
+        ),
+        "STORMHELM_VOICE_PUSH_TO_TALK_ENABLED": (
             "voice.manual_input_enabled",
             _parse_bool,
         ),
         "STORMHELM_VOICE_REALTIME_ENABLED": ("voice.realtime_enabled", _parse_bool),
         "STORMHELM_VOICE_DEBUG_MOCK_PROVIDER": (
             "voice.debug_mock_provider",
+            _parse_bool,
+        ),
+        "STORMHELM_VOICE_INPUT_PROVIDER": ("voice.provider", str),
+        "STORMHELM_VOICE_STT_PROVIDER": ("voice.provider", str),
+        "STORMHELM_VOICE_INPUT_ENABLED": ("voice.capture.enabled", _parse_bool),
+        "STORMHELM_VOICE_MICROPHONE_ENABLED": (
+            "voice.capture.enabled",
             _parse_bool,
         ),
         "STORMHELM_VOICE_PLAYBACK_ENABLED": ("voice.playback.enabled", _parse_bool),
@@ -1100,6 +1372,7 @@ def _apply_env_overrides(data: ConfigDict, env: Mapping[str, str]) -> ConfigDict
         "STORMHELM_VOICE_VAD_ENABLED": ("voice.vad.enabled", _parse_bool),
         "STORMHELM_VOICE_VAD_PROVIDER": ("voice.vad.provider", str),
         "STORMHELM_VOICE_VAD_SILENCE_MS": ("voice.vad.silence_ms", int),
+        "STORMHELM_VOICE_ENDPOINT_SILENCE_MS": ("voice.vad.silence_ms", int),
         "STORMHELM_VOICE_VAD_SPEECH_START_THRESHOLD": (
             "voice.vad.speech_start_threshold",
             float,
@@ -1180,7 +1453,12 @@ def _apply_env_overrides(data: ConfigDict, env: Mapping[str, str]) -> ConfigDict
             _parse_bool,
         ),
         "STORMHELM_VOICE_OPENAI_STT_MODEL": ("voice.openai.stt_model", str),
+        "STORMHELM_VOICE_STT_MODEL": ("voice.openai.stt_model", str),
         "STORMHELM_VOICE_OPENAI_TRANSCRIPTION_LANGUAGE": (
+            "voice.openai.transcription_language",
+            str,
+        ),
+        "STORMHELM_VOICE_INPUT_LANGUAGE": (
             "voice.openai.transcription_language",
             str,
         ),
@@ -1353,6 +1631,46 @@ def _apply_env_overrides(data: ConfigDict, env: Mapping[str, str]) -> ConfigDict
             "screen_awareness.power_features_enabled",
             _parse_bool,
         ),
+        "STORMHELM_SCREEN_AWARENESS_SCREEN_CAPTURE_ENABLED": (
+            "screen_awareness.screen_capture_enabled",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_CAPTURE_ENABLED": (
+            "screen_awareness.screen_capture_enabled",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_SCREEN_CAPTURE_SCOPE": (
+            "screen_awareness.screen_capture_scope",
+            str,
+        ),
+        "STORMHELM_SCREEN_CAPTURE_SCOPE": (
+            "screen_awareness.screen_capture_scope",
+            str,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_SCREEN_CAPTURE_OCR_ENABLED": (
+            "screen_awareness.screen_capture_ocr_enabled",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_CAPTURE_OCR_ENABLED": (
+            "screen_awareness.screen_capture_ocr_enabled",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PROVIDER_VISION_ENABLED": (
+            "screen_awareness.screen_capture_provider_vision_enabled",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_CAPTURE_PROVIDER_VISION_ENABLED": (
+            "screen_awareness.screen_capture_provider_vision_enabled",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_STORE_RAW_IMAGES": (
+            "screen_awareness.screen_capture_store_raw_images",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_CAPTURE_STORE_RAW_IMAGES": (
+            "screen_awareness.screen_capture_store_raw_images",
+            _parse_bool,
+        ),
         "STORMHELM_CALCULATIONS_ENABLED": ("calculations.enabled", _parse_bool),
         "STORMHELM_CALCULATIONS_PLANNER_ROUTING_ENABLED": (
             "calculations.planner_routing_enabled",
@@ -1461,6 +1779,18 @@ def _apply_env_overrides(data: ConfigDict, env: Mapping[str, str]) -> ConfigDict
             continue
         _set_nested_value(merged, path, parser(raw_value))
 
+    max_utterance_seconds = env.get("STORMHELM_VOICE_MAX_UTTERANCE_SECONDS")
+    if max_utterance_seconds not in {None, ""}:
+        max_utterance_ms = _parse_seconds_to_ms(str(max_utterance_seconds))
+        _set_nested_value(merged, "voice.capture.max_duration_ms", max_utterance_ms)
+        _set_nested_value(merged, "voice.vad.max_utterance_ms", max_utterance_ms)
+        _set_nested_value(
+            merged, "voice.openai.max_audio_seconds", float(max_utterance_ms) / 1000.0
+        )
+    if _parse_bool(str(env.get("STORMHELM_VOICE_MICROPHONE_ENABLED") or "")):
+        _set_nested_value(merged, "voice.capture.enabled", True)
+        _set_nested_value(merged, "voice.capture.allow_dev_capture", True)
+
     return merged
 
 
@@ -1484,6 +1814,14 @@ def _expand_path(raw: str | None, root: Path, data_dir: Path | None) -> Path | N
 
 def _parse_bool(raw: str) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_seconds_to_ms(raw: str) -> int:
+    try:
+        seconds = float(str(raw).strip())
+    except (TypeError, ValueError):
+        seconds = 0.0
+    return max(1, int(seconds * 1000))
 
 
 def _parse_optional_float(raw: Any) -> float | None:
