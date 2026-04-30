@@ -1,0 +1,134 @@
+{
+  "action_capabilities_disabled": true,
+  "after_observation_id": "browser-semantic-a82e95ed6a1c",
+  "after_page_title": "Stormhelm Fixture Form",
+  "before_observation_id": "browser-semantic-5a8a6544e5d8",
+  "before_page_title": "Stormhelm Fixture Dialog",
+  "change_count": 9,
+  "claim_ceiling": "browser_semantic_observation_comparison",
+  "cleanup_status": "closed",
+  "comparison_status": "supported",
+  "completed_at": "2026-04-30T20:43:15.890549+00:00",
+  "expected_change_kind": "warning_removed",
+  "expected_change_supported": true,
+  "limitations": [
+    "semantic_comparison_only",
+    "not_user_visible_screen",
+    "not_truth_verified",
+    "live_semantic_observation_only",
+    "isolated_temporary_browser_context",
+    "no_user_profile",
+    "no_actions",
+    "not_visible_screen_verification"
+  ],
+  "provider": "playwright_live_semantic",
+  "raw_output_redacted": true,
+  "report_id": "playwright-addition-4-live-verification-only",
+  "started_at": "2026-04-30T20:43:13.709159+00:00",
+  "status": "passed",
+  "top_changes": [
+    {
+      "after_summary": "http://127.0.0.1:56954/form.html",
+      "before_summary": "http://127.0.0.1:56954/dialog.html",
+      "change_id": "browser-semantic-change-03557ce89e72",
+      "change_type": "page_url_changed",
+      "confidence": 0.86,
+      "control_id_after": "",
+      "control_id_before": "",
+      "evidence_terms": [
+        "page_url_changed"
+      ],
+      "label": "",
+      "limitations": [],
+      "name": "",
+      "role": "",
+      "sensitive_redacted": false
+    },
+    {
+      "after_summary": "Stormhelm Fixture Form",
+      "before_summary": "Stormhelm Fixture Dialog",
+      "change_id": "browser-semantic-change-61867ff63b1d",
+      "change_type": "page_title_changed",
+      "confidence": 0.82,
+      "control_id_after": "",
+      "control_id_before": "",
+      "evidence_terms": [
+        "page_title_changed"
+      ],
+      "label": "",
+      "limitations": [],
+      "name": "",
+      "role": "",
+      "sensitive_redacted": false
+    },
+    {
+      "after_summary": "",
+      "before_summary": "Session expired alert; enabled=True; required=False; checked=False; readonly=False",
+      "change_id": "browser-semantic-change-a30c1ec3f072",
+      "change_type": "control_removed",
+      "confidence": 0.72,
+      "control_id_after": "",
+      "control_id_before": "alert-1",
+      "evidence_terms": [
+        "control_removed"
+      ],
+      "label": "",
+      "limitations": [],
+      "name": "Session expired",
+      "role": "alert",
+      "sensitive_redacted": false
+    },
+    {
+      "after_summary": "",
+      "before_summary": "Session expired button; enabled=True; required=False; checked=False; readonly=False",
+      "change_id": "browser-semantic-change-ea3d83434949",
+      "change_type": "control_removed",
+      "confidence": 0.72,
+      "control_id_after": "",
+      "control_id_before": "button-2",
+      "evidence_terms": [
+        "control_removed"
+      ],
+      "label": "Session expired",
+      "limitations": [],
+      "name": "Session expired",
+      "role": "button",
+      "sensitive_redacted": false
+    },
+    {
+      "after_summary": "Email textbox; enabled=True; required=False; checked=False; readonly=False",
+      "before_summary": "",
+      "change_id": "browser-semantic-change-93438edfa550",
+      "change_type": "form_field_added",
+      "confidence": 0.72,
+      "control_id_after": "email",
+      "control_id_before": "",
+      "evidence_terms": [
+        "form_field_added"
+      ],
+      "label": "Email",
+      "limitations": [],
+      "name": "Email",
+      "role": "textbox",
+      "sensitive_redacted": false
+    },
+    {
+      "after_summary": "I agree checkbox; enabled=True; required=False; checked=False; readonly=False; value=[redacted value]",
+      "before_summary": "",
+      "change_id": "browser-semantic-change-9e5f4846cbc4",
+      "change_type": "form_field_added",
+      "confidence": 0.72,
+      "control_id_after": "agree",
+      "control_id_before": "",
+      "evidence_terms": [
+        "form_field_added"
+      ],
+      "label": "I agree",
+      "limitations": [],
+      "name": "I agree",
+      "role": "checkbox",
+      "sensitive_redacted": false
+    }
+  ],
+  "user_message": "The semantic snapshots support that the warning disappeared."
+}

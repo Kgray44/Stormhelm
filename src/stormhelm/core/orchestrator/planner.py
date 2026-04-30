@@ -805,13 +805,43 @@ class DeterministicPlanner:
         )
         debug["structured_query"] = structured_query.to_dict()
         if clarification_reason is not None:
+            clarification_execution_plan: ExecutionPlan | None = None
+            clarification_active_state: dict[str, object] = {}
+            if structured_query.query_shape == QueryShape.CAMERA_AWARENESS_REQUEST:
+                clarification_execution_plan = ExecutionPlan(
+                    plan_type=structured_query.execution_type
+                    or "camera_awareness_c0_mock_or_permission_gate",
+                    request_type=str(
+                        structured_query.slots.get("request_type_hint")
+                        or "camera_awareness_confirmation"
+                    ),
+                    response_mode=ResponseMode.CLARIFICATION,
+                    family=str(
+                        structured_query.slots.get("family")
+                        or structured_query.domain
+                        or "camera_awareness"
+                    ),
+                    subject=str(
+                        structured_query.slots.get("subject")
+                        or structured_query.domain
+                        or "camera still"
+                    ),
+                    assistant_message=clarification_reason.message,
+                )
+                clarification_active_state = self._active_request_state_from_structured_query(
+                    structured_query,
+                    clarification_execution_plan,
+                )
+                debug["execution_plan"] = clarification_execution_plan.to_dict()
             debug["clarification_reason"] = clarification_reason.to_dict()
             debug["response_mode"] = ResponseMode.CLARIFICATION.value
             return self._finalize_decision(
                 PlannerDecision(
                     request_type="clarification_request",
                     assistant_message=clarification_reason.message,
+                    active_request_state=clarification_active_state,
                     structured_query=structured_query,
+                    execution_plan=clarification_execution_plan,
                     clarification_reason=clarification_reason,
                     response_mode=ResponseMode.CLARIFICATION.value,
                     debug=debug,
@@ -1593,6 +1623,8 @@ class DeterministicPlanner:
             return "discord_relay"
         if semantic.query_shape == QueryShape.WEB_RETRIEVAL_REQUEST:
             return "web_retrieval"
+        if semantic.query_shape == QueryShape.CAMERA_AWARENESS_REQUEST:
+            return "camera_awareness"
         if semantic.query_shape == QueryShape.OPEN_BROWSER_DESTINATION:
             return "browser_destination"
         if semantic.query_shape in {QueryShape.SEARCH_REQUEST, QueryShape.SEARCH_AND_OPEN}:
@@ -1628,6 +1660,8 @@ class DeterministicPlanner:
             return ["software_target"]
         if semantic.query_shape == QueryShape.WEB_RETRIEVAL_REQUEST:
             return ["public_url"]
+        if semantic.query_shape == QueryShape.CAMERA_AWARENESS_REQUEST:
+            return ["camera_capture_confirmation"]
         if semantic.query_shape in {QueryShape.OPEN_BROWSER_DESTINATION, QueryShape.SEARCH_AND_OPEN}:
             return ["target"]
         if semantic.query_shape == QueryShape.TRUST_APPROVAL_REQUEST:
@@ -2033,13 +2067,43 @@ class DeterministicPlanner:
         )
         debug["structured_query"] = structured_query.to_dict()
         if clarification_reason is not None:
+            clarification_execution_plan: ExecutionPlan | None = None
+            clarification_active_state: dict[str, object] = {}
+            if structured_query.query_shape == QueryShape.CAMERA_AWARENESS_REQUEST:
+                clarification_execution_plan = ExecutionPlan(
+                    plan_type=structured_query.execution_type
+                    or "camera_awareness_c0_mock_or_permission_gate",
+                    request_type=str(
+                        structured_query.slots.get("request_type_hint")
+                        or "camera_awareness_confirmation"
+                    ),
+                    response_mode=ResponseMode.CLARIFICATION,
+                    family=str(
+                        structured_query.slots.get("family")
+                        or structured_query.domain
+                        or "camera_awareness"
+                    ),
+                    subject=str(
+                        structured_query.slots.get("subject")
+                        or structured_query.domain
+                        or "camera still"
+                    ),
+                    assistant_message=clarification_reason.message,
+                )
+                clarification_active_state = self._active_request_state_from_structured_query(
+                    structured_query,
+                    clarification_execution_plan,
+                )
+                debug["execution_plan"] = clarification_execution_plan.to_dict()
             debug["clarification_reason"] = clarification_reason.to_dict()
             debug["response_mode"] = ResponseMode.CLARIFICATION.value
             return self._finalize_decision(
                 PlannerDecision(
                     request_type="clarification_request",
                     assistant_message=clarification_reason.message,
+                    active_request_state=clarification_active_state,
                     structured_query=structured_query,
+                    execution_plan=clarification_execution_plan,
                     clarification_reason=clarification_reason,
                     response_mode=ResponseMode.CLARIFICATION.value,
                     debug=debug,
@@ -2190,6 +2254,46 @@ class DeterministicPlanner:
             and self._screen_action_requires_bound_target(lower, screen_awareness_evaluation)
         ):
             return self._route_spine_clarification_proposal(decision, slots=slots)
+        if family == "camera_awareness":
+            slots.update(
+                {
+                    "source_provenance": "camera_request",
+                    "target_scope": "camera_frame",
+                    "capture_mode": "single_still",
+                    "requires_confirmation": True,
+                    "camera_awareness": {
+                        "route_family": "camera_awareness",
+                        "phase": "c0",
+                        "provider_kind": "mock",
+                        "real_camera_implemented": False,
+                        "openai_vision_implemented": False,
+                        "cloud_upload_allowed": False,
+                        "background_capture_allowed": False,
+                        "image_persistence_default": False,
+                    },
+                    "clarification": {
+                        "code": "camera_capture_confirmation_required",
+                        "message": "I can use a camera still for that, but camera capture needs confirmation first.",
+                        "missing_slots": ["camera_capture_confirmation"],
+                    },
+                    "missing_preconditions": ["camera_capture_confirmation"],
+                }
+            )
+            return self._tool_proposal(
+                query_shape=QueryShape.CAMERA_AWARENESS_REQUEST,
+                domain="camera_awareness",
+                request_type_hint="camera_awareness_confirmation",
+                family="camera_awareness",
+                subject=decision.intent_frame.target_text or "camera still",
+                requested_action="request_single_still",
+                confidence=decision.winner.score or 0.88,
+                evidence=["route_spine selected camera_awareness from explicit camera or physical-object request"],
+                assistant_message="I can use a camera still for that, but camera capture needs confirmation first.",
+                execution_type="camera_awareness_c0_mock_or_permission_gate",
+                output_mode=ResponseMode.CLARIFICATION.value,
+                output_type="camera_awareness",
+                slots=slots,
+            )
         screen_proposal = self._screen_awareness_semantic_proposal(screen_awareness_evaluation)
         if (
             screen_proposal is not None
@@ -3546,6 +3650,7 @@ class DeterministicPlanner:
             "context_action": QueryShape.CONTEXT_ACTION,
             "context_clarification": QueryShape.CONTEXT_ACTION,
             "screen_awareness": QueryShape.SCREEN_AWARENESS_REQUEST,
+            "camera_awareness": QueryShape.CAMERA_AWARENESS_REQUEST,
             "discord_relay": QueryShape.DISCORD_RELAY_REQUEST,
             "routine": QueryShape.ROUTINE_REQUEST,
             "trust_approvals": QueryShape.TRUST_APPROVAL_REQUEST,
@@ -3564,6 +3669,7 @@ class DeterministicPlanner:
             "context_action": "context",
             "context_clarification": "context",
             "screen_awareness": "screen_awareness",
+            "camera_awareness": "camera_awareness",
             "discord_relay": "discord_relay",
             "routine": "workflow",
             "trust_approvals": "trust",
@@ -5601,6 +5707,10 @@ class DeterministicPlanner:
             output_mode = output_mode or ResponseMode.SUMMARY_RESULT.value
             output_type = output_type or "screen_analysis"
             execution_type = execution_type or "screen_awareness_analyze"
+        elif query_shape == QueryShape.CAMERA_AWARENESS_REQUEST:
+            output_mode = output_mode or ResponseMode.CLARIFICATION.value
+            output_type = output_type or "camera_awareness"
+            execution_type = execution_type or "camera_awareness_c0_mock_or_permission_gate"
         elif query_shape == QueryShape.DISCORD_RELAY_REQUEST:
             output_mode = output_mode or ResponseMode.ACTION_RESULT.value
             output_type = output_type or "action"
@@ -5669,6 +5779,10 @@ class DeterministicPlanner:
             capability_requirements.append("identity_lookup")
         elif query_shape == QueryShape.SCREEN_AWARENESS_REQUEST:
             capability_requirements.extend(["screen_observation", "screen_interpretation"])
+        elif query_shape == QueryShape.CAMERA_AWARENESS_REQUEST:
+            capability_requirements.extend(
+                ["camera_awareness_c0", "camera_user_confirmation", "mock_camera_capture"]
+            )
         elif query_shape == QueryShape.DISCORD_RELAY_REQUEST:
             capability_requirements.append("discord_relay")
         elif query_shape == QueryShape.WEB_RETRIEVAL_REQUEST:
@@ -5906,6 +6020,23 @@ class DeterministicPlanner:
                 ),
                 notes=[
                     "The screen-awareness planner route exists, but the runtime is not configured for live observation and interpretation.",
+                ],
+            )
+
+        if structured_query.query_shape == QueryShape.CAMERA_AWARENESS_REQUEST:
+            return CapabilityPlan(
+                supported=True,
+                available_tools=sorted(tool for tool in available_tools if tool in DEFAULT_AVAILABLE_TOOLS),
+                required_tools=[],
+                required_capabilities=required_capabilities,
+                missing_capabilities=[],
+                **adapter_fields,
+                freshness_expectation="current",
+                unsupported_reason=None,
+                notes=[
+                    "Camera awareness C0 is planner-routed but permission-gated before capture.",
+                    "Only mock capture and mock vision are claimable in C0.",
+                    "No real camera, background capture, image persistence, or cloud vision route is exposed.",
                 ],
             )
 
@@ -6196,7 +6327,7 @@ class DeterministicPlanner:
             ):
                 if key in structured_query.slots:
                     parameters[key] = structured_query.slots.get(key)
-        return {
+        state = {
             "family": family,
             "subject": execution_plan.subject or family,
             "request_type": execution_plan.request_type,
@@ -6212,6 +6343,14 @@ class DeterministicPlanner:
             "parameters": parameters,
             "structured_query": structured_query.to_dict(),
         }
+        if structured_query.query_shape == QueryShape.CAMERA_AWARENESS_REQUEST:
+            state["source_provenance"] = "camera_request"
+            state["context_source"] = "camera_request"
+            parameters.setdefault("source_provenance", "camera_request")
+            parameters.setdefault("capture_mode", "single_still")
+            parameters.setdefault("requires_confirmation", True)
+            parameters.setdefault("provider_kind", "mock")
+        return state
 
     def classify(
         self,

@@ -108,6 +108,7 @@ from stormhelm.core.voice.state import VoiceStateController
 from stormhelm.core.voice.state import VoiceStateSnapshot
 from stormhelm.core.voice.state import VoiceTransitionError
 from stormhelm.core.voice.visualizer import VoiceAudioEnvelope
+from stormhelm.core.voice.visualizer import VoicePlaybackMeter
 from stormhelm.core.voice.visualizer import build_voice_anchor_payload
 from stormhelm.core.voice.visualizer import compute_voice_audio_envelope
 from stormhelm.core.voice.visualizer import compute_voice_audio_envelope_frames
@@ -292,6 +293,21 @@ class VoiceService:
         default=None, init=False, repr=False
     )
     _voice_envelope_frame_active: bool = field(default=False, init=False, repr=False)
+    _voice_playback_meter: VoicePlaybackMeter | None = field(
+        default=None, init=False, repr=False
+    )
+    _voice_playback_meter_context: dict[str, Any] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _voice_playback_meter_thread: threading.Thread | None = field(
+        default=None, init=False, repr=False
+    )
+    _voice_playback_meter_alignment: str = field(
+        default="estimated", init=False, repr=False
+    )
+    _voice_playback_meter_finishing: bool = field(
+        default=False, init=False, repr=False
+    )
     _voice_envelope_frames_generated_total: int = field(
         default=0, init=False, repr=False
     )
@@ -300,6 +316,30 @@ class VoiceService:
     )
     _voice_envelope_last_frame: dict[str, Any] | None = field(
         default=None, init=False, repr=False
+    )
+    _voice_visualizer_updates_received_total: int = field(
+        default=0, init=False, repr=False
+    )
+    _voice_visualizer_updates_coalesced_total: int = field(
+        default=0, init=False, repr=False
+    )
+    _voice_visualizer_updates_dropped_total: int = field(
+        default=0, init=False, repr=False
+    )
+    _voice_visualizer_last_publish_monotonic: float = field(
+        default=0.0, init=False, repr=False
+    )
+    _voice_visualizer_first_publish_monotonic: float = field(
+        default=0.0, init=False, repr=False
+    )
+    _voice_visualizer_publish_window_count: int = field(
+        default=0, init=False, repr=False
+    )
+    _voice_visualizer_last_update_gap_ms: float = field(
+        default=0.0, init=False, repr=False
+    )
+    _voice_visualizer_max_update_gap_ms: float = field(
+        default=0.0, init=False, repr=False
     )
     last_capture_request: VoiceCaptureRequest | None = field(default=None, init=False)
     last_capture_session: VoiceCaptureSession | None = field(default=None, init=False)
@@ -6576,6 +6616,7 @@ class VoiceService:
                     partial_playback=playback_started_ms is not None,
                 )
             self.last_live_playback_result = live_result
+            self._finish_voice_playback_meter()
             self._drain_voice_output_envelope_frames()
             settled_envelope = self._settle_voice_output_envelope()
             self._publish_voice_output_envelope_update(
@@ -6774,6 +6815,7 @@ class VoiceService:
                     error_message=live_session.error_message,
                 )
             self.last_live_playback_result = live_result
+            self._finish_voice_playback_meter()
             self._drain_voice_output_envelope_frames()
             settled_envelope = self._settle_voice_output_envelope()
             self._publish_voice_output_envelope_update(
@@ -12911,50 +12953,113 @@ class VoiceService:
     ) -> VoiceAudioEnvelope | None:
         if not audio:
             return self.last_voice_output_envelope
-        try:
-            frames = compute_voice_audio_envelope_frames(
-                audio,
-                audio_format=audio_format,
-                source=source,
-                previous=self.last_voice_output_envelope,
-                update_hz=30,
-                sample_rate_hz=24000,
-                channels=1,
-            )
-        except Exception:
-            frames = []
-        if not frames:
-            envelope = self._remember_voice_output_envelope(
-                audio,
-                audio_format=audio_format,
-                source=source,
-            )
-            if envelope is not None:
-                self._publish_voice_output_envelope_update(
-                    envelope,
-                    **publish_context,
-                )
-            return envelope
+        del source
+        payload = bytes(audio or b"")
+        if str(audio_format or "").strip().lower() == "wav" and payload[:4] == b"RIFF" and len(payload) > 44:
+            payload = payload[44:]
+        if not payload:
+            return self.last_voice_output_envelope
 
         with self._voice_envelope_frame_condition:
             generation = self._voice_envelope_frame_generation
-            self._voice_envelope_frames_generated_total += len(frames)
-            self._voice_envelope_frame_queue.append(
-                (generation, frames, dict(publish_context))
-            )
-            thread = self._voice_envelope_frame_thread
+            meter = self._voice_playback_meter
+            if meter is None or not meter.active:
+                meter = VoicePlaybackMeter(
+                    update_hz=60,
+                    sample_rate_hz=24000,
+                    channels=1,
+                    sample_width_bytes=2,
+                    window_ms=33,
+                    playback_meter_alignment=self._voice_playback_meter_alignment,
+                )
+                meter.start(start_monotonic=time.perf_counter())
+                self._voice_playback_meter = meter
+                self._voice_visualizer_last_publish_monotonic = 0.0
+                self._voice_visualizer_first_publish_monotonic = 0.0
+                self._voice_visualizer_publish_window_count = 0
+            self._voice_playback_meter_finishing = False
+            context = dict(publish_context)
+            context.pop("chunk_index", None)
+            context.pop("size_bytes", None)
+            context["audio_format"] = "pcm"
+            context["playback_meter_alignment"] = self._voice_playback_meter_alignment
+            self._voice_playback_meter_context = context
+            meter.feed_pcm(payload)
+            thread = self._voice_playback_meter_thread
             if thread is None or not thread.is_alive():
                 thread = threading.Thread(
-                    target=self._voice_envelope_frame_worker,
-                    name="StormhelmVoiceEnvelopeFrames",
+                    target=self._voice_playback_meter_worker,
+                    args=(generation,),
+                    name="StormhelmVoicePlaybackMeter",
                     daemon=True,
                 )
-                self._voice_envelope_frame_thread = thread
+                self._voice_playback_meter_thread = thread
                 thread.start()
+            self._voice_envelope_frame_active = True
+        with self._voice_envelope_frame_condition:
             self._voice_envelope_frame_condition.notify_all()
-        return frames[-1].envelope
+        return self.last_voice_output_envelope
+
+    def _voice_playback_meter_worker(self, generation: int) -> None:
+        min_publish_interval = 1.0 / 60.0
+        next_tick = time.perf_counter()
+        while True:
+            with self._voice_envelope_frame_condition:
+                if generation != self._voice_envelope_frame_generation:
+                    self._voice_playback_meter_thread = None
+                    self._voice_envelope_frame_active = False
+                    self._voice_envelope_frame_condition.notify_all()
+                    return
+                meter = self._voice_playback_meter
+                if meter is None or not meter.active:
+                    self._voice_playback_meter_thread = None
+                    self._voice_envelope_frame_active = False
+                    self._voice_envelope_frame_condition.notify_all()
+                    return
+                now = time.perf_counter()
+                remaining = next_tick - now
+                if remaining > 0:
+                    self._voice_envelope_frame_condition.wait(
+                        timeout=min(0.002, remaining)
+                    )
+                    continue
+                publish_context = dict(self._voice_playback_meter_context)
+            frame = meter.sample_due(now_monotonic=now)
+            next_tick = max(next_tick + min_publish_interval, time.perf_counter())
+            if frame is None:
+                time.sleep(0.001)
+                continue
+            with self._voice_envelope_frame_condition:
+                if generation != self._voice_envelope_frame_generation:
+                    self._voice_visualizer_updates_dropped_total += 1
+                    continue
+                self._voice_visualizer_updates_received_total += 1
+                self._voice_envelope_frames_generated_total += 1
+            self.last_voice_output_envelope = frame.envelope
+            self._publish_voice_visualizer_frame(
+                frame,
+                generation=generation,
+                publish_context=publish_context,
+            )
+            with self._voice_envelope_frame_condition:
+                finishing = bool(self._voice_playback_meter_finishing)
+                buffered_duration_ms = meter.buffered_duration_ms
+                if (
+                    finishing
+                    and frame.playback_position_ms
+                    >= max(0, buffered_duration_ms)
+                ):
+                    meter.stop()
+                    self._voice_playback_meter = None
+                    self._voice_playback_meter_context = {}
+                    self._voice_playback_meter_finishing = False
+                    self._voice_playback_meter_thread = None
+                    self._voice_envelope_frame_active = False
+                    self._voice_envelope_frame_condition.notify_all()
+                    return
 
     def _voice_envelope_frame_worker(self) -> None:
+        min_publish_interval = 1.0 / 30.0
         while True:
             with self._voice_envelope_frame_condition:
                 while not self._voice_envelope_frame_queue:
@@ -12966,34 +13071,136 @@ class VoiceService:
                         return
                 generation, frames, publish_context = self._voice_envelope_frame_queue.popleft()
                 self._voice_envelope_frame_active = True
+            pending_frame: Any | None = None
             for frame in frames:
                 with self._voice_envelope_frame_condition:
                     if generation != self._voice_envelope_frame_generation:
+                        self._voice_visualizer_updates_dropped_total += 1
                         break
+                    self._voice_visualizer_updates_received_total += 1
                 self.last_voice_output_envelope = frame.envelope
-                self._publish_voice_output_envelope_update(
-                    frame.envelope,
-                    envelope_frame=frame,
-                    **publish_context,
-                )
+                pending_frame = frame
+                should_publish = False
+                now = time.perf_counter()
                 with self._voice_envelope_frame_condition:
-                    self._voice_envelope_frames_published_total += 1
-                    self._voice_envelope_last_frame = frame.to_dict()
+                    last_publish = self._voice_visualizer_last_publish_monotonic
+                    if last_publish <= 0.0 or now - last_publish >= min_publish_interval:
+                        should_publish = True
+                    else:
+                        self._voice_visualizer_updates_coalesced_total += 1
+                if should_publish and pending_frame is not None:
+                    if self._publish_voice_visualizer_frame(
+                        pending_frame,
+                        generation=generation,
+                        publish_context=publish_context,
+                    ):
+                        pending_frame = None
                 wait_seconds = max(0.0, float(frame.duration_ms) / 1000.0)
                 if wait_seconds <= 0.0:
                     continue
                 with self._voice_envelope_frame_condition:
                     self._voice_envelope_frame_condition.wait(timeout=wait_seconds)
                     if generation != self._voice_envelope_frame_generation:
+                        self._voice_visualizer_updates_dropped_total += 1
                         break
+            if pending_frame is not None:
+                self._wait_for_visualizer_publish_slot(
+                    generation=generation,
+                    min_publish_interval=min_publish_interval,
+                )
+                self._publish_voice_visualizer_frame(
+                    pending_frame,
+                    generation=generation,
+                    publish_context=publish_context,
+                )
             with self._voice_envelope_frame_condition:
                 self._voice_envelope_frame_active = False
                 self._voice_envelope_frame_condition.notify_all()
+
+    def _wait_for_visualizer_publish_slot(
+        self,
+        *,
+        generation: int,
+        min_publish_interval: float,
+    ) -> None:
+        with self._voice_envelope_frame_condition:
+            while generation == self._voice_envelope_frame_generation:
+                last_publish = self._voice_visualizer_last_publish_monotonic
+                remaining = (
+                    min_publish_interval - (time.perf_counter() - last_publish)
+                    if last_publish > 0.0
+                    else 0.0
+                )
+                if remaining <= 0.0:
+                    return
+                self._voice_envelope_frame_condition.wait(
+                    timeout=min(0.01, remaining)
+                )
+
+    def _publish_voice_visualizer_frame(
+        self,
+        frame: Any,
+        *,
+        generation: int,
+        publish_context: dict[str, Any],
+    ) -> bool:
+        with self._voice_envelope_frame_condition:
+            if generation != self._voice_envelope_frame_generation:
+                self._voice_visualizer_updates_dropped_total += 1
+                return False
+            now = time.perf_counter()
+            last_publish = self._voice_visualizer_last_publish_monotonic
+            gap_ms = (now - last_publish) * 1000.0 if last_publish > 0.0 else 0.0
+            if self._voice_visualizer_first_publish_monotonic <= 0.0:
+                self._voice_visualizer_first_publish_monotonic = now
+            self._voice_visualizer_last_publish_monotonic = now
+            self._voice_visualizer_last_update_gap_ms = gap_ms
+            self._voice_visualizer_max_update_gap_ms = max(
+                self._voice_visualizer_max_update_gap_ms,
+                gap_ms,
+            )
+            self._voice_envelope_frames_published_total += 1
+            self._voice_visualizer_publish_window_count += 1
+            self._voice_envelope_last_frame = frame.to_dict()
+        try:
+            self._publish_voice_output_envelope_update(
+                frame.envelope,
+                envelope_frame=frame,
+                **publish_context,
+            )
+        except Exception:
+            with self._voice_envelope_frame_condition:
+                self._voice_visualizer_updates_dropped_total += 1
+            return False
+        return True
 
     def _cancel_voice_output_envelope_frames(self) -> None:
         with self._voice_envelope_frame_condition:
             self._voice_envelope_frame_generation += 1
             self._voice_envelope_frame_queue.clear()
+            if self._voice_playback_meter is not None:
+                self._voice_playback_meter.stop()
+            self._voice_playback_meter = None
+            self._voice_playback_meter_context = {}
+            self._voice_playback_meter_finishing = False
+            self._voice_envelope_frame_active = False
+            self._voice_visualizer_last_publish_monotonic = 0.0
+            self._voice_visualizer_first_publish_monotonic = 0.0
+            self._voice_visualizer_publish_window_count = 0
+            self._voice_envelope_frame_condition.notify_all()
+
+    def _finish_voice_playback_meter(self) -> None:
+        with self._voice_envelope_frame_condition:
+            self._voice_playback_meter_finishing = True
+            self._voice_envelope_frame_condition.notify_all()
+
+    def _stop_voice_playback_meter(self) -> None:
+        with self._voice_envelope_frame_condition:
+            if self._voice_playback_meter is not None:
+                self._voice_playback_meter.stop()
+            self._voice_playback_meter = None
+            self._voice_playback_meter_context = {}
+            self._voice_playback_meter_finishing = False
             self._voice_envelope_frame_active = False
             self._voice_envelope_frame_condition.notify_all()
 
@@ -13024,6 +13231,21 @@ class VoiceService:
 
     def _voice_envelope_frame_status_snapshot(self) -> dict[str, Any]:
         with self._voice_envelope_frame_condition:
+            last_gap_ms = round(self._voice_visualizer_last_update_gap_ms, 3)
+            max_gap_ms = round(self._voice_visualizer_max_update_gap_ms, 3)
+            elapsed = (
+                self._voice_visualizer_last_publish_monotonic
+                - self._voice_visualizer_first_publish_monotonic
+                if self._voice_visualizer_first_publish_monotonic > 0.0
+                and self._voice_visualizer_last_publish_monotonic
+                > self._voice_visualizer_first_publish_monotonic
+                else 0.0
+            )
+            emit_rate_hz = (
+                (self._voice_visualizer_publish_window_count - 1) / elapsed
+                if self._voice_visualizer_publish_window_count > 1 and elapsed > 0
+                else 0.0
+            )
             return {
                 "envelope_frames_generated": int(
                     self._voice_envelope_frames_generated_total
@@ -13031,6 +13253,33 @@ class VoiceService:
                 "envelope_frames_published": int(
                     self._voice_envelope_frames_published_total
                 ),
+                "visualizer_frames_generated": int(
+                    self._voice_envelope_frames_generated_total
+                ),
+                "visualizer_frames_emitted": int(
+                    self._voice_envelope_frames_published_total
+                ),
+                "visualizer_frames_emitted_in_window": int(
+                    self._voice_visualizer_publish_window_count
+                ),
+                "visualizer_emit_rate_hz": round(emit_rate_hz, 3),
+                "visualizer_updates_received": int(
+                    self._voice_visualizer_updates_received_total
+                ),
+                "visualizer_updates_coalesced": int(
+                    self._voice_visualizer_updates_coalesced_total
+                ),
+                "visualizer_updates_dropped": int(
+                    self._voice_visualizer_updates_dropped_total
+                ),
+                "visualizer_update_rate_limit_hz": 30,
+                "visualizer_last_update_gap_ms": last_gap_ms,
+                "visualizer_max_update_gap_ms": max_gap_ms,
+                "max_visualizer_frame_gap_ms": max_gap_ms,
+                "status_polling_used_for_visualizer": False,
+                "playback_meter_alignment": self._voice_playback_meter_alignment,
+                "playback_meter_source": "stormhelm_playback_meter",
+                "playback_meter_active": bool(self._voice_playback_meter is not None),
                 "queue_depth": len(self._voice_envelope_frame_queue),
                 "active": bool(self._voice_envelope_frame_active),
                 "generation": int(self._voice_envelope_frame_generation),
@@ -13103,6 +13352,34 @@ class VoiceService:
             "voice_visualizer_envelope_frames_published": visualizer.get(
                 "envelope_frames_published"
             ),
+            "visualizer_frames_generated": visualizer.get(
+                "visualizer_frames_generated"
+            ),
+            "visualizer_frames_emitted": visualizer.get("visualizer_frames_emitted"),
+            "visualizer_emit_rate_hz": visualizer.get("visualizer_emit_rate_hz"),
+            "playback_meter_alignment": visualizer.get("playback_meter_alignment"),
+            "playback_meter_source": visualizer.get("playback_meter_source"),
+            "voice_visualizer_updates_received": visualizer.get(
+                "visualizer_updates_received"
+            ),
+            "voice_visualizer_updates_coalesced": visualizer.get(
+                "visualizer_updates_coalesced"
+            ),
+            "voice_visualizer_updates_dropped": visualizer.get(
+                "visualizer_updates_dropped"
+            ),
+            "voice_visualizer_last_update_gap_ms": visualizer.get(
+                "visualizer_last_update_gap_ms"
+            ),
+            "voice_visualizer_max_update_gap_ms": visualizer.get(
+                "visualizer_max_update_gap_ms"
+            ),
+            "max_visualizer_frame_gap_ms": visualizer.get(
+                "max_visualizer_frame_gap_ms"
+            ),
+            "status_polling_used_for_visualizer": visualizer.get(
+                "status_polling_used_for_visualizer"
+            ),
             "voice_visualizer_queue_depth": visualizer.get("queue_depth"),
             "voice_visualizer_frame_worker_active": visualizer.get("active"),
             "voice_anchor_debug": debug,
@@ -13144,6 +13421,95 @@ class VoiceService:
         voice_payload.update({"raw_audio_present": False, "raw_audio_included": False})
         return voice_payload
 
+    def _voice_meter_event_payload(
+        self,
+        envelope: VoiceAudioEnvelope,
+        *,
+        playback_status: str = "playing",
+        playback_streaming_active: bool = True,
+        first_audio_started: bool = True,
+    ) -> dict[str, Any]:
+        envelope_payload = envelope.to_dict()
+        active = playback_status in {"started", "playing"}
+        center_drive = round(float(envelope.center_blob_drive), 4)
+        center_scale_drive = round(float(envelope.center_blob_scale_drive), 4)
+        center_scale = round(float(envelope.center_blob_scale), 4)
+        visual_drive = round(float(envelope.visual_drive_level), 4)
+        outer_motion = round(float(envelope.outer_speaking_motion), 4)
+        anchor = {
+            "state": "speaking" if active else "idle",
+            "speaking_visual_active": bool(active),
+            "motion_intensity": round(max(outer_motion, center_drive * 0.72), 4),
+            "audio_reactive_available": bool(envelope.audio_reactive_available),
+            "audio_reactive_source": envelope.source,
+            "output_level_rms": round(float(envelope.rms_level), 4),
+            "audio_level_raw": round(float(envelope.rms_level), 4),
+            "output_level_peak": round(float(envelope.peak_level), 4),
+            "instant_audio_level": round(float(envelope.instant_audio_level), 4),
+            "fast_audio_level": round(float(envelope.fast_audio_level), 4),
+            "smoothed_output_level": round(float(envelope.smoothed_level), 4),
+            "speech_energy": round(float(envelope.speech_energy), 4),
+            "visual_drive_level": visual_drive,
+            "visual_drive_peak": round(float(envelope.visual_drive_peak), 4),
+            "center_blob_drive": center_drive,
+            "center_blob_scale_drive": center_scale_drive,
+            "center_blob_scale": center_scale,
+            "outer_speaking_motion": outer_motion,
+            "visual_gain": round(float(envelope.visual_gain), 4),
+            "audio_drive_level": center_scale_drive,
+            "first_audio_started": bool(first_audio_started),
+            "streaming_tts_active": bool(playback_streaming_active),
+            "live_playback_active": bool(active),
+            "visualizer_update_hz": 30,
+            "visualizer_last_update_at": envelope.last_update_at,
+            "synthetic_fallback": bool(envelope.synthetic),
+            "user_heard_claimed": False,
+            "playback_started_does_not_mean_user_heard": True,
+            "speaking_visual_is_not_completion": True,
+            "speaking_visual_is_not_verification": True,
+        }
+        return {
+            "enabled": bool(self.config.enabled),
+            "spoken_responses_enabled": bool(self.config.spoken_responses_enabled),
+            "voice_output_envelope": envelope_payload,
+            "voice_anchor": anchor,
+            "playback": {
+                "active_playback_status": playback_status,
+                "live_playback_status": playback_status,
+                "stream_status": playback_status,
+                "playback_streaming_active": bool(playback_streaming_active),
+                "first_audio_started": bool(first_audio_started),
+                "raw_audio_included": False,
+                "raw_audio_logged": False,
+            },
+            "voice_anchor_state": anchor["state"],
+            "speaking_visual_active": bool(active),
+            "voice_motion_intensity": anchor["motion_intensity"],
+            "voice_audio_level": anchor["smoothed_output_level"],
+            "voice_audio_level_raw": anchor["audio_level_raw"],
+            "voice_instant_audio_level": anchor["instant_audio_level"],
+            "voice_fast_audio_level": anchor["fast_audio_level"],
+            "voice_smoothed_output_level": anchor["smoothed_output_level"],
+            "voice_visual_drive_level": visual_drive,
+            "voice_visual_drive_peak": anchor["visual_drive_peak"],
+            "voice_center_blob_drive": center_drive,
+            "voice_center_blob_scale_drive": center_scale_drive,
+            "voice_center_blob_scale": center_scale,
+            "voice_outer_speaking_motion": outer_motion,
+            "voice_visual_gain": anchor["visual_gain"],
+            "audioDriveLevel": center_scale_drive,
+            "voice_audio_reactive_available": anchor["audio_reactive_available"],
+            "voice_audio_reactive_source": envelope.source,
+            "voice_visualizer_update_hz": 30,
+            "voice_visualizer_last_update_at": envelope.last_update_at,
+            "streaming_tts_active": bool(playback_streaming_active),
+            "live_playback_active": bool(active),
+            "first_audio_started": bool(first_audio_started),
+            "active_playback_status": playback_status,
+            "raw_audio_present": False,
+            "raw_audio_included": False,
+        }
+
     def _publish_voice_output_envelope_update(
         self,
         envelope: VoiceAudioEnvelope | None,
@@ -13163,17 +13529,34 @@ class VoiceService:
         playback_streaming_active: bool = True,
         first_audio_started: bool = True,
         envelope_frame: Any | None = None,
+        playback_meter_alignment: str | None = None,
     ) -> None:
         if envelope is None:
             return
-        voice_payload = self._voice_envelope_ui_payload(
-            envelope,
-            playback_status=playback_status,
-            playback_streaming_active=playback_streaming_active,
-            first_audio_started=first_audio_started,
-        )
+        if envelope.source == "stormhelm_playback_meter":
+            voice_payload = self._voice_meter_event_payload(
+                envelope,
+                playback_status=playback_status,
+                playback_streaming_active=playback_streaming_active,
+                first_audio_started=first_audio_started,
+            )
+        else:
+            voice_payload = self._voice_envelope_ui_payload(
+                envelope,
+                playback_status=playback_status,
+                playback_streaming_active=playback_streaming_active,
+                first_audio_started=first_audio_started,
+            )
         metadata = {
             "chunk_index": chunk_index,
+            "visualizer_only": True,
+            "visualizer_clock": "stormhelm_playback_meter"
+            if envelope.source == "stormhelm_playback_meter"
+            else "playback_time_envelope",
+            "source": envelope.source,
+            "current_rms": round(float(envelope.rms_level), 4),
+            "current_peak": round(float(envelope.peak_level), 4),
+            "visual_drive": round(float(envelope.visual_drive_level), 4),
             "voice": voice_payload,
             "voice_output_envelope": envelope.to_dict(),
             "payload_keys": [
@@ -13188,10 +13571,18 @@ class VoiceService:
             "raw_audio_included": False,
         }
         if envelope_frame is not None and hasattr(envelope_frame, "to_dict"):
-            metadata["audio_envelope_frame"] = envelope_frame.to_dict()
+            frame_payload = envelope_frame.to_dict()
+            metadata["audio_envelope_frame"] = frame_payload
+            metadata["playback_position_ms"] = frame_payload.get(
+                "playback_position_ms"
+            )
+            metadata["playback_meter_alignment"] = frame_payload.get(
+                "playback_meter_alignment",
+                playback_meter_alignment or self._voice_playback_meter_alignment,
+            )
         self._publish(
-            VoiceEventType.TTS_STREAM_CHUNK,
-            message="Voice chunk envelope updated.",
+            VoiceEventType.VOICE_VISUALIZER_UPDATE,
+            message="Voice visualizer envelope updated.",
             session_id=session_id,
             turn_id=turn_id,
             speech_request_id=speech_request_id,

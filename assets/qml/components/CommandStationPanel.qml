@@ -10,6 +10,7 @@ Item {
     property var stationData: ({})
     property bool panelMode: false
     readonly property var safeData: root.stationData || ({})
+    readonly property var visualArtifact: root.safeData.visualArtifact || ({})
 
     function chipFill(tone) {
         switch (String(tone || "")) {
@@ -179,6 +180,77 @@ Item {
                                     font.pixelSize: 11
                                     wrapMode: Text.Wrap
                                     Layout.fillWidth: true
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    radius: 16
+                    color: "#101c25"
+                    border.width: 1
+                    border.color: "#395c6f"
+                    implicitHeight: artifactColumn.implicitHeight + 20
+                    visible: String(root.visualArtifact.previewKind || "").length > 0
+
+                    ColumnLayout {
+                        id: artifactColumn
+                        anchors.fill: parent
+                        anchors.margins: 12
+                        spacing: 6
+
+                        Text {
+                            text: root.visualArtifact.previewLabel || "Visual artifact"
+                            color: "#e8f5fb"
+                            font.family: "Bahnschrift SemiCondensed"
+                            font.pixelSize: root.panelMode ? 13 : 15
+                            wrapMode: Text.Wrap
+                            Layout.fillWidth: true
+                        }
+
+                        Text {
+                            text: root.visualArtifact.safePreviewRef || "No direct preview reference"
+                            color: "#9fb9c8"
+                            font.family: "Segoe UI Semibold"
+                            font.pixelSize: 10
+                            wrapMode: Text.WrapAnywhere
+                            Layout.fillWidth: true
+                        }
+
+                        Flow {
+                            Layout.fillWidth: true
+                            spacing: 8
+
+                            Repeater {
+                                model: [
+                                    String(root.visualArtifact.artifactState || "unknown"),
+                                    String(root.visualArtifact.storageMode || "ephemeral"),
+                                    String(root.visualArtifact.artifactFormat || "unknown")
+                                ]
+
+                                delegate: Rectangle {
+                                    required property string modelData
+
+                                    radius: 11
+                                    height: 23
+                                    width: Math.min(150, artifactPillText.implicitWidth + 20)
+                                    color: "#0d1720"
+                                    border.width: 1
+                                    border.color: "#2f4e5e"
+
+                                    Text {
+                                        id: artifactPillText
+                                        anchors.centerIn: parent
+                                        text: modelData
+                                        color: "#d6e7ef"
+                                        font.family: "Segoe UI Semibold"
+                                        font.pixelSize: 9
+                                        elide: Text.ElideRight
+                                        width: parent.width - 12
+                                        horizontalAlignment: Text.AlignHCenter
+                                    }
                                 }
                             }
                         }

@@ -13,8 +13,29 @@ Stormhelm loads typed config from TOML, `.env`, environment variables, and runti
 | 5 | `.env` | Parsed as key/value pairs. |
 | 6 | Process environment | Overrides prior values. |
 
-Sources: `src/stormhelm/config/loader.py`, `config/default.toml`, `config/development.toml.example`
+Sources: `src/stormhelm/config/loader.py`, `config/default.toml`, `config/development.toml.example`, `config/development-live-browser.toml.example`
 Tests: `tests/test_config_loader.py`
+
+## Live Browser Integration Profile
+
+`config/development-live-browser.toml.example` is a local diagnostic profile for live Obscura CLI, Obscura CDP, and Playwright semantic observation checks. It is not loaded by default. It keeps browser actions, form fill, login, cookies, screenshots, visible-screen verification, and truth verification disabled.
+
+Live-test environment gates:
+
+| Env var | Meaning |
+|---|---|
+| `STORMHELM_LIVE_BROWSER_TESTS` | Master gate. Must be `true` before live checks run. |
+| `STORMHELM_ENABLE_LIVE_OBSCURA` | Enables the Obscura CLI smoke path. |
+| `STORMHELM_ENABLE_LIVE_OBSCURA_CDP` | Enables the Obscura CDP compatibility/smoke path. |
+| `STORMHELM_ENABLE_LIVE_PLAYWRIGHT` | Enables Playwright readiness checks. |
+| `STORMHELM_PLAYWRIGHT_ALLOW_BROWSER_LAUNCH` | Allows the live Playwright semantic smoke to launch an isolated temporary browser context. |
+| `STORMHELM_OBSCURA_BINARY` | Obscura binary name/path for live checks. |
+| `STORMHELM_LIVE_BROWSER_TEST_URL` | Optional public URL for Obscura provider smoke checks. |
+
+Run `scripts/setup_live_browser_dependencies.ps1 -CheckOnly` to inspect optional local dependencies, then `scripts/run_live_browser_checks.ps1` or `python -m stormhelm.core.live_browser_integration` for a bounded JSON report. The setup helper installs Playwright only when explicit install flags are supplied and installs Obscura only when `-InstallObscura` is paired with `-DownloadLatestObscuraRelease`, a local zip path, or an explicit official `h4ckf0r0day/obscura` GitHub release URL. Normal CI should leave these gates unset; `tests/test_live_browser_provider_smoke.py` skips by default.
+
+Sources: `src/stormhelm/core/live_browser_integration.py`, `scripts/setup_live_browser_dependencies.ps1`, `scripts/run_live_browser_checks.ps1`, `config/development-live-browser.toml.example`
+Tests: `tests/test_live_browser_integration.py`, `tests/test_live_browser_provider_smoke.py`
 
 ## Core Settings
 
@@ -166,9 +187,35 @@ Tests: `tests/test_hardware_telemetry.py`
 | `screen_awareness.workflow_learning_enabled` | bool | `true` | No | bool | TOML/env | Workflow learning flag. |
 | `screen_awareness.brain_integration_enabled` | bool | `true` | No | bool | TOML/env | Brain integration flag. |
 | `screen_awareness.power_features_enabled` | bool | `true` | No | bool | TOML/env | Power features flag. |
+| `screen_awareness.browser_adapters.playwright.enabled` | bool | `false` | No | bool | TOML/env | Optional Playwright browser semantic adapter scaffold; disabled by default. |
+| `screen_awareness.browser_adapters.playwright.provider` | string | `playwright` | No | `playwright` | TOML | Provider label only; no dependency required in normal CI. |
+| `screen_awareness.browser_adapters.playwright.mode` | string | `semantic_observation` | No | `semantic_observation` | TOML | Observation/grounding scaffold mode. |
+| `screen_awareness.browser_adapters.playwright.allow_browser_launch` | bool | `false` | No | bool | TOML/env | Browser launch is not allowed by default. When enabled with the dev gate and live-test gates, Playwright may launch an isolated temporary context for semantic observation only. |
+| `screen_awareness.browser_adapters.playwright.allow_connect_existing` | bool | `false` | No | bool | TOML/env | Connecting to real user browser sessions is not allowed by default. |
+| `screen_awareness.browser_adapters.playwright.allow_actions` | bool | `false` | No | bool | TOML/env | Master action-execution gate. Click/focus still require their specific gates, the dev action gate, isolated launch readiness, and trust approval. |
+| `screen_awareness.browser_adapters.playwright.allow_click` | bool | `false` | No | bool | TOML/env | Enables runtime declaration and execution of trust-gated click only when all other Playwright action gates pass, a fresh target fingerprint is still valid, and the locator is unambiguous. |
+| `screen_awareness.browser_adapters.playwright.allow_focus` | bool | `false` | No | bool | TOML/env | Enables runtime declaration and execution of trust-gated focus only when all other Playwright action gates pass, a fresh target fingerprint is still valid, and the locator is unambiguous. |
+| `screen_awareness.browser_adapters.playwright.allow_type_text` | bool | `false` | No | bool | TOML/env | Typing remains unsupported; setting this blocks readiness/action execution rather than enabling typing. |
+| `screen_awareness.browser_adapters.playwright.allow_scroll` | bool | `false` | No | bool | TOML/env | Scrolling remains unsupported; setting this blocks readiness/action execution rather than enabling scrolling. |
+| `screen_awareness.browser_adapters.playwright.allow_form_fill` | bool | `false` | No | bool | TOML/env | Form fill remains unsupported. |
+| `screen_awareness.browser_adapters.playwright.allow_form_submit` | bool | `false` | No | bool | TOML/env | Form submission remains unsupported. |
+| `screen_awareness.browser_adapters.playwright.allow_login` | bool | `false` | No | bool | TOML/env | Login handling remains unsupported. |
+| `screen_awareness.browser_adapters.playwright.allow_cookies` | bool | `false` | No | bool | TOML/env | Cookie/session access remains unsupported. |
+| `screen_awareness.browser_adapters.playwright.allow_user_profile` | bool | `false` | No | bool | TOML/env | User profile attachment remains unsupported; isolated temporary contexts are the only live path. |
+| `screen_awareness.browser_adapters.playwright.allow_screenshots` | bool | `false` | No | bool | TOML/env | Screenshots are not enabled or treated as visible-screen truth in this scaffold. |
+| `screen_awareness.browser_adapters.playwright.allow_dev_adapter` | bool | `false` | No | bool | TOML/env | Required before mock/dev readiness can become `mock_ready`; disabled by default. |
+| `screen_awareness.browser_adapters.playwright.allow_dev_actions` | bool | `false` | No | bool | TOML/env | Required in addition to `allow_actions` and the specific click/focus gate before Addition 5 execution can run. |
+| `screen_awareness.browser_adapters.playwright.max_session_seconds` | int | `120` | No | positive int | TOML | Session cap for future long-lived phases; Addition 2 closes each isolated observation context immediately. |
+| `screen_awareness.browser_adapters.playwright.navigation_timeout_seconds` | int | `12000` | No | milliseconds | TOML | Navigation timeout for isolated semantic observation. |
+| `screen_awareness.browser_adapters.playwright.observation_timeout_seconds` | int | `8000` | No | milliseconds | TOML | Semantic observation timeout budget for future expansion; extraction remains bounded by fixed list/text caps and a short stabilization wait. |
+| `screen_awareness.browser_adapters.playwright.debug_events_enabled` | bool | `true` | No | bool | TOML/env | Allows bounded readiness/mock/live observation/grounding/guidance/cleanup events. |
 
-Sources: `config/default.toml`, `src/stormhelm/config/models.py`, `src/stormhelm/core/screen_awareness/service.py`
-Tests: `tests/test_screen_awareness_service.py`, `tests/test_screen_awareness_action.py`, `tests/test_screen_awareness_verification.py`
+Readiness statuses include `disabled`, `dev_gate_required`, `dependency_missing`, `browsers_missing`, `mock_ready`, `runtime_ready`, `unavailable`, and `failed`. `mock_ready` does not mean Stormhelm observed a real browser; it means the dev-gated mock provider can produce fixture-backed semantic observations for tests and diagnostics. `runtime_ready` allows real isolated semantic observation only when Playwright is installed, browser engines are available/checkable, `enabled = true`, `allow_dev_adapter = true`, and `allow_browser_launch = true`.
+
+Env overrides include `STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ENABLED`, `STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_ACTIONS`, `STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_CLICK`, `STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_FOCUS`, `STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_TYPE_TEXT`, `STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_SCROLL`, `STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_BROWSER_LAUNCH`, `STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_CONNECT_EXISTING`, `STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_DEV_ADAPTER`, `STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_DEV_ACTIONS`, `STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_FORM_FILL`, `STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_FORM_SUBMIT`, `STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_LOGIN`, `STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_COOKIES`, `STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_USER_PROFILE`, `STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_SCREENSHOTS`, and `STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_DEBUG_EVENTS_ENABLED`. Live semantic observation diagnostics also require `STORMHELM_LIVE_BROWSER_TESTS=true`, `STORMHELM_ENABLE_LIVE_PLAYWRIGHT=true`, and `STORMHELM_PLAYWRIGHT_ALLOW_BROWSER_LAUNCH=true`; they use an isolated temporary browser context, redact sensitive field values, clear temporary cookies, report iframe/shadow-DOM/large-page limitations when detected, and still expose no action capabilities. Addition 5 click/focus execution is not enabled by the live diagnostic profile; it requires explicit runtime config gates plus trust approval, blocks stale plans/target drift/ambiguous locators, records cleanup status, and still does not expose type/scroll/form/login/cookie/profile capabilities. Addition 4 before/after comparison uses existing observations and does not require a separate action or browser-control setting.
+
+Sources: `config/default.toml`, `src/stormhelm/config/models.py`, `src/stormhelm/config/loader.py`, `src/stormhelm/core/screen_awareness/service.py`, `src/stormhelm/core/screen_awareness/browser_playwright.py`
+Tests: `tests/test_screen_awareness_service.py`, `tests/test_screen_awareness_action.py`, `tests/test_screen_awareness_verification.py`, `tests/test_screen_awareness_playwright_adapter_scaffold.py`, `tests/test_screen_awareness_playwright_adapter_integration.py`, `tests/test_screen_awareness_playwright_live_semantic.py`, `tests/test_screen_awareness_playwright_grounding_robustness.py`, `tests/test_screen_awareness_playwright_semantic_verification.py`
 
 ## Calculations
 
@@ -190,7 +237,7 @@ Tests: `tests/test_calculations.py`
 | `web_retrieval.enabled` | bool | `true` | No | bool | TOML/env | Disables public web retrieval if false. |
 | `web_retrieval.planner_routing_enabled` | bool | `true` | No | bool | TOML/env | Allows summarize/read/render/extract URL requests to route here. |
 | `web_retrieval.debug_events_enabled` | bool | `true` | No | bool | TOML/env | Emits compact retrieval events without raw page text/html. |
-| `web_retrieval.default_provider` | string | `auto` | No | `auto`, `http`, `obscura`, `obscura_cdp` | TOML/env | Selects provider order; `auto` starts with HTTP unless rendering is requested. CDP is selected only by explicit CDP/richer-inspection requests or provider preference. |
+| `web_retrieval.default_provider` | string | `auto` | No | `auto`, `http`, `obscura`, `obscura_cdp` | TOML/env | Selects provider order; `auto` starts with HTTP unless rendering is requested. CDP is selected for extraction only when readiness proves page-inspection support, or by explicit CDP requests that may return diagnostic-only/fallback state. |
 | `web_retrieval.max_url_count` | int | `8` | No | positive int | TOML/env | Caps URLs per request. |
 | `web_retrieval.max_url_chars` | int | `4096` | No | positive int | TOML/env | Blocks extremely long URLs before provider dispatch. |
 | `web_retrieval.max_parallel_pages` | int | `3` | No | positive int | TOML/env | Provider concurrency ceiling for future parallel retrieval. |
@@ -213,7 +260,7 @@ Tests: `tests/test_calculations.py`
 | `web_retrieval.obscura.cdp.binary_path` | string | `obscura` | No | executable path/name | TOML/env | Binary used for `obscura serve`; missing binary reports `binary_missing`. |
 | `web_retrieval.obscura.cdp.host` | string | `127.0.0.1` | No | localhost only | TOML/env | CDP server must bind locally; public binds are rejected. |
 | `web_retrieval.obscura.cdp.port` | int | `0` | No | `0` or local port | TOML/env | `0` chooses a dynamic local port. |
-| `web_retrieval.obscura.cdp.startup_timeout_seconds` | number | `8.0` | No | seconds | TOML | Maximum wait for `/json/version`. |
+| `web_retrieval.obscura.cdp.startup_timeout_seconds` | number | `8.0` | No | seconds | TOML | Maximum wait for compatible localhost CDP endpoints such as `/json/version`, `/json/list`, or `/json`. |
 | `web_retrieval.obscura.cdp.shutdown_timeout_seconds` | number | `4.0` | No | seconds | TOML | Graceful stop wait before forced cleanup. |
 | `web_retrieval.obscura.cdp.navigation_timeout_seconds` | number | `12.0` | No | seconds | TOML | CDP navigation/load wait bound. |
 | `web_retrieval.obscura.cdp.max_session_seconds` | number | `120.0` | No | seconds | TOML | Maximum session lifetime; no persistent background browser. |
@@ -232,8 +279,10 @@ Tests: `tests/test_calculations.py`
 
 Env overrides include `STORMHELM_WEB_RETRIEVAL_ENABLED`, `STORMHELM_WEB_RETRIEVAL_DEFAULT_PROVIDER`, `STORMHELM_WEB_RETRIEVAL_MAX_URL_COUNT`, `STORMHELM_WEB_RETRIEVAL_MAX_URL_CHARS`, `STORMHELM_WEB_RETRIEVAL_ALLOW_PRIVATE_NETWORK_URLS`, `STORMHELM_WEB_RETRIEVAL_HTTP_ENABLED`, `STORMHELM_OBSCURA_ENABLED`, `STORMHELM_OBSCURA_BINARY_PATH`, `STORMHELM_OBSCURA_MAX_CONCURRENCY`, `STORMHELM_OBSCURA_CDP_ENABLED`, `STORMHELM_OBSCURA_CDP_BINARY_PATH`, `STORMHELM_OBSCURA_CDP_HOST`, `STORMHELM_OBSCURA_CDP_PORT`, and `STORMHELM_OBSCURA_CDP_MAX_PAGES_PER_SESSION`.
 
-Sources: `config/default.toml`, `src/stormhelm/config/models.py`, `src/stormhelm/config/loader.py`, `src/stormhelm/core/web_retrieval/service.py`
-Tests: `tests/test_web_retrieval_config.py`, `tests/test_web_retrieval_safety.py`, `tests/test_web_retrieval_service.py`
+Run `python -m stormhelm.core.web_retrieval.obscura_cdp_probe`, `scripts/smoke_obscura_cdp.ps1`, or the consolidated `scripts/run_live_browser_checks.ps1` for opt-in compatibility reports. Compatibility levels are `ready` when version/page websocket/navigation behavior is usable, `partial` when page inspection can proceed with missing nonessential endpoint details, `diagnostic_only` when endpoints are discovered but navigation/page inspection is unsupported, `unsupported` when required endpoint data is absent or mismatched, and `failed` when binary/startup/probe execution fails. A live smoke can report `cdp_navigation_unsupported` if endpoint discovery succeeds but the installed Obscura release rejects `Page.navigate`; Stormhelm then keeps CDP out of normal extraction selection and recommends Obscura CLI. These probes are manual, localhost-only, bounded, and not part of normal CI.
+
+Sources: `config/default.toml`, `config/development-live-browser.toml.example`, `src/stormhelm/config/models.py`, `src/stormhelm/config/loader.py`, `src/stormhelm/core/web_retrieval/service.py`, `src/stormhelm/core/live_browser_integration.py`
+Tests: `tests/test_web_retrieval_config.py`, `tests/test_web_retrieval_safety.py`, `tests/test_web_retrieval_service.py`, `tests/test_live_browser_integration.py`
 
 ## Software Control And Recovery
 

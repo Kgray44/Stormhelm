@@ -1,0 +1,44 @@
+{
+    "report_id":  "live-browser-deps-bbf1f74c9a20",
+    "mode":  "explicit_install",
+    "started_at":  "2026-04-30T15:06:18.6609249Z",
+    "completed_at":  "2026-04-30T15:06:21.3821902Z",
+    "install_requested":  {
+                              "playwright_package":  true,
+                              "obscura_auto_install":  false,
+                              "playwright_chromium":  true
+                          },
+    "install_results":  [
+                            {
+                                "command":  "C:\\Users\\kkids\\AppData\\Local\\Programs\\Python\\Python312\\python.exe -m pip install playwright",
+                                "name":  "playwright_package",
+                                "exit_code":  0
+                            },
+                            {
+                                "command":  "C:\\Users\\kkids\\AppData\\Local\\Programs\\Python\\Python312\\python.exe -m playwright install chromium",
+                                "name":  "playwright_chromium",
+                                "exit_code":  0
+                            }
+                        ],
+    "python_available":  true,
+    "python_executable":  "C:\\Users\\kkids\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+    "obscura":  {
+                    "binary_path":  "",
+                    "binary_input":  "obscura",
+                    "binary_found":  false,
+                    "install_note":  "Install Obscura separately and put it on PATH, or pass -ObscuraBinaryPath."
+                },
+    "playwright":  {
+                       "uses_user_profile":  false,
+                       "dependency_installed":  true,
+                       "chromium_executable_path":  "C:\\Users\\kkids\\AppData\\Local\\ms-playwright\\chromium-1217\\chrome-win64\\chrome.exe",
+                       "actions_enabled":  false,
+                       "chromium_available":  true
+                   },
+    "safety":  {
+                   "action_capabilities_disabled":  true,
+                   "no_user_browser_profile":  true,
+                   "normal_ci_dependency_free":  true,
+                   "installs_are_explicit_only":  true
+               }
+}

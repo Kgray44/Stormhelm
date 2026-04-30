@@ -22,6 +22,7 @@ class MainController(QtCore.QObject):
         self._snapshot_in_flight = False
         self._snapshot_refresh_queued = False
         self._stream_last_cursor: int | None = None
+        self._stream_reconnect_needs_reconciliation = False
         self._manual_backend_shutdown_requested = False
 
         self.refresh_timer = QtCore.QTimer(self)
@@ -283,6 +284,8 @@ class MainController(QtCore.QObject):
             self._request_snapshot(force=True)
 
     def _handle_stream_state(self, payload: dict) -> None:
+        phase = str(payload.get("phase") or "").strip().lower()
+        source = str(payload.get("source") or "").strip().lower()
         cursor = payload.get("cursor")
         if isinstance(cursor, int):
             if self._stream_last_cursor is None:
@@ -290,6 +293,15 @@ class MainController(QtCore.QObject):
             else:
                 self._stream_last_cursor = max(self._stream_last_cursor, cursor)
         self.bridge.apply_stream_state(payload)
+        if source == "client" and phase in {"reconnecting", "disconnected"}:
+            self._stream_reconnect_needs_reconciliation = True
+            return
+        if source == "core" and phase == "connected":
+            if self._stream_reconnect_needs_reconciliation or bool(
+                payload.get("gap_detected")
+            ):
+                self._stream_reconnect_needs_reconciliation = False
+                self._request_snapshot(force=True)
 
     def _handle_stream_gap(self, payload: dict) -> None:
         self.bridge.apply_stream_gap(payload)
@@ -417,6 +429,17 @@ class MainController(QtCore.QObject):
         return latest or None
 
     def _event_requires_snapshot_reconciliation(self, payload: dict) -> bool:
+        event_type = str(payload.get("event_type") or payload.get("type") or "").strip()
+        event_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+        metadata = (
+            event_payload.get("metadata")
+            if isinstance(event_payload.get("metadata"), dict)
+            else {}
+        )
+        if event_type == "voice.visualizer_update" or bool(
+            metadata.get("visualizer_only")
+        ):
+            return False
         visibility = str(payload.get("visibility_scope", "")).strip().lower()
         if visibility in {
             "watch_surface",

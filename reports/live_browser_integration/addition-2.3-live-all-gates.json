@@ -1,0 +1,133 @@
+{
+  "action_capabilities_disabled": true,
+  "claim_ceilings": {
+    "obscura_cdp": "headless_cdp_page_evidence",
+    "obscura_cli": "rendered_page_evidence",
+    "playwright": "browser_semantic_observation"
+  },
+  "completed_at": "2026-04-30T13:32:21.875234+00:00",
+  "gates": {
+    "enable_obscura": true,
+    "enable_obscura_cdp": true,
+    "enable_playwright": true,
+    "live_browser_test_url": "https://example.com",
+    "live_browser_tests": true,
+    "obscura_binary": "obscura",
+    "playwright_allow_browser_launch": true
+  },
+  "limitations": [
+    "live_provider_checks_are_opt_in",
+    "normal_ci_skips_live_dependencies",
+    "no_browser_actions",
+    "no_logged_in_context",
+    "not_visible_screen_verification",
+    "not_truth_verified"
+  ],
+  "overall_status": "unavailable",
+  "raw_output_redacted": true,
+  "report_id": "live-browser-bd4889b40ce4",
+  "results": {
+    "obscura_cdp": {
+      "action_capabilities_disabled": true,
+      "bounded_error_message": "binary_missing",
+      "claim_ceiling": "headless_cdp_page_evidence",
+      "cleanup_status": "",
+      "details": {
+        "binary_found": false,
+        "binary_path": "obscura"
+      },
+      "duration_ms": 2.99,
+      "enabled": true,
+      "error_code": "binary_missing",
+      "limitations": [
+        "dependency_unavailable",
+        "not_truth_verified",
+        "not_user_visible_screen",
+        "no_actions"
+      ],
+      "provider": "obscura_cdp",
+      "safety_gates_active": true,
+      "status": "unavailable"
+    },
+    "obscura_cli": {
+      "action_capabilities_disabled": true,
+      "bounded_error_message": "binary_missing",
+      "claim_ceiling": "rendered_page_evidence",
+      "cleanup_status": "",
+      "details": {
+        "binary_found": false,
+        "binary_path": "obscura"
+      },
+      "duration_ms": 3.233,
+      "enabled": true,
+      "error_code": "binary_missing",
+      "limitations": [
+        "dependency_unavailable",
+        "not_truth_verified",
+        "not_user_visible_screen",
+        "no_actions"
+      ],
+      "provider": "obscura_cli",
+      "safety_gates_active": true,
+      "status": "unavailable"
+    },
+    "playwright_readiness": {
+      "action_capabilities_disabled": true,
+      "bounded_error_message": "dependency_missing",
+      "claim_ceiling": "browser_semantic_observation",
+      "cleanup_status": "",
+      "details": {
+        "actions_enabled": false,
+        "browser_engines_available": false,
+        "dependency_installed": false,
+        "launch_allowed": true
+      },
+      "duration_ms": 0.277,
+      "enabled": true,
+      "error_code": "dependency_missing",
+      "limitations": [
+        "dependency_unavailable",
+        "not_truth_verified",
+        "not_user_visible_screen",
+        "no_actions"
+      ],
+      "provider": "playwright",
+      "safety_gates_active": true,
+      "status": "unavailable"
+    },
+    "playwright_semantic_observation": {
+      "action_capabilities_disabled": true,
+      "bounded_error_message": "dependency_missing",
+      "claim_ceiling": "browser_semantic_observation",
+      "cleanup_status": "",
+      "details": {
+        "actions_enabled": false,
+        "browser_engines_available": false,
+        "dependency_installed": false,
+        "launch_allowed": true
+      },
+      "duration_ms": 0.182,
+      "enabled": true,
+      "error_code": "dependency_missing",
+      "limitations": [
+        "dependency_unavailable",
+        "not_truth_verified",
+        "not_user_visible_screen",
+        "no_actions"
+      ],
+      "provider": "playwright_live_semantic",
+      "safety_gates_active": true,
+      "status": "unavailable"
+    }
+  },
+  "safety_gates_active": {
+    "actions_disabled": true,
+    "live_browser_tests": true,
+    "localhost_binding_only": true,
+    "obscura_cdp_enabled": true,
+    "obscura_enabled": true,
+    "playwright_browser_launch_allowed": true,
+    "playwright_enabled": true
+  },
+  "started_at": "2026-04-30T13:32:21.868228+00:00"
+}

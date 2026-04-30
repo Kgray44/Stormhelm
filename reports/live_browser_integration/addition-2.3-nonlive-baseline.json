@@ -1,0 +1,117 @@
+{
+  "action_capabilities_disabled": true,
+  "claim_ceilings": {
+    "obscura_cdp": "headless_cdp_page_evidence",
+    "obscura_cli": "rendered_page_evidence",
+    "playwright": "browser_semantic_observation"
+  },
+  "completed_at": "2026-04-30T13:33:46.467264+00:00",
+  "gates": {
+    "enable_obscura": false,
+    "enable_obscura_cdp": false,
+    "enable_playwright": false,
+    "live_browser_test_url": "",
+    "live_browser_tests": false,
+    "obscura_binary": "obscura",
+    "playwright_allow_browser_launch": false
+  },
+  "limitations": [
+    "live_provider_checks_are_opt_in",
+    "normal_ci_skips_live_dependencies",
+    "no_browser_actions",
+    "no_logged_in_context",
+    "not_visible_screen_verification",
+    "not_truth_verified"
+  ],
+  "overall_status": "skipped",
+  "raw_output_redacted": true,
+  "report_id": "live-browser-f1d3fce5c265",
+  "results": {
+    "obscura_cdp": {
+      "action_capabilities_disabled": true,
+      "bounded_error_message": "live_obscura_cdp_gate_not_enabled",
+      "claim_ceiling": "headless_cdp_page_evidence",
+      "cleanup_status": "",
+      "details": {},
+      "duration_ms": 0.001,
+      "enabled": false,
+      "error_code": "live_obscura_cdp_gate_not_enabled",
+      "limitations": [
+        "live_check_not_run",
+        "not_truth_verified",
+        "not_user_visible_screen",
+        "no_actions"
+      ],
+      "provider": "obscura_cdp",
+      "safety_gates_active": true,
+      "status": "skipped"
+    },
+    "obscura_cli": {
+      "action_capabilities_disabled": true,
+      "bounded_error_message": "live_obscura_gate_not_enabled",
+      "claim_ceiling": "rendered_page_evidence",
+      "cleanup_status": "",
+      "details": {},
+      "duration_ms": 0.002,
+      "enabled": false,
+      "error_code": "live_obscura_gate_not_enabled",
+      "limitations": [
+        "live_check_not_run",
+        "not_truth_verified",
+        "not_user_visible_screen",
+        "no_actions"
+      ],
+      "provider": "obscura_cli",
+      "safety_gates_active": true,
+      "status": "skipped"
+    },
+    "playwright_readiness": {
+      "action_capabilities_disabled": true,
+      "bounded_error_message": "live_playwright_gate_not_enabled",
+      "claim_ceiling": "browser_semantic_observation",
+      "cleanup_status": "",
+      "details": {},
+      "duration_ms": 0.001,
+      "enabled": false,
+      "error_code": "live_playwright_gate_not_enabled",
+      "limitations": [
+        "live_check_not_run",
+        "not_truth_verified",
+        "not_user_visible_screen",
+        "no_actions"
+      ],
+      "provider": "playwright",
+      "safety_gates_active": true,
+      "status": "skipped"
+    },
+    "playwright_semantic_observation": {
+      "action_capabilities_disabled": true,
+      "bounded_error_message": "live_playwright_gate_not_enabled",
+      "claim_ceiling": "browser_semantic_observation",
+      "cleanup_status": "",
+      "details": {},
+      "duration_ms": 0.001,
+      "enabled": false,
+      "error_code": "live_playwright_gate_not_enabled",
+      "limitations": [
+        "live_check_not_run",
+        "not_truth_verified",
+        "not_user_visible_screen",
+        "no_actions"
+      ],
+      "provider": "playwright_live_semantic",
+      "safety_gates_active": true,
+      "status": "skipped"
+    }
+  },
+  "safety_gates_active": {
+    "actions_disabled": true,
+    "live_browser_tests": false,
+    "localhost_binding_only": true,
+    "obscura_cdp_enabled": false,
+    "obscura_enabled": false,
+    "playwright_browser_launch_allowed": false,
+    "playwright_enabled": false
+  },
+  "started_at": "2026-04-30T13:33:46.467264+00:00"
+}

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from stormhelm.config.models import WebRetrievalConfig
+from stormhelm.config.models import WebRetrievalObscuraCDPConfig
 from stormhelm.config.models import WebRetrievalObscuraConfig
 from stormhelm.core.events import EventBuffer
+from stormhelm.core.web_retrieval.models import ProviderReadiness
 from stormhelm.core.web_retrieval.models import RenderedWebPage
 from stormhelm.core.web_retrieval.models import WebRetrievalRequest
 from stormhelm.core.web_retrieval.service import WebRetrievalService
@@ -33,6 +35,30 @@ class _UnavailableProvider(_Provider):
 
     def readiness(self):
         return {"status": self.status, "provider": self.name, "available": False, "reason": self.reason}
+
+
+class _DiagnosticOnlyCdpProvider(_Provider):
+    def __init__(self) -> None:
+        super().__init__(
+            "obscura_cdp",
+            RenderedWebPage(requested_url="", final_url="", provider="obscura_cdp", status="failed"),
+        )
+
+    def readiness(self):
+        return ProviderReadiness(
+            provider="obscura_cdp",
+            status="diagnostic_only",
+            available=False,
+            reason="cdp_navigation_unsupported",
+            detail="CDP endpoint detected; page navigation unsupported.",
+        )
+
+    def retrieve(self, request: WebRetrievalRequest, url: str) -> RenderedWebPage:
+        raise AssertionError("diagnostic-only CDP must not be used for page extraction")
+
+
+def _cdp_enabled_config() -> WebRetrievalObscuraCDPConfig:
+    return WebRetrievalObscuraCDPConfig(enabled=True)
 
 
 def test_service_uses_http_for_read_page_and_emits_redacted_events() -> None:
@@ -102,6 +128,56 @@ def test_service_prefers_obscura_for_render_requests_and_falls_back_to_http() ->
     assert http.calls == ["https://example.com"]
     assert bundle.pages[0].provider == "http"
     assert "obscura_failed" in bundle.limitations
+
+
+def test_service_does_not_select_diagnostic_only_cdp_for_renderer_requests() -> None:
+    cdp = _DiagnosticOnlyCdpProvider()
+    obscura = _Provider(
+        "obscura",
+        RenderedWebPage(
+            requested_url="https://example.com",
+            final_url="https://example.com",
+            provider="obscura",
+            status="success",
+            text="Rendered by the working CLI path.",
+        ),
+    )
+    service = WebRetrievalService(
+        WebRetrievalConfig(obscura=WebRetrievalObscuraConfig(enabled=True, cdp=_cdp_enabled_config())),
+        obscura_provider=obscura,
+        cdp_provider=cdp,
+    )
+
+    bundle = service.retrieve(
+        WebRetrievalRequest(urls=["https://example.com"], preferred_provider="browser_renderer", require_rendering=True)
+    )
+
+    assert bundle.result_state == "extracted"
+    assert bundle.provider_chain == ["obscura"]
+    assert bundle.trace is not None
+    assert "obscura_cdp" not in bundle.trace.attempted_providers
+    assert obscura.calls == ["https://example.com"]
+
+
+def test_explicit_cdp_request_returns_fallback_available_when_diagnostic_only() -> None:
+    service = WebRetrievalService(
+        WebRetrievalConfig(obscura=WebRetrievalObscuraConfig(enabled=True, cdp=_cdp_enabled_config())),
+        cdp_provider=_DiagnosticOnlyCdpProvider(),
+    )
+
+    bundle = service.retrieve(
+        WebRetrievalRequest(urls=["https://example.com"], intent="cdp_inspect", preferred_provider="obscura_cdp")
+    )
+
+    assert bundle.result_state == "fallback_available"
+    assert bundle.summary_ready is False
+    assert bundle.pages[0].status == "fallback_available"
+    assert bundle.pages[0].error_code == "cdp_navigation_unsupported"
+    assert bundle.pages[0].fallback_provider == "obscura"
+    assert bundle.trace is not None
+    assert bundle.trace.fallback_outcome == "obscura_cli:fallback_available"
+    assert bundle.trace.cdp["diagnostic_only"] is True
+    assert bundle.trace.cdp["recommended_fallback_provider"] == "obscura_cli"
 
 
 def test_service_blocks_private_urls_before_provider_selection() -> None:

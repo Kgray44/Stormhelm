@@ -1,0 +1,146 @@
+{
+  "action_capabilities_disabled": true,
+  "claim_ceilings": {
+    "obscura_cdp": "headless_cdp_page_evidence",
+    "obscura_cli": "rendered_page_evidence",
+    "playwright": "browser_semantic_observation"
+  },
+  "completed_at": "2026-04-30T19:32:59.174738+00:00",
+  "gates": {
+    "enable_obscura": false,
+    "enable_obscura_cdp": false,
+    "enable_playwright": true,
+    "live_browser_test_url": "",
+    "live_browser_tests": true,
+    "obscura_binary": "obscura.exe",
+    "playwright_allow_browser_launch": true
+  },
+  "limitations": [
+    "live_provider_checks_are_opt_in",
+    "normal_ci_skips_live_dependencies",
+    "no_browser_actions",
+    "no_logged_in_context",
+    "not_visible_screen_verification",
+    "not_truth_verified"
+  ],
+  "overall_status": "passed",
+  "raw_output_redacted": true,
+  "report_id": "live-browser-8262f7b5deb0",
+  "results": {
+    "obscura_cdp": {
+      "action_capabilities_disabled": true,
+      "bounded_error_message": "live_obscura_cdp_gate_not_enabled",
+      "claim_ceiling": "headless_cdp_page_evidence",
+      "cleanup_status": "",
+      "details": {},
+      "duration_ms": 0.001,
+      "enabled": false,
+      "error_code": "live_obscura_cdp_gate_not_enabled",
+      "limitations": [
+        "live_check_not_run",
+        "not_truth_verified",
+        "not_user_visible_screen",
+        "no_actions"
+      ],
+      "provider": "obscura_cdp",
+      "safety_gates_active": true,
+      "status": "skipped"
+    },
+    "obscura_cli": {
+      "action_capabilities_disabled": true,
+      "bounded_error_message": "live_obscura_gate_not_enabled",
+      "claim_ceiling": "rendered_page_evidence",
+      "cleanup_status": "",
+      "details": {},
+      "duration_ms": 0.002,
+      "enabled": false,
+      "error_code": "live_obscura_gate_not_enabled",
+      "limitations": [
+        "live_check_not_run",
+        "not_truth_verified",
+        "not_user_visible_screen",
+        "no_actions"
+      ],
+      "provider": "obscura_cli",
+      "safety_gates_active": true,
+      "status": "skipped"
+    },
+    "playwright_readiness": {
+      "action_capabilities_disabled": true,
+      "bounded_error_message": "",
+      "claim_ceiling": "browser_semantic_observation",
+      "cleanup_status": "",
+      "details": {
+        "actions_enabled": false,
+        "browser_engines_available": true,
+        "browser_launch_allowed": true,
+        "connect_existing_allowed": false,
+        "dependency_installed": true
+      },
+      "duration_ms": 476.026,
+      "enabled": true,
+      "error_code": "",
+      "limitations": [
+        "semantic_observation_only",
+        "not_truth_verified",
+        "not_user_visible_screen",
+        "no_actions"
+      ],
+      "provider": "playwright",
+      "safety_gates_active": true,
+      "status": "passed"
+    },
+    "playwright_semantic_observation": {
+      "action_capabilities_disabled": true,
+      "bounded_error_message": "",
+      "claim_ceiling": "browser_semantic_observation",
+      "cleanup_status": "closed",
+      "details": {
+        "action_supported": false,
+        "browser_context_kind": "isolated_playwright_context",
+        "control_count": 4,
+        "controls_found": 4,
+        "dialog_count": 0,
+        "dialogs_found": 0,
+        "forms_found": 0,
+        "grounding_result": "guidance_only",
+        "guidance_message": "I found the Continue button.",
+        "guidance_result": "I found the Continue button.",
+        "guidance_status": "guidance_only",
+        "isolated_context": true,
+        "isolated_context_used": true,
+        "links_found": 1,
+        "page_title": "Stormhelm Fixture Form",
+        "page_url": "http://127.0.0.1:63132/form.html",
+        "semantic_extraction_path": "screen_awareness.playwright_adapter",
+        "user_profile_used": false,
+        "verification_supported": false
+      },
+      "duration_ms": 1588.795,
+      "enabled": true,
+      "error_code": "",
+      "limitations": [
+        "live_semantic_observation_only",
+        "isolated_temporary_browser_context",
+        "no_user_profile",
+        "no_actions",
+        "not_visible_screen_verification",
+        "not_truth_verified",
+        "not_user_visible_screen"
+      ],
+      "provider": "playwright_live_semantic",
+      "safety_gates_active": true,
+      "status": "passed"
+    }
+  },
+  "safety_gates_active": {
+    "actions_disabled": true,
+    "live_browser_tests": true,
+    "localhost_binding_only": true,
+    "obscura_cdp_enabled": false,
+    "obscura_enabled": false,
+    "playwright_browser_launch_allowed": true,
+    "playwright_enabled": true
+  },
+  "started_at": "2026-04-30T19:32:57.109979+00:00"
+}

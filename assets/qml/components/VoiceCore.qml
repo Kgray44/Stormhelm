@@ -22,6 +22,8 @@ Item {
     property real forceAudioDriveLevel: -1
     property string forceAnchorState: ""
     property bool showAnchorDebugValues: false
+    property real displayedAudioLevel: 0
+    property int qmlAnchorUpdatesDuringSpeech: 0
     property real idleBaseMotion: 0.035
     property real speakingBaseMotion: 0.025
     property real audioReactiveGain: 0.78
@@ -32,13 +34,15 @@ Item {
     property string audioReactiveSource: "unavailable"
     property string statusLabel: ""
     readonly property string idleLoopMode: "continuous_time"
-    readonly property real centerBlobDriveLevel: Math.max(0, Math.min(1, root.forceAudioDriveLevel >= 0 ? root.forceAudioDriveLevel : root.centerBlobScaleDrive))
-    readonly property real audioDriveLevel: root.centerBlobDriveLevel
-    readonly property real centerBlobScale: root.forceAudioDriveLevel >= 0
-            ? 1.0 + root.centerBlobDriveLevel * 0.32
-            : Math.max(1.0, root.backendCenterBlobScale > 0 ? root.backendCenterBlobScale : 1.0 + root.centerBlobDriveLevel * 0.32)
+    readonly property real targetAudioDriveLevel: Math.max(0, Math.min(1, root.forceAudioDriveLevel >= 0 ? root.forceAudioDriveLevel : root.centerBlobScaleDrive))
+    readonly property real targetAudioLevel: root.targetAudioDriveLevel
+    readonly property real displayedAudioDriveLevel: Math.max(0, Math.min(1, root.displayedAudioLevel))
+    readonly property real centerBlobDriveLevel: root.displayedAudioDriveLevel
+    readonly property real audioDriveLevel: root.displayedAudioDriveLevel
+    readonly property real targetCenterBlobScale: 1.0 + root.targetAudioLevel * 0.32
+    readonly property real centerBlobScale: 1.0 + root.displayedAudioDriveLevel * 0.32
     readonly property real centerBlobLift: 0
-    readonly property real centerBlobGlow: 0.38 + root.centerBlobDriveLevel * 0.38
+    readonly property real centerBlobGlow: 0.38 + root.displayedAudioDriveLevel * 0.38
     readonly property real centerBlobWobble: root.speakingActive ? 0 : root.displayAmplitude * 0.26
     readonly property real outerRingCarrierAmplitude: root.speakingActive ? Math.min(0.08, root.speakingBaseMotion + Math.max(0, root.outerSpeakingMotion) * 0.28) : 0
     readonly property real audioReactiveLayerShare: root.audioReactiveGain / Math.max(0.001, root.audioReactiveGain + root.speakingBaseMotion)
@@ -117,6 +121,21 @@ Item {
              : 1.15
     }
 
+    function followAudioTarget(delta) {
+        var target = root.speakingActive || root.forceAudioDriveLevel >= 0 ? root.targetAudioDriveLevel : 0
+        var current = root.displayedAudioLevel
+        var rate = target > current ? 28.0 : 36.0
+        var blend = 1.0 - Math.exp(-Math.max(0.0, delta) * rate)
+        var nextLevel = current + (target - current) * blend
+        if (Math.abs(target - nextLevel) < 0.006) {
+            nextLevel = target
+        }
+        root.displayedAudioLevel = Math.max(0, Math.min(1, nextLevel))
+        if (root.speakingActive) {
+            root.qmlAnchorUpdatesDuringSpeech += 1
+        }
+    }
+
     function rgba(colorValue, alphaValue) {
         return "rgba("
             + Math.round(colorValue.r * 255) + ","
@@ -141,7 +160,7 @@ Item {
 
     Timer {
         id: motionClock
-        interval: 33
+        interval: 16
         repeat: true
         running: true
         onTriggered: {
@@ -152,6 +171,7 @@ Item {
             }
             var delta = Math.min(0.08, Math.max(0.0, now - root._lastMotionTick))
             root._lastMotionTick = now
+            root.followAudioTarget(delta)
             var speed = root.motionSpeedForState(root.visualState())
             var drive = root.audioDriveLevel
             root.phase += delta * speed
@@ -406,10 +426,10 @@ Item {
         }
     }
 
-    onPhaseChanged: coreCanvas.requestPaint()
-    onOrbitChanged: coreCanvas.requestPaint()
-    onShimmerChanged: coreCanvas.requestPaint()
-    onVarianceChanged: coreCanvas.requestPaint()
+    onPhaseChanged: {}
+    onOrbitChanged: {}
+    onShimmerChanged: {}
+    onVarianceChanged: {}
     onAssistantStateChanged: {
         root.displayAccentColor = root.accentForState(root.visualState())
         root.displayAmplitude = root.amplitudeForState(root.visualState())
@@ -420,26 +440,32 @@ Item {
         root.displayAmplitude = root.amplitudeForState(root.visualState())
         coreCanvas.requestPaint()
     }
-    onSpeakingActiveChanged: coreCanvas.requestPaint()
+    onSpeakingActiveChanged: {
+        if (!root.speakingActive && root.forceAudioDriveLevel < 0) {
+            root.displayedAudioLevel = 0
+        }
+        coreCanvas.requestPaint()
+    }
     onMotionIntensityChanged: {
-        root.displayAmplitude = root.amplitudeForState(root.visualState())
-        coreCanvas.requestPaint()
+        if (!root.speakingActive) {
+            root.displayAmplitude = root.amplitudeForState(root.visualState())
+            coreCanvas.requestPaint()
+        }
     }
-    onAudioLevelChanged: coreCanvas.requestPaint()
-    onSmoothedAudioLevelChanged: {
-        root.displayAmplitude = root.amplitudeForState(root.visualState())
-        coreCanvas.requestPaint()
-    }
-    onVisualDriveLevelChanged: coreCanvas.requestPaint()
-    onVisualDrivePeakChanged: coreCanvas.requestPaint()
-    onCenterBlobDriveChanged: coreCanvas.requestPaint()
-    onCenterBlobScaleDriveChanged: coreCanvas.requestPaint()
-    onBackendCenterBlobScaleChanged: coreCanvas.requestPaint()
+    onAudioLevelChanged: {}
+    onSmoothedAudioLevelChanged: {}
+    onVisualDriveLevelChanged: {}
+    onVisualDrivePeakChanged: {}
+    onCenterBlobDriveChanged: {}
+    onCenterBlobScaleDriveChanged: {}
+    onBackendCenterBlobScaleChanged: {}
     onOuterSpeakingMotionChanged: {
-        root.displayAmplitude = root.amplitudeForState(root.visualState())
-        coreCanvas.requestPaint()
+        if (!root.speakingActive) {
+            root.displayAmplitude = root.amplitudeForState(root.visualState())
+            coreCanvas.requestPaint()
+        }
     }
-    onForceAudioDriveLevelChanged: coreCanvas.requestPaint()
+    onForceAudioDriveLevelChanged: {}
     onForceAnchorStateChanged: {
         root.displayAccentColor = root.accentForState(root.visualState())
         root.displayAmplitude = root.amplitudeForState(root.visualState())
@@ -459,6 +485,7 @@ Item {
 
     Component.onCompleted: {
         root._lastMotionTick = Date.now() / 1000.0
+        root.displayedAudioLevel = root.targetAudioLevel
         root.displayAccentColor = root.accentForState(root.visualState())
         root.displayAmplitude = root.amplitudeForState(root.visualState())
         coreCanvas.requestPaint()

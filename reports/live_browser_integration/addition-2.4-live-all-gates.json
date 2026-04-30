@@ -1,0 +1,143 @@
+{
+  "action_capabilities_disabled": true,
+  "claim_ceilings": {
+    "obscura_cdp": "headless_cdp_page_evidence",
+    "obscura_cli": "rendered_page_evidence",
+    "playwright": "browser_semantic_observation"
+  },
+  "completed_at": "2026-04-30T15:08:33.057565+00:00",
+  "gates": {
+    "enable_obscura": true,
+    "enable_obscura_cdp": true,
+    "enable_playwright": true,
+    "live_browser_test_url": "https://example.com",
+    "live_browser_tests": true,
+    "obscura_binary": "obscura",
+    "playwright_allow_browser_launch": true
+  },
+  "limitations": [
+    "live_provider_checks_are_opt_in",
+    "normal_ci_skips_live_dependencies",
+    "no_browser_actions",
+    "no_logged_in_context",
+    "not_visible_screen_verification",
+    "not_truth_verified"
+  ],
+  "overall_status": "unavailable",
+  "raw_output_redacted": true,
+  "report_id": "live-browser-6150fa2cd7d7",
+  "results": {
+    "obscura_cdp": {
+      "action_capabilities_disabled": true,
+      "bounded_error_message": "binary_missing",
+      "claim_ceiling": "headless_cdp_page_evidence",
+      "cleanup_status": "",
+      "details": {
+        "binary_found": false,
+        "binary_path": "obscura"
+      },
+      "duration_ms": 3.553,
+      "enabled": true,
+      "error_code": "binary_missing",
+      "limitations": [
+        "dependency_unavailable",
+        "not_truth_verified",
+        "not_user_visible_screen",
+        "no_actions"
+      ],
+      "provider": "obscura_cdp",
+      "safety_gates_active": true,
+      "status": "unavailable"
+    },
+    "obscura_cli": {
+      "action_capabilities_disabled": true,
+      "bounded_error_message": "binary_missing",
+      "claim_ceiling": "rendered_page_evidence",
+      "cleanup_status": "",
+      "details": {
+        "binary_found": false,
+        "binary_path": "obscura"
+      },
+      "duration_ms": 3.298,
+      "enabled": true,
+      "error_code": "binary_missing",
+      "limitations": [
+        "dependency_unavailable",
+        "not_truth_verified",
+        "not_user_visible_screen",
+        "no_actions"
+      ],
+      "provider": "obscura_cli",
+      "safety_gates_active": true,
+      "status": "unavailable"
+    },
+    "playwright_readiness": {
+      "action_capabilities_disabled": true,
+      "bounded_error_message": "",
+      "claim_ceiling": "browser_semantic_observation",
+      "cleanup_status": "",
+      "details": {
+        "actions_enabled": false,
+        "browser_engines_available": true,
+        "browser_launch_allowed": true,
+        "connect_existing_allowed": false,
+        "dependency_installed": true
+      },
+      "duration_ms": 473.648,
+      "enabled": true,
+      "error_code": "",
+      "limitations": [
+        "semantic_observation_only",
+        "not_truth_verified",
+        "not_user_visible_screen",
+        "no_actions"
+      ],
+      "provider": "playwright",
+      "safety_gates_active": true,
+      "status": "passed"
+    },
+    "playwright_semantic_observation": {
+      "action_capabilities_disabled": true,
+      "bounded_error_message": "",
+      "claim_ceiling": "browser_semantic_observation",
+      "cleanup_status": "closed",
+      "details": {
+        "action_supported": false,
+        "browser_context_kind": "isolated_live_test",
+        "control_count": 1,
+        "dialog_count": 0,
+        "guidance_message": "I found the Learn more link.",
+        "guidance_status": "guidance_only",
+        "isolated_context": true,
+        "page_title": "Example Domain",
+        "page_url": "https://example.com/",
+        "verification_supported": false
+      },
+      "duration_ms": 1148.213,
+      "enabled": true,
+      "error_code": "",
+      "limitations": [
+        "live_semantic_observation_only",
+        "isolated_temporary_browser_context",
+        "no_user_profile",
+        "no_actions",
+        "not_visible_screen_verification",
+        "not_truth_verified",
+        "not_user_visible_screen"
+      ],
+      "provider": "playwright_live_semantic",
+      "safety_gates_active": true,
+      "status": "passed"
+    }
+  },
+  "safety_gates_active": {
+    "actions_disabled": true,
+    "live_browser_tests": true,
+    "localhost_binding_only": true,
+    "obscura_cdp_enabled": true,
+    "obscura_enabled": true,
+    "playwright_browser_launch_allowed": true,
+    "playwright_enabled": true
+  },
+  "started_at": "2026-04-30T15:08:31.429072+00:00"
+}

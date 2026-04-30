@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from stormhelm.core.subsystem_latency import subsystem_latency_trace_fields
+
 
 class RouteExecutionMode(str, Enum):
     INSTANT = "instant"
@@ -545,6 +547,19 @@ class LatencyTrace:
     trust_posture: str | None = None
     verification_posture: str | None = None
     provider_fallback_used: bool = False
+    provider_eligibility: dict[str, Any] = field(default_factory=dict)
+    provider_latency_summary: dict[str, Any] = field(default_factory=dict)
+    provider_audit_timing: dict[str, Any] = field(default_factory=dict)
+    subsystem_id: str = ""
+    hot_path_name: str = ""
+    latency_mode: str = ""
+    cache_hit: bool = False
+    cache_age_ms: float | None = None
+    cache_policy_id: str = ""
+    live_probe_started: bool = False
+    heavy_context_used: bool = False
+    planner_fast_path_used: bool = False
+    route_handler_ms: float | None = None
     execution_mode: str | None = None
     async_expected: bool = False
     first_feedback_ms: float | None = None
@@ -767,6 +782,16 @@ class LatencyTrace:
             "stale_allowed": bool(policy.stale_allowed),
             "async_continuation_allowed": bool(policy.async_continuation_allowed),
             "no_fake_data_rule": policy.no_fake_data_rule,
+            "subsystem_id": self.subsystem_id,
+            "hot_path_name": self.hot_path_name,
+            "latency_mode": self.latency_mode,
+            "cache_hit": bool(self.cache_hit),
+            "cache_age_ms": self.cache_age_ms,
+            "cache_policy_id": self.cache_policy_id,
+            "live_probe_started": bool(self.live_probe_started),
+            "heavy_context_used": bool(self.heavy_context_used),
+            "planner_fast_path_used": bool(self.planner_fast_path_used),
+            "route_handler_ms": self.route_handler_ms,
             "execution_mode": self.execution_mode,
             "async_expected": bool(self.async_expected),
             "first_feedback_ms": self.first_feedback_ms,
@@ -946,6 +971,80 @@ class LatencyTrace:
             "trust_posture": self.trust_posture,
             "verification_posture": self.verification_posture,
             "provider_fallback_used": bool(self.provider_fallback_used),
+            "provider_eligibility": safe_latency_value(self.provider_eligibility),
+            "provider_latency_summary": safe_latency_value(
+                self.provider_latency_summary
+            ),
+            "provider_audit_timing": safe_latency_value(self.provider_audit_timing),
+            "provider_fallback_allowed": bool(
+                self.provider_eligibility.get("provider_fallback_allowed")
+                or self.provider_latency_summary.get("fallback_allowed")
+            ),
+            "provider_fallback_blocked_reason": str(
+                self.provider_eligibility.get("provider_fallback_blocked_reason")
+                or ""
+            ),
+            "provider_fallback_reason": str(
+                self.provider_eligibility.get("provider_fallback_reason")
+                or self.provider_latency_summary.get("fallback_reason")
+                or ""
+            ),
+            "provider_name": str(self.provider_latency_summary.get("provider_name") or ""),
+            "provider_model_name": str(
+                self.provider_latency_summary.get("model_name") or ""
+            ),
+            "provider_streaming_enabled": bool(
+                self.provider_latency_summary.get("streaming_enabled")
+            ),
+            "provider_streaming_used": bool(
+                self.provider_latency_summary.get("streaming_used")
+            ),
+            "provider_cancellation_supported": bool(
+                self.provider_latency_summary.get("cancellation_supported")
+            ),
+            "provider_first_byte_ms": _optional_safe_float(
+                self.provider_latency_summary.get("first_byte_ms")
+            ),
+            "provider_first_token_ms": _optional_safe_float(
+                self.provider_latency_summary.get("first_token_ms")
+            ),
+            "provider_first_output_ms": _optional_safe_float(
+                self.provider_latency_summary.get("first_output_ms")
+            ),
+            "provider_total_ms": _optional_safe_float(
+                self.provider_latency_summary.get("total_provider_ms")
+            ),
+            "provider_total_user_visible_ms": _optional_safe_float(
+                self.provider_latency_summary.get("total_user_visible_ms")
+            ),
+            "provider_timeout_ms": _optional_safe_float(
+                self.provider_latency_summary.get("timeout_ms")
+            ),
+            "provider_timeout_hit": bool(
+                self.provider_latency_summary.get("timeout_hit")
+            ),
+            "provider_cancelled": bool(self.provider_latency_summary.get("cancelled")),
+            "provider_failure_code": str(
+                self.provider_latency_summary.get("failure_code") or ""
+            ),
+            "provider_budget_label": str(
+                self.provider_latency_summary.get("provider_budget_label") or ""
+            ),
+            "provider_budget_exceeded": bool(
+                self.provider_latency_summary.get("provider_budget_exceeded")
+            ),
+            "provider_partial_result_count": int(
+                _safe_float(self.provider_latency_summary.get("partial_result_count"))
+            ),
+            "native_route_blocked_by_provider": bool(
+                self.provider_latency_summary.get("native_route_blocked_by_provider")
+            ),
+            "provider_payload_redacted": bool(
+                self.provider_latency_summary.get("payload_redacted", True)
+            ),
+            "provider_secrets_logged": bool(
+                self.provider_latency_summary.get("secrets_logged")
+            ),
             "warnings": list(self.warnings[:10]),
         }
 
@@ -1548,6 +1647,27 @@ def build_latency_trace(
     l41_trace = _l41_trace_metadata(metadata, timings, existing_trace)
     l42_trace = _l42_trace_metadata(metadata, timings, existing_trace)
     l5_voice_trace = _l5_voice_trace_metadata(metadata, timings, existing_trace)
+    l9_provider_trace = _l9_provider_trace_metadata(metadata, existing_trace)
+    provider_fallback_used = bool(
+        attribution.get("provider_fallback_used")
+        or (provider_called and route_family == "generic_provider")
+        or bool(l9_provider_trace["provider_latency_summary"])
+    )
+    async_continuation_used = bool(
+        async_continuation
+        or l4_trace["async_initial_response_returned"]
+        or l42_trace["returned_before_subsystem_completion"]
+    )
+    l8_trace = subsystem_latency_trace_fields(
+        route_family=route_family,
+        subsystem=subsystem,
+        request_kind=request_kind,
+        metadata=metadata,
+        stage_timings_ms=timings,
+        provider_fallback_used=provider_fallback_used,
+        heavy_context_used=bool(l2_trace["heavy_context_loaded"]),
+        async_continuation=async_continuation_used,
+    )
     return LatencyTrace(
         trace_id=str(trace_id or existing_trace.get("trace_id") or ""),
         request_id=str(request_id or existing_trace.get("request_id") or ""),
@@ -1563,11 +1683,7 @@ def build_latency_trace(
         budget=budget,
         stages=stages,
         stage_timings_ms=timings,
-        async_continuation=bool(
-            async_continuation
-            or l4_trace["async_initial_response_returned"]
-            or l42_trace["returned_before_subsystem_completion"]
-        ),
+        async_continuation=async_continuation_used,
         provider_called=bool(provider_called),
         openai_called=bool(openai_called),
         llm_called=bool(llm_called),
@@ -1580,17 +1696,31 @@ def build_latency_trace(
         result_state=attribution.get("result_state"),
         trust_posture=attribution.get("trust_posture"),
         verification_posture=attribution.get("verification_posture"),
-        provider_fallback_used=bool(
-            attribution.get("provider_fallback_used")
-            or (provider_called and route_family == "generic_provider")
-        ),
+        provider_fallback_used=provider_fallback_used,
+        provider_eligibility=l9_provider_trace["provider_eligibility"],
+        provider_latency_summary=l9_provider_trace["provider_latency_summary"],
+        provider_audit_timing=l9_provider_trace["provider_audit_timing"],
+        subsystem_id=str(l8_trace.get("subsystem_id") or ""),
+        hot_path_name=str(l8_trace.get("hot_path_name") or ""),
+        latency_mode=str(l8_trace.get("latency_mode") or ""),
+        cache_hit=bool(l8_trace.get("cache_hit")),
+        cache_age_ms=l8_trace.get("cache_age_ms"),
+        cache_policy_id=str(l8_trace.get("cache_policy_id") or ""),
+        live_probe_started=bool(l8_trace.get("live_probe_started")),
+        heavy_context_used=bool(l8_trace.get("heavy_context_used")),
+        planner_fast_path_used=bool(l8_trace.get("planner_fast_path_used")),
+        route_handler_ms=l8_trace.get("route_handler_ms"),
         execution_mode=l4_trace["execution_mode"] or policy.execution_mode.value,
         async_expected=bool(
             policy.async_expected
             or l4_trace["async_initial_response_returned"]
             or l42_trace["async_conversion_expected"]
         ),
-        first_feedback_ms=_first_feedback_ms(timings, policy),
+        first_feedback_ms=(
+            l8_trace.get("first_feedback_ms")
+            if l8_trace.get("first_feedback_ms") is not None
+            else _first_feedback_ms(timings, policy)
+        ),
         fail_fast_reason=fail_fast_reason or policy.fail_fast_reason,
         route_triage_ms=l2_trace["route_triage_ms"],
         route_triage_result=l2_trace["route_triage_result"],
@@ -2215,14 +2345,16 @@ def _route_attribution(metadata: dict[str, Any]) -> dict[str, Any]:
         else {}
     )
     route_family = (
-        winner.get("route_family")
+        metadata.get("route_family")
+        or winner.get("route_family")
         or planner_debug.get("route_family")
         or route_decision.get("selected_route_family")
         or route_decision.get("selected_route_spec")
         or planner_obedience.get("route_family")
     )
     subsystem = (
-        winner.get("subsystem")
+        metadata.get("subsystem")
+        or winner.get("subsystem")
         or planner_debug.get("subsystem")
         or route_decision.get("subsystem")
         or planner_obedience.get("actual_subsystem")
@@ -2365,6 +2497,32 @@ def _l2_trace_metadata(
         ),
         "route_family_seams_evaluated": seams_evaluated,
         "route_family_seams_skipped": seams_skipped,
+    }
+
+
+def _l9_provider_trace_metadata(
+    metadata: dict[str, Any],
+    existing_trace: dict[str, Any],
+) -> dict[str, Any]:
+    provider_eligibility = _dict_payload(
+        metadata.get("provider_eligibility")
+        or metadata.get("provider_fallback_eligibility")
+        or existing_trace.get("provider_eligibility")
+    )
+    provider_latency_summary = _dict_payload(
+        metadata.get("provider_latency_summary")
+        or metadata.get("provider_fallback_summary")
+        or existing_trace.get("provider_latency_summary")
+    )
+    provider_audit_timing = _dict_payload(
+        metadata.get("provider_audit_timing")
+        or metadata.get("provider_fallback_audit_timing")
+        or existing_trace.get("provider_audit_timing")
+    )
+    return {
+        "provider_eligibility": safe_latency_value(provider_eligibility),
+        "provider_latency_summary": safe_latency_value(provider_latency_summary),
+        "provider_audit_timing": safe_latency_value(provider_audit_timing),
     }
 
 
@@ -2985,11 +3143,35 @@ def _json_ready(value: Any) -> Any:
     return safe_latency_value(value)
 
 
+def _dict_payload(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if hasattr(value, "to_dict") and callable(value.to_dict):
+        payload = value.to_dict()
+        return dict(payload) if isinstance(payload, dict) else {}
+    if hasattr(value, "__dataclass_fields__"):
+        payload = asdict(value)
+        return dict(payload) if isinstance(payload, dict) else {}
+    return {}
+
+
 def _safe_float(value: Any) -> float:
     try:
         return round(float(value or 0.0), 3)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _optional_safe_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        text = str(value).strip()
+        if not text:
+            return None
+        return round(float(text), 3)
+    except (TypeError, ValueError):
+        return None
 
 
 def _unsafe_key(key: str) -> bool:

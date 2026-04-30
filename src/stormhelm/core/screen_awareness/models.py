@@ -1,9 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, is_dataclass
+from datetime import UTC
+from datetime import datetime
 from enum import StrEnum
 from typing import Any
 from uuid import uuid4
+
+
+CLAIM_CEILING_BROWSER_SEMANTIC_OBSERVATION = "browser_semantic_observation"
+CLAIM_CEILING_BROWSER_SEMANTIC_OBSERVATION_COMPARISON = "browser_semantic_observation_comparison"
+CLAIM_CEILING_BROWSER_SEMANTIC_ACTION_PREVIEW = "browser_semantic_action_preview"
+CLAIM_CEILING_BROWSER_SEMANTIC_ACTION_EXECUTION = "browser_semantic_action_execution"
 
 
 def _serialize(value: Any) -> Any:
@@ -462,6 +470,271 @@ class ScreenTruthfulnessContract:
             "unverified_change_behavior": self.unverified_change_behavior,
             "action_boundary": self.action_boundary,
         }
+
+
+@dataclass(slots=True)
+class BrowserSemanticControl:
+    control_id: str
+    role: str = ""
+    name: str = ""
+    label: str = ""
+    text: str = ""
+    selector_hint: str = ""
+    bounding_hint: dict[str, Any] = field(default_factory=dict)
+    enabled: bool | None = None
+    visible: bool | None = None
+    checked: bool | None = None
+    expanded: bool | None = None
+    required: bool | None = None
+    readonly: bool | None = None
+    value_summary: str = ""
+    risk_hint: str = ""
+    confidence: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class BrowserGroundingCandidate:
+    candidate_id: str = field(default_factory=lambda: f"browser-grounding-{uuid4().hex[:12]}")
+    target_phrase: str = ""
+    control_id: str = ""
+    role: str = ""
+    name: str = ""
+    label: str = ""
+    text: str = ""
+    selector_hint: str = ""
+    match_reason: str = ""
+    confidence: float = 0.0
+    ambiguity_reason: str = ""
+    action_supported: bool = False
+    verification_supported: bool = False
+    evidence_terms: list[str] = field(default_factory=list)
+    mismatch_terms: list[str] = field(default_factory=list)
+    source_observation_id: str = ""
+    source_provider: str = ""
+    claim_ceiling: str = CLAIM_CEILING_BROWSER_SEMANTIC_OBSERVATION
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class BrowserSemanticObservation:
+    observation_id: str = field(default_factory=lambda: f"browser-semantic-{uuid4().hex[:12]}")
+    provider: str = "playwright"
+    adapter_id: str = "screen_awareness.browser.playwright"
+    session_id: str = ""
+    page_url: str = ""
+    page_title: str = ""
+    browser_context_kind: str = "none"
+    observed_at: str = ""
+    controls: list[BrowserSemanticControl] = field(default_factory=list)
+    text_regions: list[dict[str, Any]] = field(default_factory=list)
+    forms: list[dict[str, Any]] = field(default_factory=list)
+    landmarks: list[dict[str, Any]] = field(default_factory=list)
+    tables: list[dict[str, Any]] = field(default_factory=list)
+    dialogs: list[dict[str, Any]] = field(default_factory=list)
+    alerts: list[dict[str, Any]] = field(default_factory=list)
+    limitations: list[str] = field(default_factory=lambda: ["playwright_scaffold_only", "no_actions"])
+    confidence: float = 0.0
+    claim_ceiling: str = CLAIM_CEILING_BROWSER_SEMANTIC_OBSERVATION
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class BrowserSemanticChange:
+    change_id: str = field(default_factory=lambda: f"browser-semantic-change-{uuid4().hex[:12]}")
+    change_type: str = ""
+    before_summary: str = ""
+    after_summary: str = ""
+    control_id_before: str = ""
+    control_id_after: str = ""
+    role: str = ""
+    name: str = ""
+    label: str = ""
+    evidence_terms: list[str] = field(default_factory=list)
+    confidence: float = 0.0
+    sensitive_redacted: bool = False
+    limitations: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class BrowserSemanticVerificationRequest:
+    request_id: str = field(default_factory=lambda: f"browser-semantic-verification-{uuid4().hex[:12]}")
+    before_observation_id: str = ""
+    after_observation_id: str = ""
+    expected_change_kind: str = ""
+    target_phrase: str = ""
+    expected_target: str = ""
+    expected_state: bool | str | None = None
+    route_family: str = "screen_awareness"
+    source_provider: str = "playwright"
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class BrowserSemanticVerificationResult:
+    result_id: str = field(default_factory=lambda: f"browser-semantic-comparison-{uuid4().hex[:12]}")
+    request_id: str = ""
+    status: str = "insufficient_basis"
+    summary: str = ""
+    changes: list[BrowserSemanticChange] = field(default_factory=list)
+    expected_change_supported: bool = False
+    expected_change_evidence: list[str] = field(default_factory=list)
+    expected_change_missing: list[str] = field(default_factory=list)
+    before_observation_id: str = ""
+    after_observation_id: str = ""
+    confidence: float = 0.0
+    comparison_basis: str = "isolated_browser_semantic_observation"
+    claim_ceiling: str = CLAIM_CEILING_BROWSER_SEMANTIC_OBSERVATION_COMPARISON
+    limitations: list[str] = field(default_factory=list)
+    user_message: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class BrowserSemanticActionPreview:
+    preview_id: str = field(default_factory=lambda: f"browser-semantic-action-preview-{uuid4().hex[:12]}")
+    observation_id: str = ""
+    source_provider: str = "playwright"
+    target_phrase: str = ""
+    target_candidate_id: str = ""
+    target_role: str = ""
+    target_name: str = ""
+    target_label: str = ""
+    action_kind: str = "unsupported"
+    preview_state: str = "preview_only"
+    action_supported_now: bool = False
+    action_supported: bool = False
+    executable_now: bool = False
+    reason_not_executable: str = "action_execution_deferred"
+    confidence: float = 0.0
+    risk_level: str = "medium"
+    approval_required: bool = True
+    required_trust_scope: str = "browser_action_once_future"
+    expected_outcome: list[str] = field(default_factory=list)
+    verification_strategy: str = "semantic_before_after_comparison_required"
+    limitations: list[str] = field(default_factory=lambda: ["preview_only", "action_execution_deferred", "no_actions"])
+    claim_ceiling: str = CLAIM_CEILING_BROWSER_SEMANTIC_ACTION_PREVIEW
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class BrowserSemanticActionPlan:
+    plan_id: str = field(default_factory=lambda: f"browser-semantic-action-plan-{uuid4().hex[:12]}")
+    preview_id: str = ""
+    observation_id: str = ""
+    target_candidate: dict[str, Any] = field(default_factory=dict)
+    action_kind: str = "unsupported"
+    action_arguments_redacted: dict[str, Any] = field(default_factory=dict)
+    preconditions: list[str] = field(default_factory=lambda: ["fresh_semantic_observation_required", "operator_approval_required"])
+    approval_request_hint: str = "Future execution would require approval."
+    adapter_capability_required: str = ""
+    adapter_capability_declared: bool = False
+    executable_now: bool = False
+    verification_request_template: dict[str, Any] = field(default_factory=dict)
+    result_state: str = "preview_only"
+    user_message: str = "Action plan preview only. Execution is not enabled yet."
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    claim_ceiling: str = CLAIM_CEILING_BROWSER_SEMANTIC_ACTION_PREVIEW
+    limitations: list[str] = field(default_factory=lambda: ["preview_only", "action_execution_deferred", "no_actions"])
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class BrowserSemanticActionExecutionRequest:
+    request_id: str = field(default_factory=lambda: f"browser-semantic-action-exec-{uuid4().hex[:12]}")
+    plan_id: str = ""
+    preview_id: str = ""
+    observation_id: str = ""
+    target_candidate_id: str = ""
+    action_kind: str = "unsupported"
+    trust_request_id: str = ""
+    approval_request_id: str = ""
+    approval_grant_id: str = ""
+    session_id: str = ""
+    task_id: str = ""
+    source_provider: str = "playwright"
+    expected_outcome: list[str] = field(default_factory=list)
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class BrowserSemanticActionExecutionResult:
+    result_id: str = field(default_factory=lambda: f"browser-semantic-action-result-{uuid4().hex[:12]}")
+    request_id: str = ""
+    plan_id: str = ""
+    preview_id: str = ""
+    action_kind: str = "unsupported"
+    status: str = "blocked"
+    action_attempted: bool = False
+    action_completed: bool = False
+    verification_attempted: bool = False
+    verification_status: str = ""
+    before_observation_id: str = ""
+    after_observation_id: str = ""
+    comparison_result_id: str = ""
+    target_summary: dict[str, Any] = field(default_factory=dict)
+    risk_level: str = ""
+    trust_scope: str = ""
+    trust_request_id: str = ""
+    approval_request_id: str = ""
+    approval_grant_id: str = ""
+    provider: str = "playwright"
+    claim_ceiling: str = CLAIM_CEILING_BROWSER_SEMANTIC_ACTION_EXECUTION
+    limitations: list[str] = field(default_factory=list)
+    error_code: str = ""
+    bounded_error_message: str = ""
+    user_message: str = ""
+    cleanup_status: str = "not_started"
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    completed_at: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class PlaywrightAdapterReadiness:
+    status: str = "disabled"
+    enabled: bool = False
+    available: bool = False
+    dependency_installed: bool = False
+    browser_engines_available: bool = False
+    browser_engines_checkable: bool = False
+    mock_ready: bool = False
+    runtime_ready: bool = False
+    mock_provider_active: bool = False
+    live_runtime_allowed: bool = False
+    actions_enabled: bool = False
+    launch_allowed: bool = False
+    connect_existing_allowed: bool = False
+    blocking_reasons: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    bounded_error_message: str = ""
+    claim_ceiling: str = CLAIM_CEILING_BROWSER_SEMANTIC_OBSERVATION
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
 
 
 @dataclass(slots=True)

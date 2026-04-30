@@ -18,6 +18,7 @@ MIGRATED_ROUTE_FAMILIES = {
     "file",
     "context_action",
     "screen_awareness",
+    "camera_awareness",
     "watch_runtime",
     "network",
     "machine",

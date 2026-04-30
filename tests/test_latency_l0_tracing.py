@@ -175,6 +175,25 @@ def test_command_eval_rows_and_summary_include_kraken_latency_fields() -> None:
             "route_handler_ms": 5100.0,
             "response_serialization_ms": 30.0,
         },
+        latency_summary={
+            "total_ms": 6200.0,
+            "longest_stage": "route_handler_ms",
+            "longest_stage_ms": 5100.0,
+            "budget_label": "ghost_interactive",
+            "budget_exceeded": True,
+            "event_stream_delay_ms": 18.0,
+            "ui_event_render_latency_summary": {
+                "received_to_bridge_update_ms": 5.5,
+                "received_to_render_visible_ms": None,
+                "used_polling_fallback": True,
+                "reconnect_gap_recovered": True,
+                "render_confirmed": "unknown",
+            },
+            "ghost_first_visible_state_ms": 24.0,
+            "approval_prompt_visible_ms": 31.0,
+            "voice_state_visible_ms": 12.0,
+            "route_state_visible_ms": 19.0,
+        },
         job_count=1,
         event_count=2,
     )
@@ -192,6 +211,30 @@ def test_command_eval_rows_and_summary_include_kraken_latency_fields() -> None:
     assert row["budget_label"] == "ghost_interactive"
     assert row["budget_exceeded"] is True
     assert row["hard_timeout"] is False
+    assert row["event_stream_delay_ms"] == 18.0
+    assert row["ui_bridge_apply_ms"] == 5.5
+    assert row["ui_render_visible_ms"] is None
+    assert row["ui_render_visible_status"] == "unknown"
+    assert row["polling_fallback_used"] is True
+    assert row["reconnect_gap_detected"] is True
     assert summary["kraken_latency_report"]["total_latency_ms"]["p95"] == 6200.0
     assert summary["kraken_latency_report"]["budget_exceeded_count"] == 1
+    assert summary["kraken_latency_report"]["event_stream_delay_ms"]["p95"] == 18.0
+    assert summary["kraken_latency_report"]["ui_bridge_apply_ms"]["p95"] == 5.5
+    assert summary["kraken_latency_report"]["ui_render_visible_ms"]["count"] == 0
+    assert summary["kraken_latency_report"]["ui_render_visible_not_measured_count"] == 1
+    assert summary["kraken_latency_report"]["polling_fallback_used_count"] == 1
+    assert summary["kraken_latency_report"]["reconnect_gap_detected_count"] == 1
     assert summary["kraken_latency_report"]["top_10_slowest_rows"][0]["test_id"] == "latency-row-1"
+
+    plain_row = CommandEvalResult(
+        case=case,
+        observation=CoreObservation(
+            case_id="latency-row-no-ui",
+            input_boundary="POST /chat/send",
+            latency_ms=100.0,
+            ui_response="Ready.",
+        ),
+        assertions={},
+    ).to_dict()
+    assert plain_row["ui_render_visible_status"] is None

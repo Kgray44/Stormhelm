@@ -127,6 +127,56 @@ def test_load_config_defaults_screen_awareness_to_phase12_hardening_and_power_fl
     assert config.screen_awareness.capability_flags()["hardening_enabled"] is True
 
 
+def test_load_config_defaults_playwright_click_focus_execution_disabled(temp_project_root: Path) -> None:
+    config = load_config(project_root=temp_project_root, env={})
+    playwright = config.screen_awareness.browser_adapters.playwright
+
+    assert playwright.enabled is False
+    assert playwright.allow_actions is False
+    assert playwright.allow_click is False
+    assert playwright.allow_focus is False
+    assert playwright.allow_type_text is False
+    assert playwright.allow_scroll is False
+    assert playwright.allow_form_fill is False
+    assert playwright.allow_form_submit is False
+    assert playwright.allow_login is False
+    assert playwright.allow_cookies is False
+    assert playwright.allow_user_profile is False
+    assert playwright.allow_dev_actions is False
+
+
+def test_load_config_applies_playwright_click_focus_execution_environment_overrides(temp_project_root: Path) -> None:
+    config = load_config(
+        project_root=temp_project_root,
+        env={
+            "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ENABLED": "true",
+            "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_DEV_ADAPTER": "true",
+            "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_BROWSER_LAUNCH": "true",
+            "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_ACTIONS": "true",
+            "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_DEV_ACTIONS": "true",
+            "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_CLICK": "true",
+            "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_FOCUS": "true",
+            "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_TYPE_TEXT": "false",
+            "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_SCROLL": "false",
+            "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_FORM_SUBMIT": "false",
+            "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_USER_PROFILE": "false",
+        },
+    )
+    playwright = config.screen_awareness.browser_adapters.playwright
+
+    assert playwright.enabled is True
+    assert playwright.allow_dev_adapter is True
+    assert playwright.allow_browser_launch is True
+    assert playwright.allow_actions is True
+    assert playwright.allow_dev_actions is True
+    assert playwright.allow_click is True
+    assert playwright.allow_focus is True
+    assert playwright.allow_type_text is False
+    assert playwright.allow_scroll is False
+    assert playwright.allow_form_submit is False
+    assert playwright.allow_user_profile is False
+
+
 def test_load_config_defaults_calculations_to_enabled_local_routing(temp_project_root: Path) -> None:
     config = load_config(project_root=temp_project_root, env={})
 

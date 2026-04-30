@@ -4,18 +4,20 @@ from collections import deque
 from dataclasses import dataclass, field
 from statistics import mean
 from time import monotonic
-from typing import Any
+from typing import Any, Sequence
 from uuid import uuid4
 
 from stormhelm.core.calculations import CalculationResultVisibility
 from stormhelm.core.calculations import build_calculations_subsystem
 from stormhelm.config.models import CalculationsConfig
 from stormhelm.config.models import ScreenAwarenessConfig
+from stormhelm.core.events import EventBuffer
 from stormhelm.core.screen_awareness.adapters import SemanticAdapterRegistry
 from stormhelm.core.screen_awareness.calculations import run_screen_calculation
 from stormhelm.core.screen_awareness.action import DeterministicActionEngine
 from stormhelm.core.screen_awareness.action import WindowsNativeActionExecutor
 from stormhelm.core.screen_awareness.brain_integration import DeterministicBrainIntegrationEngine
+from stormhelm.core.screen_awareness.browser_playwright import PlaywrightBrowserSemanticAdapter
 from stormhelm.core.screen_awareness.continuity import DeterministicContinuityEngine
 from stormhelm.core.screen_awareness.grounding import DeterministicGroundingEngine
 from stormhelm.core.screen_awareness.interpretation import DeterministicContextSynthesizer
@@ -27,6 +29,13 @@ from stormhelm.core.screen_awareness.workflow_learning import DeterministicWorkf
 from stormhelm.core.screen_awareness.models import ActionExecutionResult
 from stormhelm.core.screen_awareness.models import ActionExecutionStatus
 from stormhelm.core.screen_awareness.models import ActionPolicyMode
+from stormhelm.core.screen_awareness.models import BrowserGroundingCandidate
+from stormhelm.core.screen_awareness.models import BrowserSemanticActionExecutionResult
+from stormhelm.core.screen_awareness.models import BrowserSemanticActionPlan
+from stormhelm.core.screen_awareness.models import BrowserSemanticActionPreview
+from stormhelm.core.screen_awareness.models import BrowserSemanticObservation
+from stormhelm.core.screen_awareness.models import BrowserSemanticVerificationRequest
+from stormhelm.core.screen_awareness.models import BrowserSemanticVerificationResult
 from stormhelm.core.screen_awareness.models import ScreenAnalysisResult
 from stormhelm.core.screen_awareness.models import ScreenAuditFinding
 from stormhelm.core.screen_awareness.models import ScreenAuditSeverity
@@ -115,7 +124,9 @@ class ScreenAwarenessSubsystem:
     observation_source: Any | None = None
     screen_capture_provider: Any | None = None
     action_executor: Any | None = None
+    events: EventBuffer | None = None
     adapter_registry: SemanticAdapterRegistry = field(init=False)
+    playwright_browser_adapter: PlaywrightBrowserSemanticAdapter = field(init=False)
     visual_grounder: ScreenVisualGrounder = field(init=False)
     _recent_trace_summaries: deque[dict[str, Any]] = field(init=False, repr=False)
 
@@ -128,6 +139,10 @@ class ScreenAwarenessSubsystem:
             capture_provider=self.screen_capture_provider,
         )
         self.adapter_registry = SemanticAdapterRegistry()
+        self.playwright_browser_adapter = PlaywrightBrowserSemanticAdapter(
+            self.config.browser_adapters.playwright,
+            events=self.events,
+        )
         self.grounding_engine = DeterministicGroundingEngine(provider=self.provider)
         self.navigation_engine = DeterministicNavigationEngine(grounding_engine=self.grounding_engine)
         self.verification_engine = DeterministicVerificationEngine(calculations=self.calculations)
@@ -146,6 +161,7 @@ class ScreenAwarenessSubsystem:
 
     def status_snapshot(self) -> dict[str, Any]:
         policy_state = self._policy_state()
+        playwright_readiness = self.playwright_browser_adapter.status_snapshot()
         return {
             "phase": self.config.phase,
             "enabled": self.config.enabled,
@@ -154,6 +170,9 @@ class ScreenAwarenessSubsystem:
             "action_policy_mode": self.config.action_policy_mode,
             "capabilities": self.config.capability_flags(),
             "visual_grounding": self.visual_grounder.status_snapshot(),
+            "browser_adapters": {
+                "playwright": playwright_readiness,
+            },
             "policy_state": policy_state.to_dict(),
             "hardening": {
                 "enabled": self._phase12_enabled(),
@@ -179,6 +198,9 @@ class ScreenAwarenessSubsystem:
                 "brain_integration_engine_ready": True,
                 "power_features_engine_ready": bool(self.config.capability_flags().get("power_features_enabled", False)),
                 "supported_adapters": self.adapter_registry.supported_adapter_ids(),
+                "browser_semantic_adapters": {
+                    "playwright": playwright_readiness,
+                },
                 "calculations_seam_available": self.calculations is not None,
                 "system_probe_available": self.system_probe is not None,
                 "provider_visual_augmentation_available": self.provider is not None,
@@ -187,6 +209,175 @@ class ScreenAwarenessSubsystem:
                 "power_features": self.power_features_engine.status_snapshot(),
             },
         }
+
+    def check_playwright_browser_adapter_readiness(self) -> dict[str, Any]:
+        return self.playwright_browser_adapter.get_readiness(emit_event=True).to_dict()
+
+    def observe_playwright_mock_browser_page(
+        self,
+        context: dict[str, Any] | None = None,
+    ) -> BrowserSemanticObservation:
+        return self.playwright_browser_adapter.observe_mock_browser_page(context)
+
+    def observe_playwright_live_browser_page(
+        self,
+        url: str,
+        *,
+        fixture_mode: bool = False,
+        context_options: dict[str, Any] | None = None,
+    ) -> BrowserSemanticObservation:
+        return self.playwright_browser_adapter.observe_live_browser_page(
+            url,
+            fixture_mode=fixture_mode,
+            context_options=context_options,
+        )
+
+    def ground_playwright_mock_target(
+        self,
+        target_phrase: str,
+        observation: BrowserSemanticObservation,
+    ) -> list[Any]:
+        return self.playwright_browser_adapter.ground_target(target_phrase, observation)
+
+    def ground_playwright_live_target(
+        self,
+        target_phrase: str,
+        observation: BrowserSemanticObservation,
+    ) -> list[Any]:
+        return self.playwright_browser_adapter.ground_target(target_phrase, observation)
+
+    def guide_playwright_mock_target(
+        self,
+        candidate: BrowserGroundingCandidate | Sequence[BrowserGroundingCandidate],
+        *,
+        observation: BrowserSemanticObservation | None = None,
+    ) -> dict[str, Any]:
+        return self.playwright_browser_adapter.produce_guidance_step(candidate, observation=observation)
+
+    def guide_playwright_live_target(
+        self,
+        candidate: BrowserGroundingCandidate | Sequence[BrowserGroundingCandidate],
+        *,
+        observation: BrowserSemanticObservation | None = None,
+    ) -> dict[str, Any]:
+        return self.playwright_browser_adapter.produce_guidance_step(candidate, observation=observation)
+
+    def summarize_playwright_browser_observation(
+        self,
+        observation: BrowserSemanticObservation,
+    ) -> dict[str, Any]:
+        return self.playwright_browser_adapter.summarize_observation(observation)
+
+    def compare_playwright_browser_observations(
+        self,
+        before: BrowserSemanticObservation | None,
+        after: BrowserSemanticObservation | None,
+        expected: BrowserSemanticVerificationRequest | dict[str, Any] | None = None,
+    ) -> BrowserSemanticVerificationResult:
+        return self.playwright_browser_adapter.compare_semantic_observations(before, after, expected=expected)
+
+    def verify_playwright_semantic_change(
+        self,
+        request: BrowserSemanticVerificationRequest | dict[str, Any],
+        *,
+        before: BrowserSemanticObservation | None,
+        after: BrowserSemanticObservation | None,
+    ) -> BrowserSemanticVerificationResult:
+        return self.playwright_browser_adapter.verify_semantic_change(request, before=before, after=after)
+
+    def summarize_playwright_semantic_changes(
+        self,
+        before: BrowserSemanticObservation | None,
+        after: BrowserSemanticObservation | None,
+    ) -> dict[str, Any]:
+        return self.compare_playwright_browser_observations(before, after).to_dict()
+
+    def get_latest_playwright_verification_summary(self) -> dict[str, Any]:
+        return self.playwright_browser_adapter.last_verification_summary
+
+    def preview_playwright_browser_action(
+        self,
+        observation_or_candidate: BrowserSemanticObservation | BrowserGroundingCandidate,
+        target_phrase: str = "",
+        action_phrase: str = "",
+        action_arguments: dict[str, Any] | None = None,
+    ) -> BrowserSemanticActionPreview | dict[str, Any]:
+        if isinstance(observation_or_candidate, BrowserGroundingCandidate):
+            return self.playwright_browser_adapter.build_action_preview(observation_or_candidate)
+        return self.playwright_browser_adapter.preview_semantic_action(
+            observation_or_candidate,
+            target_phrase=target_phrase,
+            action_phrase=action_phrase,
+            action_arguments=action_arguments,
+        )
+
+    def build_playwright_browser_action_plan(
+        self,
+        preview: BrowserSemanticActionPreview | dict[str, Any],
+        *,
+        action_arguments: dict[str, Any] | None = None,
+    ) -> BrowserSemanticActionPlan:
+        return self.playwright_browser_adapter.build_semantic_action_plan(
+            preview,
+            action_arguments=action_arguments,
+        )
+
+    def get_latest_playwright_action_preview_summary(self) -> dict[str, Any]:
+        return self.playwright_browser_adapter.last_action_preview_summary
+
+    def request_playwright_browser_action_execution(
+        self,
+        plan: BrowserSemanticActionPlan | dict[str, Any],
+        *,
+        url: str,
+        trust_service: Any | None = None,
+        session_id: str = "default",
+        task_id: str = "",
+        fixture_mode: bool = False,
+        context_options: dict[str, Any] | None = None,
+    ) -> BrowserSemanticActionExecutionResult:
+        return self.playwright_browser_adapter.request_semantic_action_execution(
+            plan,
+            url=url,
+            trust_service=trust_service,
+            session_id=session_id,
+            task_id=task_id,
+            fixture_mode=fixture_mode,
+            context_options=context_options,
+        )
+
+    def execute_playwright_browser_action(
+        self,
+        plan: BrowserSemanticActionPlan | dict[str, Any],
+        *,
+        url: str,
+        trust_service: Any | None = None,
+        session_id: str = "default",
+        task_id: str = "",
+        fixture_mode: bool = False,
+        context_options: dict[str, Any] | None = None,
+    ) -> BrowserSemanticActionExecutionResult:
+        return self.playwright_browser_adapter.execute_semantic_action(
+            plan,
+            url=url,
+            trust_service=trust_service,
+            session_id=session_id,
+            task_id=task_id,
+            fixture_mode=fixture_mode,
+            context_options=context_options,
+        )
+
+    def get_latest_playwright_action_execution_summary(self) -> dict[str, Any]:
+        return self.playwright_browser_adapter.last_action_execution_summary
+
+    def verify_playwright_browser_action(
+        self,
+        *,
+        before: BrowserSemanticObservation,
+        after: BrowserSemanticObservation,
+        expected_change: str,
+    ) -> dict[str, Any]:
+        return self.playwright_browser_adapter.verify_after_action(before, after, expected_change)
 
     def _phase12_enabled(self) -> bool:
         return bool(self.config.capability_flags().get("hardening_enabled"))
@@ -1076,6 +1267,7 @@ def build_screen_awareness_subsystem(
     observation_source: Any | None = None,
     screen_capture_provider: Any | None = None,
     action_executor: Any | None = None,
+    events: EventBuffer | None = None,
 ) -> ScreenAwarenessSubsystem:
     return ScreenAwarenessSubsystem(
         config=config,
@@ -1085,4 +1277,5 @@ def build_screen_awareness_subsystem(
         observation_source=observation_source,
         screen_capture_provider=screen_capture_provider,
         action_executor=action_executor,
+        events=events,
     )

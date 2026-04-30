@@ -90,6 +90,72 @@ screen_capture_ocr_enabled = true
 screen_capture_provider_vision_enabled = false
 screen_capture_store_raw_images = false
 
+[screen_awareness.browser_adapters.playwright]
+enabled = false
+provider = "playwright"
+mode = "semantic_observation"
+allow_browser_launch = false
+allow_connect_existing = false
+allow_actions = false
+allow_click = false
+allow_focus = false
+allow_type_text = false
+allow_scroll = false
+allow_form_fill = false
+allow_form_submit = false
+allow_login = false
+allow_cookies = false
+allow_user_profile = false
+allow_screenshots = false
+allow_dev_adapter = false
+allow_dev_actions = false
+max_session_seconds = 120
+navigation_timeout_seconds = 12000
+observation_timeout_seconds = 8000
+debug_events_enabled = true
+
+[camera_awareness]
+enabled = false
+planner_routing_enabled = true
+debug_events_enabled = true
+default_capture_mode = "single_still"
+default_storage_mode = "ephemeral"
+auto_discard_after_seconds = 300
+allow_cloud_vision = false
+allow_background_capture = false
+allow_task_artifact_save = false
+allow_session_permission = false
+
+[camera_awareness.capture]
+provider = "mock"
+mode = "single_still"
+default_device_id = ""
+requested_resolution = "1280x720"
+timeout_seconds = 5.0
+max_artifact_bytes = 10485760
+
+[camera_awareness.vision]
+provider = "mock"
+model = "mock-vision"
+timeout_seconds = 10.0
+detail = "auto"
+max_image_bytes = 8000000
+request_timeout_ms = 30000
+allow_cloud_vision = false
+require_confirmation_for_cloud = true
+
+[camera_awareness.privacy]
+confirm_before_capture = true
+persist_images_by_default = false
+require_source_provenance = true
+redact_raw_image_from_events = true
+
+[camera_awareness.dev]
+mock_capture_enabled = true
+mock_vision_enabled = true
+mock_image_fixture = "resistor"
+save_debug_images = false
+
 [calculations]
 enabled = true
 planner_routing_enabled = true
@@ -225,6 +291,24 @@ Behavior rules:
 - Keep tool usage purposeful and specialized. Do not use one generic blob of work when a cleaner tool split is available.
 - When tools return actionable results, synthesize them into a short useful response.
 """
+
+[provider_fallback]
+enabled = false
+allow_streaming = true
+allow_partial_progress = true
+allow_cancellation = true
+target_first_output_ms = 1500
+soft_first_output_ms = 3000
+hard_first_output_ms = 6000
+target_total_ms = 4000
+soft_total_ms = 8000
+hard_total_ms = 12000
+allow_for_native_routes = false
+allow_speculative_provider_calls = false
+log_prompt_payloads = false
+audit_timing = true
+surface_partial_in_ghost = true
+surface_details_in_deck = true
 
 [voice]
 enabled = false

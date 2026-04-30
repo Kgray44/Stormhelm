@@ -8,6 +8,7 @@ from urllib.parse import quote_plus
 from urllib.parse import urlparse
 
 from stormhelm.core.intelligence.language import normalize_phrase
+from stormhelm.core.subsystem_latency import get_subsystem_latency_profile
 
 
 class BrowserIntentType(StrEnum):
@@ -214,6 +215,13 @@ class BrowserOpenPlan:
     tool_arguments: dict[str, Any]
     response_contract: dict[str, str]
     open_target: str
+    latency_mode: str = "plan_first"
+    cache_policy_id: str = "browser_known_destination_cache"
+    ack_stage: str = "open_requested"
+    external_load_blocking: bool = False
+    load_verification_required: bool = True
+    verification_stage: str = "separate_adapter_evidence"
+    provider_fallback_used: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -221,6 +229,13 @@ class BrowserOpenPlan:
             "tool_arguments": dict(self.tool_arguments),
             "response_contract": dict(self.response_contract),
             "open_target": self.open_target,
+            "latency_mode": self.latency_mode,
+            "cache_policy_id": self.cache_policy_id,
+            "ack_stage": self.ack_stage,
+            "external_load_blocking": self.external_load_blocking,
+            "load_verification_required": self.load_verification_required,
+            "verification_stage": self.verification_stage,
+            "provider_fallback_used": self.provider_fallback_used,
         }
 
 
@@ -843,10 +858,17 @@ class BrowserDestinationResolver:
         title = resolution.display_title or (resolution.destination.title if resolution.destination is not None else "Browser destination")
         response_contract = self.response_contract_for_success(resolution)
         tool_name = "deck_open_url" if resolution.request.open_target == "deck" else "external_open_url"
+        latency_profile = get_subsystem_latency_profile("browser_destination")
         tool_arguments: dict[str, Any] = {
             "url": resolution.url,
             "label": title,
             "response_contract": dict(response_contract),
+            "ack_stage": "open_requested",
+            "external_load_blocking": False,
+            "verification_stage": "separate_adapter_evidence",
+            "provider_fallback_allowed": latency_profile.provider_fallback_allowed,
+            "latency_mode": latency_profile.latency_mode.value,
+            "cache_policy_id": latency_profile.cache_policy_id,
         }
         if tool_name == "external_open_url" and resolution.request.browser_preference != "default":
             tool_arguments["browser_target"] = resolution.request.browser_preference
@@ -855,6 +877,11 @@ class BrowserDestinationResolver:
             tool_arguments=tool_arguments,
             response_contract=response_contract,
             open_target=resolution.request.open_target,
+            latency_mode=latency_profile.latency_mode.value,
+            cache_policy_id=latency_profile.cache_policy_id,
+            external_load_blocking=False,
+            load_verification_required=True,
+            provider_fallback_used=False,
         )
 
     def build_search_open_plan(self, resolution: SearchResolutionResult) -> BrowserOpenPlan:
@@ -862,10 +889,17 @@ class BrowserDestinationResolver:
             raise ValueError("A successful search resolution is required before building an open plan.")
         response_contract = self.response_contract_for_search_success(resolution)
         tool_name = "deck_open_url" if resolution.request.open_target == "deck" else "external_open_url"
+        latency_profile = get_subsystem_latency_profile("browser_destination")
         tool_arguments: dict[str, Any] = {
             "url": resolution.url,
             "label": resolution.display_title or resolution.provider.search_title(),
             "response_contract": dict(response_contract),
+            "ack_stage": "open_requested",
+            "external_load_blocking": False,
+            "verification_stage": "separate_adapter_evidence",
+            "provider_fallback_allowed": latency_profile.provider_fallback_allowed,
+            "latency_mode": latency_profile.latency_mode.value,
+            "cache_policy_id": latency_profile.cache_policy_id,
         }
         if tool_name == "external_open_url" and resolution.request.browser_preference != "default":
             tool_arguments["browser_target"] = resolution.request.browser_preference
@@ -874,6 +908,11 @@ class BrowserDestinationResolver:
             tool_arguments=tool_arguments,
             response_contract=response_contract,
             open_target=resolution.request.open_target,
+            latency_mode=latency_profile.latency_mode.value,
+            cache_policy_id=latency_profile.cache_policy_id,
+            external_load_blocking=False,
+            load_verification_required=True,
+            provider_fallback_used=False,
         )
 
     def response_contract_for_success(self, resolution: DestinationResolutionResult) -> dict[str, str]:

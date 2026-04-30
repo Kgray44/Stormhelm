@@ -22,6 +22,7 @@ _ALL_NATIVE_ROUTE_FAMILIES = (
     "trust_approvals",
     "voice_control",
     "screen_awareness",
+    "camera_awareness",
     "task_continuity",
     "workspace_operations",
     "semantic_memory",
@@ -32,7 +33,12 @@ _ALL_NATIVE_ROUTE_FAMILIES = (
     "power",
     "resources",
 )
-_SEAM_ROUTE_FAMILIES = ("calculations", "software_control", "screen_awareness")
+_SEAM_ROUTE_FAMILIES = (
+    "calculations",
+    "software_control",
+    "screen_awareness",
+    "camera_awareness",
+)
 _NATIVE_PROTECTED_FAMILIES = {
     "calculations",
     "web_retrieval",
@@ -42,6 +48,7 @@ _NATIVE_PROTECTED_FAMILIES = {
     "trust_approvals",
     "voice_control",
     "screen_awareness",
+    "camera_awareness",
     "task_continuity",
     "workspace_operations",
     "watch_runtime",
@@ -89,6 +96,19 @@ _VOICE_RE = re.compile(
 _SCREEN_RE = re.compile(
     r"\b(?:screen|visible|button|click that|click this|what changed|compare to before|"
     r"verify it changed|visible error|what should i click|on my screen)\b",
+    re.IGNORECASE,
+)
+_CAMERA_AWARENESS_RE = re.compile(
+    r"\b(?:webcam|camera look|with (?:the )?camera|take a camera look|"
+    r"what am i holding|what is this i'?m holding|identify this thing i'?m holding|"
+    r"identify this part i'?m holding|part i'?m holding|"
+    r"in front of me|what resistor value is this|what connector is this|"
+    r"read this label|does this solder joint)\b",
+    re.IGNORECASE,
+)
+_CAMERA_CONCEPTUAL_RE = re.compile(
+    r"\b(?:how do cameras work|explain how cameras work|camera settings|camera drivers|"
+    r"open the camera|launch camera|start camera app)\b",
     re.IGNORECASE,
 )
 _WORKSPACE_RE = re.compile(
@@ -278,6 +298,20 @@ class FastRouteClassifier:
             needs_deictic = needs_deictic or any(token in normalized for token in ("that", "this", "it", "changed"))
             needs_workspace = True
 
+        if (
+            not likely
+            and _CAMERA_AWARENESS_RE.search(normalized)
+            and not _CAMERA_CONCEPTUAL_RE.search(normalized)
+        ):
+            likely = ["camera_awareness"]
+            reason_codes.append("camera_awareness_phrase")
+            confidence = 0.9
+            query_shape_hint = "camera_awareness"
+            route_hints["capture_mode"] = "single_still"
+            route_hints["source_provenance"] = "camera_request"
+            needs_active_state = True
+            clarification_likely = True
+
         if not likely and _WORKSPACE_RE.search(normalized):
             family = "workspace_operations" if "workspace" in normalized else "task_continuity"
             likely = [family]
@@ -334,7 +368,7 @@ class FastRouteClassifier:
             clarification_likely=clarification_likely,
         )
         excluded = _excluded_families(likely, confidence, safe_to_short_circuit)
-        if not safe_to_short_circuit and likely and likely[0] in {"discord_relay", "screen_awareness", "task_continuity", "workspace_operations"}:
+        if not safe_to_short_circuit and likely and likely[0] in {"discord_relay", "screen_awareness", "camera_awareness", "task_continuity", "workspace_operations"}:
             excluded = tuple(family for family in excluded if family not in {"screen_awareness"})
 
         elapsed_ms = round((perf_counter() - started) * 1000, 3)

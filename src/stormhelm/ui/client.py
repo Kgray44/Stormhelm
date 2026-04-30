@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Callable
 from urllib.parse import quote
 
@@ -360,6 +361,15 @@ class CoreApiClient(QtCore.QObject):
         request.setHeader(
             QtNetwork.QNetworkRequest.ContentTypeHeader, "application/json"
         )
+        http_timing = None
+        if path == "/chat/send":
+            send_started_ms = round(time.monotonic() * 1000.0, 3)
+            http_timing = {
+                "user_submitted_message_monotonic_ms": send_started_ms,
+                "http_send_started_monotonic_ms": send_started_ms,
+                "source": "ui_action",
+                "render_confirmed": "unknown",
+            }
 
         if method == "GET":
             reply = self.manager.get(request)
@@ -368,8 +378,8 @@ class CoreApiClient(QtCore.QObject):
             reply = self.manager.post(request, QtCore.QByteArray(data))
 
         reply.finished.connect(
-            lambda reply=reply, cb=callback, purpose=path: self._handle_reply(
-                reply, cb, purpose
+            lambda reply=reply, cb=callback, purpose=path, timing=http_timing: self._handle_reply(
+                reply, cb, purpose, timing
             )
         )
 
@@ -480,6 +490,7 @@ class CoreApiClient(QtCore.QObject):
     def _process_stream_block(self, block: str) -> None:
         if not block.strip():
             return
+        frame_received_monotonic_ms = round(time.monotonic() * 1000.0, 3)
         event_name = "message"
         data_lines: list[str] = []
         for raw_line in block.split("\n"):
@@ -500,6 +511,19 @@ class CoreApiClient(QtCore.QObject):
                 "/events/stream", f"Malformed stream frame: {error}"
             )
             return
+        parsed_monotonic_ms = round(time.monotonic() * 1000.0, 3)
+        if isinstance(payload, dict) and event_name == "stormhelm.event":
+            payload.setdefault(
+                "ui_stream_timing",
+                {
+                    "frame_received_monotonic_ms": frame_received_monotonic_ms,
+                    "event_parsed_monotonic_ms": parsed_monotonic_ms,
+                    "source": "core_event"
+                    if event_name == "stormhelm.event"
+                    else "stream_control",
+                    "render_confirmed": "unknown",
+                },
+            )
 
         if event_name == "stormhelm.event":
             cursor = payload.get("cursor")
@@ -545,6 +569,7 @@ class CoreApiClient(QtCore.QObject):
         reply: QtNetwork.QNetworkReply,
         callback: Callable[[dict], None],
         purpose: str,
+        http_timing: dict[str, object] | None = None,
     ) -> None:
         try:
             if reply.error() != QtNetwork.QNetworkReply.NetworkError.NoError:
@@ -556,6 +581,13 @@ class CoreApiClient(QtCore.QObject):
 
             raw = bytes(reply.readAll()).decode("utf-8")
             payload = json.loads(raw) if raw else {}
+            if isinstance(payload, dict) and http_timing is not None:
+                timing = dict(http_timing)
+                timing["http_response_received_monotonic_ms"] = round(
+                    time.monotonic() * 1000.0,
+                    3,
+                )
+                payload.setdefault("ui_http_timing", timing)
             callback(payload)
         except Exception as error:  # pragma: no cover - defensive UI path
             self.error_occurred.emit(purpose, str(error))

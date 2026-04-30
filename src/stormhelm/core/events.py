@@ -21,9 +21,11 @@ class EventFamily(str, Enum):
     SYSTEM_SIGNAL = "system_signal"
     NETWORK = "network"
     SCREEN_AWARENESS = "screen_awareness"
+    CAMERA_AWARENESS = "camera_awareness"
     DISCORD_RELAY = "discord_relay"
     WEB_RETRIEVAL = "web_retrieval"
     VOICE = "voice"
+    PROVIDER = "provider"
     LIFECYCLE = "lifecycle"
 
 
@@ -489,7 +491,7 @@ class EventBuffer:
             return "direct_system_fact"
         if subsystem in {"assistant", "planner"}:
             return "operator_summary"
-        if subsystem in {"judgment", "screen_awareness", "discord_relay", "web_retrieval", "network", "voice"}:
+        if subsystem in {"judgment", "screen_awareness", "camera_awareness", "discord_relay", "web_retrieval", "network", "voice"}:
             return "subsystem_interpretation"
         return "heuristic_status"
 
@@ -520,9 +522,11 @@ class EventBuffer:
         if event_family in {
             EventFamily.VERIFICATION.value,
             EventFamily.SCREEN_AWARENESS.value,
+            EventFamily.CAMERA_AWARENESS.value,
             EventFamily.DISCORD_RELAY.value,
             EventFamily.WEB_RETRIEVAL.value,
             EventFamily.VOICE.value,
+            EventFamily.PROVIDER.value,
             EventFamily.WORKSPACE.value,
         }:
             return EventVisibilityScope.DECK_CONTEXT.value
@@ -572,9 +576,11 @@ class EventBuffer:
             "network": EventFamily.NETWORK,
             "calculations": EventFamily.VERIFICATION,
             "screen_awareness": EventFamily.SCREEN_AWARENESS,
+            "camera_awareness": EventFamily.CAMERA_AWARENESS,
             "discord_relay": EventFamily.DISCORD_RELAY,
             "web_retrieval": EventFamily.WEB_RETRIEVAL,
             "voice": EventFamily.VOICE,
+            "provider_fallback": EventFamily.PROVIDER,
             "workspace": EventFamily.WORKSPACE,
             "api": EventFamily.WORKSPACE,
         }
@@ -658,6 +664,12 @@ class EventBuffer:
             if state:
                 return f"voice.{state}"
             return "voice.updated"
+
+        if event_family == EventFamily.PROVIDER.value:
+            state = str(payload.get("provider_fallback_state") or payload.get("state") or "").strip().lower()
+            if state:
+                return f"provider.{state}"
+            return "provider.updated"
 
         if event_family == EventFamily.VERIFICATION.value:
             trace = payload.get("trace") if isinstance(payload.get("trace"), dict) else {}

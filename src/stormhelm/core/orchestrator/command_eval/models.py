@@ -10,6 +10,22 @@ from typing import Any
 from stormhelm.core.latency import build_latency_trace
 
 
+UI_PERCEIVED_LATENCY_NUMERIC_FIELDS = (
+    "event_stream_delay_ms",
+    "ui_bridge_apply_ms",
+    "ui_render_visible_ms",
+    "ghost_first_visible_state_ms",
+    "approval_prompt_visible_ms",
+    "voice_state_visible_ms",
+    "route_state_visible_ms",
+)
+
+UI_PERCEIVED_LATENCY_FLAG_FIELDS = (
+    "polling_fallback_used",
+    "reconnect_gap_detected",
+)
+
+
 def json_ready(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
@@ -214,6 +230,7 @@ class CommandEvalResult:
             if self.observation.budget_result
             else latency_trace.budget_result().to_dict()
         )
+        ui_perceived_latency = _ui_perceived_latency_fields(latency_summary)
         historical_blocker_labels = _historical_blocker_labels(
             case_id=self.case.case_id,
             actual_route_family=self.observation.actual_route_family,
@@ -422,6 +439,63 @@ class CommandEvalResult:
                 if latency_summary.get("first_feedback_ms") is not None
                 else None
             ),
+            "l8_subsystem_id": str(latency_summary.get("subsystem_id") or ""),
+            "l8_hot_path_name": str(latency_summary.get("hot_path_name") or ""),
+            "l8_latency_mode": str(latency_summary.get("latency_mode") or ""),
+            "l8_cache_hit": bool(latency_summary.get("cache_hit")),
+            "l8_cache_age_ms": (
+                float(latency_summary.get("cache_age_ms") or 0.0)
+                if latency_summary.get("cache_age_ms") is not None
+                else None
+            ),
+            "l8_cache_policy_id": str(latency_summary.get("cache_policy_id") or ""),
+            "l8_live_probe_started": bool(latency_summary.get("live_probe_started")),
+            "l8_provider_fallback_used": bool(latency_summary.get("provider_fallback_used")),
+            "l8_heavy_context_used": bool(latency_summary.get("heavy_context_used")),
+            "l8_planner_fast_path_used": bool(latency_summary.get("planner_fast_path_used")),
+            "l8_route_handler_ms": (
+                float(latency_summary.get("route_handler_ms") or 0.0)
+                if latency_summary.get("route_handler_ms") is not None
+                else None
+            ),
+            "provider_eligibility": dict(latency_summary.get("provider_eligibility") or {}),
+            "provider_latency_summary": dict(latency_summary.get("provider_latency_summary") or {}),
+            "provider_audit_timing": dict(latency_summary.get("provider_audit_timing") or {}),
+            "provider_fallback_allowed": bool(latency_summary.get("provider_fallback_allowed")),
+            "provider_fallback_blocked_reason": str(latency_summary.get("provider_fallback_blocked_reason") or ""),
+            "provider_first_byte_ms": (
+                float(latency_summary.get("provider_first_byte_ms") or 0.0)
+                if latency_summary.get("provider_first_byte_ms") is not None
+                else None
+            ),
+            "provider_first_token_ms": (
+                float(latency_summary.get("provider_first_token_ms") or 0.0)
+                if latency_summary.get("provider_first_token_ms") is not None
+                else None
+            ),
+            "provider_first_output_ms": (
+                float(latency_summary.get("provider_first_output_ms") or 0.0)
+                if latency_summary.get("provider_first_output_ms") is not None
+                else None
+            ),
+            "provider_total_ms": (
+                float(latency_summary.get("provider_total_ms") or 0.0)
+                if latency_summary.get("provider_total_ms") is not None
+                else None
+            ),
+            "provider_timeout_hit": bool(latency_summary.get("provider_timeout_hit")),
+            "provider_cancelled": bool(latency_summary.get("provider_cancelled")),
+            "provider_failure_code": str(latency_summary.get("provider_failure_code") or ""),
+            "provider_budget_label": str(latency_summary.get("provider_budget_label") or ""),
+            "provider_budget_exceeded": bool(latency_summary.get("provider_budget_exceeded")),
+            "provider_streaming_enabled": bool(latency_summary.get("provider_streaming_enabled")),
+            "provider_streaming_used": bool(latency_summary.get("provider_streaming_used")),
+            "provider_partial_result_count": int(latency_summary.get("provider_partial_result_count") or 0),
+            "provider_name": str(latency_summary.get("provider_name") or next(iter(ai_usage["provider_names"]), "")),
+            "provider_model_name": str(latency_summary.get("provider_model_name") or next(iter(ai_usage["model_names"]), "")),
+            "native_route_blocked_by_provider": bool(latency_summary.get("native_route_blocked_by_provider")),
+            "provider_payload_redacted": bool(latency_summary.get("provider_payload_redacted", True)),
+            "provider_secrets_logged": bool(latency_summary.get("provider_secrets_logged")),
             "budget_exceeded_continuing": bool(latency_summary.get("budget_exceeded_continuing")),
             "fail_fast_reason": str(latency_summary.get("fail_fast_reason") or ""),
             "fast_path_used": bool(latency_summary.get("fast_path_used")),
@@ -689,6 +763,7 @@ class CommandEvalResult:
                 latency_summary.get("voice_anchor_user_heard_claimed")
                 or latency_summary.get("user_heard_claimed")
             ),
+            **ui_perceived_latency,
             "hard_timeout": bool(
                 self.observation.process_killed
                 or str(self.observation.status).strip().lower()
@@ -785,6 +860,16 @@ def command_eval_result_from_dict(payload: dict[str, Any]) -> CommandEvalResult:
         ),
     )
     observation_payload = dict(payload.get("observation") or {})
+    latency_summary_payload = dict(
+        observation_payload.get("latency_summary")
+        or payload.get("latency_summary")
+        or {}
+    )
+    latency_summary_payload = _merge_ui_perceived_latency_payload(
+        latency_summary_payload,
+        observation_payload,
+        payload,
+    )
     observation = CoreObservation(
         case_id=str(observation_payload.get("case_id") or case.case_id),
         input_boundary=str(observation_payload.get("input_boundary") or ""),
@@ -824,7 +909,7 @@ def command_eval_result_from_dict(payload: dict[str, Any]) -> CommandEvalResult:
         ),
         stage_timings_ms=dict(observation_payload.get("stage_timings_ms") or _stage_timings_from_payload(payload)),
         latency_trace=dict(observation_payload.get("latency_trace") or payload.get("latency_trace") or {}),
-        latency_summary=dict(observation_payload.get("latency_summary") or payload.get("latency_summary") or {}),
+        latency_summary=latency_summary_payload,
         budget_result=dict(observation_payload.get("budget_result") or payload.get("budget_result") or {}),
         response_json_bytes=int(observation_payload.get("response_json_bytes") or payload.get("response_json_bytes") or 0),
         event_count=int(observation_payload.get("event_count") or payload.get("event_count") or 0),
@@ -978,6 +1063,146 @@ def _stage_timings_from_payload(payload: dict[str, Any]) -> dict[str, float]:
         for field in STAGE_LATENCY_FIELDS
         if field in payload
     }
+
+
+def _merge_ui_perceived_latency_payload(
+    latency_summary: dict[str, Any],
+    *payloads: dict[str, Any],
+) -> dict[str, Any]:
+    merged = dict(latency_summary)
+    fields = (
+        *UI_PERCEIVED_LATENCY_NUMERIC_FIELDS,
+        *UI_PERCEIVED_LATENCY_FLAG_FIELDS,
+        "ui_render_visible_status",
+    )
+    for source in payloads:
+        for field in fields:
+            if field in source and field not in merged:
+                merged[field] = source[field]
+    return merged
+
+
+def _ui_perceived_latency_fields(latency_summary: dict[str, Any]) -> dict[str, Any]:
+    event_summary = _first_ui_event_render_summary(latency_summary)
+    has_ui_latency_source = bool(event_summary) or any(
+        _ui_latency_value(latency_summary, field) is not None
+        for field in (
+            *UI_PERCEIVED_LATENCY_NUMERIC_FIELDS,
+            *UI_PERCEIVED_LATENCY_FLAG_FIELDS,
+            "ui_render_visible_status",
+        )
+    )
+    payload = {
+        "event_stream_delay_ms": _optional_float(
+            _ui_latency_value(latency_summary, "event_stream_delay_ms")
+        ),
+        "ui_bridge_apply_ms": _optional_float(
+            _ui_latency_value(latency_summary, "ui_bridge_apply_ms")
+            if _ui_latency_value(latency_summary, "ui_bridge_apply_ms") is not None
+            else event_summary.get("received_to_bridge_update_ms")
+        ),
+        "ui_render_visible_ms": _optional_float(
+            _ui_latency_value(latency_summary, "ui_render_visible_ms")
+            if _ui_latency_value(latency_summary, "ui_render_visible_ms") is not None
+            else event_summary.get("received_to_render_visible_ms")
+        ),
+        "ghost_first_visible_state_ms": _optional_float(
+            _ui_latency_value(latency_summary, "ghost_first_visible_state_ms")
+        ),
+        "approval_prompt_visible_ms": _optional_float(
+            _ui_latency_value(latency_summary, "approval_prompt_visible_ms")
+        ),
+        "voice_state_visible_ms": _optional_float(
+            _ui_latency_value(latency_summary, "voice_state_visible_ms")
+        ),
+        "route_state_visible_ms": _optional_float(
+            _ui_latency_value(latency_summary, "route_state_visible_ms")
+        ),
+        "polling_fallback_used": _truthy_latency_flag(
+            _ui_latency_value(latency_summary, "polling_fallback_used")
+            if _ui_latency_value(latency_summary, "polling_fallback_used") is not None
+            else event_summary.get("used_polling_fallback")
+        ),
+        "reconnect_gap_detected": _truthy_latency_flag(
+            _ui_latency_value(latency_summary, "reconnect_gap_detected")
+            if _ui_latency_value(latency_summary, "reconnect_gap_detected") is not None
+            else (
+                event_summary.get("reconnect_gap_detected")
+                if event_summary.get("reconnect_gap_detected") is not None
+                else event_summary.get("reconnect_gap_recovered")
+            )
+        ),
+    }
+    render_status = str(
+        _ui_latency_value(latency_summary, "ui_render_visible_status")
+        or event_summary.get("render_confirmed")
+        or ""
+    ).strip().lower()
+    if payload["ui_render_visible_ms"] is not None:
+        payload["ui_render_visible_status"] = render_status or "measured"
+    elif render_status in {"true", "measured", "confirmed"}:
+        payload["ui_render_visible_status"] = "measured"
+    else:
+        payload["ui_render_visible_status"] = (
+            (render_status or "not_measured")
+            if has_ui_latency_source
+            else None
+        )
+    return payload
+
+
+def _ui_latency_value(latency_summary: dict[str, Any], field: str) -> Any:
+    if field in latency_summary:
+        return latency_summary.get(field)
+    for nested_key in (
+        "ui_perceived_latency",
+        "ui_latency",
+        "ui_bridge_latency",
+        "ui_render_latency",
+    ):
+        nested = latency_summary.get(nested_key)
+        if isinstance(nested, dict) and field in nested:
+            return nested.get(field)
+    return None
+
+
+def _first_ui_event_render_summary(latency_summary: dict[str, Any]) -> dict[str, Any]:
+    summaries = latency_summary.get("ui_event_render_latency_summaries")
+    if isinstance(summaries, list):
+        for item in summaries:
+            if isinstance(item, dict):
+                return dict(item)
+    summary = latency_summary.get("ui_event_render_latency_summary")
+    if isinstance(summary, dict):
+        return dict(summary)
+    nested = latency_summary.get("ui_perceived_latency")
+    if isinstance(nested, dict):
+        nested_summary = nested.get("ui_event_render_latency_summary")
+        if isinstance(nested_summary, dict):
+            return dict(nested_summary)
+    return {}
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return round(float(value), 3)
+    except (TypeError, ValueError):
+        return None
+
+
+def _truthy_latency_flag(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "used",
+            "detected",
+            "recovered",
+        }
+    return bool(value)
 
 
 def _latency_trace_for_observation(

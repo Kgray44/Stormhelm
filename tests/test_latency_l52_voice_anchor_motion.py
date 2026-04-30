@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import struct
+import threading
+import time
 
 import pytest
 from PySide6 import QtCore
@@ -137,6 +139,74 @@ def test_pcm_chunk_is_split_into_playback_time_envelope_frames() -> None:
     assert "raw_audio_bytes" not in str([frame.to_dict() for frame in frames])
 
 
+def test_playback_meter_samples_pcm_buffer_at_visualizer_rate() -> None:
+    from stormhelm.core.voice.visualizer import VoicePlaybackMeter
+
+    current_time = 100.0
+    meter = VoicePlaybackMeter(
+        update_hz=30,
+        sample_rate_hz=24000,
+        channels=1,
+        sample_width_bytes=2,
+        clock=lambda: current_time,
+    )
+    pcm = (
+        _pcm_section(1800, samples=24000)
+        + _pcm_section(18500, samples=24000)
+    )
+    meter.start(start_monotonic=current_time)
+    meter.feed_pcm(pcm)
+
+    frames = []
+    for index in range(30):
+        current_time = 100.0 + (index / 30.0)
+        frame = meter.sample_due(now_monotonic=current_time)
+        if frame is not None:
+            frames.append(frame)
+
+    assert 28 <= len(frames) <= 31
+    assert all(frame.source == "stormhelm_playback_meter" for frame in frames)
+    assert all(frame.playback_meter_alignment == "estimated" for frame in frames)
+    positions = [frame.playback_position_ms for frame in frames]
+    assert positions == sorted(positions)
+    assert frames[-1].playback_position_ms >= 900
+    assert "raw_audio_bytes" not in str([frame.to_dict() for frame in frames])
+
+
+def test_playback_meter_follows_current_playback_position_levels() -> None:
+    from stormhelm.core.voice.visualizer import VoicePlaybackMeter
+
+    meter = VoicePlaybackMeter(
+        update_hz=30,
+        sample_rate_hz=24000,
+        channels=1,
+        sample_width_bytes=2,
+        clock=lambda: 0.0,
+    )
+    pcm = (
+        _pcm_section(0, samples=2400)
+        + _pcm_section(1800, samples=2400)
+        + _pcm_section(19000, samples=2400)
+        + _pcm_section(0, samples=2400)
+    )
+    meter.start(start_monotonic=0.0)
+    meter.feed_pcm(pcm)
+
+    silence = meter.sample_at_playback_position(20)
+    quiet = meter.sample_at_playback_position(125)
+    loud = meter.sample_at_playback_position(225)
+    pause = meter.sample_at_playback_position(350)
+
+    assert silence.visual_drive <= 0.08
+    assert 0.20 <= quiet.visual_drive <= 0.45
+    assert loud.visual_drive >= 0.8
+    assert pause.visual_drive <= 0.08
+    assert loud.visual_drive > quiet.visual_drive + 0.35
+    assert quiet.playback_position_ms == 125
+    assert loud.source == "stormhelm_playback_meter"
+    assert loud.to_dict()["raw_audio_present"] is False
+
+
 def test_backend_converts_low_rms_into_visible_visual_drive_level() -> None:
     from stormhelm.core.voice.visualizer import compute_voice_audio_envelope
 
@@ -223,9 +293,9 @@ def test_fast_center_blob_scale_drive_follows_fake_level_sequence() -> None:
 def test_streaming_playback_chunks_publish_changing_voice_envelope_fields() -> None:
     events = EventBuffer()
     service = build_voice_subsystem(_voice_config(), _openai_config(), events=events)
-    quiet = _pcm_frame(180)
-    loud = _pcm_frame(19000)
-    silence = _pcm_frame(0)
+    quiet = _pcm_section(1800, samples=2400)
+    loud = _pcm_section(19000, samples=2400)
+    silence = _pcm_section(0, samples=2400)
     service.provider = MockVoiceProvider(
         tts_audio_bytes=quiet + loud + silence,
         tts_stream_chunk_size=len(quiet),
@@ -247,7 +317,7 @@ def test_streaming_playback_chunks_publish_changing_voice_envelope_fields() -> N
     chunk_events = [
         event
         for event in events.recent(limit=80)
-        if event.get("event_type") == "voice.tts_stream_chunk"
+        if event.get("event_type") == "voice.visualizer_update"
     ]
     assert len(chunk_events) >= 3
     voice_updates = [
@@ -261,14 +331,30 @@ def test_streaming_playback_chunks_publish_changing_voice_envelope_fields() -> N
     levels = [float(update["voice_smoothed_output_level"]) for update in voice_updates]
     visual_drives = [float(update["voice_visual_drive_level"]) for update in voice_updates]
     center_drives = [float(update["voice_center_blob_drive"]) for update in voice_updates]
-    assert levels[1] > levels[0] + 0.25
-    assert levels[-1] < levels[1]
-    assert visual_drives[1] > visual_drives[0] + 0.35
-    assert visual_drives[-1] < visual_drives[1]
-    assert center_drives[1] > center_drives[0] + 0.35
-    assert center_drives[-1] < center_drives[1]
-    assert voice_updates[1]["voice_audio_reactive_source"] == "playback_output_envelope"
+    assert max(levels) > min(levels) + 0.25
+    assert max(visual_drives) > min(visual_drives) + 0.35
+    assert max(center_drives) > min(center_drives) + 0.35
+    assert all(
+        update["voice_audio_reactive_source"] == "stormhelm_playback_meter"
+        for update in voice_updates[:-1]
+    )
     assert voice_updates[1]["voice_audio_reactive_available"] is True
+    meter_frames = [
+        event["payload"]["metadata"].get("audio_envelope_frame")
+        for event in chunk_events
+        if isinstance(event.get("payload"), dict)
+        and isinstance(event["payload"].get("metadata"), dict)
+        and isinstance(event["payload"]["metadata"].get("audio_envelope_frame"), dict)
+    ]
+    assert all(
+        frame.get("playback_position_ms") is not None for frame in meter_frames
+    )
+    assert all(
+        event["payload"]["metadata"].get("visualizer_clock")
+        == "stormhelm_playback_meter"
+        for event in chunk_events[:-1]
+        if isinstance(event.get("payload"), dict)
+    )
     assert "19000" not in str(chunk_events)
     assert "raw_audio_bytes" not in str(chunk_events)
     assert "data': b" not in str(chunk_events)
@@ -310,7 +396,7 @@ def test_single_long_playback_chunk_delivers_multiple_playback_time_envelope_upd
     chunk_events = [
         event
         for event in events.recent(limit=256)
-        if event.get("event_type") == "voice.tts_stream_chunk"
+        if event.get("event_type") == "voice.visualizer_update"
     ]
     voice_updates = [
         event["payload"]["metadata"]["voice"]
@@ -324,7 +410,7 @@ def test_single_long_playback_chunk_delivers_multiple_playback_time_envelope_upd
         for update in voice_updates
     ]
 
-    assert len(voice_updates) >= 10
+    assert len(voice_updates) >= 8
     frame_events = [
         event
         for event in chunk_events
@@ -332,19 +418,142 @@ def test_single_long_playback_chunk_delivers_multiple_playback_time_envelope_upd
         and isinstance(event["payload"].get("metadata"), dict)
         and isinstance(event["payload"]["metadata"].get("audio_envelope_frame"), dict)
     ]
-    assert len(frame_events) >= 10
+    assert len(frame_events) >= 8
     assert min(center_drives[:3]) <= 0.08
     assert max(center_drives) >= 0.76
     assert center_drives[-1] <= 0.12
-    assert all(update["voice_audio_reactive_source"] == "playback_output_envelope" for update in voice_updates[:-1])
+    assert all(
+        update["voice_audio_reactive_source"] == "stormhelm_playback_meter"
+        for update in voice_updates[:-1]
+    )
+    assert all(
+        event["payload"]["metadata"].get("visualizer_clock")
+        == "stormhelm_playback_meter"
+        for event in frame_events
+    )
+    playback_positions = [
+        event["payload"]["metadata"]["audio_envelope_frame"]["playback_position_ms"]
+        for event in frame_events
+    ]
+    assert playback_positions == sorted(playback_positions)
     assert "raw_audio_bytes" not in str(chunk_events)
     assert "data': b" not in str(chunk_events)
 
     snapshot = service.status_snapshot_fast()
     assert snapshot["voice_visualizer_envelope_frames_generated"] >= len(frame_events)
-    assert snapshot["voice_visualizer_envelope_frames_published"] >= len(frame_events)
+    assert snapshot["voice_visualizer_envelope_frames_published"] == len(frame_events)
     assert snapshot["voice_visualizer_queue_depth"] == 0
     assert snapshot["voice_visualizer"]["raw_audio_present"] is False
+
+
+def test_high_frequency_playback_feeds_are_metered_at_bounded_rate() -> None:
+    events = EventBuffer(capacity=256)
+    service = build_voice_subsystem(_voice_config(), _openai_config(), events=events)
+    context = {
+        "session_id": "voice-session",
+        "turn_id": "voice-turn-high-rate",
+        "speech_request_id": "speech-high-rate",
+        "playback_request_id": "playback-request-high-rate",
+        "playback_id": "playback-high-rate",
+        "provider": "mock",
+        "audio_format": "pcm",
+        "playback_status": "playing",
+        "playback_streaming_active": True,
+        "first_audio_started": True,
+    }
+    for _ in range(20):
+        service._queue_voice_output_envelope_frames(
+            _pcm_section(12000, samples=240),
+            audio_format="pcm",
+            source="playback_output_envelope",
+            publish_context=context,
+        )
+    service._finish_voice_playback_meter()
+    service._drain_voice_output_envelope_frames(max_wait_seconds=2.0)
+
+    visualizer_events = [
+        event
+        for event in events.recent(limit=256)
+        if event.get("event_type") == "voice.visualizer_update"
+    ]
+    snapshot = service.status_snapshot_fast()
+    visualizer = snapshot["voice_visualizer"]
+
+    assert 4 <= visualizer["visualizer_updates_received"] <= 12
+    assert visualizer["visualizer_updates_dropped"] == 0
+    assert len(visualizer_events) < 20
+    assert snapshot["voice_visualizer_envelope_frames_published"] == len(visualizer_events)
+    assert all(
+        event["payload"]["metadata"].get("source") == "stormhelm_playback_meter"
+        for event in visualizer_events
+        if isinstance(event.get("payload"), dict)
+    )
+    assert all(
+        event["payload"]["metadata"].get("visualizer_only") is True
+        for event in visualizer_events
+        if isinstance(event.get("payload"), dict)
+    )
+    assert "raw_audio_bytes" not in str(visualizer_events)
+    assert "data': b" not in str(visualizer_events)
+
+
+def test_visualizer_event_publish_does_not_block_chunk_queueing(monkeypatch) -> None:
+    events = EventBuffer(capacity=64)
+    service = build_voice_subsystem(_voice_config(), _openai_config(), events=events)
+    pcm = _pcm_section(12000, samples=2400)
+
+    def slow_publish(self, *args, **kwargs) -> None:
+        time.sleep(0.15)
+
+    monkeypatch.setattr(type(service), "_publish_voice_output_envelope_update", slow_publish)
+
+    started = time.perf_counter()
+    service._queue_voice_output_envelope_frames(
+        pcm,
+        audio_format="pcm",
+        source="playback_output_envelope",
+        publish_context={
+            "session_id": "voice-session",
+            "turn_id": "voice-turn-nonblocking",
+            "speech_request_id": "speech-nonblocking",
+            "playback_request_id": "playback-request-nonblocking",
+            "playback_id": "playback-nonblocking",
+            "provider": "mock",
+            "audio_format": "pcm",
+            "playback_status": "playing",
+            "playback_streaming_active": True,
+            "first_audio_started": True,
+        },
+    )
+    elapsed = time.perf_counter() - started
+    service._cancel_voice_output_envelope_frames()
+
+    assert elapsed < 0.05
+
+
+def test_visualizer_publish_slot_wait_ignores_unrelated_queue_notifications() -> None:
+    service = build_voice_subsystem(_voice_config(), _openai_config(), events=EventBuffer())
+    generation = service._voice_envelope_frame_generation
+    min_interval = 0.04
+    with service._voice_envelope_frame_condition:
+        service._voice_visualizer_last_publish_monotonic = time.perf_counter()
+
+    def notify_early() -> None:
+        time.sleep(0.005)
+        with service._voice_envelope_frame_condition:
+            service._voice_envelope_frame_condition.notify_all()
+
+    thread = threading.Thread(target=notify_early)
+    thread.start()
+    started = time.perf_counter()
+    service._wait_for_visualizer_publish_slot(
+        generation=generation,
+        min_publish_interval=min_interval,
+    )
+    elapsed = time.perf_counter() - started
+    thread.join(timeout=0.5)
+
+    assert elapsed >= min_interval * 0.75
 
 
 def test_fake_envelope_sequence_drives_visual_drive_and_motion_then_stop_damps() -> None:
@@ -669,8 +878,18 @@ def test_main_qml_binds_voice_core_to_backend_voice_anchor_state() -> None:
         assert float(voice_core.property("visualDriveLevel")) == pytest.approx(0.79)
         assert float(voice_core.property("centerBlobDrive")) == pytest.approx(0.69)
         assert float(voice_core.property("centerBlobScaleDrive")) == pytest.approx(0.69)
-        assert float(voice_core.property("centerBlobScale")) == pytest.approx(1.2208)
-        assert float(voice_core.property("audioDriveLevel")) == pytest.approx(0.69)
+        assert float(voice_core.property("targetAudioDriveLevel")) == pytest.approx(0.69)
+        assert 0.0 < float(voice_core.property("displayedAudioDriveLevel")) <= 0.69
+        assert float(voice_core.property("centerBlobScale")) == pytest.approx(
+            1.0 + float(voice_core.property("displayedAudioDriveLevel")) * 0.32
+        )
+        assert float(voice_core.property("targetAudioLevel")) == pytest.approx(0.69)
+        assert float(voice_core.property("targetCenterBlobScale")) == pytest.approx(1.2208)
+        assert 0.0 < float(voice_core.property("displayedAudioLevel")) <= 0.69
+        assert 1.0 < float(voice_core.property("centerBlobScale")) <= 1.2208
+        assert float(voice_core.property("audioDriveLevel")) == pytest.approx(
+            float(voice_core.property("displayedAudioLevel"))
+        )
         assert float(voice_core.property("audioReactiveLayerShare")) >= 0.6
         assert float(voice_core.property("speakingBaseMotion")) < 0.12
         assert voice_core.property("audioReactiveAvailable") is True
@@ -725,21 +944,29 @@ def test_main_qml_audio_level_changes_speaking_motion_and_stop_damps() -> None:
         apply_anchor(0.08, 0.32, 0.46)
         quiet_amplitude = float(voice_core.property("displayAmplitude"))
         quiet_audio_level = float(voice_core.property("audioLevel"))
+        quiet_target_level = float(voice_core.property("targetAudioLevel"))
         quiet_drive_level = float(voice_core.property("audioDriveLevel"))
+        quiet_scale = float(voice_core.property("centerBlobScale"))
 
         apply_anchor(0.86, 0.92, 0.92)
         loud_amplitude = float(voice_core.property("displayAmplitude"))
         loud_audio_level = float(voice_core.property("audioLevel"))
+        loud_target_level = float(voice_core.property("targetAudioLevel"))
         loud_drive_level = float(voice_core.property("audioDriveLevel"))
+        loud_scale = float(voice_core.property("centerBlobScale"))
 
         apply_anchor(0.0, 0.0, 0.06, active=False)
         stopped_amplitude = float(voice_core.property("displayAmplitude"))
 
         assert quiet_audio_level == pytest.approx(0.08)
-        assert quiet_drive_level == pytest.approx(0.32)
+        assert quiet_target_level == pytest.approx(0.32)
+        assert 0.0 < quiet_drive_level <= 0.32
         assert loud_audio_level == pytest.approx(0.86)
-        assert loud_drive_level == pytest.approx(0.92)
-        assert loud_amplitude > quiet_amplitude + 0.14
+        assert loud_target_level == pytest.approx(0.92)
+        assert loud_drive_level > quiet_drive_level
+        assert loud_drive_level <= 0.92
+        assert loud_scale > quiet_scale + 0.08
+        assert loud_amplitude == pytest.approx(quiet_amplitude, abs=0.02)
         assert voice_core.property("speakingActive") is False
         assert float(voice_core.property("audioLevel")) == pytest.approx(0.0)
         assert float(voice_core.property("audioDriveLevel")) == pytest.approx(0.0)
@@ -784,6 +1011,7 @@ def test_main_qml_center_blob_has_no_major_preset_speaking_motion_when_audio_zer
         app.processEvents()
 
         assert voice_core.property("speakingActive") is True
+        assert float(voice_core.property("targetAudioLevel")) == pytest.approx(0.0)
         assert float(voice_core.property("audioDriveLevel")) == pytest.approx(0.0)
         assert float(voice_core.property("centerBlobDriveLevel")) == pytest.approx(0.0)
         assert float(voice_core.property("centerBlobScale")) == pytest.approx(1.0, abs=0.015)
@@ -828,6 +1056,8 @@ def test_main_qml_force_audio_drive_controls_center_blob_visualizer_sequence() -
         app.processEvents()
 
         levels = [0.0, 0.2, 0.8, 0.1, 1.0, 0.0]
+        targets: list[float] = []
+        displayed: list[float] = []
         scales: list[float] = []
         lifts: list[float] = []
         glows: list[float] = []
@@ -835,13 +1065,23 @@ def test_main_qml_force_audio_drive_controls_center_blob_visualizer_sequence() -
         for level in levels:
             assert voice_core.setProperty("forceAudioDriveLevel", level)
             app.processEvents()
-            QtTest.QTest.qWait(40)
+            QtTest.QTest.qWait(120)
             app.processEvents()
+            targets.append(float(voice_core.property("targetAudioLevel")))
+            displayed.append(float(voice_core.property("displayedAudioLevel")))
             scales.append(float(voice_core.property("centerBlobScale")))
             lifts.append(float(voice_core.property("centerBlobLift")))
             glows.append(float(voice_core.property("centerBlobGlow")))
             wobbles.append(float(voice_core.property("centerBlobWobble")))
 
+        assert targets == pytest.approx(levels)
+        assert displayed[0] == pytest.approx(0.0, abs=0.015)
+        assert displayed[1] <= targets[1]
+        assert displayed[2] <= targets[2]
+        assert displayed[2] > displayed[1] + 0.15
+        assert displayed[3] < displayed[2]
+        assert displayed[4] > displayed[3] + 0.25
+        assert displayed[5] == pytest.approx(0.0, abs=0.04)
         assert scales[0] == pytest.approx(1.0, abs=0.015)
         assert scales[1] > scales[0] + 0.05
         assert scales[2] > scales[1] + 0.15
@@ -1003,3 +1243,40 @@ def test_envelope_probe_report_serializes_safely(tmp_path) -> None:
     assert "Center drive fell near neutral: True" in markdown
     assert "Center drive rose for louder speech: True" in markdown
     assert "playback_output_envelope" in markdown
+
+
+def test_envelope_probe_classifies_sub_hz_visualizer_transport_as_broken() -> None:
+    from scripts.voice_anchor_reactivity_probe import classify_samples
+
+    samples = [
+        {
+            "speaking_visual_active": True,
+            "voice_audio_reactive_source": "playback_output_envelope",
+            "voice_smoothed_output_level": 0.2,
+            "voice_visual_drive_level": 0.4,
+            "voice_center_blob_scale_drive": 0.35,
+            "voice_motion_intensity": 0.45,
+            "ui_bridge_update_count": 1,
+            "elapsed_ms": 0.0,
+        },
+        {
+            "speaking_visual_active": True,
+            "voice_audio_reactive_source": "playback_output_envelope",
+            "voice_smoothed_output_level": 0.35,
+            "voice_visual_drive_level": 0.62,
+            "voice_center_blob_scale_drive": 0.58,
+            "voice_motion_intensity": 0.56,
+            "ui_bridge_update_count": 2,
+            "elapsed_ms": 2500.0,
+        },
+    ]
+
+    classification = classify_samples(
+        samples,
+        event_metrics={
+            "visualizer_event_count": 2,
+            "visualizer_event_duration_ms": 2500.0,
+        },
+    )
+
+    assert "visualizer_transport_broken" in classification

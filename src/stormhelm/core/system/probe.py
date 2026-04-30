@@ -3581,20 +3581,21 @@ class SystemProbe:
         }
 
     def get_saved_home_location(self) -> dict[str, Any] | None:
-        return self._saved_home_location()
+        home = self._saved_home_location()
+        return self._annotate_location_authority(home) if home else None
 
     def get_saved_locations(self) -> list[dict[str, Any]]:
         locations: list[dict[str, Any]] = []
         home = self._saved_home_location()
         if home:
-            locations.append(dict(home))
+            locations.append(self._annotate_location_authority(home))
         for location in self._saved_named_locations():
             entry = dict(location)
             entry.setdefault("source", "saved_named")
             entry.setdefault("resolved", True)
             entry.setdefault("approximate", False)
             entry.setdefault("used_home_fallback", False)
-            locations.append(entry)
+            locations.append(self._annotate_location_authority(entry))
         return locations
 
     def save_home_location(
@@ -3619,7 +3620,7 @@ class SystemProbe:
             "saved_at": datetime.now().astimezone().isoformat(),
         }
         self._set_preference(self._HOME_LOCATION_KEY, payload)
-        return self._saved_home_location() or {
+        saved = self._saved_home_location() or {
             "resolved": True,
             "source": "saved_home",
             "label": payload["label"],
@@ -3629,6 +3630,7 @@ class SystemProbe:
             "approximate": payload["approximate"],
             "used_home_fallback": False,
         }
+        return self._annotate_location_authority(saved)
 
     def save_named_location(
         self,
@@ -3666,7 +3668,7 @@ class SystemProbe:
                 "used_home_fallback": False,
             }
         )
-        return saved
+        return self._annotate_location_authority(saved)
 
     def resolve_best_location_for_request(
         self,
@@ -3684,15 +3686,15 @@ class SystemProbe:
             if normalized_type != "place_query":
                 named = self._saved_named_location(named_location)
                 if named:
-                    return named
+                    return self._annotate_location_authority(named)
                 if normalized_type == "saved_alias":
-                    return {
+                    return self._annotate_location_authority({
                         "resolved": False,
                         "mode": "named",
                         "source": "saved_named",
                         "reason": "saved_named_location_not_found",
                         "requested_name": named_location,
-                    }
+                    })
             if not allow_live_probe:
                 refresh_id = self._start_location_status_refresh(
                     mode=mode,
@@ -3715,14 +3717,14 @@ class SystemProbe:
                 )
             queried = self._query_location_lookup(named_location)
             if queried:
-                return queried
-            return {
+                return self._annotate_location_authority(queried)
+            return self._annotate_location_authority({
                 "resolved": False,
                 "mode": "named",
                 "source": "queried_place",
                 "reason": "queried_place_not_found",
                 "requested_name": named_location,
-            }
+            })
         return self.resolve_location(
             mode=mode,
             allow_home_fallback=allow_home_fallback,
@@ -3741,13 +3743,18 @@ class SystemProbe:
         if normalized_mode == "home":
             home = self._saved_home_location()
             if home:
-                return home
-            return {
+                return self._annotate_location_authority(home)
+            return self._annotate_location_authority({
                 "resolved": False,
                 "mode": "home",
                 "source": "saved_home",
                 "reason": "saved_home_not_configured",
-            }
+            })
+
+        if normalized_mode == "auto" and allow_home_fallback:
+            home = self._saved_home_location()
+            if home:
+                return self._annotate_location_authority(home)
 
         if not allow_live_probe:
             now = monotonic()
@@ -3812,6 +3819,7 @@ class SystemProbe:
         live = self._live_device_location()
         live_reason = None
         if isinstance(live, dict) and live.get("resolved"):
+            live = self._annotate_location_authority(live)
             self._cache_location_status(live)
             return live
         if isinstance(live, dict):
@@ -3822,6 +3830,7 @@ class SystemProbe:
         approximate_device = self._approximate_device_location()
         approximate_reason = None
         if isinstance(approximate_device, dict) and approximate_device.get("resolved"):
+            approximate_device = self._annotate_location_authority(approximate_device)
             self._cache_location_status(approximate_device)
             return approximate_device
         if isinstance(approximate_device, dict):
@@ -3837,8 +3846,13 @@ class SystemProbe:
                     home["fallback_reason"] = live_reason
                 elif approximate_reason:
                     home["fallback_reason"] = approximate_reason
+                home = self._annotate_location_authority(home)
                 self._cache_location_status(home)
                 return home
+
+        recent = self._recent_confirmed_location()
+        if recent:
+            return recent
 
         ip_estimate = self._ip_estimate_location()
         if ip_estimate:
@@ -3851,22 +3865,115 @@ class SystemProbe:
                 "approximate_device",
                 "saved_home" if allow_home_fallback else "home_fallback_disabled",
             ]
+            ip_estimate = self._annotate_location_authority(ip_estimate)
             self._cache_location_status(ip_estimate)
             return ip_estimate
 
-        return {
+        return self._annotate_location_authority({
             "resolved": False,
             "mode": normalized_mode,
             "source": "unavailable",
             "reason": "location_unavailable",
             "live_reason": live_reason,
             "approximate_reason": approximate_reason,
-        }
+        })
 
     def _cache_location_status(self, payload: dict[str, Any]) -> None:
-        if payload.get("resolved"):
-            self._location_status_cache = deepcopy(payload)
+        annotated = self._annotate_location_authority(payload)
+        if annotated.get("resolved"):
+            self._location_status_cache = deepcopy(annotated)
             self._location_status_cached_at = monotonic()
+
+    def _recent_confirmed_location(self) -> dict[str, Any] | None:
+        cached = deepcopy(self._location_status_cache) if self._location_status_cache is not None else None
+        if not isinstance(cached, dict) or not cached.get("resolved"):
+            return None
+        if str(cached.get("source") or "").strip().lower() == "ip_estimate":
+            return None
+        age_ms = self._cache_age_ms(self._location_status_cached_at)
+        if age_ms > self._LOCATION_CACHE_TTL_SECONDS * 1000:
+            return None
+        cached["location_original_source"] = cached.get("source")
+        return self._annotate_location_authority(
+            cached,
+            cache_age_ms=age_ms,
+            freshness_state="recent_confirmed",
+        )
+
+    def _annotate_location_authority(
+        self,
+        payload: dict[str, Any],
+        *,
+        used_for_weather: bool = False,
+        cache_age_ms: float | None = None,
+        freshness_state: str | None = None,
+    ) -> dict[str, Any]:
+        result = dict(payload)
+        source = str(result.get("source") or "unknown").strip().lower() or "unknown"
+        resolved = bool(result.get("resolved"))
+        approximate = bool(result.get("approximate"))
+
+        if not resolved:
+            confidence = "none"
+        elif source in {"saved_home", "saved_named", "queried_place"}:
+            confidence = "high"
+        elif source == "device_live":
+            accuracy = result.get("accuracy_meters")
+            try:
+                confidence = "high" if accuracy is None or float(accuracy) <= 1000 else "medium"
+            except (TypeError, ValueError):
+                confidence = "high"
+        elif source in {"approximate_device", "approximate"}:
+            confidence = "medium"
+        elif source == "ip_estimate":
+            confidence = "low"
+        else:
+            confidence = "medium" if resolved else "none"
+
+        if freshness_state:
+            freshness = freshness_state
+        elif source in {"saved_home", "saved_named"}:
+            freshness = "saved"
+        elif source == "queried_place":
+            freshness = "explicit_request"
+        elif source == "device_live":
+            freshness = "live"
+        elif source == "approximate_device":
+            freshness = "live_approximate"
+        elif source == "ip_estimate":
+            freshness = "ip_estimate"
+        else:
+            freshness = "unknown" if not resolved else "current"
+
+        user_confirmed = source in {"saved_home", "saved_named", "queried_place"}
+        ip_estimate = source == "ip_estimate"
+        age_ms = cache_age_ms if cache_age_ms is not None else self._location_payload_age_ms(result)
+        needs_confirmation = (not resolved) or ip_estimate or confidence in {"low", "none"}
+
+        location_source = "explicit_request" if source == "queried_place" else source
+
+        result["location_source"] = location_source
+        result["location_confidence"] = confidence
+        result["location_freshness"] = freshness
+        result["location_age_ms"] = age_ms
+        result["location_is_user_confirmed"] = user_confirmed
+        result["location_is_ip_estimate"] = ip_estimate
+        result["location_needs_confirmation"] = needs_confirmation
+        result["location_used_for_weather"] = bool(result.get("location_used_for_weather") or used_for_weather)
+        if approximate and confidence == "high" and not user_confirmed:
+            result["location_confidence"] = "medium"
+        return result
+
+    def _location_payload_age_ms(self, payload: dict[str, Any]) -> float | None:
+        timestamp = payload.get("timestamp") or payload.get("looked_up_at") or payload.get("saved_at")
+        if not timestamp:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        now = datetime.now(parsed.tzinfo) if parsed.tzinfo else datetime.now()
+        return round(max((now - parsed).total_seconds(), 0.0) * 1000.0, 3)
 
     def _annotate_location_status(
         self,
@@ -3879,7 +3986,11 @@ class SystemProbe:
         refresh_id: str,
         started_at: float,
     ) -> dict[str, Any]:
-        result = dict(payload)
+        result = self._annotate_location_authority(
+            payload,
+            cache_age_ms=cache_age_ms,
+            freshness_state=freshness_state,
+        )
         trace = {
             "location_cache_hit": bool(cache_hit),
             "location_cache_age_ms": cache_age_ms,
@@ -4046,6 +4157,7 @@ class SystemProbe:
         }
 
         def _with_weather_trace(payload: dict[str, Any]) -> dict[str, Any]:
+            payload = self._annotate_weather_location_authority(payload)
             payload["weather_trace"] = dict(trace)
             for key, value in trace.items():
                 payload.setdefault(key, value)
@@ -4058,6 +4170,7 @@ class SystemProbe:
             named_location_type=named_location_type,
             allow_home_fallback=allow_home_fallback,
         )
+        resolved = self._annotate_location_authority(resolved, used_for_weather=bool(resolved.get("resolved")))
         trace["weather_location_lookup_ms"] = round((monotonic() - location_started) * 1000, 3)
         if not resolved.get("resolved"):
             trace["weather_provider_status"] = "skipped_location_unavailable"
@@ -4175,7 +4288,7 @@ class SystemProbe:
         provider_status: str,
         timeout_ms: float = 0.0,
     ) -> dict[str, Any]:
-        result = dict(payload)
+        result = self._annotate_weather_location_authority(payload)
         trace = dict(result.get("weather_trace") if isinstance(result.get("weather_trace"), dict) else {})
         trace.update(
             {
@@ -4195,6 +4308,37 @@ class SystemProbe:
         result["live_probe_deferred"] = bool(deferred)
         result["live_probe_job_id"] = refresh_id
         result["live_probe_timeout_ms"] = round(float(timeout_ms or 0.0), 3)
+        return result
+
+    def _annotate_weather_location_authority(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result = dict(payload)
+        location = result.get("location")
+        if isinstance(location, dict):
+            location = self._annotate_location_authority(
+                location,
+                used_for_weather=bool(location.get("resolved")),
+            )
+            result["location"] = location
+            for key in (
+                "location_source",
+                "location_confidence",
+                "location_freshness",
+                "location_age_ms",
+                "location_is_user_confirmed",
+                "location_is_ip_estimate",
+                "location_needs_confirmation",
+                "location_used_for_weather",
+            ):
+                result[key] = location.get(key)
+        else:
+            result.setdefault("location_source", "unknown")
+            result.setdefault("location_confidence", "none")
+            result.setdefault("location_freshness", "unknown")
+            result.setdefault("location_age_ms", None)
+            result.setdefault("location_is_user_confirmed", False)
+            result.setdefault("location_is_ip_estimate", False)
+            result.setdefault("location_needs_confirmation", True)
+            result.setdefault("location_used_for_weather", False)
         return result
 
     def _start_weather_status_refresh(
@@ -5137,6 +5281,7 @@ class SystemProbe:
             "approximate": True,
             "used_home_fallback": False,
             "ip": str(payload.get("ip", "")).strip() or None,
+            "looked_up_at": datetime.now().astimezone().isoformat(),
         }
 
     def _query_location_lookup(self, query: str) -> dict[str, Any] | None:
@@ -5188,6 +5333,7 @@ class SystemProbe:
             "approximate": False,
             "used_home_fallback": False,
             "query_type": "zip_code",
+            "looked_up_at": datetime.now().astimezone().isoformat(),
         }
 
     def _geocode_location_lookup(self, query: str) -> dict[str, Any] | None:
@@ -5229,6 +5375,7 @@ class SystemProbe:
             "approximate": False,
             "used_home_fallback": False,
             "query_type": "place_query",
+            "looked_up_at": datetime.now().astimezone().isoformat(),
         }
 
     def _run_windows_location_lookup(self, *, allow_coarse: bool) -> dict[str, Any] | None:

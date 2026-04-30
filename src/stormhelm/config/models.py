@@ -104,6 +104,37 @@ class HardwareTelemetryConfig:
 
 
 @dataclass(slots=True)
+class PlaywrightBrowserAdapterConfig:
+    enabled: bool = False
+    provider: str = "playwright"
+    mode: str = "semantic_observation"
+    allow_browser_launch: bool = False
+    allow_connect_existing: bool = False
+    allow_actions: bool = False
+    allow_click: bool = False
+    allow_focus: bool = False
+    allow_type_text: bool = False
+    allow_scroll: bool = False
+    allow_form_fill: bool = False
+    allow_form_submit: bool = False
+    allow_login: bool = False
+    allow_cookies: bool = False
+    allow_user_profile: bool = False
+    allow_screenshots: bool = False
+    allow_dev_adapter: bool = False
+    allow_dev_actions: bool = False
+    max_session_seconds: int = 120
+    navigation_timeout_seconds: int = 12000
+    observation_timeout_seconds: int = 8000
+    debug_events_enabled: bool = True
+
+
+@dataclass(slots=True)
+class ScreenAwarenessBrowserAdaptersConfig:
+    playwright: PlaywrightBrowserAdapterConfig = field(default_factory=PlaywrightBrowserAdapterConfig)
+
+
+@dataclass(slots=True)
 class ScreenAwarenessConfig:
     enabled: bool = True
     phase: str = "phase12"
@@ -127,6 +158,7 @@ class ScreenAwarenessConfig:
     screen_capture_ocr_enabled: bool = True
     screen_capture_provider_vision_enabled: bool = False
     screen_capture_store_raw_images: bool = False
+    browser_adapters: ScreenAwarenessBrowserAdaptersConfig = field(default_factory=ScreenAwarenessBrowserAdaptersConfig)
 
     def _phase_at_least(self, minimum_phase: int) -> bool:
         phase_name = str(self.phase or "").strip().lower()
@@ -178,6 +210,62 @@ class ScreenAwarenessConfig:
             and self.screen_capture_enabled
             and self._phase_at_least(12),
         }
+
+
+@dataclass(slots=True)
+class CameraAwarenessCaptureConfig:
+    provider: str = "mock"
+    mode: str = "single_still"
+    default_device_id: str | None = None
+    requested_resolution: str = "1280x720"
+    timeout_seconds: float = 5.0
+    max_artifact_bytes: int = 10485760
+
+
+@dataclass(slots=True)
+class CameraAwarenessVisionConfig:
+    provider: str = "mock"
+    model: str = "mock-vision"
+    timeout_seconds: float = 10.0
+    detail: str = "auto"
+    max_image_bytes: int = 8_000_000
+    request_timeout_ms: int = 30_000
+    allow_cloud_vision: bool = False
+    require_confirmation_for_cloud: bool = True
+
+
+@dataclass(slots=True)
+class CameraAwarenessPrivacyConfig:
+    confirm_before_capture: bool = True
+    persist_images_by_default: bool = False
+    require_source_provenance: bool = True
+    redact_raw_image_from_events: bool = True
+
+
+@dataclass(slots=True)
+class CameraAwarenessDevConfig:
+    mock_capture_enabled: bool = True
+    mock_vision_enabled: bool = True
+    mock_image_fixture: str = "resistor"
+    save_debug_images: bool = False
+
+
+@dataclass(slots=True)
+class CameraAwarenessConfig:
+    enabled: bool = False
+    planner_routing_enabled: bool = True
+    debug_events_enabled: bool = True
+    default_capture_mode: str = "single_still"
+    default_storage_mode: str = "ephemeral"
+    auto_discard_after_seconds: int = 300
+    allow_cloud_vision: bool = False
+    allow_background_capture: bool = False
+    allow_task_artifact_save: bool = False
+    allow_session_permission: bool = False
+    capture: CameraAwarenessCaptureConfig = field(default_factory=CameraAwarenessCaptureConfig)
+    vision: CameraAwarenessVisionConfig = field(default_factory=CameraAwarenessVisionConfig)
+    privacy: CameraAwarenessPrivacyConfig = field(default_factory=CameraAwarenessPrivacyConfig)
+    dev: CameraAwarenessDevConfig = field(default_factory=CameraAwarenessDevConfig)
 
 
 @dataclass(slots=True)
@@ -356,6 +444,26 @@ class OpenAIConfig:
     planner_max_output_tokens: int
     reasoning_max_output_tokens: int
     instructions: str
+
+
+@dataclass(slots=True)
+class ProviderFallbackConfig:
+    enabled: bool = False
+    allow_streaming: bool = True
+    allow_partial_progress: bool = True
+    allow_cancellation: bool = True
+    target_first_output_ms: float = 1500.0
+    soft_first_output_ms: float = 3000.0
+    hard_first_output_ms: float = 6000.0
+    target_total_ms: float = 4000.0
+    soft_total_ms: float = 8000.0
+    hard_total_ms: float = 12000.0
+    allow_for_native_routes: bool = False
+    allow_speculative_provider_calls: bool = False
+    log_prompt_payloads: bool = False
+    audit_timing: bool = True
+    surface_partial_in_ghost: bool = True
+    surface_details_in_deck: bool = True
 
 
 @dataclass(slots=True)
@@ -714,6 +822,7 @@ class AppConfig:
     weather: WeatherConfig
     hardware_telemetry: HardwareTelemetryConfig
     screen_awareness: ScreenAwarenessConfig
+    camera_awareness: CameraAwarenessConfig
     calculations: CalculationsConfig
     software_control: SoftwareControlConfig
     software_recovery: SoftwareRecoveryConfig
@@ -721,6 +830,7 @@ class AppConfig:
     web_retrieval: WebRetrievalConfig
     discord_relay: DiscordRelayConfig
     openai: OpenAIConfig
+    provider_fallback: ProviderFallbackConfig
     voice: VoiceConfig
     safety: SafetyConfig
     tools: ToolConfig

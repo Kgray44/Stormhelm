@@ -13,7 +13,7 @@ from stormhelm.core.memory.repositories import PreferencesRepository
 from stormhelm.core.system.probe import SystemProbe
 
 
-def test_resolve_location_prefers_live_device_source(temp_config, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_location_current_prefers_live_device_source(temp_config, monkeypatch: pytest.MonkeyPatch) -> None:
     probe = SystemProbe(temp_config)
     monkeypatch.setattr(
         SystemProbe,
@@ -32,9 +32,49 @@ def test_resolve_location_prefers_live_device_source(temp_config, monkeypatch: p
     monkeypatch.setattr(SystemProbe, "_saved_home_location", lambda self: None)
     monkeypatch.setattr(SystemProbe, "_ip_estimate_location", lambda self: None)
 
-    result = probe.resolve_location(mode="auto", allow_home_fallback=True)
+    result = probe.resolve_location(mode="current", allow_home_fallback=True)
 
     assert result["source"] == "device_live"
+
+
+def test_resolve_location_auto_prefers_saved_home_before_live_device(temp_config, monkeypatch: pytest.MonkeyPatch) -> None:
+    probe = SystemProbe(temp_config)
+    monkeypatch.setattr(
+        SystemProbe,
+        "_live_device_location",
+        lambda self: {
+            "resolved": True,
+            "source": "device_live",
+            "label": "Live Device",
+            "latitude": 1.0,
+            "longitude": 2.0,
+            "approximate": False,
+            "used_home_fallback": False,
+        },
+    )
+    monkeypatch.setattr(SystemProbe, "_approximate_device_location", lambda self: None)
+    monkeypatch.setattr(
+        SystemProbe,
+        "_saved_home_location",
+        lambda self: {
+            "resolved": True,
+            "source": "saved_home",
+            "label": "Perkinsville, Vermont",
+            "latitude": 43.383,
+            "longitude": -72.504,
+            "approximate": False,
+            "used_home_fallback": False,
+        },
+    )
+    monkeypatch.setattr(SystemProbe, "_ip_estimate_location", lambda self: pytest.fail("IP should not be reached when saved home exists."))
+
+    result = probe.resolve_location(mode="auto", allow_home_fallback=True)
+
+    assert result["source"] == "saved_home"
+    assert result["location_source"] == "saved_home"
+    assert result["location_confidence"] == "high"
+    assert result["location_is_user_confirmed"] is True
+    assert result["location_is_ip_estimate"] is False
 
 
 def test_resolve_location_falls_back_to_saved_home_before_ip(temp_config, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -68,7 +108,7 @@ def test_resolve_location_falls_back_to_saved_home_before_ip(temp_config, monkey
         },
     )
 
-    result = probe.resolve_location(mode="auto", allow_home_fallback=True)
+    result = probe.resolve_location(mode="current", allow_home_fallback=True)
 
     assert result["source"] == "saved_home"
     assert result["used_home_fallback"] is True
@@ -114,6 +154,58 @@ def test_resolve_location_uses_ip_estimate_when_home_fallback_is_disabled(temp_c
         "approximate_device",
         "home_fallback_disabled",
     ]
+    assert result["location_source"] == "ip_estimate"
+    assert result["location_confidence"] == "low"
+    assert result["location_is_ip_estimate"] is True
+    assert result["location_needs_confirmation"] is True
+
+
+def test_weather_status_marks_location_authority_used_for_weather(temp_config, monkeypatch: pytest.MonkeyPatch) -> None:
+    probe = SystemProbe(temp_config)
+
+    monkeypatch.setattr(
+        SystemProbe,
+        "resolve_best_location_for_request",
+        lambda self, **kwargs: {
+            "resolved": True,
+            "source": "saved_home",
+            "label": "Perkinsville, Vermont",
+            "latitude": 43.383,
+            "longitude": -72.504,
+            "approximate": False,
+            "used_home_fallback": False,
+        },
+    )
+    monkeypatch.setattr(
+        SystemProbe,
+        "_fetch_json",
+        lambda self, url, timeout: {
+            "current": {
+                "temperature_2m": 44.0,
+                "apparent_temperature": 41.0,
+                "weather_code": 3,
+                "wind_speed_10m": 5.0,
+                "relative_humidity_2m": 71,
+            },
+            "daily": {
+                "time": ["2026-04-30"],
+                "weather_code": [3],
+                "temperature_2m_max": [52.0],
+                "temperature_2m_min": [37.0],
+                "precipitation_probability_max": [10],
+            },
+            "hourly": {},
+        },
+    )
+
+    result = probe.weather_status(location_mode="auto", allow_home_fallback=True, units="imperial")
+
+    assert result["available"] is True
+    assert result["location_used_for_weather"] is True
+    assert result["location_source"] == "saved_home"
+    assert result["location_confidence"] == "high"
+    assert result["location"]["location_used_for_weather"] is True
+    assert result["location"]["location_is_user_confirmed"] is True
 
 
 def test_saved_home_location_prefers_persistent_memory_over_config(temp_config) -> None:
@@ -210,6 +302,8 @@ def test_resolve_best_location_geocodes_explicit_place_query_when_not_saved(temp
 
     assert result["resolved"] is True
     assert result["source"] == "queried_place"
+    assert result["location_source"] == "explicit_request"
+    assert result["location_confidence"] == "high"
     assert result["label"] == "Concord, New Hampshire"
 
 

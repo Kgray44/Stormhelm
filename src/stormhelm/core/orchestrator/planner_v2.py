@@ -24,6 +24,7 @@ PLANNER_V2_ROUTE_FAMILIES = {
     "context_clarification",
     "unsupported",
     "screen_awareness",
+    "camera_awareness",
     "software_control",
     "watch_runtime",
     "network",
@@ -65,6 +66,7 @@ LEGACY_MIGRATION_SCHEDULE: dict[str, tuple[str, str]] = {
     "task_continuity": ("migrated", "migrated_in_planner_v2_expansion_1"),
     "discord_relay": ("migrated", "migrated_in_planner_v2_expansion_1"),
     "web_retrieval": ("migrated", "obscura_public_page_rendering_adapter"),
+    "camera_awareness": ("migrated", "camera_awareness_c0_foundation"),
     "maintenance": ("scheduled", "medium"),
     "trust_approvals": ("scheduled", "medium"),
     "power": ("scheduled", "low"),
@@ -453,6 +455,15 @@ class ContextBinder:
                     candidate_bindings=({"type": "approval_object", "source": "active_request_state", "value": dict(trust), "confidence": 0.9},),
                 )
             return self._missing(frame, "approval_object")
+        if frame.native_owner_hint == "camera_awareness":
+            return ContextBinding(
+                context_reference=frame.context_reference,
+                context_type="camera_frame",
+                context_source="camera_request",
+                status="missing",
+                label=frame.target_text or "camera still",
+                missing_preconditions=("camera_capture_confirmation",),
+            )
         if frame.native_owner_hint == "app_control" and frame.operation == "status":
             return ContextBinding(
                 context_reference=frame.context_reference,
@@ -1313,6 +1324,16 @@ class PlanBuilder:
             return PlanDraft(family, "context", "clarify", "unknown", subject="ambiguous context", request_type_hint="context_clarification", execution_type="clarify_route_context")
         if family == "screen_awareness":
             return PlanDraft(family, "screen_awareness", frame.operation, "visible_ui", subject="visible_screen", request_type_hint="screen_awareness_response", execution_type="screen_awareness_preflight")
+        if family == "camera_awareness":
+            return PlanDraft(
+                family,
+                "camera_awareness",
+                "inspect",
+                "camera_frame",
+                subject=subject or "camera still",
+                request_type_hint="camera_awareness_confirmation",
+                execution_type="camera_awareness_c0_mock_or_permission_gate",
+            )
         if family == "software_control":
             return PlanDraft(family, "software_control", frame.operation, "software_package", subject=subject, request_type_hint="software_control_response", execution_type="software_control_execute", requires_execution=frame.operation in {"install", "uninstall", "update", "repair"})
         if family == "network":
@@ -2065,6 +2086,22 @@ class PlannerV2:
             frame.candidate_route_families = ["software_control"]
             frame.generic_provider_allowed = False
             frame.generic_provider_reason = "native_route_candidate_present"
+        if self._camera_awareness_signal(text):
+            frame.operation = "inspect"
+            frame.target_type = "camera_frame"
+            frame.target_text = self._camera_target_text(frame.raw_text)
+            frame.context_reference = "explicit_camera_request"
+            frame.context_status = "missing"
+            frame.risk_class = "privacy_sensitive"
+            frame.native_owner_hint = "camera_awareness"
+            frame.candidate_route_families = ["camera_awareness"]
+            frame.generic_provider_allowed = False
+            frame.generic_provider_reason = "native_route_candidate_present"
+            frame.clarification_needed = True
+            frame.clarification_reason = "camera_capture_confirmation"
+            frame.extracted_entities["source_provenance"] = "camera_request"
+            frame.extracted_entities["capture_mode"] = "single_still"
+            frame.extracted_entities["analysis_mode"] = self._camera_analysis_mode(text)
         if self._screen_status_signal(text):
             frame.operation = "inspect"
             frame.target_type = "visible_ui"
@@ -3020,7 +3057,82 @@ class PlannerV2:
         text = re.sub(r"\b(?:download\s+and\s+install|install|download|setup|set up|uninstall|update|upgrade|repair)\b", "", raw_text, flags=re.IGNORECASE)
         return " ".join(text.split()).strip(" ?") or "software"
 
+    def _camera_awareness_signal(self, text: str) -> bool:
+        if self._camera_conceptual_or_settings_near_miss(text):
+            return False
+        if re.search(r"\b(?:screen|window|popup|visible ui|on my screen|desktop)\b", text):
+            return False
+        if re.search(r"\b(?:camera|webcam)\b", text):
+            return True
+        if re.search(r"\b(?:what\s+am\s+i\s+holding|what\s+is\s+this\s+i(?:'|’)??m\s+holding|thing\s+i(?:'|’)??m\s+holding|in\s+my\s+hand)\b", text):
+            return True
+        if re.search(r"\b(?:holding|in\s+front\s+of\s+me|held\s+up)\b", text) and re.search(
+            r"\b(?:what|identify|read|look|inspect|check|does|can)\b",
+            text,
+        ):
+            return True
+        if re.search(r"\b(?:resistor\s+value|connector\s+is\s+this|solder\s+joint|label\s+in\s+front\s+of\s+me|component\s+is\s+this|part\s+is\s+this)\b", text):
+            return True
+        if self._camera_comparison_signal(text):
+            return True
+        return False
+
+    def _camera_comparison_signal(self, text: str) -> bool:
+        if re.search(r"\b(?:how\s+does|how\s+do|what\s+is|explain)\b.{0,32}\b(?:image\s+comparison|before\s+and\s+after)\b", text):
+            return False
+        if re.search(r"\b(?:front\b.{0,40}\bback|back\b.{0,40}\bfront)\b", text) and re.search(
+            r"\b(?:pcb|board|part|camera|show|capture)\b", text
+        ):
+            return True
+        if re.search(r"\b(?:before\b.{0,48}\bafter|after\b.{0,48}\bbefore)\b", text) and re.search(
+            r"\b(?:compare|solder|joint|photo|image|picture|capture|show)\b", text
+        ):
+            return True
+        if re.search(r"\bcompare\b.{0,48}\b(?:two\s+)?(?:images?|photos?|pictures?|connectors?|parts?|captures?|stills?)\b", text):
+            return True
+        if re.search(r"\bwhich\b.{0,24}\b(?:image|photo|picture)\b.{0,24}\b(?:clearer|better|sharpest|clearest)\b", text):
+            return True
+        if re.search(r"\bcompare\b.{0,48}\b(?:close[ -]?up|full view|whole view|context)\b", text):
+            return True
+        return False
+
+    def _camera_conceptual_or_settings_near_miss(self, text: str) -> bool:
+        if re.search(r"\b(?:open|find|search|install|update|driver|drivers|settings|privacy settings)\b.{0,24}\bcamera\b", text):
+            return True
+        if re.search(r"\bcamera\b.{0,24}\b(?:settings|drivers|driver|online)\b", text):
+            return True
+        if re.search(r"\b(?:what\s+is\s+a|how\s+do|how\s+does|explain|examples?|show\s+me\s+examples?)\b.{0,48}\b(?:camera|cameras|connector|connectors|resistor|resistors|solder\s+joint|color\s+codes?)\b", text):
+            return True
+        if re.search(r"\bwhat\s+is\s+a\s+[a-z0-9 -]{0,32}\b(?:connector|resistor|camera)\b", text):
+            return True
+        return False
+
+    def _camera_analysis_mode(self, text: str) -> str:
+        if self._camera_comparison_signal(text):
+            return "compare"
+        if re.search(r"\b(?:read|label|text|say)\b", text):
+            return "read_text"
+        if re.search(r"\b(?:bad|broken|damage|solder|joint|wrong)\b", text):
+            return "troubleshoot"
+        if re.search(r"\b(?:what|identify|connector|resistor|part|holding)\b", text):
+            return "identify"
+        return "inspect"
+
+    def _camera_target_text(self, raw_text: str) -> str:
+        text = re.sub(r"\b(?:can\s+you|could\s+you|please|look\s+at|take\s+a\s+camera\s+look\s+at|with\s+the\s+camera|using\s+the\s+camera|identify|what\s+is|what\s+am\s+i|does|can|read|inspect|check)\b", "", raw_text, flags=re.IGNORECASE)
+        text = " ".join(text.split()).strip(" ?.") or "camera still"
+        return text[:96]
+
     def _screen_status_signal(self, text: str) -> bool:
+        if (
+            re.search(r"\b(?:in\s+front\s+of\s+me|holding|held\s+up|in\s+my\s+hand)\b", text)
+            and re.search(
+                r"\b(?:resistor|connector|jst|ic\s+marking|component\s+marking|solder\s+joint|pcb|circuit\s+board)\b",
+                text,
+            )
+            and not re.search(r"\b(?:screen|window|popup|desktop|visible ui|on my screen)\b", text)
+        ):
+            return False
         has_question = bool(re.search(r"\b(?:what|which|where)\b", text))
         has_visual_target = bool(
             re.search(r"\b(?:looking\s+at|on\s+(?:my\s+)?screen|visible|in\s+front\s+of\s+me|current\s+view)\b", text)

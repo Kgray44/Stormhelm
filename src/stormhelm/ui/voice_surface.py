@@ -280,6 +280,7 @@ def build_voice_ui_state(status: dict[str, Any] | None) -> dict[str, Any]:
         realtime=realtime,
     )
     voice_anchor = build_voice_anchor_payload(voice)
+    visualizer = _dict(voice.get("voice_visualizer"))
     voice_output_envelope = _first_dict(
         voice.get("voice_output_envelope"),
         playback.get("voice_output_envelope"),
@@ -350,6 +351,90 @@ def build_voice_ui_state(status: dict[str, Any] | None) -> dict[str, Any]:
         "voice_visualizer_update_hz": voice_anchor.get("visualizer_update_hz", 30),
         "voice_visualizer_last_update_at": voice_anchor.get(
             "visualizer_last_update_at"
+        ),
+        "voice_visualizer_updates_received": int(
+            _number(
+                voice.get("voice_visualizer_updates_received"),
+                visualizer.get("visualizer_updates_received", 0),
+            )
+        ),
+        "voice_visualizer_updates_coalesced": int(
+            _number(
+                voice.get("voice_visualizer_updates_coalesced"),
+                visualizer.get("visualizer_updates_coalesced", 0),
+            )
+        ),
+        "voice_visualizer_updates_dropped": int(
+            _number(
+                voice.get("voice_visualizer_updates_dropped"),
+                visualizer.get("visualizer_updates_dropped", 0),
+            )
+        ),
+        "visualizer_frames_generated": int(
+            _number(
+                voice.get("visualizer_frames_generated"),
+                visualizer.get("visualizer_frames_generated", 0),
+            )
+        ),
+        "visualizer_frames_emitted": int(
+            _number(
+                voice.get("visualizer_frames_emitted"),
+                visualizer.get("visualizer_frames_emitted", 0),
+            )
+        ),
+        "visualizer_emit_rate_hz": _number(
+            voice.get("visualizer_emit_rate_hz"),
+            visualizer.get("visualizer_emit_rate_hz", 0.0),
+        ),
+        "max_visualizer_frame_gap_ms": _number(
+            voice.get("max_visualizer_frame_gap_ms"),
+            visualizer.get("max_visualizer_frame_gap_ms", 0.0),
+        ),
+        "status_polling_used_for_visualizer": bool(
+            voice.get(
+                "status_polling_used_for_visualizer",
+                visualizer.get("status_polling_used_for_visualizer", False),
+            )
+        ),
+        "playback_meter_alignment": voice.get(
+            "playback_meter_alignment",
+            visualizer.get("playback_meter_alignment"),
+        ),
+        "playback_meter_source": voice.get(
+            "playback_meter_source",
+            visualizer.get("playback_meter_source"),
+        ),
+        "voice_visualizer_last_update_gap_ms": _number(
+            voice.get("voice_visualizer_last_update_gap_ms"),
+            visualizer.get("visualizer_last_update_gap_ms", 0.0),
+        ),
+        "voice_visualizer_max_update_gap_ms": _number(
+            voice.get("voice_visualizer_max_update_gap_ms"),
+            visualizer.get("visualizer_max_update_gap_ms", 0.0),
+        ),
+        "visualizer_updates_received": int(
+            _number(
+                voice.get("visualizer_updates_received"),
+                visualizer.get("visualizer_updates_received", 0),
+            )
+        ),
+        "visualizer_updates_coalesced": int(
+            _number(
+                voice.get("visualizer_updates_coalesced"),
+                visualizer.get("visualizer_updates_coalesced", 0),
+            )
+        ),
+        "visualizer_updates_dropped": int(
+            _number(
+                voice.get("visualizer_updates_dropped"),
+                visualizer.get("visualizer_updates_dropped", 0),
+            )
+        ),
+        "bridge_collection_rebuilds_during_speech": int(
+            _number(voice.get("bridge_collection_rebuilds_during_speech"), 0)
+        ),
+        "qml_anchor_updates_during_speech": int(
+            _number(voice.get("qml_anchor_updates_during_speech"), 0)
         ),
         "voice_anchor_debug": anchor_debug,
         "voice_anchor_truth_flags": anchor_truth_flags,
@@ -1139,6 +1224,13 @@ def _current_phase(
         return "playback_active"
     if playback_state == "completed":
         return "playback_completed"
+    if voice_state in {"synthesizing"} or tts_state in {
+        "started",
+        "synthesizing",
+        "in_progress",
+        "first_chunk",
+    }:
+        return "synthesizing"
     if tts_state in {"succeeded", "completed", "prepared"}:
         return "response_prepared"
     return "ready"
@@ -1150,6 +1242,8 @@ def _voice_core_state(phase: str) -> str:
     if phase == "wake_ghost_active":
         return "wake_ready"
     if phase in {"transcribing", "core_routing"}:
+        return "thinking"
+    if phase == "synthesizing":
         return "thinking"
     if phase == "playback_active":
         return "speaking"
@@ -1238,6 +1332,10 @@ def _ghost_payload(
     elif current_phase == "response_prepared":
         label = "Response ready."
         detail = spoken_preview or "Spoken response preview is prepared."
+        actions = []
+    elif current_phase == "synthesizing":
+        label = "Preparing speech."
+        detail = spoken_preview or "TTS has started; playback has not started yet."
         actions = []
     elif current_phase == "playback_active":
         label = "Playing response."

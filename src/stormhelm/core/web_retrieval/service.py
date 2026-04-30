@@ -136,6 +136,42 @@ class WebRetrievalService:
                 readiness = self._readiness(provider)
                 readiness_payload[provider_name] = readiness.to_dict()
                 if not readiness.available:
+                    if provider_name == "obscura_cdp" and _is_cdp_navigation_unsupported(readiness):
+                        unavailable = RenderedWebPage(
+                            requested_url=normalized_url,
+                            final_url=normalized_url,
+                            provider=provider_name,
+                            status="fallback_available",
+                            error_code="cdp_navigation_unsupported",
+                            error_message="CDP endpoint detected; page navigation unsupported. Use Obscura CLI for page extraction.",
+                            limitations=[
+                                "cdp_diagnostic_only",
+                                "page_inspection_unsupported",
+                                "not_truth_verified",
+                                "not_user_visible_screen",
+                                "no_actions",
+                            ],
+                            claim_ceiling=CLAIM_CEILING_HEADLESS_CDP_PAGE_EVIDENCE,
+                            fallback_provider="obscura",
+                        )
+                        cdp_attempt = self._cdp_attempt(provider, unavailable)
+                        cdp_attempt.update(
+                            {
+                                "diagnostic_only": True,
+                                "navigation_supported": False,
+                                "page_inspection_supported": False,
+                                "recommended_fallback_provider": "obscura_cli",
+                                "protocol_compatibility_level": "diagnostic_only",
+                                "endpoint_status": cdp_attempt.get("endpoint_status") or "available",
+                            }
+                        )
+                        trace_cdp = cdp_attempt
+                        self._record_attempt(provider_attempts, unavailable, readiness=readiness.status)
+                        first_failure = first_failure or unavailable
+                        limitations.append("obscura_cdp_diagnostic_only")
+                        fallback_reason = "obscura_cdp:cdp_navigation_unsupported"
+                        fallback_outcome = "obscura_cli:fallback_available"
+                        continue
                     if provider_name == "obscura_cdp":
                         self._publish_cdp_event(
                             "web_retrieval.obscura_cdp_start_failed",
@@ -281,6 +317,73 @@ class WebRetrievalService:
             claim_ceiling=trace.claim_ceiling,
         )
 
+    def status_snapshot(self) -> dict[str, Any]:
+        provider_readiness: dict[str, Any] = {}
+        for provider_name in ("http", "obscura", "obscura_cdp"):
+            provider = self._provider(provider_name)
+            if provider is None:
+                continue
+            try:
+                provider_readiness[provider_name] = self._readiness(provider).to_dict()
+            except Exception as error:
+                provider_readiness[provider_name] = {
+                    "provider": provider_name,
+                    "status": "failed",
+                    "available": False,
+                    "reason": _bounded_message(str(error)),
+                }
+        cdp_config = self.config.obscura.cdp
+        cdp_readiness: dict[str, Any] = {}
+        manager = getattr(self.cdp_provider, "manager", None)
+        if manager is not None and hasattr(manager, "readiness"):
+            try:
+                raw_readiness = manager.readiness()
+                cdp_readiness = raw_readiness.to_dict() if hasattr(raw_readiness, "to_dict") else dict(raw_readiness)
+            except Exception as error:
+                cdp_readiness = {"status": "failed", "bounded_error_message": _bounded_message(str(error))}
+        compatibility_report = getattr(self.cdp_provider, "compatibility_report", {})
+        if callable(compatibility_report):
+            compatibility_report = compatibility_report()
+        if hasattr(compatibility_report, "to_dict"):
+            compatibility_report = compatibility_report.to_dict()
+        if not isinstance(compatibility_report, dict):
+            compatibility_report = {}
+        if not compatibility_report:
+            compatibility_report = dict(cdp_readiness.get("last_compatibility_report") or {})
+        active_session = getattr(manager, "_session", None) if manager is not None else None
+        cdp_snapshot = {
+            "enabled": bool(cdp_config.enabled),
+            "binary_path": str(cdp_config.binary_path or "obscura"),
+            "host": cdp_config.host,
+            "configured_port": int(cdp_config.port or 0),
+            "claim_ceiling": CLAIM_CEILING_HEADLESS_CDP_PAGE_EVIDENCE,
+            "status": str(cdp_readiness.get("status") or provider_readiness.get("obscura_cdp", {}).get("status") or ""),
+            "available": bool(cdp_readiness.get("available", provider_readiness.get("obscura_cdp", {}).get("available", False))),
+            "binary_found": "binary_missing" not in set(cdp_readiness.get("blocking_reasons") or []),
+            "active_session_id": str(getattr(active_session, "session_id", "") or cdp_readiness.get("cdp_session_id") or ""),
+            "active_process_id": int(getattr(active_session, "process_id", 0) or cdp_readiness.get("process_id") or 0),
+            "active_port": int(cdp_readiness.get("active_port") or 0),
+            "endpoint_status": str(cdp_readiness.get("endpoint_status") or ""),
+            "last_startup_error_code": str(cdp_readiness.get("last_startup_error_code") or ""),
+            "last_navigation_error_code": str(cdp_readiness.get("last_navigation_error_code") or ""),
+            "last_cleanup_status": str(cdp_readiness.get("last_cleanup_status") or ""),
+            "protocol_compatibility_level": str(cdp_readiness.get("protocol_compatibility_level") or compatibility_report.get("compatibility_level") or ""),
+            "optional_domains": dict(cdp_readiness.get("optional_domains") or compatibility_report.get("cdp_domains_available") or {}),
+            "last_compatibility_report": compatibility_report,
+            "endpoint_discovered": bool(cdp_readiness.get("endpoint_discovered") or compatibility_report.get("endpoint_discovered", False)),
+            "navigation_supported": bool(cdp_readiness.get("navigation_supported") or compatibility_report.get("navigation_supported", False)),
+            "page_inspection_supported": bool(cdp_readiness.get("page_inspection_supported") or compatibility_report.get("page_inspection_supported", False)),
+            "extraction_supported": bool(cdp_readiness.get("extraction_supported") or compatibility_report.get("extraction_supported", False)),
+            "diagnostic_only": bool(cdp_readiness.get("diagnostic_only") or compatibility_report.get("diagnostic_only", False)),
+            "recommended_fallback_provider": str(cdp_readiness.get("recommended_fallback_provider") or compatibility_report.get("recommended_fallback_provider") or ""),
+            "status_message": str(cdp_readiness.get("status_message") or ""),
+        }
+        return {
+            "enabled": bool(self.config.enabled),
+            "providers": provider_readiness,
+            "obscura_cdp": cdp_snapshot,
+        }
+
     def _provider_order(self, request: WebRetrievalRequest) -> list[str]:
         preferred = str(request.preferred_provider or self.config.default_provider or "auto").strip().lower()
         cdp_requested = preferred in {"obscura_cdp", "obscura.cdp", "cdp"} or str(request.intent or "").startswith("cdp_")
@@ -301,7 +404,32 @@ class WebRetrievalService:
             order = [item for item in order if item != "obscura"]
         if "obscura_cdp" in order and not (self.config.obscura.cdp.enabled or cdp_requested):
             order = [item for item in order if item != "obscura_cdp"]
+        if "obscura_cdp" in order and not cdp_requested and not self._cdp_page_inspection_available():
+            order = [item for item in order if item != "obscura_cdp"]
         return list(dict.fromkeys(order))
+
+    def _cdp_page_inspection_available(self) -> bool:
+        provider = self._provider("obscura_cdp")
+        if provider is None:
+            return False
+        manager = getattr(provider, "manager", None)
+        if manager is not None and hasattr(manager, "readiness"):
+            try:
+                cdp_readiness = manager.readiness()
+                if getattr(cdp_readiness, "diagnostic_only", False):
+                    return False
+                if getattr(cdp_readiness, "page_inspection_supported", False):
+                    return True
+                report = getattr(cdp_readiness, "last_compatibility_report", {}) or {}
+                if isinstance(report, dict) and report.get("page_inspection_supported") is True:
+                    return True
+                return False
+            except Exception:
+                return False
+        readiness = self._readiness(provider)
+        if _is_cdp_navigation_unsupported(readiness):
+            return False
+        return readiness.available
 
     def _provider(self, provider_name: str) -> Any | None:
         if provider_name == "http":
@@ -384,6 +512,7 @@ class WebRetrievalService:
                 "text_chars": page.text_chars,
                 "link_count": page.link_count,
                 "confidence": page.confidence,
+                "fallback_provider": page.fallback_provider,
             }
         )
         if page.provider == "obscura_cdp":
@@ -537,6 +666,26 @@ class WebRetrievalService:
         payload.setdefault("console_error_count", _summary_count(page.console_summary, "error_count"))
         payload.setdefault("provider_attempt_status", page.status)
         payload.setdefault("claim_ceiling", CLAIM_CEILING_HEADLESS_CDP_PAGE_EVIDENCE)
+        manager = getattr(provider, "manager", None)
+        if manager is not None and hasattr(manager, "readiness"):
+            try:
+                readiness = manager.readiness()
+                readiness_payload = readiness.to_dict() if hasattr(readiness, "to_dict") else dict(readiness)
+                payload.setdefault("endpoint_status", str(readiness_payload.get("endpoint_status") or ""))
+                payload.setdefault("protocol_compatibility_level", str(readiness_payload.get("protocol_compatibility_level") or ""))
+                payload.setdefault("protocol_version", str(readiness_payload.get("protocol_version") or ""))
+                payload.setdefault("optional_domains", dict(readiness_payload.get("optional_domains") or {}))
+                payload.setdefault("last_startup_error_code", str(readiness_payload.get("last_startup_error_code") or ""))
+                payload.setdefault("last_navigation_error_code", str(readiness_payload.get("last_navigation_error_code") or ""))
+                payload.setdefault("last_cleanup_status", str(readiness_payload.get("last_cleanup_status") or ""))
+                payload.setdefault("endpoint_discovered", bool(readiness_payload.get("endpoint_discovered", False)))
+                payload.setdefault("navigation_supported", bool(readiness_payload.get("navigation_supported", False)))
+                payload.setdefault("page_inspection_supported", bool(readiness_payload.get("page_inspection_supported", False)))
+                payload.setdefault("extraction_supported", bool(readiness_payload.get("extraction_supported", False)))
+                payload.setdefault("diagnostic_only", bool(readiness_payload.get("diagnostic_only", False)))
+                payload.setdefault("recommended_fallback_provider", str(readiness_payload.get("recommended_fallback_provider") or ""))
+            except Exception:
+                pass
         return payload
 
     def _publish(
@@ -573,12 +722,16 @@ def _bundle_state(pages: list[RenderedWebPage]) -> str:
         return "provider_unavailable"
     if statuses <= {"unsupported"}:
         return "unsupported"
+    if statuses <= {"fallback_available"}:
+        return "fallback_available"
     if statuses <= {"timeout"}:
         return "timeout"
     if any(status == "success" for status in statuses):
         return "partial" if any(status in {"failed", "timeout", "blocked", "partial"} for status in statuses) else "extracted"
     if any(status == "partial" for status in statuses):
         return "partial"
+    if any(status == "fallback_available" for status in statuses):
+        return "fallback_available"
     if any(status == "timeout" for status in statuses):
         return "failed"
     return "failed"
@@ -612,3 +765,13 @@ def _summary_count(summary: dict[str, Any], key: str) -> int:
         return int(summary.get(key) or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _is_cdp_navigation_unsupported(readiness: ProviderReadiness) -> bool:
+    values = {
+        str(readiness.status or ""),
+        str(readiness.reason or ""),
+        str(readiness.detail or ""),
+    }
+    joined = " ".join(values).lower()
+    return "diagnostic_only" in values or "cdp_navigation_unsupported" in joined or "page navigation unsupported" in joined

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import math
 import struct
+import threading
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -9,6 +11,7 @@ from stormhelm.core.voice.models import utc_now_iso
 
 
 ENVELOPE_SOURCES = {
+    "stormhelm_playback_meter",
     "playback_output_envelope",
     "streaming_chunk_envelope",
     "precomputed_artifact_envelope",
@@ -111,6 +114,182 @@ class AudioEnvelopeFrame:
             "synthetic": bool(self.envelope.synthetic),
             "raw_audio_present": False,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class VoicePlaybackMeterFrame:
+    timestamp: str
+    playback_position_ms: int
+    duration_ms: int
+    rms: float
+    peak: float
+    visual_drive: float
+    envelope: VoiceAudioEnvelope
+    playback_meter_alignment: str = "estimated"
+
+    @property
+    def source(self) -> str:
+        return self.envelope.source
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "timestamp": self.timestamp,
+            "playback_position_ms": int(self.playback_position_ms),
+            "audio_offset_ms": int(self.playback_position_ms),
+            "duration_ms": int(self.duration_ms),
+            "rms": _round(self.rms),
+            "peak": _round(self.peak),
+            "visual_drive": _round(self.visual_drive),
+            "center_blob_drive": _round(self.envelope.center_blob_drive),
+            "center_blob_scale_drive": _round(self.envelope.center_blob_scale_drive),
+            "center_blob_scale": _round(self.envelope.center_blob_scale, maximum=2.0),
+            "source": self.envelope.source,
+            "playback_meter_alignment": self.playback_meter_alignment,
+            "synthetic": bool(self.envelope.synthetic),
+            "raw_audio_present": False,
+        }
+
+
+class VoicePlaybackMeter:
+    """Meter Stormhelm's own outgoing PCM buffer at playback-time cadence."""
+
+    def __init__(
+        self,
+        *,
+        update_hz: int = 30,
+        sample_rate_hz: int = 24000,
+        channels: int = 1,
+        sample_width_bytes: int = 2,
+        window_ms: int | None = None,
+        clock: Any | None = None,
+        playback_meter_alignment: str = "estimated",
+    ) -> None:
+        self.update_hz = max(1, min(60, int(update_hz or 30)))
+        self.sample_rate_hz = max(1, int(sample_rate_hz or 24000))
+        self.channels = max(1, int(channels or 1))
+        self.sample_width_bytes = max(1, int(sample_width_bytes or 2))
+        self.window_ms = max(1, int(window_ms or round(1000.0 / self.update_hz)))
+        self.playback_meter_alignment = (
+            str(playback_meter_alignment or "estimated").strip().lower()
+            or "estimated"
+        )
+        self._clock = clock or time.perf_counter
+        self._buffer = bytearray()
+        self._lock = threading.Lock()
+        self._started_monotonic: float | None = None
+        self._last_sample_monotonic: float | None = None
+        self._previous_envelope: VoiceAudioEnvelope | None = None
+        self._active = False
+
+    @property
+    def active(self) -> bool:
+        with self._lock:
+            return bool(self._active)
+
+    @property
+    def buffered_duration_ms(self) -> int:
+        with self._lock:
+            return self._duration_ms_for_bytes_locked(len(self._buffer))
+
+    def start(self, *, start_monotonic: float | None = None) -> None:
+        with self._lock:
+            self._started_monotonic = (
+                float(start_monotonic)
+                if start_monotonic is not None
+                else float(self._clock())
+            )
+            self._last_sample_monotonic = None
+            self._previous_envelope = None
+            self._active = True
+
+    def stop(self) -> None:
+        with self._lock:
+            self._active = False
+
+    def feed_pcm(self, data: bytes | bytearray | memoryview | None) -> int:
+        payload = bytes(data or b"")
+        if not payload:
+            return 0
+        with self._lock:
+            self._buffer.extend(payload)
+            return len(payload)
+
+    def sample_due(
+        self, *, now_monotonic: float | None = None
+    ) -> VoicePlaybackMeterFrame | None:
+        now = float(now_monotonic if now_monotonic is not None else self._clock())
+        with self._lock:
+            if not self._active or self._started_monotonic is None:
+                return None
+            interval = 1.0 / float(self.update_hz)
+            if (
+                self._last_sample_monotonic is not None
+                and now - self._last_sample_monotonic + 1e-9 < interval
+            ):
+                return None
+            self._last_sample_monotonic = now
+            position_ms = int(
+                max(0.0, round((now - self._started_monotonic) * 1000.0))
+            )
+        return self.sample_at_playback_position(position_ms)
+
+    def sample_at_playback_position(
+        self, playback_position_ms: int | float
+    ) -> VoicePlaybackMeterFrame:
+        position_ms = int(max(0.0, round(float(playback_position_ms or 0.0))))
+        with self._lock:
+            payload = self._window_for_position_locked(position_ms)
+            previous = self._previous_envelope
+        samples = _pcm16_samples(payload)
+        if not samples:
+            samples = [0] * max(1, int(self.sample_rate_hz * self.channels * self.window_ms / 1000.0))
+        envelope = _voice_audio_envelope_from_samples(
+            samples,
+            source="stormhelm_playback_meter",
+            previous=previous,
+            update_hz=self.update_hz,
+            noise_floor=0.015,
+        )
+        frame = VoicePlaybackMeterFrame(
+            timestamp=envelope.last_update_at,
+            playback_position_ms=position_ms,
+            duration_ms=self.window_ms,
+            rms=envelope.rms_level,
+            peak=envelope.peak_level,
+            visual_drive=envelope.visual_drive_level,
+            envelope=envelope,
+            playback_meter_alignment=self.playback_meter_alignment,
+        )
+        with self._lock:
+            self._previous_envelope = envelope
+        return frame
+
+    def _window_for_position_locked(self, position_ms: int) -> bytes:
+        bytes_per_second = self._bytes_per_second_locked()
+        frame_bytes = self.channels * self.sample_width_bytes
+        start_byte = int((position_ms / 1000.0) * bytes_per_second)
+        start_byte -= start_byte % frame_bytes
+        window_bytes = max(
+            frame_bytes,
+            int((self.window_ms / 1000.0) * bytes_per_second),
+        )
+        window_bytes -= window_bytes % frame_bytes
+        if window_bytes <= 0:
+            window_bytes = frame_bytes
+        end_byte = start_byte + window_bytes
+        segment = bytes(self._buffer[start_byte:end_byte])
+        if len(segment) < window_bytes:
+            segment += b"\x00" * (window_bytes - len(segment))
+        return segment
+
+    def _bytes_per_second_locked(self) -> int:
+        return self.sample_rate_hz * self.channels * self.sample_width_bytes
+
+    def _duration_ms_for_bytes_locked(self, size_bytes: int) -> int:
+        bytes_per_second = self._bytes_per_second_locked()
+        if bytes_per_second <= 0:
+            return 0
+        return int(round((max(0, int(size_bytes)) / float(bytes_per_second)) * 1000.0))
 
 
 def compute_voice_audio_envelope(
@@ -257,7 +436,12 @@ def _voice_audio_envelope_from_samples(
         last_update_at=utc_now_iso(),
         update_hz=max(1, min(60, int(update_hz or 30))),
         audio_reactive_available=source
-        in {"playback_output_envelope", "streaming_chunk_envelope", "precomputed_artifact_envelope"},
+        in {
+            "stormhelm_playback_meter",
+            "playback_output_envelope",
+            "streaming_chunk_envelope",
+            "precomputed_artifact_envelope",
+        },
         synthetic=False,
         raw_audio_present=False,
     )
@@ -803,7 +987,8 @@ def _visual_drive_levels(
     if source == "unavailable":
         return 0.0, 0.0, 1.85, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0
     energy_level = _clamp(energy)
-    drive_energy = max(energy_level, _clamp(smoothed_level))
+    meter_source = source == "stormhelm_playback_meter"
+    drive_energy = energy_level if meter_source else max(energy_level, _clamp(smoothed_level))
     peak = _clamp(peak_level)
     instant_level = _instant_audio_level(rms_level, peak, noise_floor=noise_floor)
     fast_level = _fast_audio_level(instant_level, previous)
@@ -835,11 +1020,11 @@ def _visual_drive_levels(
         raw_drive = _clamp(pow(max(drive_energy, 0.0), 0.45) * 0.99)
         raw_center = _clamp(pow(max(drive_energy, 0.0), 0.9) * 1.15)
     previous_drive = _previous_visual_drive(previous)
-    if previous_drive is not None:
+    if previous_drive is not None and not meter_source:
         alpha = 0.88 if raw_drive >= previous_drive else 0.74
         raw_drive = _clamp(previous_drive + (raw_drive - previous_drive) * alpha)
     previous_center = _previous_center_blob_drive(previous)
-    if previous_center is not None:
+    if previous_center is not None and not meter_source:
         alpha = 0.92 if raw_center >= previous_center else 0.76
         raw_center = _clamp(previous_center + (raw_center - previous_center) * alpha)
     peak_floor = 0.0

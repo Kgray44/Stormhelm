@@ -1,0 +1,33 @@
+{
+  "action_capabilities_enabled_for_test": {
+    "click": true,
+    "focus": true
+  },
+  "approval_required": true,
+  "claim_ceiling": "browser_semantic_action_execution",
+  "cleanup_status": "closed",
+  "click_action_attempted": true,
+  "click_action_completed": true,
+  "click_status": "verified_supported",
+  "click_verification_status": "supported",
+  "controls_found": 3,
+  "fixture_url_host": "127.0.0.1",
+  "focus_action_attempted": true,
+  "focus_action_completed": true,
+  "focus_status": "completed_unverified",
+  "focus_verification_status": "unsupported",
+  "forbidden_capabilities": {
+    "cookies": false,
+    "form_submit": false,
+    "login": false,
+    "scroll": false,
+    "type_text": false,
+    "user_profile": false
+  },
+  "isolated_context_used": true,
+  "page_title": "Action Fixture",
+  "provider": "playwright_live_semantic",
+  "status": "passed",
+  "trust_scope": "once",
+  "user_profile_used": false
+}

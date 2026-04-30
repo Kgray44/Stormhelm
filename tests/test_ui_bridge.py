@@ -133,6 +133,88 @@ def test_ui_bridge_applies_stream_chunk_voice_envelope_without_collection_rebuil
     assert bridge.voiceState["voice_audio_reactive_source"] == "playback_output_envelope"
 
 
+def test_ui_bridge_visualizer_updates_use_voice_hot_path_only(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+    collection_emits = 0
+    voice_emits = 0
+
+    def mark_collection() -> None:
+        nonlocal collection_emits
+        collection_emits += 1
+
+    def mark_voice() -> None:
+        nonlocal voice_emits
+        voice_emits += 1
+
+    bridge.collectionsChanged.connect(mark_collection)
+    bridge.voiceStateChanged.connect(mark_voice)
+
+    for index, drive in enumerate([0.0, 0.22, 0.74, 0.18, 0.0], start=1):
+        bridge.apply_stream_event(
+            {
+                "cursor": 200 + index,
+                "event_type": "voice.visualizer_update",
+                "visibility_scope": "watch_surface",
+                "severity": "debug",
+                "message": "Voice visualizer updated.",
+                "payload": {
+                    "metadata": {
+                        "visualizer_only": True,
+                        "voice": {
+                            "enabled": True,
+                            "voice_anchor": {
+                                "state": "speaking",
+                                "speaking_visual_active": True,
+                                "smoothed_output_level": drive,
+                                "visual_drive_level": drive,
+                                "visual_drive_peak": min(1.0, drive + 0.08),
+                                "center_blob_drive": drive,
+                                "center_blob_scale_drive": drive,
+                                "center_blob_scale": 1.0 + drive * 0.32,
+                                "outer_speaking_motion": 0.12,
+                                "audio_reactive_available": True,
+                                "audio_reactive_source": "playback_output_envelope",
+                            },
+                            "voice_anchor_state": "speaking",
+                            "speaking_visual_active": True,
+                            "voice_smoothed_output_level": drive,
+                            "voice_visual_drive_level": drive,
+                            "voice_visual_drive_peak": min(1.0, drive + 0.08),
+                            "voice_center_blob_drive": drive,
+                            "voice_center_blob_scale_drive": drive,
+                            "voice_center_blob_scale": 1.0 + drive * 0.32,
+                            "voice_outer_speaking_motion": 0.12,
+                            "audioDriveLevel": drive,
+                            "voice_audio_reactive_available": True,
+                            "voice_audio_reactive_source": "playback_output_envelope",
+                            "voice_visualizer": {
+                                "visualizer_updates_received": index,
+                                "visualizer_updates_coalesced": 2,
+                                "visualizer_updates_dropped": 0,
+                                "raw_audio_present": False,
+                            },
+                            "raw_audio_present": False,
+                        },
+                    }
+                },
+            }
+        )
+
+    assert collection_emits == 0
+    assert voice_emits == 5
+    assert bridge.voiceState["voice_center_blob_scale_drive"] == 0.0
+    assert bridge.voiceState["visualizer_updates_received"] == 5
+    assert bridge.voiceState["visualizer_updates_coalesced"] == 2
+    assert bridge.voiceState["visualizer_updates_dropped"] == 0
+    assert bridge.voiceState["visualizer_frames_received_by_bridge"] == 5
+    assert bridge.voiceState["bridge_receive_rate_hz"] > 0
+    assert bridge.voiceState["max_bridge_frame_gap_ms"] >= 0
+    assert bridge.voiceState["status_polling_used_for_visualizer"] is False
+    assert bridge.voiceState["collection_rebuilds_during_visualizer_updates"] == 0
+    assert bridge.voiceState["bridge_collection_rebuilds_during_speech"] == 0
+    assert bridge.voiceState["qml_anchor_updates_during_speech"] == 5
+
+
 def test_ui_bridge_coalesces_visible_stream_collection_rebuilds(temp_config) -> None:
     _ensure_app()
     bridge = UiBridge(temp_config)
@@ -159,6 +241,377 @@ def test_ui_bridge_coalesces_visible_stream_collection_rebuilds(temp_config) -> 
     assert collection_emits == 0
     QtTest.QTest.qWait(150)
     assert collection_emits == 1
+
+
+def test_ui_bridge_l7_route_event_updates_ghost_without_polling_and_marks_latency(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+    collection_emits = 0
+    status_emits = 0
+
+    def mark_collection() -> None:
+        nonlocal collection_emits
+        collection_emits += 1
+
+    def mark_status() -> None:
+        nonlocal status_emits
+        status_emits += 1
+
+    bridge.collectionsChanged.connect(mark_collection)
+    bridge.statusChanged.connect(mark_status)
+
+    bridge.apply_stream_event(
+        {
+            "cursor": 501,
+            "event_id": 501,
+            "event_family": "route",
+            "event_type": "route.selected",
+            "severity": "info",
+            "subsystem": "planner",
+            "visibility_scope": "ghost_hint",
+            "message": "Route selected.",
+            "payload": {
+                "request_id": "req-l7-route",
+                "route_family": "software_control",
+                "result_state": "planning",
+                "summary": "Preparing a safe software route.",
+            },
+            "ui_stream_timing": {
+                "frame_received_monotonic_ms": 1000.0,
+                "event_parsed_monotonic_ms": 1001.0,
+            },
+        }
+    )
+
+    assert bridge.statusLine == "Route selected."
+    assert bridge.ghostPrimaryCard["routeLabel"] == "Software Control"
+    assert bridge.requestComposer["chips"][0]["value"] == "Software Control"
+    assert collection_emits == 1
+    assert status_emits >= 1
+
+    marks = bridge.uiLatencyMarks
+    mark_names = {mark["mark_name"] for mark in marks}
+    assert "event_stream_frame_received" in mark_names
+    assert "bridge_event_parsed" in mark_names
+    assert "bridge_state_updated" in mark_names
+    assert "qml_model_changed" in mark_names
+    assert "ghost_state_updated" in mark_names
+    assert all("secret" not in str(mark).lower() for mark in marks)
+
+    summary = bridge.uiEventRenderLatencySummaries[-1]
+    assert summary["event_id"] == "501"
+    assert summary["received_to_bridge_update_ms"] >= 0
+    assert summary["received_to_render_visible_ms"] is None
+    assert summary["render_confirmed"] == "unknown"
+    assert summary["used_polling_fallback"] is False
+
+
+def test_ui_bridge_l7_http_chat_marks_are_sanitized_and_request_bound(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+
+    bridge.apply_chat_result(
+        {
+            "ui_http_timing": {
+                "user_submitted_message_monotonic_ms": 100.0,
+                "http_send_started_monotonic_ms": 101.0,
+                "http_response_received_monotonic_ms": 145.0,
+            },
+            "user_message": {
+                "message_id": "user-http",
+                "role": "user",
+                "content": "private text should not appear in marks",
+            },
+            "assistant_message": {
+                "message_id": "assistant-http",
+                "role": "assistant",
+                "content": "Ready.",
+                "metadata": {"latency_trace": {"request_id": "req-http-l7"}},
+            },
+        }
+    )
+
+    marks = bridge.uiLatencyMarks
+    mark_names = {mark["mark_name"] for mark in marks}
+    assert {"user_submitted_message", "ui_http_send_started", "ui_http_response_received"} <= mark_names
+    assert {mark["request_id"] for mark in marks} == {"req-http-l7"}
+    assert "private text" not in str(marks).lower()
+
+
+def test_ui_bridge_l7_clarification_and_approval_prompts_are_push_first_and_expire(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+
+    bridge.apply_stream_event(
+        {
+            "cursor": 610,
+            "event_id": 610,
+            "event_family": "route",
+            "event_type": "clarification_required",
+            "severity": "info",
+            "subsystem": "planner",
+            "visibility_scope": "operator_blocking",
+            "message": "Clarification required.",
+            "payload": {
+                "request_id": "req-l7-prompt",
+                "route_family": "discord_relay",
+                "subject": "relay payload",
+                "clarification_choices": ["selected text", "current page"],
+                "summary": "Choose what should be relayed.",
+            },
+        }
+    )
+
+    assert bridge.statusLine == "Clarification required."
+    assert bridge.ghostPrimaryCard["resultState"] == "unresolved"
+    assert [choice["sendText"] for choice in bridge.requestComposer["clarificationChoices"]] == [
+        "selected text",
+        "current page",
+    ]
+
+    bridge.apply_stream_event(
+        {
+            "cursor": 611,
+            "event_id": 611,
+            "event_family": "approval",
+            "event_type": "approval_required",
+            "severity": "warning",
+            "subsystem": "trust",
+            "visibility_scope": "operator_blocking",
+            "message": "Approval required.",
+            "payload": {
+                "request_id": "req-l7-prompt",
+                "approval_id": "approval-l7",
+                "route_family": "trust_approvals",
+                "subject": "Discord dispatch",
+                "available_scopes": ["once", "task"],
+                "operator_message": "Dispatch needs operator approval.",
+            },
+        }
+    )
+
+    assert bridge.statusLine == "Approval required."
+    assert bridge.ghostPrimaryCard["resultState"] == "awaiting_approval"
+    assert any(action["category"] == "approve" for action in bridge.ghostActionStrip)
+
+    bridge.apply_stream_event(
+        {
+            "cursor": 612,
+            "event_id": 612,
+            "event_family": "approval",
+            "event_type": "approval.consumed",
+            "severity": "info",
+            "subsystem": "trust",
+            "visibility_scope": "deck_context",
+            "message": "Approval consumed.",
+            "payload": {
+                "request_id": "req-l7-prompt",
+                "approval_id": "approval-l7",
+                "route_family": "trust_approvals",
+                "approval_state": "consumed",
+                "operator_message": "Approval was consumed by the backend.",
+            },
+        }
+    )
+
+    assert not any(action["category"] == "approve" for action in bridge.ghostActionStrip)
+    assert bridge.routeInspector["provenance"][0]["label"] == "Trust"
+
+
+def test_ui_bridge_l7_job_and_verification_events_update_models_without_claiming_false_success(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+
+    bridge.apply_stream_event(
+        {
+            "cursor": 701,
+            "event_id": 701,
+            "event_family": "job",
+            "event_type": "job.progress",
+            "severity": "info",
+            "subsystem": "job_manager",
+            "visibility_scope": "deck_context",
+            "message": "Verification queued.",
+            "payload": {
+                "request_id": "req-l7-verify",
+                "job_id": "job-l7",
+                "task_id": "task-l7",
+                "tool_name": "software_control",
+                "status": "running",
+                "progress_summary": "Verification running.",
+            },
+        }
+    )
+
+    watch_module = next(module for module in bridge.deckModules if module["key"] == "watch")
+    watch_entries = watch_module["entries"]
+    assert watch_entries[0]["secondary"] == "Running"
+    assert watch_entries[0]["secondary"] != "Completed"
+
+    bridge.apply_stream_event(
+        {
+            "cursor": 702,
+            "event_id": 702,
+            "event_family": "verification",
+            "event_type": "verification.result",
+            "severity": "info",
+            "subsystem": "verification",
+            "visibility_scope": "deck_context",
+            "message": "Verification returned without evidence.",
+            "payload": {
+                "request_id": "req-l7-verify",
+                "route_family": "software_control",
+                "verification_state": "not_verified",
+                "result_state": "completed",
+                "verification_evidence_count": 0,
+            },
+        }
+    )
+
+    assert bridge.ghostPrimaryCard["resultState"] != "verified"
+
+    bridge.apply_stream_event(
+        {
+            "cursor": 703,
+            "event_id": 703,
+            "event_family": "verification",
+            "event_type": "verification.result",
+            "severity": "info",
+            "subsystem": "verification",
+            "visibility_scope": "deck_context",
+            "message": "Verification complete.",
+            "payload": {
+                "request_id": "req-l7-verify",
+                "route_family": "software_control",
+                "verification_state": "verified",
+                "result_state": "verified",
+                "verification_evidence_count": 2,
+                "evidence": ["installed binary found"],
+            },
+        }
+    )
+
+    assert bridge.ghostPrimaryCard["resultState"] == "verified"
+    assert bridge.routeInspector["statusLabel"] == "Verified"
+
+
+def test_ui_bridge_l7_voice_stage_events_remain_distinct_and_truthful(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+
+    bridge.apply_stream_event(
+        {
+            "cursor": 801,
+            "event_id": 801,
+            "event_family": "voice",
+            "event_type": "voice.synthesis_started",
+            "severity": "info",
+            "subsystem": "voice",
+            "visibility_scope": "deck_context",
+            "message": "TTS started.",
+            "payload": {
+                "turn_id": "voice-turn-l7",
+                "speech_request_id": "speech-l7",
+                "status": "started",
+                "raw_audio_present": False,
+            },
+        }
+    )
+
+    assert bridge.voiceState["voice_current_phase"] == "synthesizing"
+    assert bridge.voiceState["last_synthesis_status"] == "started"
+    assert bridge.voiceState.get("active_playback_status") is None
+    assert bridge.assistantState != "speaking"
+
+    bridge.apply_stream_event(
+        {
+            "cursor": 802,
+            "event_id": 802,
+            "event_family": "voice",
+            "event_type": "voice.tts_first_chunk_received",
+            "severity": "info",
+            "subsystem": "voice",
+            "visibility_scope": "deck_context",
+            "message": "First TTS chunk received.",
+            "payload": {
+                "turn_id": "voice-turn-l7",
+                "synthesis_id": "synth-l7",
+                "status": "first_chunk",
+                "raw_audio_present": False,
+            },
+        }
+    )
+
+    assert bridge.voiceState["last_synthesis_status"] == "first_chunk"
+    assert bridge.voiceState.get("active_playback_status") is None
+    assert bridge.assistantState != "speaking"
+
+    bridge.apply_stream_event(
+        {
+            "cursor": 803,
+            "event_id": 803,
+            "event_family": "voice",
+            "event_type": "voice.playback_started",
+            "severity": "info",
+            "subsystem": "voice",
+            "visibility_scope": "deck_context",
+            "message": "Playback started.",
+            "payload": {
+                "turn_id": "voice-turn-l7",
+                "playback_id": "playback-l7",
+                "status": "started",
+                "raw_audio_present": False,
+                "user_heard_claimed": False,
+            },
+        }
+    )
+
+    assert bridge.voiceState["voice_current_phase"] == "playback_active"
+    assert bridge.voiceState["active_playback_status"] == "started"
+    assert bridge.voiceState["user_heard_claimed"] is False
+    assert bridge.assistantState == "speaking"
+
+
+def test_ui_bridge_l7_duplicate_and_out_of_order_events_do_not_downgrade_state(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+
+    verified_event = {
+        "cursor": 901,
+        "event_id": 901,
+        "event_family": "verification",
+        "event_type": "verification.result",
+        "severity": "info",
+        "subsystem": "verification",
+        "visibility_scope": "deck_context",
+        "message": "Verified.",
+        "payload": {
+            "request_id": "req-l7-order",
+            "route_family": "software_control",
+            "verification_state": "verified",
+            "result_state": "verified",
+            "verification_evidence_count": 1,
+            "evidence": ["post-check succeeded"],
+        },
+    }
+    bridge.apply_stream_event(verified_event)
+    bridge.apply_stream_event(verified_event)
+    bridge.apply_stream_event(
+        {
+            "cursor": 900,
+            "event_id": 900,
+            "event_family": "route",
+            "event_type": "route.selected",
+            "severity": "info",
+            "subsystem": "planner",
+            "visibility_scope": "ghost_hint",
+            "message": "Route selected.",
+            "payload": {
+                "request_id": "req-l7-order",
+                "route_family": "software_control",
+                "result_state": "planning",
+            },
+        }
+    )
+
+    assert bridge.ghostPrimaryCard["resultState"] == "verified"
+    diagnostics = bridge.eventStreamConnectionState
+    assert diagnostics["duplicate_ignored_count"] == 1
+    assert diagnostics["out_of_order_ignored_count"] == 1
 
 
 def test_ui_bridge_applies_snapshot_to_context_cards_and_modules(temp_config) -> None:
@@ -642,6 +1095,7 @@ def test_ui_bridge_systems_surfaces_event_stream_runtime_state(temp_config) -> N
             }
         }
     )
+    bridge.apply_stream_state({"source": "client", "phase": "reconnecting"})
 
     bridge.activateModule("systems")
 
@@ -651,6 +1105,9 @@ def test_ui_bridge_systems_surfaces_event_stream_runtime_state(temp_config) -> N
     assert rows["Buffered"]["value"] == "12 / 256"
     assert rows["Replay"]["detail"] == "5 replays, 1 retention gaps"
     assert rows["Connections"]["value"] == "1 live"
+    assert rows["UI Stream"]["value"] == "Reconnecting"
+    assert rows["UI Stream"]["detail"] == "reconcile requested"
+    assert rows["UI Timing"]["value"] == "1 summaries"
 
 
 def test_ui_bridge_watch_uses_job_posture_slice(temp_config) -> None:

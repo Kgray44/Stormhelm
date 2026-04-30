@@ -26,6 +26,9 @@ def test_core_api_client_parses_stream_events_and_tracks_cursor() -> None:
     assert events[0]["cursor"] == 9
     assert events[0]["event_family"] == "job"
     assert client.last_event_cursor == 9
+    assert events[0]["ui_stream_timing"]["frame_received_monotonic_ms"] > 0
+    assert events[0]["ui_stream_timing"]["event_parsed_monotonic_ms"] >= events[0]["ui_stream_timing"]["frame_received_monotonic_ms"]
+    assert events[0]["ui_stream_timing"]["render_confirmed"] == "unknown"
     assert gaps == []
 
 

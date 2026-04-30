@@ -67,6 +67,7 @@ Focused examples:
 .\.venv\Scripts\python.exe -m pytest tests/test_ui_bridge.py tests/test_qml_shell.py -q
 .\.venv\Scripts\python.exe -m pytest tests/test_software_control.py tests/test_discord_relay.py -q
 .\.venv\Scripts\python.exe -m pytest tests/test_voice_config.py tests/test_voice_availability.py tests/test_voice_state.py tests/test_voice_events.py -q
+.\.venv\Scripts\python.exe -m pytest tests/test_live_browser_provider_smoke.py -q
 ```
 
 When running from unusual shells or worktrees, pin the local source tree:
@@ -78,6 +79,43 @@ $env:PYTHONPATH = "C:\Stormhelm\src"
 
 Sources: `pyproject.toml`, `tests/conftest.py`
 Tests: all tests under `tests/`
+
+Live browser provider tests are opt-in and skipped by default. To run local diagnostics against installed Obscura or Playwright dependencies, use:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_live_browser_dependencies.ps1 -CheckOnly -ReportPath reports\live_browser_integration\addition-2.4-checkonly-dependencies.json
+```
+
+Install optional Obscura diagnostics only from an explicit local zip or trusted release URL:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_live_browser_dependencies.ps1 -InstallObscura -DownloadLatestObscuraRelease -ObscuraInstallDir "$env:LOCALAPPDATA\Stormhelm\tools\obscura" -SetStormhelmObscuraBinary -ReportPath reports\live_browser_integration\addition-2.6-setup-obscura.json
+```
+
+Local zip alternative:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_live_browser_dependencies.ps1 -InstallObscura -ObscuraZipPath "C:\path\to\obscura-windows.zip" -ObscuraInstallDir "$env:LOCALAPPDATA\Stormhelm\tools\obscura" -ReportPath reports\live_browser_integration\addition-2.5-setup-obscura.json
+```
+
+The official Windows Obscura release validated in Addition 2.6 uses `obscura.exe serve --port <port>` for CDP diagnostics; `--host` was not accepted by that release.
+
+Install optional Playwright diagnostics only with explicit flags:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_live_browser_dependencies.ps1 -InstallPlaywrightPackage -InstallPlaywrightChromium -ReportPath reports\live_browser_integration\addition-2.4-setup-playwright.json
+```
+
+Then run the selected live checks:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_live_browser_checks.ps1 -Enable -Obscura -ObscuraCdp -Playwright -Url "https://example.com"
+```
+
+Add `-AllowPlaywrightBrowserLaunch` only when you want the Playwright semantic smoke to launch an isolated temporary browser context and exercise the Screen Awareness adapter's real semantic snapshot path. The checks do not enable click/type/form/login/cookie behavior and do not attach to a user browser profile.
+
+Sources: `docs/live-browser-integration.md`, `scripts/setup_live_browser_dependencies.ps1`, `scripts/run_live_browser_checks.ps1`, `src/stormhelm/core/live_browser_integration.py`, `src/stormhelm/core/screen_awareness/browser_playwright.py`
+Tests: `tests/test_live_browser_integration.py`, `tests/test_live_browser_provider_smoke.py`, `tests/test_screen_awareness_playwright_live_semantic.py`
 
 ## Build / Package
 

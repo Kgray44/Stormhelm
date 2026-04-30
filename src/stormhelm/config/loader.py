@@ -7,6 +7,11 @@ from typing import Any, Callable, Mapping
 
 from stormhelm.config.models import (
     AppConfig,
+    CameraAwarenessCaptureConfig,
+    CameraAwarenessConfig,
+    CameraAwarenessDevConfig,
+    CameraAwarenessPrivacyConfig,
+    CameraAwarenessVisionConfig,
     CalculationsConfig,
     ConcurrencyConfig,
     DiscordRelayConfig,
@@ -19,6 +24,7 @@ from stormhelm.config.models import (
     LoggingConfig,
     NetworkConfig,
     OpenAIConfig,
+    ProviderFallbackConfig,
     ScreenAwarenessConfig,
     SoftwareControlConfig,
     SoftwareRecoveryConfig,
@@ -32,6 +38,8 @@ from stormhelm.config.models import (
     RuntimePathConfig,
     SafetyConfig,
     StorageConfig,
+    PlaywrightBrowserAdapterConfig,
+    ScreenAwarenessBrowserAdaptersConfig,
     ToolConfig,
     ToolEnablementConfig,
     UIConfig,
@@ -251,6 +259,16 @@ def _build_app_config(
     )
 
     screen_awareness_data = data.get("screen_awareness", {})
+    screen_awareness_browser_adapters_data = (
+        screen_awareness_data.get("browser_adapters", {})
+        if isinstance(screen_awareness_data.get("browser_adapters"), dict)
+        else {}
+    )
+    screen_awareness_playwright_data = (
+        screen_awareness_browser_adapters_data.get("playwright", {})
+        if isinstance(screen_awareness_browser_adapters_data.get("playwright"), dict)
+        else {}
+    )
     screen_awareness_config = ScreenAwarenessConfig(
         enabled=bool(screen_awareness_data.get("enabled", True)),
         phase=str(screen_awareness_data.get("phase", "phase12")).strip() or "phase12",
@@ -305,6 +323,150 @@ def _build_app_config(
         ),
         screen_capture_store_raw_images=bool(
             screen_awareness_data.get("screen_capture_store_raw_images", False)
+        ),
+        browser_adapters=ScreenAwarenessBrowserAdaptersConfig(
+            playwright=PlaywrightBrowserAdapterConfig(
+                enabled=bool(screen_awareness_playwright_data.get("enabled", False)),
+                provider=str(screen_awareness_playwright_data.get("provider", "playwright")).strip() or "playwright",
+                mode=str(screen_awareness_playwright_data.get("mode", "semantic_observation")).strip() or "semantic_observation",
+                allow_browser_launch=bool(screen_awareness_playwright_data.get("allow_browser_launch", False)),
+                allow_connect_existing=bool(screen_awareness_playwright_data.get("allow_connect_existing", False)),
+                allow_actions=bool(screen_awareness_playwright_data.get("allow_actions", False)),
+                allow_click=bool(screen_awareness_playwright_data.get("allow_click", False)),
+                allow_focus=bool(screen_awareness_playwright_data.get("allow_focus", False)),
+                allow_type_text=bool(screen_awareness_playwright_data.get("allow_type_text", False)),
+                allow_scroll=bool(screen_awareness_playwright_data.get("allow_scroll", False)),
+                allow_form_fill=bool(screen_awareness_playwright_data.get("allow_form_fill", False)),
+                allow_form_submit=bool(screen_awareness_playwright_data.get("allow_form_submit", False)),
+                allow_login=bool(screen_awareness_playwright_data.get("allow_login", False)),
+                allow_cookies=bool(screen_awareness_playwright_data.get("allow_cookies", False)),
+                allow_user_profile=bool(screen_awareness_playwright_data.get("allow_user_profile", False)),
+                allow_screenshots=bool(screen_awareness_playwright_data.get("allow_screenshots", False)),
+                allow_dev_adapter=bool(screen_awareness_playwright_data.get("allow_dev_adapter", False)),
+                allow_dev_actions=bool(screen_awareness_playwright_data.get("allow_dev_actions", False)),
+                max_session_seconds=int(screen_awareness_playwright_data.get("max_session_seconds", 120)),
+                navigation_timeout_seconds=int(screen_awareness_playwright_data.get("navigation_timeout_seconds", 12000)),
+                observation_timeout_seconds=int(screen_awareness_playwright_data.get("observation_timeout_seconds", 8000)),
+                debug_events_enabled=bool(screen_awareness_playwright_data.get("debug_events_enabled", True)),
+            )
+        ),
+    )
+
+    camera_awareness_data = data.get("camera_awareness", {})
+    camera_capture_data = (
+        camera_awareness_data.get("capture", {})
+        if isinstance(camera_awareness_data.get("capture"), dict)
+        else {}
+    )
+    camera_vision_data = (
+        camera_awareness_data.get("vision", {})
+        if isinstance(camera_awareness_data.get("vision"), dict)
+        else {}
+    )
+    camera_privacy_data = (
+        camera_awareness_data.get("privacy", {})
+        if isinstance(camera_awareness_data.get("privacy"), dict)
+        else {}
+    )
+    camera_dev_data = (
+        camera_awareness_data.get("dev", {})
+        if isinstance(camera_awareness_data.get("dev"), dict)
+        else {}
+    )
+    camera_awareness_config = CameraAwarenessConfig(
+        enabled=bool(camera_awareness_data.get("enabled", False)),
+        planner_routing_enabled=bool(
+            camera_awareness_data.get("planner_routing_enabled", True)
+        ),
+        debug_events_enabled=bool(
+            camera_awareness_data.get("debug_events_enabled", True)
+        ),
+        default_capture_mode=str(
+            camera_awareness_data.get("default_capture_mode", "single_still")
+        ).strip()
+        or "single_still",
+        default_storage_mode=str(
+            camera_awareness_data.get("default_storage_mode", "ephemeral")
+        ).strip()
+        or "ephemeral",
+        auto_discard_after_seconds=int(
+            camera_awareness_data.get("auto_discard_after_seconds", 300)
+        ),
+        allow_cloud_vision=bool(
+            camera_awareness_data.get("allow_cloud_vision", False)
+        ),
+        allow_background_capture=bool(
+            camera_awareness_data.get("allow_background_capture", False)
+        ),
+        allow_task_artifact_save=bool(
+            camera_awareness_data.get("allow_task_artifact_save", False)
+        ),
+        allow_session_permission=bool(
+            camera_awareness_data.get("allow_session_permission", False)
+        ),
+        capture=CameraAwarenessCaptureConfig(
+            provider=str(camera_capture_data.get("provider", "mock")).strip().lower()
+            or "mock",
+            mode=str(camera_capture_data.get("mode", "single_still")).strip()
+            or "single_still",
+            default_device_id=str(
+                camera_capture_data.get("default_device_id", "")
+            ).strip()
+            or None,
+            requested_resolution=str(
+                camera_capture_data.get("requested_resolution", "1280x720")
+            ).strip()
+            or "1280x720",
+            timeout_seconds=float(camera_capture_data.get("timeout_seconds", 5.0)),
+            max_artifact_bytes=int(
+                camera_capture_data.get("max_artifact_bytes", 10485760)
+            ),
+        ),
+        vision=CameraAwarenessVisionConfig(
+            provider=str(camera_vision_data.get("provider", "mock")).strip().lower()
+            or "mock",
+            model=str(camera_vision_data.get("model", "mock-vision")).strip()
+            or "mock-vision",
+            timeout_seconds=float(camera_vision_data.get("timeout_seconds", 10.0)),
+            detail=str(camera_vision_data.get("detail", "auto")).strip().lower()
+            or "auto",
+            max_image_bytes=int(camera_vision_data.get("max_image_bytes", 8_000_000)),
+            request_timeout_ms=int(
+                camera_vision_data.get("request_timeout_ms", 30_000)
+            ),
+            allow_cloud_vision=bool(
+                camera_vision_data.get("allow_cloud_vision", False)
+            ),
+            require_confirmation_for_cloud=bool(
+                camera_vision_data.get("require_confirmation_for_cloud", True)
+            ),
+        ),
+        privacy=CameraAwarenessPrivacyConfig(
+            confirm_before_capture=bool(
+                camera_privacy_data.get("confirm_before_capture", True)
+            ),
+            persist_images_by_default=bool(
+                camera_privacy_data.get("persist_images_by_default", False)
+            ),
+            require_source_provenance=bool(
+                camera_privacy_data.get("require_source_provenance", True)
+            ),
+            redact_raw_image_from_events=bool(
+                camera_privacy_data.get("redact_raw_image_from_events", True)
+            ),
+        ),
+        dev=CameraAwarenessDevConfig(
+            mock_capture_enabled=bool(
+                camera_dev_data.get("mock_capture_enabled", True)
+            ),
+            mock_vision_enabled=bool(
+                camera_dev_data.get("mock_vision_enabled", True)
+            ),
+            mock_image_fixture=str(
+                camera_dev_data.get("mock_image_fixture", "resistor")
+            ).strip()
+            or "resistor",
+            save_debug_images=bool(camera_dev_data.get("save_debug_images", False)),
         ),
     )
 
@@ -633,6 +795,46 @@ def _build_app_config(
             )
         ),
         instructions=str(openai_data.get("instructions", "")).strip(),
+    )
+
+    provider_fallback_data = data.get("provider_fallback", {})
+    provider_fallback_config = ProviderFallbackConfig(
+        enabled=bool(provider_fallback_data.get("enabled", False)),
+        allow_streaming=bool(provider_fallback_data.get("allow_streaming", True)),
+        allow_partial_progress=bool(
+            provider_fallback_data.get("allow_partial_progress", True)
+        ),
+        allow_cancellation=bool(
+            provider_fallback_data.get("allow_cancellation", True)
+        ),
+        target_first_output_ms=float(
+            provider_fallback_data.get("target_first_output_ms", 1500)
+        ),
+        soft_first_output_ms=float(
+            provider_fallback_data.get("soft_first_output_ms", 3000)
+        ),
+        hard_first_output_ms=float(
+            provider_fallback_data.get("hard_first_output_ms", 6000)
+        ),
+        target_total_ms=float(provider_fallback_data.get("target_total_ms", 4000)),
+        soft_total_ms=float(provider_fallback_data.get("soft_total_ms", 8000)),
+        hard_total_ms=float(provider_fallback_data.get("hard_total_ms", 12000)),
+        allow_for_native_routes=bool(
+            provider_fallback_data.get("allow_for_native_routes", False)
+        ),
+        allow_speculative_provider_calls=bool(
+            provider_fallback_data.get("allow_speculative_provider_calls", False)
+        ),
+        log_prompt_payloads=bool(
+            provider_fallback_data.get("log_prompt_payloads", False)
+        ),
+        audit_timing=bool(provider_fallback_data.get("audit_timing", True)),
+        surface_partial_in_ghost=bool(
+            provider_fallback_data.get("surface_partial_in_ghost", True)
+        ),
+        surface_details_in_deck=bool(
+            provider_fallback_data.get("surface_details_in_deck", True)
+        ),
     )
 
     voice_data = data.get("voice", {})
@@ -1032,6 +1234,7 @@ def _build_app_config(
         weather=weather_config,
         hardware_telemetry=hardware_telemetry_config,
         screen_awareness=screen_awareness_config,
+        camera_awareness=camera_awareness_config,
         calculations=calculations_config,
         software_control=software_control_config,
         software_recovery=software_recovery_config,
@@ -1039,6 +1242,7 @@ def _build_app_config(
         web_retrieval=web_retrieval_config,
         discord_relay=discord_relay_config,
         openai=openai_config,
+        provider_fallback=provider_fallback_config,
         voice=voice_config,
         safety=safety_config,
         tools=tool_config,
@@ -1125,6 +1329,50 @@ def _apply_env_overrides(data: ConfigDict, env: Mapping[str, str]) -> ConfigDict
             float,
         ),
         "STORMHELM_CORE_RESTART_BACKOFF_MS": ("lifecycle.core_restart_backoff_ms", int),
+        "STORMHELM_CAMERA_AWARENESS_ENABLED": (
+            "camera_awareness.enabled",
+            _parse_bool,
+        ),
+        "STORMHELM_CAMERA_AWARENESS_PLANNER_ROUTING_ENABLED": (
+            "camera_awareness.planner_routing_enabled",
+            _parse_bool,
+        ),
+        "STORMHELM_CAMERA_AWARENESS_ALLOW_CLOUD_VISION": (
+            "camera_awareness.allow_cloud_vision",
+            _parse_bool,
+        ),
+        "STORMHELM_CAMERA_AWARENESS_ALLOW_BACKGROUND_CAPTURE": (
+            "camera_awareness.allow_background_capture",
+            _parse_bool,
+        ),
+        "STORMHELM_CAMERA_AWARENESS_CAPTURE_PROVIDER": (
+            "camera_awareness.capture.provider",
+            str,
+        ),
+        "STORMHELM_CAMERA_AWARENESS_VISION_PROVIDER": (
+            "camera_awareness.vision.provider",
+            str,
+        ),
+        "STORMHELM_CAMERA_AWARENESS_VISION_MODEL": (
+            "camera_awareness.vision.model",
+            str,
+        ),
+        "STORMHELM_CAMERA_AWARENESS_VISION_DETAIL": (
+            "camera_awareness.vision.detail",
+            str,
+        ),
+        "STORMHELM_CAMERA_AWARENESS_VISION_MAX_IMAGE_BYTES": (
+            "camera_awareness.vision.max_image_bytes",
+            int,
+        ),
+        "STORMHELM_CAMERA_AWARENESS_VISION_REQUIRE_CONFIRMATION_FOR_CLOUD": (
+            "camera_awareness.vision.require_confirmation_for_cloud",
+            _parse_bool,
+        ),
+        "STORMHELM_CAMERA_AWARENESS_VISION_ALLOW_CLOUD": (
+            "camera_awareness.vision.allow_cloud_vision",
+            _parse_bool,
+        ),
         "STORMHELM_WEB_RETRIEVAL_ENABLED": (
             "web_retrieval.enabled",
             _parse_bool,
@@ -1669,6 +1917,74 @@ def _apply_env_overrides(data: ConfigDict, env: Mapping[str, str]) -> ConfigDict
         ),
         "STORMHELM_SCREEN_CAPTURE_STORE_RAW_IMAGES": (
             "screen_awareness.screen_capture_store_raw_images",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ENABLED": (
+            "screen_awareness.browser_adapters.playwright.enabled",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_ACTIONS": (
+            "screen_awareness.browser_adapters.playwright.allow_actions",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_CLICK": (
+            "screen_awareness.browser_adapters.playwright.allow_click",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_FOCUS": (
+            "screen_awareness.browser_adapters.playwright.allow_focus",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_TYPE_TEXT": (
+            "screen_awareness.browser_adapters.playwright.allow_type_text",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_SCROLL": (
+            "screen_awareness.browser_adapters.playwright.allow_scroll",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_DEV_ACTIONS": (
+            "screen_awareness.browser_adapters.playwright.allow_dev_actions",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_BROWSER_LAUNCH": (
+            "screen_awareness.browser_adapters.playwright.allow_browser_launch",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_CONNECT_EXISTING": (
+            "screen_awareness.browser_adapters.playwright.allow_connect_existing",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_DEV_ADAPTER": (
+            "screen_awareness.browser_adapters.playwright.allow_dev_adapter",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_FORM_FILL": (
+            "screen_awareness.browser_adapters.playwright.allow_form_fill",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_FORM_SUBMIT": (
+            "screen_awareness.browser_adapters.playwright.allow_form_submit",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_LOGIN": (
+            "screen_awareness.browser_adapters.playwright.allow_login",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_COOKIES": (
+            "screen_awareness.browser_adapters.playwright.allow_cookies",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_USER_PROFILE": (
+            "screen_awareness.browser_adapters.playwright.allow_user_profile",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_SCREENSHOTS": (
+            "screen_awareness.browser_adapters.playwright.allow_screenshots",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_DEBUG_EVENTS_ENABLED": (
+            "screen_awareness.browser_adapters.playwright.debug_events_enabled",
             _parse_bool,
         ),
         "STORMHELM_CALCULATIONS_ENABLED": ("calculations.enabled", _parse_bool),

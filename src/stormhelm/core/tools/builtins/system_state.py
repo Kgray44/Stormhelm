@@ -1396,6 +1396,18 @@ class SaveLocationTool(BaseTool):
                 summary=persona.report("Stormhelm could not secure location bearings strongly enough to save them yet."),
                 data=resolved,
             )
+        if resolved.get("location_is_ip_estimate") or str(resolved.get("source") or "").strip().lower() == "ip_estimate":
+            return ToolResult(
+                success=True,
+                summary=persona.report(
+                    "Stormhelm only has an IP-based location estimate right now, so it needs confirmation before saving that as home."
+                ),
+                data={
+                    "saved_location": None,
+                    "location": resolved,
+                    "reason": "location_needs_confirmation",
+                },
+            )
 
         if target == "home":
             saved = probe.save_home_location(

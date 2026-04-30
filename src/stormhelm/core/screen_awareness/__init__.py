@@ -18,7 +18,17 @@ from stormhelm.core.screen_awareness.models import AppAdapterResolution
 from stormhelm.core.screen_awareness.models import AppSemanticContext
 from stormhelm.core.screen_awareness.models import AppSemanticTarget
 from stormhelm.core.screen_awareness.models import BrowserFormSemantic
+from stormhelm.core.screen_awareness.models import BrowserGroundingCandidate
 from stormhelm.core.screen_awareness.models import BrowserSemanticContext
+from stormhelm.core.screen_awareness.models import BrowserSemanticActionExecutionRequest
+from stormhelm.core.screen_awareness.models import BrowserSemanticActionExecutionResult
+from stormhelm.core.screen_awareness.models import BrowserSemanticActionPlan
+from stormhelm.core.screen_awareness.models import BrowserSemanticActionPreview
+from stormhelm.core.screen_awareness.models import BrowserSemanticChange
+from stormhelm.core.screen_awareness.models import BrowserSemanticControl
+from stormhelm.core.screen_awareness.models import BrowserSemanticObservation
+from stormhelm.core.screen_awareness.models import BrowserSemanticVerificationRequest
+from stormhelm.core.screen_awareness.models import BrowserSemanticVerificationResult
 from stormhelm.core.screen_awareness.models import BrowserTabIdentity
 from stormhelm.core.screen_awareness.models import BrainIntegrationResult
 from stormhelm.core.screen_awareness.models import BrainIntegrationStatus
@@ -74,6 +84,7 @@ from stormhelm.core.screen_awareness.models import PlannerBrainIntegrationResult
 from stormhelm.core.screen_awareness.models import PlannerPowerFeaturesResult
 from stormhelm.core.screen_awareness.models import PlannerWorkflowReuseResult
 from stormhelm.core.screen_awareness.models import PlannerVerificationResult
+from stormhelm.core.screen_awareness.models import PlaywrightAdapterReadiness
 from stormhelm.core.screen_awareness.models import ProblemAmbiguityState
 from stormhelm.core.screen_awareness.models import ProblemAnswerStatus
 from stormhelm.core.screen_awareness.models import ProblemSolvingResult
@@ -172,6 +183,7 @@ from stormhelm.core.screen_awareness.planner import ScreenAwarenessPlannerSeam
 from stormhelm.core.screen_awareness.planner import ScreenPlannerEvaluation
 from stormhelm.core.screen_awareness.service import ScreenAwarenessSubsystem
 from stormhelm.core.screen_awareness.service import build_screen_awareness_subsystem
+from stormhelm.core.screen_awareness.browser_playwright import PlaywrightBrowserSemanticAdapter
 from stormhelm.core.screen_awareness.visual_capture import ScreenCaptureResult
 from stormhelm.core.screen_awareness.visual_capture import ScreenVisualGrounder
 from stormhelm.core.screen_awareness.visual_capture import WindowsScreenCaptureProvider
@@ -198,7 +210,17 @@ __all__ = [
     "BrainIntegrationResult",
     "BrainIntegrationStatus",
     "BrowserFormSemantic",
+    "BrowserGroundingCandidate",
     "BrowserSemanticContext",
+    "BrowserSemanticActionExecutionRequest",
+    "BrowserSemanticActionExecutionResult",
+    "BrowserSemanticActionPlan",
+    "BrowserSemanticActionPreview",
+    "BrowserSemanticChange",
+    "BrowserSemanticControl",
+    "BrowserSemanticObservation",
+    "BrowserSemanticVerificationRequest",
+    "BrowserSemanticVerificationResult",
     "BrowserTabIdentity",
     "ChangeClassification",
     "ChangeObservation",
@@ -259,6 +281,8 @@ __all__ = [
     "PlannerProblemSolvingResult",
     "PlannerWorkflowReuseResult",
     "PlannerVerificationResult",
+    "PlaywrightAdapterReadiness",
+    "PlaywrightBrowserSemanticAdapter",
     "ProblemAmbiguityState",
     "ProblemAnswerStatus",
     "ProblemSolvingResult",

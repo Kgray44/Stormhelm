@@ -9,7 +9,13 @@ from typing import Any
 from .models import CommandEvalCase
 from .models import CommandEvalResult
 from .models import STAGE_LATENCY_FIELDS
+from .models import UI_PERCEIVED_LATENCY_FLAG_FIELDS
+from .models import UI_PERCEIVED_LATENCY_NUMERIC_FIELDS
 from .models import json_ready
+
+from stormhelm.core.latency_gates import build_latency_gate_report
+from stormhelm.core.latency_gates import format_latency_gate_report_markdown
+from stormhelm.core.provider_fallback import PROTECTED_NATIVE_ROUTE_FAMILIES
 
 
 _L44_INLINE_CORRECT_ROUTES = {
@@ -167,6 +173,10 @@ def build_checkpoint_summary(results: list[CommandEvalResult], *, feature_audit:
     raw_failure_category_counts = Counter(result.failure_category for result in all_failures)
     scored_failure_category_counts = Counter(result.failure_category for result in failures)
     excluded_category_counts = Counter(result.failure_category for result in excluded_failures)
+    latency_gate_report = build_latency_gate_report(
+        [result.to_dict() for result in results],
+        profile="command_eval_profile",
+    )
     return {
         "completed_requests": len(results),
         "durable_assertion_rows": len(results),
@@ -199,6 +209,7 @@ def build_checkpoint_summary(results: list[CommandEvalResult], *, feature_audit:
         },
         "stage_latency_summary": _stage_latency_summary(results),
         "kraken_latency_report": _kraken_latency_report(results),
+        "latency_gate_report": latency_gate_report,
         "unattributed_latency": {
             "top_20": _top_unattributed(results),
             "by_route_family": _unattributed_by_route_family(results),
@@ -262,6 +273,9 @@ def build_checkpoint_report(
         "",
         "## Kraken Latency Report",
         _format_kraken_latency_report(summary["kraken_latency_report"]),
+        "",
+        "## L10 Latency Gate Report",
+        _format_latency_gate_report_for_checkpoint(summary["latency_gate_report"]),
         "",
         "## Slowest 20 Requests",
         _compact_result_table(summary["slowest_20_requests"]),
@@ -405,6 +419,10 @@ def write_artifacts(
         "focused_checkpoint_report": output_dir / "focused_checkpoint_report.md",
         "full_checkpoint_summary": output_dir / "full_checkpoint_summary.json",
         "full_checkpoint_report": output_dir / "full_checkpoint_report.md",
+        "focused_latency_gate_report": output_dir / "focused_latency_gate_report.json",
+        "focused_latency_gate_report_md": output_dir / "focused_latency_gate_report.md",
+        "full_latency_gate_report": output_dir / "full_latency_gate_report.json",
+        "full_latency_gate_report_md": output_dir / "full_latency_gate_report.md",
     }
     write_json(paths["feature_map"], feature_map)
     if feature_audit is not None:
@@ -414,7 +432,13 @@ def write_artifacts(
     write_jsonl(paths["full_results"], [result.to_dict() for result in full_results])
     summary = build_summary(full_results)
     write_json(paths["summary"], summary)
-    write_json(paths["focused_checkpoint_summary"], build_checkpoint_summary(focused_results, feature_audit=feature_audit))
+    focused_checkpoint_summary = build_checkpoint_summary(focused_results, feature_audit=feature_audit)
+    write_json(paths["focused_checkpoint_summary"], focused_checkpoint_summary)
+    write_json(paths["focused_latency_gate_report"], focused_checkpoint_summary["latency_gate_report"])
+    paths["focused_latency_gate_report_md"].write_text(
+        format_latency_gate_report_markdown(focused_checkpoint_summary["latency_gate_report"]),
+        encoding="utf-8",
+    )
     paths["focused_checkpoint_report"].write_text(
         build_checkpoint_report(
             title="Stormhelm Focused Command Evaluation Checkpoint",
@@ -423,7 +447,13 @@ def write_artifacts(
         ),
         encoding="utf-8",
     )
-    write_json(paths["full_checkpoint_summary"], build_checkpoint_summary(full_results, feature_audit=feature_audit))
+    full_checkpoint_summary = build_checkpoint_summary(full_results, feature_audit=feature_audit)
+    write_json(paths["full_checkpoint_summary"], full_checkpoint_summary)
+    write_json(paths["full_latency_gate_report"], full_checkpoint_summary["latency_gate_report"])
+    paths["full_latency_gate_report_md"].write_text(
+        format_latency_gate_report_markdown(full_checkpoint_summary["latency_gate_report"]),
+        encoding="utf-8",
+    )
     paths["full_checkpoint_report"].write_text(
         build_checkpoint_report(
             title="Stormhelm Command Evaluation Checkpoint",
@@ -457,6 +487,37 @@ def _format_nested_counts(counts: dict[str, dict[str, Any]]) -> str:
     return "\n".join(f"- {key}: {dict(value)}" for key, value in counts.items())
 
 
+def _format_latency_gate_report_for_checkpoint(report: dict[str, Any]) -> str:
+    if not isinstance(report, dict) or not report:
+        return "- No L10 latency gate data."
+    posture = report.get("release_posture") if isinstance(report.get("release_posture"), dict) else {}
+    gate_summary = report.get("gate_summary") if isinstance(report.get("gate_summary"), dict) else {}
+    provider = report.get("provider_fallback_metrics") if isinstance(report.get("provider_fallback_metrics"), dict) else {}
+    ui = report.get("ui_perceived_latency_metrics") if isinstance(report.get("ui_perceived_latency_metrics"), dict) else {}
+    voice = report.get("voice_first_audio_metrics") if isinstance(report.get("voice_first_audio_metrics"), dict) else {}
+    lines = [
+        f"- release_posture: {posture.get('posture', 'invalid_run')}",
+        f"- gates: {gate_summary}",
+        f"- blocking_reasons: {posture.get('blocking_reasons', [])}",
+        f"- warning_reasons: {posture.get('warning_reasons', [])}",
+        f"- unexpected_provider_native_call_count: {provider.get('unexpected_provider_native_call_count', 0)}",
+        f"- provider_first_output_ms: {provider.get('provider_first_output_ms', {})}",
+        f"- voice_first_audio_ms: {voice.get('voice_first_audio_ms', {})}",
+        f"- ui_bridge_apply_ms: {ui.get('ui_bridge_apply_ms', {})}",
+        f"- ui_render_visible_status: {ui.get('ui_render_visible_status', 'unknown')}",
+        f"- known_baseline_gaps: {len(report.get('known_baseline_gaps') or [])}",
+    ]
+    outliers = report.get("outlier_investigation") if isinstance(report.get("outlier_investigation"), list) else []
+    if outliers:
+        lines.append("- outliers:")
+        for item in outliers[:10]:
+            if isinstance(item, dict):
+                lines.append(
+                    f"  - {item.get('row_id')}: {item.get('total_ms')} ms | {item.get('classification')} | longest={item.get('longest_stage')}"
+                )
+    return "\n".join(lines)
+
+
 def _format_kraken_latency_report(report: dict[str, Any]) -> str:
     if not report:
         return "- No data."
@@ -466,6 +527,21 @@ def _format_kraken_latency_report(report: dict[str, Any]) -> str:
         f"- budget_exceeded_continuing_count: {report.get('budget_exceeded_continuing_count', 0)}",
         f"- hard_timeout_count: {report.get('hard_timeout_count', 0)}",
         f"- provider_call_count: {report.get('provider_call_count', 0)}",
+        f"- provider_calls_by_route_family: {report.get('provider_calls_by_route_family', {})}",
+        f"- provider_calls_by_provider: {report.get('provider_calls_by_provider', {})}",
+        f"- provider_calls_by_model: {report.get('provider_calls_by_model', {})}",
+        f"- provider_fallback_allowed_count: {report.get('provider_fallback_allowed_count', 0)}",
+        f"- provider_fallback_denied_count: {report.get('provider_fallback_denied_count', 0)}",
+        f"- provider_blocked_by_native_route_count: {report.get('provider_blocked_by_native_route_count', 0)}",
+        f"- provider_first_output_ms: {report.get('provider_first_output_ms', {})}",
+        f"- provider_total_ms: {report.get('provider_total_ms', {})}",
+        f"- provider_timeout_count: {report.get('provider_timeout_count', 0)}",
+        f"- provider_cancelled_count: {report.get('provider_cancelled_count', 0)}",
+        f"- provider_failed_count: {report.get('provider_failed_count', 0)}",
+        f"- provider_streaming_used_count: {report.get('provider_streaming_used_count', 0)}",
+        f"- provider_partial_result_count: {report.get('provider_partial_result_count', 0)}",
+        f"- native_routes_with_unexpected_provider_calls: {report.get('native_routes_with_unexpected_provider_calls', [])}",
+        f"- provider_latency_excluded_from_native_p95: {report.get('provider_latency_excluded_from_native_p95', False)}",
         f"- partial_response_count: {report.get('partial_response_count', 0)}",
         f"- async_initial_response_count: {report.get('async_initial_response_count', 0)}",
         f"- progress_event_count: {report.get('progress_event_count', 0)}",
@@ -502,6 +578,16 @@ def _format_kraken_latency_report(report: dict[str, Any]) -> str:
         f"- voice_streaming_fallback_count: {report.get('voice_streaming_fallback_count', 0)}",
         f"- voice_prewarm_used_count: {report.get('voice_prewarm_used_count', 0)}",
         f"- voice_partial_playback_count: {report.get('voice_partial_playback_count', 0)}",
+        f"- event_stream_delay_ms: {report.get('event_stream_delay_ms', {})}",
+        f"- ui_bridge_apply_ms: {report.get('ui_bridge_apply_ms', {})}",
+        f"- ui_render_visible_ms: {report.get('ui_render_visible_ms', {})}",
+        f"- ghost_first_visible_state_ms: {report.get('ghost_first_visible_state_ms', {})}",
+        f"- approval_prompt_visible_ms: {report.get('approval_prompt_visible_ms', {})}",
+        f"- voice_state_visible_ms: {report.get('voice_state_visible_ms', {})}",
+        f"- route_state_visible_ms: {report.get('route_state_visible_ms', {})}",
+        f"- polling_fallback_used_count: {report.get('polling_fallback_used_count', 0)}",
+        f"- reconnect_gap_detected_count: {report.get('reconnect_gap_detected_count', 0)}",
+        f"- ui_render_visible_not_measured_count: {report.get('ui_render_visible_not_measured_count', 0)}",
         f"- by_async_strategy: {report.get('by_async_strategy', {})}",
         f"- queue_wait_ms: {report.get('queue_wait_ms', {})}",
         f"- job_run_ms: {report.get('job_run_ms', {})}",
@@ -644,6 +730,8 @@ def _kraken_latency_report(results: list[CommandEvalResult]) -> dict[str, Any]:
     by_longest_stage: dict[str, list[float]] = defaultdict(list)
     by_execution_mode: dict[str, list[float]] = defaultdict(list)
     by_async_strategy: dict[str, list[float]] = defaultdict(list)
+    l8_by_hot_path: dict[str, list[float]] = defaultdict(list)
+    l8_by_subsystem: dict[str, list[float]] = defaultdict(list)
     async_strategy_by_worker_lane: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
     queue_wait_values: list[float] = []
     job_run_values: list[float] = []
@@ -713,6 +801,31 @@ def _kraken_latency_report(results: list[CommandEvalResult]) -> dict[str, Any]:
     voice_fallback_count = 0
     voice_prewarm_used_count = 0
     voice_partial_playback_count = 0
+    ui_latency_values: dict[str, list[float]] = {
+        field: [] for field in UI_PERCEIVED_LATENCY_NUMERIC_FIELDS
+    }
+    ui_flag_counts: Counter[str] = Counter()
+    ui_render_visible_not_measured_count = 0
+    l8_cache_hit_count = 0
+    l8_cache_miss_count = 0
+    l8_live_probe_started_count = 0
+    l8_provider_fallback_used_count = 0
+    l8_heavy_context_used_count = 0
+    provider_calls_total = 0
+    provider_calls_by_route_family: Counter[str] = Counter()
+    provider_calls_by_provider: Counter[str] = Counter()
+    provider_calls_by_model: Counter[str] = Counter()
+    provider_fallback_allowed_count = 0
+    provider_fallback_denied_count = 0
+    provider_blocked_by_native_route_count = 0
+    provider_first_output_values: list[float] = []
+    provider_total_values: list[float] = []
+    provider_timeout_count = 0
+    provider_cancelled_count = 0
+    provider_failed_count = 0
+    provider_streaming_used_count = 0
+    provider_partial_result_count = 0
+    native_routes_with_unexpected_provider_calls: list[str] = []
     for row in rows:
         total = float(row.get("total_latency_ms") or row.get("latency_ms") or 0.0)
         route = str(row.get("actual_route_family") or row.get("expected_route_family") or "unknown")
@@ -727,6 +840,68 @@ def _kraken_latency_report(results: list[CommandEvalResult]) -> dict[str, Any]:
         by_longest_stage[stage].append(total)
         by_execution_mode[execution_mode].append(total)
         by_async_strategy[async_strategy].append(total)
+        l8_hot_path = str(row.get("l8_hot_path_name") or row.get("hot_path_name") or "")
+        l8_subsystem = str(row.get("l8_subsystem_id") or row.get("subsystem_id") or "")
+        if l8_hot_path:
+            l8_by_hot_path[l8_hot_path].append(total)
+        if l8_subsystem:
+            l8_by_subsystem[l8_subsystem].append(total)
+        if row.get("l8_cache_hit") or row.get("cache_hit"):
+            l8_cache_hit_count += 1
+        elif l8_hot_path or l8_subsystem:
+            l8_cache_miss_count += 1
+        if row.get("l8_live_probe_started") or row.get("live_probe_started"):
+            l8_live_probe_started_count += 1
+        if row.get("l8_provider_fallback_used"):
+            l8_provider_fallback_used_count += 1
+        if row.get("l8_heavy_context_used") or row.get("heavy_context_used"):
+            l8_heavy_context_used_count += 1
+        provider_count = int(row.get("provider_call_count") or 0)
+        provider_called = bool(row.get("provider_called") or provider_count > 0)
+        if provider_called and provider_count <= 0:
+            provider_count = 1
+        provider_calls_total += provider_count
+        if provider_count:
+            provider_calls_by_route_family[route] += provider_count
+            provider_name = str(row.get("provider_name") or "")
+            if not provider_name and isinstance(row.get("provider_names"), list):
+                provider_name = str(next(iter(row.get("provider_names") or []), ""))
+            model_name = str(row.get("provider_model_name") or "")
+            if not model_name and isinstance(row.get("model_names"), list):
+                model_name = str(next(iter(row.get("model_names") or []), ""))
+            if provider_name:
+                provider_calls_by_provider[provider_name] += provider_count
+            if model_name:
+                provider_calls_by_model[model_name] += provider_count
+            if route in PROTECTED_NATIVE_ROUTE_FAMILIES:
+                case_id = str(row.get("test_id") or row.get("case_id") or "").strip()
+                native_routes_with_unexpected_provider_calls.append(case_id or route)
+        if row.get("provider_fallback_allowed"):
+            provider_fallback_allowed_count += 1
+        if row.get("provider_fallback_blocked_reason"):
+            provider_fallback_denied_count += 1
+            if row.get("provider_fallback_blocked_reason") == "provider_blocked_by_native_route":
+                provider_blocked_by_native_route_count += 1
+        first_output = _numeric_or_none(row.get("provider_first_output_ms"))
+        if first_output is not None:
+            provider_first_output_values.append(first_output)
+        total_provider = _numeric_or_none(row.get("provider_total_ms"))
+        if total_provider is not None:
+            provider_total_values.append(total_provider)
+        if row.get("provider_timeout_hit") or str(row.get("provider_failure_code") or "").startswith("provider_timeout"):
+            provider_timeout_count += 1
+        if row.get("provider_cancelled") or row.get("provider_failure_code") == "provider_cancelled":
+            provider_cancelled_count += 1
+        provider_failure_code = str(row.get("provider_failure_code") or "")
+        if (
+            provider_failure_code
+            and not provider_failure_code.startswith("provider_timeout")
+            and provider_failure_code != "provider_cancelled"
+        ):
+            provider_failed_count += 1
+        if row.get("provider_streaming_used"):
+            provider_streaming_used_count += 1
+        provider_partial_result_count += int(row.get("provider_partial_result_count") or 0)
         async_strategy_by_worker_lane[async_strategy][worker_lane].append(total)
         worker_lane_counts[worker_lane] += 1
         queue_wait_values.append(float(row.get("queue_wait_ms") or 0.0))
@@ -842,6 +1017,15 @@ def _kraken_latency_report(results: list[CommandEvalResult]) -> dict[str, Any]:
             voice_prewarm_used_count += 1
         if row.get("voice_partial_playback"):
             voice_partial_playback_count += 1
+        for field in UI_PERCEIVED_LATENCY_NUMERIC_FIELDS:
+            value = _numeric_or_none(row.get(field))
+            if value is not None:
+                ui_latency_values[field].append(value)
+        for field in UI_PERCEIVED_LATENCY_FLAG_FIELDS:
+            if row.get(field):
+                ui_flag_counts[field] += 1
+        if _row_has_ui_perceived_latency(row) and row.get("ui_render_visible_ms") is None:
+            ui_render_visible_not_measured_count += 1
         inline_front_half_values.append(float(row.get("inline_front_half_ms") or 0.0))
         worker_back_half_values.append(float(row.get("worker_back_half_ms") or 0.0))
         continuation_queue_wait_values.append(float(row.get("continuation_queue_wait_ms") or 0.0))
@@ -873,6 +1057,19 @@ def _kraken_latency_report(results: list[CommandEvalResult]) -> dict[str, Any]:
             mode: _value_summary(values)
             for mode, values in sorted(by_execution_mode.items())
         },
+        "l8_latency_by_hot_path": {
+            hot_path: _value_summary(values)
+            for hot_path, values in sorted(l8_by_hot_path.items())
+        },
+        "l8_latency_by_subsystem": {
+            subsystem: _value_summary(values)
+            for subsystem, values in sorted(l8_by_subsystem.items())
+        },
+        "l8_cache_hit_count": l8_cache_hit_count,
+        "l8_cache_miss_count": l8_cache_miss_count,
+        "l8_live_probe_started_count": l8_live_probe_started_count,
+        "l8_provider_fallback_used_count": l8_provider_fallback_used_count,
+        "l8_heavy_context_used_count": l8_heavy_context_used_count,
         "by_async_strategy": {
             strategy: _value_summary(values)
             for strategy, values in sorted(by_async_strategy.items())
@@ -930,7 +1127,24 @@ def _kraken_latency_report(results: list[CommandEvalResult]) -> dict[str, Any]:
         "budget_exceeded_count": sum(1 for row in rows if row.get("budget_exceeded")),
         "budget_exceeded_continuing_count": sum(1 for row in rows if row.get("budget_exceeded_continuing")),
         "hard_timeout_count": sum(1 for row in rows if row.get("hard_timeout") or row.get("process_killed")),
-        "provider_call_count": sum(int(row.get("provider_call_count") or 0) for row in rows),
+        "provider_call_count": provider_calls_total,
+        "provider_calls_total": provider_calls_total,
+        "provider_calls_by_route_family": dict(sorted(provider_calls_by_route_family.items())),
+        "provider_calls_by_provider": dict(sorted(provider_calls_by_provider.items())),
+        "provider_calls_by_model": dict(sorted(provider_calls_by_model.items())),
+        "provider_fallback_allowed_count": provider_fallback_allowed_count,
+        "provider_fallback_denied_count": provider_fallback_denied_count,
+        "provider_blocked_by_native_route_count": provider_blocked_by_native_route_count,
+        "provider_first_output_ms": _value_summary(provider_first_output_values),
+        "provider_total_ms": _value_summary(provider_total_values),
+        "provider_timeout_count": provider_timeout_count,
+        "provider_cancelled_count": provider_cancelled_count,
+        "provider_failed_count": provider_failed_count,
+        "provider_streaming_used_count": provider_streaming_used_count,
+        "provider_partial_result_count": provider_partial_result_count,
+        "native_routes_with_unexpected_provider_calls": sorted(set(native_routes_with_unexpected_provider_calls)),
+        "provider_latency_excluded_from_native_p95": True,
+        "provider_latency_included_in_overall_p95": True,
         "partial_response_count": sum(1 for row in rows if row.get("partial_response_returned")),
         "async_initial_response_count": async_initial_response_count,
         "progress_event_count": progress_event_count,
@@ -978,6 +1192,15 @@ def _kraken_latency_report(results: list[CommandEvalResult]) -> dict[str, Any]:
         "voice_streaming_fallback_count": voice_fallback_count,
         "voice_prewarm_used_count": voice_prewarm_used_count,
         "voice_partial_playback_count": voice_partial_playback_count,
+        **{
+            field: _value_summary(values)
+            for field, values in ui_latency_values.items()
+        },
+        "polling_fallback_used_count": ui_flag_counts["polling_fallback_used"],
+        "reconnect_gap_detected_count": ui_flag_counts["reconnect_gap_detected"],
+        "ui_render_visible_not_measured_count": ui_render_visible_not_measured_count,
+        "top_rows_by_ui_bridge_apply": _top_ui_perceived_latency_rows(rows, "ui_bridge_apply_ms"),
+        "top_rows_by_ui_render_visible": _top_ui_perceived_latency_rows(rows, "ui_render_visible_ms"),
         "fail_fast_count": sum(1 for row in rows if row.get("fail_fast_reason")),
         "heavy_context_loaded_count_by_route_family": dict(sorted(heavy_context_by_route.items())),
         "provider_fallback_suppressed_count": sum(1 for row in rows if row.get("provider_fallback_suppressed_reason")),
@@ -1463,6 +1686,16 @@ def _compact_latency_row(row: dict[str, Any]) -> dict[str, Any]:
         "partial_response_returned": row.get("partial_response_returned"),
         "async_expected": row.get("async_expected"),
         "first_feedback_ms": row.get("first_feedback_ms"),
+        "event_stream_delay_ms": row.get("event_stream_delay_ms"),
+        "ui_bridge_apply_ms": row.get("ui_bridge_apply_ms"),
+        "ui_render_visible_ms": row.get("ui_render_visible_ms"),
+        "ui_render_visible_status": row.get("ui_render_visible_status"),
+        "ghost_first_visible_state_ms": row.get("ghost_first_visible_state_ms"),
+        "approval_prompt_visible_ms": row.get("approval_prompt_visible_ms"),
+        "voice_state_visible_ms": row.get("voice_state_visible_ms"),
+        "route_state_visible_ms": row.get("route_state_visible_ms"),
+        "polling_fallback_used": row.get("polling_fallback_used"),
+        "reconnect_gap_detected": row.get("reconnect_gap_detected"),
         "budget_exceeded_continuing": row.get("budget_exceeded_continuing"),
         "fail_fast_reason": row.get("fail_fast_reason"),
         "fast_path_used": row.get("fast_path_used"),
@@ -1578,6 +1811,39 @@ def _compact_latency_row(row: dict[str, Any]) -> dict[str, Any]:
         "hard_timeout": row.get("hard_timeout"),
         "failure_category": row.get("failure_category"),
     }
+
+
+def _numeric_or_none(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _row_has_ui_perceived_latency(row: dict[str, Any]) -> bool:
+    return any(row.get(field) is not None for field in UI_PERCEIVED_LATENCY_NUMERIC_FIELDS) or any(
+        bool(row.get(field)) for field in UI_PERCEIVED_LATENCY_FLAG_FIELDS
+    ) or bool(row.get("ui_render_visible_status"))
+
+
+def _top_ui_perceived_latency_rows(
+    rows: list[dict[str, Any]],
+    field: str,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            **_compact_latency_row(row),
+            field: row.get(field),
+        }
+        for row in sorted(
+            rows,
+            key=lambda item: _numeric_or_none(item.get(field)) or 0.0,
+            reverse=True,
+        )[:10]
+        if _numeric_or_none(row.get(field)) is not None
+    ]
 
 
 def _top_stage_offenders(rows: list[dict[str, Any]], stage_name: str) -> list[dict[str, Any]]:

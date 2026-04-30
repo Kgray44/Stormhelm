@@ -14,6 +14,7 @@ Stormhelm is local-first by default, but it can still affect local files, apps, 
 | Tools | Yes | Built-in local tools unless provider/integration explicitly used. |
 | Voice state/control | Yes | Voice status, capture controls, and UI state are local. OpenAI STT/TTS is external only when enabled/invoked. |
 | Web retrieval | External public web when used | HTTP and optional Obscura retrieval only fetch public `http`/`https` URLs after safety validation. Private/local/file/credential URLs are blocked by default. |
+| Live browser integration checks | Local diagnostics plus explicit public URL checks | Disabled unless `STORMHELM_LIVE_BROWSER_TESTS=true`; used to probe local Obscura/Playwright dependencies and the isolated Playwright semantic snapshot path without enabling action execution by default. |
 | OpenAI | No, external | Disabled by default; enabling sends prompt/context to configured API. |
 | Weather | External provider | Weather tool uses configured provider URL when used. |
 | Discord relay | External effect | Local client automation can send material outside Stormhelm after preview/trust. |
@@ -81,11 +82,13 @@ Web retrieval is read-only and does not require trust approval by default, but i
 | Output limits | URL length, text, and optional HTML are bounded by config limits. |
 | Events | Events include provider/status/counts/claim ceiling, not raw page text or HTML. |
 | CDP lifecycle | Managed Obscura CDP binds to localhost only, starts only for CDP provider requests, probes readiness, caps session lifetime/page count, and stops after inspection. |
+| CDP diagnostics | Compatibility reports expose binary found/version, endpoint states, websocket availability, protocol version, optional domain availability, startup/navigation/cleanup status, and claim ceiling. They do not expose raw page content, cookies, credentials, full HTML, or huge process output. |
+| Live integration | `scripts/run_live_browser_checks.ps1` and `python -m stormhelm.core.live_browser_integration` are opt-in only. They report passed/skipped/unavailable/partial/failed/incompatible states and keep action capabilities disabled. |
 | Claim ceiling | HTTP/CLI results are rendered page evidence only. CDP results are `headless_cdp_page_evidence` only. Stormhelm does not independently check source claims and does not treat extraction as the user's visible screen. |
 | Out of scope | Logged-in browser context, cookies/session reuse, form submission, clicking, typing, scrolling, credentials, CAPTCHA/anti-bot bypass, stealth bypass behavior, Playwright/Puppeteer integration, visible-screen verification, and webpage truth verification. |
 
-Sources: `src/stormhelm/core/web_retrieval/safety.py`, `src/stormhelm/core/web_retrieval/service.py`, `src/stormhelm/core/web_retrieval/obscura_provider.py`, `src/stormhelm/core/web_retrieval/cdp.py`, `src/stormhelm/core/web_retrieval/cdp_provider.py`, `src/stormhelm/core/adapters/contracts.py`, `config/default.toml`
-Tests: `tests/test_web_retrieval_safety.py`, `tests/test_web_retrieval_service.py`, `tests/test_web_retrieval_providers.py`, `tests/test_web_retrieval_cdp.py`, `tests/test_adapter_contracts.py`
+Sources: `src/stormhelm/core/web_retrieval/safety.py`, `src/stormhelm/core/web_retrieval/service.py`, `src/stormhelm/core/web_retrieval/obscura_provider.py`, `src/stormhelm/core/web_retrieval/cdp.py`, `src/stormhelm/core/web_retrieval/cdp_provider.py`, `src/stormhelm/core/web_retrieval/obscura_cdp_probe.py`, `src/stormhelm/core/live_browser_integration.py`, `src/stormhelm/core/adapters/contracts.py`, `config/default.toml`, `config/development-live-browser.toml.example`
+Tests: `tests/test_web_retrieval_safety.py`, `tests/test_web_retrieval_service.py`, `tests/test_web_retrieval_providers.py`, `tests/test_web_retrieval_cdp.py`, `tests/test_web_retrieval_cdp_reliability.py`, `tests/test_live_browser_integration.py`, `tests/test_adapter_contracts.py`
 
 ## Destructive Action Rules
 
@@ -114,15 +117,21 @@ Current posture:
 - Provider visual augmentation is available only when a provider exists.
 - Action is policy-gated and defaults to `confirm_before_act`.
 - Truthfulness/audit fields should surface low confidence, missing prior observation, and unsupported evidence.
+- The Playwright browser semantic adapter lives under Screen Awareness, is disabled by default, and is capped by strict claim ceilings: `browser_semantic_observation`, `browser_semantic_observation_comparison`, `browser_semantic_action_preview`, and runtime-gated `browser_semantic_action_execution`.
+- Addition 1/1.1 readiness distinguishes disabled, dev-gated, dependency-missing, browser-engine-missing, mock-ready, runtime-ready, unavailable, and failed states without requiring Playwright in normal CI.
+- Mock Playwright observations are labeled `playwright_mock`, require the dev adapter gate, and exist only for tests/diagnostics/UI plumbing. They are not real browser state.
+- Disabled or unavailable Playwright config blocks mock observation and reports an unavailable mock observation instead of fabricating browser state.
+- Playwright Addition 2 can extract bounded URL/title/control/form/dialog/text summaries from an isolated temporary browser context only when explicit dev/runtime gates and local dependencies are present. Playwright Addition 3 can rank semantic grounding candidates, report ambiguity, produce closest-match guidance, and create bounded form/dialog summaries from those observations. Playwright Addition 3.1 hardens messy-label/state extraction, synonym/negation grounding, iframe/shadow-DOM/large-page limitation reporting, and form-like summaries while preserving sensitive-value redaction. Playwright Addition 4 can compare two semantic observations and classify expected outcomes as supported, unsupported, partial, ambiguous, stale, insufficient, or unverifiable evidence. Playwright Addition 4.1 can create action previews and action plans with risk/trust/expected-check metadata. Playwright Addition 5 can execute only click/focus under explicit `allow_actions`, `allow_dev_actions`, and per-action gates, after trust approval, in an isolated temporary context, and then performs semantic before/after comparison. Playwright Addition 5.1 blocks stale plans, target drift, mismatched or denied approvals, consumed/expired grants, locator ambiguity, and unusable after-observation evidence instead of overclaiming action success. It does not attach to the user's signed-in browser profile and still does not expose type/scroll/form/login/cookie/profile/payment/CAPTCHA execution capabilities.
 
 What should not happen:
 
 - Do not claim full visual certainty from clipboard or stale context.
 - Do not execute screen actions silently under default policy.
 - Do not send screen context to OpenAI unless provider-backed augmentation/fallback is explicitly enabled and used.
+- Do not use Playwright to connect to user browser sessions, type, scroll, fill forms, submit forms, log in, read/write cookies, download files, handle payments, bypass CAPTCHA/anti-bot controls, verify visible screen state, or verify source truth. Click/focus execution exists only after explicit runtime gates and exact trust approval, only in isolated temporary contexts, and only with bounded semantic before/after comparison. Playwright command completion alone is not verification. Arbitrary public-site clicking and unrestricted browser automation remain out of scope.
 
-Sources: `config/default.toml`, `src/stormhelm/core/screen_awareness/service.py`, `src/stormhelm/core/screen_awareness/observation.py`, `src/stormhelm/core/screen_awareness/action.py`, `src/stormhelm/core/screen_awareness/verification.py`
-Tests: `tests/test_screen_awareness_phase12.py`, `tests/test_screen_awareness_action.py`, `tests/test_screen_awareness_verification.py`
+Sources: `config/default.toml`, `src/stormhelm/core/screen_awareness/service.py`, `src/stormhelm/core/screen_awareness/observation.py`, `src/stormhelm/core/screen_awareness/action.py`, `src/stormhelm/core/screen_awareness/verification.py`, `src/stormhelm/core/screen_awareness/browser_playwright.py`, `src/stormhelm/core/live_browser_integration.py`, `docs/screen-awareness-playwright-adapter.md`, `docs/live-browser-integration.md`
+Tests: `tests/test_screen_awareness_phase12.py`, `tests/test_screen_awareness_action.py`, `tests/test_screen_awareness_verification.py`, `tests/test_screen_awareness_playwright_adapter_scaffold.py`, `tests/test_screen_awareness_playwright_adapter_integration.py`, `tests/test_screen_awareness_playwright_live_semantic.py`, `tests/test_screen_awareness_playwright_grounding_guidance.py`, `tests/test_screen_awareness_playwright_grounding_robustness.py`, `tests/test_screen_awareness_playwright_semantic_verification.py`, `tests/test_screen_awareness_playwright_action_preview.py`, `tests/test_screen_awareness_playwright_click_focus_execution.py`, `tests/test_live_browser_integration.py`
 
 ## Discord Relay Boundaries
 

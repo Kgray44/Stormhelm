@@ -205,6 +205,25 @@ class TrustService:
                 details={"grant_id": matched_grant.grant_id},
             )
 
+        denied_request = self.repository.latest_denied_request(
+            session_id=action_request.session_id,
+            family=action_request.family,
+            action_key=action_request.action_key,
+            subject=action_request.subject,
+            task_id=action_request.task_id,
+        )
+        if denied_request is not None and not self._request_expired(denied_request):
+            decision = TrustDecision(
+                outcome=TrustDecisionOutcome.BLOCKED,
+                approval_state=ApprovalState.DENIED,
+                reason="The operator denied this request.",
+                operator_message=denied_request.operator_message or f"Denied {action_request.subject or action_request.family}.",
+                action_request=action_request,
+                approval_request=denied_request,
+            )
+            self._record_task_trust_denied(task_id=denied_request.task_id, request=denied_request)
+            return decision
+
         request = self.repository.latest_pending_request(
             session_id=action_request.session_id,
             family=action_request.family,

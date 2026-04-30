@@ -341,6 +341,71 @@ def test_main_controller_requests_snapshot_when_live_event_needs_reconciliation(
     assert client.snapshot_calls == 1
 
 
+def test_main_controller_visualizer_events_do_not_force_snapshot_reconciliation(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+    client = DummyClient()
+    controller = MainController(config=temp_config, bridge=bridge, client=client)
+    collection_emits = 0
+    voice_emits = 0
+
+    def mark_collection() -> None:
+        nonlocal collection_emits
+        collection_emits += 1
+
+    def mark_voice() -> None:
+        nonlocal voice_emits
+        voice_emits += 1
+
+    bridge.collectionsChanged.connect(mark_collection)
+    bridge.voiceStateChanged.connect(mark_voice)
+
+    controller._handle_stream_event(
+        {
+            "cursor": 31,
+            "event_id": 31,
+            "event_family": "voice",
+            "event_type": "voice.visualizer_update",
+            "severity": "debug",
+            "subsystem": "voice",
+            "visibility_scope": "deck_context",
+            "message": "Voice visualizer envelope updated.",
+            "payload": {
+                "metadata": {
+                    "visualizer_only": True,
+                    "voice": {
+                        "enabled": True,
+                        "voice_anchor": {
+                            "state": "speaking",
+                            "speaking_visual_active": True,
+                            "audio_reactive_available": True,
+                            "audio_reactive_source": "playback_output_envelope",
+                            "visual_drive_level": 0.72,
+                            "center_blob_drive": 0.68,
+                            "center_blob_scale_drive": 0.68,
+                            "center_blob_scale": 1.2176,
+                            "raw_audio_present": False,
+                        },
+                        "voice_visualizer": {
+                            "visualizer_updates_received": 31,
+                            "visualizer_updates_coalesced": 4,
+                            "visualizer_updates_dropped": 0,
+                            "raw_audio_present": False,
+                        },
+                        "raw_audio_present": False,
+                    },
+                }
+            },
+        }
+    )
+
+    assert client.snapshot_calls == 0
+    assert collection_emits == 0
+    assert voice_emits == 1
+    assert bridge.voiceState["voice_center_blob_scale_drive"] == 0.68
+    assert bridge.voiceState["visualizer_updates_received"] == 1
+    assert bridge.voiceState["bridge_collection_rebuilds_during_speech"] == 0
+
+
 def test_main_controller_requests_snapshot_when_stream_gap_is_reported(temp_config) -> None:
     bridge = UiBridge(temp_config)
     client = DummyClient()
@@ -356,6 +421,35 @@ def test_main_controller_requests_snapshot_when_stream_gap_is_reported(temp_conf
     )
 
     assert client.snapshot_calls == 1
+
+
+def test_main_controller_requests_reconciliation_after_stream_reconnect(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+    client = DummyClient()
+    controller = MainController(config=temp_config, bridge=bridge, client=client)
+
+    controller._handle_stream_state(
+        {
+            "phase": "reconnecting",
+            "source": "client",
+            "cursor": 22,
+            "reason": "remote host closed",
+            "reconnect_attempt": 1,
+        }
+    )
+    controller._handle_stream_state(
+        {
+            "phase": "connected",
+            "source": "core",
+            "requested_cursor": 22,
+            "latest_cursor": 24,
+            "gap_detected": False,
+        }
+    )
+
+    assert client.snapshot_calls == 1
+    assert bridge.eventStreamConnectionState["connection_state"] == "connected"
+    assert bridge.eventStreamConnectionState["reconciliation_requested"] is True
 
 
 def test_main_controller_opens_external_url_in_requested_browser(monkeypatch, temp_config) -> None:

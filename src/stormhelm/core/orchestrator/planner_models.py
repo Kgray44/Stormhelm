@@ -23,6 +23,7 @@ class QueryShape(StrEnum):
     CALCULATION_REQUEST = "calculation_request"
     SOFTWARE_CONTROL_REQUEST = "software_control_request"
     SCREEN_AWARENESS_REQUEST = "screen_awareness_request"
+    CAMERA_AWARENESS_REQUEST = "camera_awareness_request"
     DISCORD_RELAY_REQUEST = "discord_relay_request"
     WEB_RETRIEVAL_REQUEST = "web_retrieval_request"
     TRUST_APPROVAL_REQUEST = "trust_approval_request"

@@ -3,8 +3,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from stormhelm.ui.camera_ghost_surface import build_camera_ghost_surface_model
+
 
 _ROUTE_LABELS = {
+    "camera_awareness": "Camera Awareness",
     "discord_relay": "Discord Relay",
     "web_retrieval": "Web Evidence",
     "software_control": "Software Control",
@@ -13,6 +16,7 @@ _ROUTE_LABELS = {
     "task_continuity": "Task Continuity",
     "watch_runtime": "Runtime Watch",
     "memory": "Memory",
+    "generic_provider": "Provider Fallback",
 }
 _RESULT_LABELS = {
     "prepared": "Prepared",
@@ -26,6 +30,8 @@ _RESULT_LABELS = {
     "fallback_available": "Fallback Available",
     "fallback_used": "Fallback Used",
     "provider_unavailable": "Provider Unavailable",
+    "provider_running": "Provider Running",
+    "provider_cancelled": "Provider Cancelled",
     "timeout": "Timed Out",
     "unsupported": "Unsupported",
     "failed": "Failed",
@@ -101,6 +107,8 @@ _RESULT_TONES = {
     "fallback_available": "attention",
     "fallback_used": "attention",
     "provider_unavailable": "warning",
+    "provider_running": "attention",
+    "provider_cancelled": "warning",
     "timeout": "warning",
     "unsupported": "warning",
     "failed": "warning",
@@ -132,6 +140,13 @@ def _number(value: Any) -> float:
         return 0.0
 
 
+def _ms_text(value: Any) -> str:
+    number = _number(value)
+    if number.is_integer():
+        return f"{int(number)} ms"
+    return f"{round(number, 3)} ms"
+
+
 def _screen_awareness_state(value: Any) -> dict[str, Any]:
     screen = _mapping(value)
     policy = _mapping(screen.get("policy")) or _mapping(screen.get("policy_state"))
@@ -139,12 +154,16 @@ def _screen_awareness_state(value: Any) -> dict[str, Any]:
     if not trace:
         hardening = _mapping(screen.get("hardening"))
         trace = _mapping(hardening.get("latest_trace"))
+    browser_adapters = _mapping(screen.get("browser_adapters"))
+    if not browser_adapters:
+        browser_adapters = _mapping(screen.get("browserAdapters"))
     duration = _number(trace.get("durationMs") if "durationMs" in trace else trace.get("total_duration_ms"))
     return {
-        "present": bool(screen or policy or trace),
+        "present": bool(screen or policy or trace or browser_adapters),
         "phase": _text(screen.get("phase")),
         "policy": {"action_policy_mode": _text(policy.get("action_policy_mode"))},
         "trace": {"durationMs": duration, "summary": _text(trace.get("summary")) or _text(policy.get("summary"))},
+        "browser_adapters": browser_adapters,
     }
 
 
@@ -230,6 +249,14 @@ def build_command_surface_model(
 
     stage = _text(parameters.get("request_stage")) or _text(winner.get("status"))
     family = _family_key(_text(request.get("family")) or _text(winner.get("route_family")), stage)
+    if family == "camera_awareness":
+        camera_surface = build_camera_ghost_surface_model(
+            active_request_state=request,
+            latest_message=latest,
+            status=status_payload,
+        )
+        if camera_surface.get("ghostPrimaryCard"):
+            return camera_surface
     continuity = _continuity(task)
     memory = _memory(status_payload, recent)
     runtime = _runtime(status_payload)
@@ -239,7 +266,7 @@ def build_command_surface_model(
     status_label = _RESULT_LABELS.get(result_state, _title(result_state))
     subject = _text(request.get("subject")) or _text(decomposition.get("subject"))
     title = _text(latest.get("bearingTitle")) or _text(latest.get("bearing_title")) or _default_title(family, stage, result_state)
-    body = _text(latest.get("fullResponse")) or _text(latest.get("content")) or _text(trust.get("operator_message")) or continuity["summary"] or next(iter(memory["contributors"] or ["Stormhelm is holding the current command posture truthfully."]), "")
+    body = _text(latest.get("fullResponse")) or _text(latest.get("content")) or _text(trust.get("operator_message")) or _text(parameters.get("progress_summary")) or continuity["summary"] or next(iter(memory["contributors"] or ["Stormhelm is holding the current command posture truthfully."]), "")
     subtitle = " • ".join(part for part in (route_label, subject, status_label) if part)
     provenance = _provenance(parameters, trust, deictic, recent, workspace)
     trace = _trace(family, request, winner, parameters, deictic)
@@ -321,7 +348,13 @@ def _stations(
         selected_target = _mapping(deictic.get("selected_target"))
         duration = _number(trace.get("durationMs"))
         trace_value = f"{duration:.1f} ms" if duration else ""
-        stations.append(_station("screen_awareness", ctx, chips=[_chip("State", status_label, _tone(result_state)), _chip("Phase", _text(screen.get("phase")) or "Active")], sections=[_section("Screen Route", [_entry("Policy", _title(_text(policy.get("action_policy_mode")) or "confirm_before_act")), _entry("Binding", _text(selected_target.get("label")) or "Current screen target", _text(deictic.get("source_summary")) or "Screen-awareness state is partial."), _entry("Trace", trace_value, _text(trace.get("summary")) or "No screen trace summary is available.")])], invalidations=_filter_invalidations(invalidations, {"Binding"}), actions=_station_actions("screen_awareness", ctx, True)))
+        screen_entries = [
+            _entry("Policy", _title(_text(policy.get("action_policy_mode")) or "confirm_before_act")),
+            _entry("Binding", _text(selected_target.get("label")) or "Current screen target", _text(deictic.get("source_summary")) or "Screen-awareness state is partial."),
+            _entry("Trace", trace_value, _text(trace.get("summary")) or "No screen trace summary is available."),
+        ]
+        screen_entries.extend(_playwright_browser_adapter_entries(screen))
+        stations.append(_station("screen_awareness", ctx, chips=[_chip("State", status_label, _tone(result_state)), _chip("Phase", _text(screen.get("phase")) or "Active")], sections=[_section("Screen Route", screen_entries)], invalidations=_filter_invalidations(invalidations, {"Binding"}), actions=_station_actions("screen_awareness", ctx, True)))
     trust_state = _text(trust.get("approval_state")).lower()
     if trust and trust_state not in {"approved_for_task", "approved_for_session", "approved_once", "allowed", "not_required"}:
         scopes = ", ".join(_title(scope) for scope in trust.get("available_scopes") or [] if _text(scope))
@@ -376,6 +409,25 @@ def _web_evidence_station(ctx: dict[str, Any]) -> dict[str, Any]:
     network_requests = _text(network.get("request_count"))
     network_failures = _text(network.get("failed_count"))
     console_errors = _text(console.get("error_count"))
+    cdp = trace.get("cdp") if isinstance(trace.get("cdp"), dict) else {}
+    compatibility_level = _text(cdp.get("protocol_compatibility_level"))
+    endpoint_status = _text(cdp.get("endpoint_status"))
+    protocol_version = _text(cdp.get("protocol_version"))
+    optional_domains = cdp.get("optional_domains") if isinstance(cdp.get("optional_domains"), dict) else {}
+    optional_domain_label = ", ".join(
+        f"{_title(_text(key))}: {_title(_text(value))}"
+        for key, value in optional_domains.items()
+        if _text(key) and _text(value)
+    )
+    startup_error = _text(cdp.get("last_startup_error_code"))
+    cleanup_status = _text(cdp.get("last_cleanup_status"))
+    cdp_navigation_supported = cdp.get("navigation_supported")
+    cdp_navigation_label = ""
+    if cdp.get("diagnostic_only") is True or cdp_navigation_supported is False:
+        cdp_navigation_label = "unsupported"
+    elif cdp_navigation_supported is True:
+        cdp_navigation_label = "supported"
+    fallback_provider = _text(cdp.get("recommended_fallback_provider")) or _text(page.get("fallback_provider"))
     claim_ceiling = _text(bundle.get("claim_ceiling")) or _text(trace.get("claim_ceiling")) or "rendered_page_evidence"
     fallback_used = bool(bundle.get("fallback_used") or trace.get("fallback_used"))
     fallback_reason = _text(trace.get("fallback_reason"))
@@ -421,6 +473,21 @@ def _web_evidence_station(ctx: dict[str, Any]) -> dict[str, Any]:
                         f"{network_failures} failed" if network_failures else "",
                     ),
                     _entry("Console", f"{console_errors} errors" if console_errors else ""),
+                    *(
+                        [
+                            _entry(
+                                "CDP Compatibility",
+                                _title(compatibility_level),
+                                f"Endpoint: {_title(endpoint_status)}" if endpoint_status else "",
+                            ),
+                            _entry("Protocol", protocol_version, optional_domain_label),
+                            _entry("CDP Navigation", _title(cdp_navigation_label)),
+                            _entry("Recommended Fallback", _title(fallback_provider)),
+                            _entry("CDP Cleanup", _title(cleanup_status), f"Startup: {_title(startup_error)}" if startup_error else ""),
+                        ]
+                        if provider == "obscura_cdp" or compatibility_level or endpoint_status
+                        else []
+                    ),
                     _entry("Elapsed", f"{elapsed} ms" if elapsed else ""),
                     _entry("Attempted Providers", attempted_label),
                     _entry("Fallback", "Used" if fallback_used else "No", f"{fallback_reason} -> {fallback_outcome}" if fallback_used else ""),
@@ -432,6 +499,198 @@ def _web_evidence_station(ctx: dict[str, Any]) -> dict[str, Any]:
         invalidations=[],
         actions=_station_actions("web_retrieval", ctx, False),
     )
+
+
+def _playwright_browser_adapter_entries(screen: dict[str, Any]) -> list[dict[str, str]]:
+    adapters = _mapping(screen.get("browser_adapters"))
+    playwright = _mapping(adapters.get("playwright"))
+    if not playwright:
+        return []
+    observation = _mapping(playwright.get("last_observation_summary"))
+    grounding = _mapping(playwright.get("last_grounding_summary"))
+    verification = _mapping(playwright.get("last_verification_summary"))
+    action_preview = _mapping(playwright.get("last_action_preview_summary"))
+    action_execution = _mapping(playwright.get("last_action_execution_summary"))
+    status = _text(playwright.get("playwright_adapter_status")) or _text(playwright.get("status")) or "unavailable"
+    entries = [
+        _entry(
+            "Browser Adapter",
+            _title(status),
+            "Playwright semantic observation is owned by Screen Awareness.",
+        )
+    ]
+    if observation:
+        control_count = int(observation.get("control_count") or 0)
+        dialog_count = int(observation.get("dialog_count") or 0)
+        form_count = int(observation.get("form_count") or 0)
+        provider = _text(observation.get("provider"))
+        observation_label = "Live Observation" if provider == "playwright_live_semantic" else "Mock Observation"
+        detail_parts = []
+        title = _text(observation.get("page_title"))
+        if title:
+            detail_parts.append(title)
+        context_kind = _text(observation.get("browser_context_kind"))
+        if context_kind:
+            detail_parts.append(_title(context_kind))
+        if form_count:
+            detail_parts.append(f"{form_count} form")
+        if dialog_count:
+            detail_parts.append(f"{dialog_count} dialog")
+        entries.append(
+            _entry(
+                observation_label,
+                f"{control_count} controls",
+                ". ".join(detail_parts),
+            )
+        )
+        form_summary = _mapping(observation.get("form_summary"))
+        if form_summary:
+            summary_form_count = int(form_summary.get("form_count") or form_count or 0)
+            required_count = int(form_summary.get("required_field_count") or 0)
+            disabled_count = int(form_summary.get("disabled_control_count") or 0)
+            warning_count = int(form_summary.get("warning_count") or 0)
+            detail = "; ".join(
+                part
+                for part in [
+                    f"{required_count} required" if required_count else "",
+                    f"{disabled_count} disabled" if disabled_count else "",
+                    f"{warning_count} warning" if warning_count else "",
+                    "form-like inferred" if form_summary.get("form_like_structure_inferred") else "",
+                ]
+                if part
+            )
+            entries.append(
+                _entry(
+                    "Form Summary",
+                    f"{summary_form_count} {'form' if summary_form_count == 1 else 'forms'}",
+                    detail,
+                )
+            )
+        limitations = observation.get("limitations") if isinstance(observation.get("limitations"), list) else []
+        if limitations:
+            labels = [_title(_text(item)) for item in limitations[:3] if _text(item)]
+            entries.append(
+                _entry(
+                    "Limitations",
+                    labels[0] if labels else "Bounded",
+                    "; ".join(labels[1:]) if len(labels) > 1 else "Bounded semantic observation only.",
+                )
+            )
+    if grounding:
+        count = int(grounding.get("candidate_count") or 0)
+        top_candidates = grounding.get("top_candidates") if isinstance(grounding.get("top_candidates"), list) else []
+        candidate_detail = _title(_text(grounding.get("status")))
+        if top_candidates:
+            labels = []
+            for item in top_candidates[:3]:
+                if isinstance(item, dict):
+                    name = _text(item.get("name")) or _text(item.get("control_id"))
+                    confidence = item.get("confidence")
+                    evidence = item.get("evidence_terms") if isinstance(item.get("evidence_terms"), list) else []
+                    evidence_label = ", ".join(_title(_text(term)) for term in evidence[:2] if _text(term))
+                    confidence_label = f"{float(confidence):.2f}" if isinstance(confidence, (int, float)) else ""
+                    bits = " / ".join(part for part in [confidence_label, evidence_label] if part)
+                    labels.append(f"{name} ({bits})" if bits else name)
+            if labels:
+                candidate_detail = "; ".join(labels)
+        entries.append(
+            _entry(
+                "Grounding",
+                f"{count} {'candidate' if count == 1 else 'candidates'}",
+                candidate_detail,
+            )
+        )
+    if verification:
+        change_count = int(verification.get("change_count") or 0)
+        verification_status = _title(_text(verification.get("status")))
+        detail_parts = []
+        summary = _text(verification.get("summary"))
+        if summary:
+            detail_parts.append(summary)
+        confidence = verification.get("confidence")
+        if isinstance(confidence, (int, float)):
+            detail_parts.append(f"confidence {float(confidence):.2f}")
+        evidence = verification.get("expected_change_evidence") if isinstance(verification.get("expected_change_evidence"), list) else []
+        if evidence:
+            detail_parts.append(", ".join(_title(_text(item)) for item in evidence[:3] if _text(item)))
+        entries.append(
+            _entry(
+                "Semantic Comparison",
+                verification_status or f"{change_count} changes",
+                "; ".join(detail_parts) or f"{change_count} bounded changes",
+            )
+        )
+        top_changes = verification.get("top_changes") if isinstance(verification.get("top_changes"), list) else []
+        if top_changes:
+            change_labels = []
+            for item in top_changes[:3]:
+                if isinstance(item, dict):
+                    change_labels.append(_title(_text(item.get("change_type"))))
+            entries.append(
+                _entry(
+                    "Change Evidence",
+                    f"{change_count} {'change' if change_count == 1 else 'changes'}",
+                    "; ".join(label for label in change_labels if label),
+                )
+            )
+    if action_preview:
+        action_kind = _title(_text(action_preview.get("action_kind")) or "Preview")
+        preview_state = _title(_text(action_preview.get("preview_state")) or _text(action_preview.get("result_state")) or "Preview Only")
+        risk_level = _title(_text(action_preview.get("risk_level")) or "Medium")
+        executable = "Yes" if action_preview.get("executable_now") is True else "No"
+        target = _text(action_preview.get("target_name")) or _text(action_preview.get("target_phrase")) or "browser target"
+        entries.append(
+            _entry(
+                "Action Preview",
+                preview_state,
+                f"{action_kind} target: {target}. Execution is not enabled.",
+            )
+        )
+        entries.append(
+            _entry(
+                "Future Trust",
+                f"Risk: {risk_level}",
+                f"Approval required; executable now: {executable}",
+            )
+        )
+        expected = action_preview.get("expected_outcome") if isinstance(action_preview.get("expected_outcome"), list) else []
+        if expected:
+            entries.append(
+                _entry(
+                    "Future Check",
+                    _title(_text(expected[0])),
+                    "; ".join(_title(_text(item)) for item in expected[1:3] if _text(item)),
+                )
+            )
+    if action_execution:
+        execution_status = _title(_text(action_execution.get("status")) or "Unknown")
+        action_kind = _title(_text(action_execution.get("action_kind")) or "Action")
+        verification_status = _title(_text(action_execution.get("verification_status")) or "Not Conclusive")
+        cleanup_status = _title(_text(action_execution.get("cleanup_status")) or "Not Started")
+        target = _mapping(action_execution.get("target_summary"))
+        target_name = _text(target.get("name")) or _text(target.get("label")) or _text(action_execution.get("target_name")) or "browser target"
+        entries.append(
+            _entry(
+                "Action Execution",
+                execution_status,
+                f"{action_kind} target: {target_name}. Verification: {verification_status}. Cleanup: {cleanup_status}.",
+            )
+        )
+        if _text(action_execution.get("before_observation_id")) or _text(action_execution.get("after_observation_id")):
+            entries.append(
+                _entry(
+                    "Execution Evidence",
+                    _title(_text(action_execution.get("claim_ceiling")) or "browser_semantic_action_execution"),
+                    f"Before: {_text(action_execution.get('before_observation_id'))}; after: {_text(action_execution.get('after_observation_id'))}",
+                )
+            )
+    claim = _text(playwright.get("claim_ceiling")) or _text(observation.get("claim_ceiling"))
+    claim = _text(verification.get("claim_ceiling")) or claim
+    claim = _text(action_preview.get("claim_ceiling")) or claim
+    claim = _text(action_execution.get("claim_ceiling")) or claim
+    if claim:
+        entries.append(_entry("Claim Ceiling", _title(claim), "Not visible-screen or source-truth proof."))
+    return entries
 
 
 def _station(station_key: str, ctx: dict[str, Any], *, chips: list[dict[str, str]], sections: list[dict[str, Any]], invalidations: list[dict[str, str]], actions: list[dict[str, Any]]) -> dict[str, Any]:
@@ -490,6 +749,23 @@ def _trace(family: str, request: dict[str, Any], winner: dict[str, Any], paramet
         entries.append({"label": "Response Mode", "value": _title(_text(route.get("response_mode")))})
     if _text(deictic.get("selected_source")):
         entries.append({"label": "Binding Source", "value": _source(_text(deictic.get("selected_source")))})
+    provider = _mapping(parameters.get("provider_fallback"))
+    if provider:
+        provider_state = _text(provider.get("state")) or _text(parameters.get("result_state"))
+        if provider_state:
+            entries.append({"label": "Provider State", "value": _title(provider_state)})
+        if _text(provider.get("provider_budget_label")):
+            entries.append({"label": "Provider Budget", "value": _text(provider.get("provider_budget_label"))})
+        if provider.get("first_output_ms") is not None:
+            entries.append({"label": "First Output", "value": _ms_text(provider.get("first_output_ms"))})
+        if provider.get("total_provider_ms") is not None and _number(provider.get("total_provider_ms")) > 0:
+            entries.append({"label": "Provider Total", "value": _ms_text(provider.get("total_provider_ms"))})
+        if provider.get("streaming_used") is not None:
+            entries.append({"label": "Provider Streaming", "value": "Used" if provider.get("streaming_used") else "Not used"})
+        if _text(provider.get("fallback_reason")):
+            entries.append({"label": "Fallback Reason", "value": _text(provider.get("fallback_reason"))})
+        if _text(provider.get("failure_code")):
+            entries.append({"label": "Provider Failure", "value": _text(provider.get("failure_code"))})
     return entries
 
 
@@ -590,6 +866,7 @@ def _runtime(status: dict[str, Any]) -> dict[str, Any]:
                 "durationMs": latest_trace.get("total_duration_ms"),
                 "summary": policy.get("summary"),
             },
+            "browser_adapters": screen.get("browser_adapters") if isinstance(screen.get("browser_adapters"), dict) else {},
         }
     )
     return {
@@ -598,7 +875,7 @@ def _runtime(status: dict[str, Any]) -> dict[str, Any]:
         "tone": "warning" if recent_failures else "steady",
         "watch": {"present": bool(active_jobs or queued_jobs or recent_failures or _text(watch.get("health")) or _text(watch.get("current_tool"))), "health": _title(_text(watch.get("health")) or ("degraded" if recent_failures else "steady")), "queue": f"{active_jobs} active / {queued_jobs} queued", "failures": str(recent_failures), "tool": _title(_text(watch.get("current_tool")) or "Not reported")},
         "lifecycle": {"present": bool(_text(bootstrap.get("lifecycle_hold_reason")) or _text(cleanup.get("operator_summary"))), "state": _title(_text(bootstrap.get("state")) or "steady"), "hold": _text(bootstrap.get("lifecycle_hold_reason")) or "No lifecycle hold", "cleanup": _text(cleanup.get("operator_summary"))},
-        "screenAwareness": {"phase": _title(_text(screen_state.get("phase"))), "policy": screen_state["policy"], "trace": screen_state["trace"]},
+        "screenAwareness": {"phase": _title(_text(screen_state.get("phase"))), "policy": screen_state["policy"], "trace": screen_state["trace"], "browser_adapters": screen_state["browser_adapters"]},
     }
 
 
@@ -644,7 +921,7 @@ def _result_state(stage: str, trust: dict[str, Any], winner: dict[str, Any], par
     raw = (_text(parameters.get("result_state")) or winner_status or approval_state).lower()
     if raw == "verified":
         return "verified"
-    if raw in {"extracted", "partial", "fallback_available", "fallback_used", "provider_unavailable", "timeout", "unsupported", "blocked", "failed"}:
+    if raw in {"extracted", "partial", "fallback_available", "fallback_used", "provider_unavailable", "provider_running", "provider_cancelled", "timeout", "unsupported", "blocked", "failed"}:
         return raw
     if raw in {"attempted", "completed", "dispatch", "dispatched"}:
         return "attempted"

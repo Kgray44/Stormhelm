@@ -1,0 +1,64 @@
+{
+    "report_id":  "live-browser-deps-e6aa5e30ce40",
+    "mode":  "check_only",
+    "started_at":  "2026-04-30T17:02:34.5897196Z",
+    "completed_at":  "2026-04-30T17:02:35.3522652Z",
+    "install_requested":  {
+                              "obscura":  false,
+                              "playwright_package":  false,
+                              "obscura_auto_install":  false,
+                              "playwright_chromium":  false
+                          },
+    "install_results":  [
+
+                        ],
+    "python_available":  true,
+    "python_executable":  "C:\\Users\\kkids\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+    "obscura":  {
+                    "error_code":  "",
+                    "bounded_error_message":  "",
+                    "binary_found":  true,
+                    "version_output_bounded":  "error: unexpected argument \u0027--version\u0027 found\nSystem.Management.Automation.RemoteException\n  tip: a similar argument exists: \u0027--verbose\u0027\nSystem.Management.Automation.RemoteException\nUsage: obscura.exe --verbose\nSystem.Management.Automation.RemoteException\nFor more information, try \u0027--help\u0027.",
+                    "obscura_release_name":  "",
+                    "download_attempted":  false,
+                    "binary_input":  "C:\\Users\\kkids\\AppData\\Local\\Stormhelm\\tools\\obscura\\obscura.exe",
+                    "install_note":  "Install Obscura only with explicit -InstallObscura and a local zip path or release URL. Pass -ObscuraBinary to live checks when avoiding PATH changes.",
+                    "install_requested":  false,
+                    "stormhelm_obscura_binary_set":  false,
+                    "obscura_asset_name":  "",
+                    "version_status":  "version_unknown",
+                    "install_status":  "present",
+                    "zip_path":  "",
+                    "checksum_status":  "unavailable",
+                    "install_mode":  "existing_path",
+                    "install_dir":  "C:\\Users\\kkids\\AppData\\Local\\Stormhelm\\tools\\obscura",
+                    "download_path":  "",
+                    "binary_executable":  true,
+                    "binary_path":  "C:\\Users\\kkids\\AppData\\Local\\Stormhelm\\tools\\obscura\\obscura.exe",
+                    "added_to_path":  false,
+                    "obscura_binary_path":  "C:\\Users\\kkids\\AppData\\Local\\Stormhelm\\tools\\obscura\\obscura.exe",
+                    "download_status":  "not_requested",
+                    "set_env_hint":  "",
+                    "binary_candidates_found":  0,
+                    "extraction_status":  "not_requested",
+                    "obscura_asset_url_redacted_or_bounded":  "",
+                    "release_url":  "",
+                    "obscura_release_tag":  "",
+                    "obscura_release_repo":  "h4ckf0r0day/obscura"
+                },
+    "playwright":  {
+                       "uses_user_profile":  false,
+                       "dependency_installed":  true,
+                       "chromium_executable_path":  "C:\\Users\\kkids\\AppData\\Local\\ms-playwright\\chromium-1217\\chrome-win64\\chrome.exe",
+                       "actions_enabled":  false,
+                       "chromium_available":  true
+                   },
+    "safety":  {
+                   "no_path_mutation_without_explicit_flag":  true,
+                   "installs_are_explicit_only":  true,
+                   "no_obscura_download_without_install_flag":  true,
+                   "action_capabilities_disabled":  true,
+                   "no_user_browser_profile":  true,
+                   "normal_ci_dependency_free":  true
+               }
+}

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from stormhelm.core.web_retrieval.models import ExtractedLink
+from stormhelm.core.web_retrieval.models import ObscuraCDPCompatibilityReport
+from stormhelm.core.web_retrieval.models import ObscuraCDPEndpointDiscovery
 from stormhelm.core.web_retrieval.models import ObscuraCDPPageInspection
 from stormhelm.core.web_retrieval.models import ObscuraCDPProviderAttempt
 from stormhelm.core.web_retrieval.models import ObscuraCDPReadiness
@@ -16,6 +18,8 @@ from stormhelm.core.web_retrieval.service import WebRetrievalService
 
 __all__ = [
     "ExtractedLink",
+    "ObscuraCDPCompatibilityReport",
+    "ObscuraCDPEndpointDiscovery",
     "ObscuraCDPPageInspection",
     "ObscuraCDPProviderAttempt",
     "ObscuraCDPReadiness",

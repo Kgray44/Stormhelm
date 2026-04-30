@@ -90,6 +90,183 @@ ApplicationWindow {
         return Number(root.ghostPlacement[key])
     }
 
+    property var renderConfirmationSignatures: ({})
+    property bool renderConfirmationQueued: false
+
+    function renderValue(value) {
+        if (value === undefined || value === null) {
+            return ""
+        }
+        return String(value)
+    }
+
+    function contextCardContains(needle) {
+        var cards = bridge ? bridge.contextCards : []
+        var wanted = String(needle || "").toLowerCase()
+        for (var index = 0; index < cards.length; index += 1) {
+            var card = cards[index] || {}
+            var text = String((card.title || "") + " " + (card.subtitle || "") + " " + (card.body || "")).toLowerCase()
+            if (text.indexOf(wanted) >= 0) {
+                return true
+            }
+        }
+        return false
+    }
+
+    function requestComposerValue() {
+        var composer = bridge ? bridge.requestComposer : ({})
+        return root.renderValue(
+            composer.routeLabel
+            || composer.statusLabel
+            || composer.routeChip
+            || composer.statusChip
+            || composer.microStatus
+            || composer.placeholder
+        )
+    }
+
+    function routeInspectorValue() {
+        var inspector = bridge ? bridge.routeInspector : ({})
+        return root.renderValue(
+            inspector.statusLabel
+            || inspector.selectedRouteLabel
+            || inspector.routeLabel
+            || inspector.family
+        )
+    }
+
+    function confirmRenderSurface(surface, componentId, key, value, visible) {
+        if (!bridge || !bridge.confirmRenderVisible || !bridge.renderSurfaceRevision) {
+            return
+        }
+        var revision = bridge.renderSurfaceRevision(surface)
+        if (revision <= 0) {
+            return
+        }
+        var stateValue = root.renderValue(value)
+        var status = visible ? "confirmed" : "hidden"
+        var signature = surface + ":" + revision + ":" + key + ":" + stateValue + ":" + status
+        if (root.renderConfirmationSignatures[surface] === signature) {
+            return
+        }
+        root.renderConfirmationSignatures[surface] = signature
+        bridge.confirmRenderVisible({
+            "surface": surface,
+            "model_revision": revision,
+            "qml_component_id": componentId,
+            "visible_state_key": key,
+            "visible_state_value": stateValue,
+            "visible": visible,
+            "render_confirmation_status": status,
+            "confirmation_source": "qml_component"
+        })
+    }
+
+    function confirmVisibleSurfaces() {
+        root.renderConfirmationQueued = false
+        if (!bridge) {
+            return
+        }
+        var primary = bridge.ghostPrimaryCard || ({})
+        var primaryValue = root.renderValue(primary.title || primary.summary || primary.resultState || bridge.statusLine)
+        root.confirmRenderSurface(
+            "ghost_primary",
+            "ghostPrimaryCommandCard",
+            "primary_state",
+            primaryValue,
+            ghostShell.visible && primaryValue.length > 0
+        )
+
+        var actionCount = bridge.ghostActionStrip ? bridge.ghostActionStrip.length : 0
+        root.confirmRenderSurface(
+            "ghost_action_strip",
+            "ghostActionStrip",
+            "action_count",
+            String(actionCount),
+            ghostShell.visible && actionCount > 0
+        )
+
+        var composerValue = root.requestComposerValue()
+        root.confirmRenderSurface(
+            "composer_chips",
+            "requestComposerStatusChips",
+            "composer_status",
+            composerValue,
+            composerValue.length > 0 && (ghostShell.visible || deckShell.visible)
+        )
+
+        var voice = bridge.voiceState || ({})
+        var voiceValue = root.renderValue(
+            voice.voice_current_phase
+            || voice.voice_anchor_state
+            || voice.active_playback_status
+        )
+        root.confirmRenderSurface(
+            "voice_core",
+            "ghostVoiceCore",
+            "voice_current_phase",
+            voiceValue,
+            voiceCore.opacity > 0.02 && voiceValue.length > 0
+        )
+
+        var approvalVisible = root.contextCardContains("approval") || String(primaryValue).toLowerCase().indexOf("approval") >= 0
+        root.confirmRenderSurface(
+            "approval_prompt",
+            "ghostApprovalPrompt",
+            "approval_prompt",
+            approvalVisible ? "visible" : "",
+            ghostShell.visible && approvalVisible
+        )
+
+        var clarificationText = String(primaryValue).toLowerCase()
+        var composer = bridge ? bridge.requestComposer : ({})
+        var clarificationChoices = composer.clarificationChoices || []
+        var clarificationVisible = root.contextCardContains("clarification")
+            || root.contextCardContains("clarify")
+            || clarificationText.indexOf("clarification") >= 0
+            || clarificationText.indexOf("clarify") >= 0
+            || clarificationChoices.length > 0
+        root.confirmRenderSurface(
+            "clarification_prompt",
+            "ghostClarificationPrompt",
+            "clarification_prompt",
+            clarificationVisible ? "visible" : "",
+            ghostShell.visible && clarificationVisible
+        )
+
+        var stream = bridge.eventStreamConnectionState || ({})
+        var deckValue = root.renderValue(
+            (stream.connection_state || "unknown")
+            + ":dup=" + (stream.duplicate_ignored_count || 0)
+            + ":ooo=" + (stream.out_of_order_ignored_count || 0)
+            + ":reconcile=" + !!stream.reconciliation_requested
+        )
+        root.confirmRenderSurface(
+            "deck_event_spine",
+            "deckEventSpine",
+            "event_stream_state",
+            deckValue,
+            deckShell.visible && deckValue.length > 0
+        )
+
+        var inspectorValue = root.routeInspectorValue()
+        root.confirmRenderSurface(
+            "route_inspector",
+            "deckRouteInspector",
+            "route_inspector_state",
+            inspectorValue,
+            deckShell.visible && inspectorValue.length > 0
+        )
+    }
+
+    function scheduleRenderConfirmations() {
+        if (root.renderConfirmationQueued) {
+            return
+        }
+        root.renderConfirmationQueued = true
+        Qt.callLater(root.confirmVisibleSurfaces)
+    }
+
     Behavior on deckProgress {
         NumberAnimation { duration: 440; easing.type: Easing.InOutCubic }
     }
@@ -104,6 +281,16 @@ ApplicationWindow {
         if (bridge && bridge.handleCloseRequest()) {
             close.accepted = false
         }
+    }
+
+    Component.onCompleted: root.scheduleRenderConfirmations()
+
+    Connections {
+        target: bridge
+        function onCollectionsChanged() { root.scheduleRenderConfirmations() }
+        function onStatusChanged() { root.scheduleRenderConfirmations() }
+        function onVoiceStateChanged() { root.scheduleRenderConfirmations() }
+        function onModeChanged() { root.scheduleRenderConfirmations() }
     }
 
     Shortcut {

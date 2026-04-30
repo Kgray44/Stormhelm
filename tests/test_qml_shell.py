@@ -151,6 +151,102 @@ def _load_main_qml_scene() -> tuple[
     return app, workspace_config, bridge, engine, engine.rootObjects()[0]
 
 
+def _wait_for_render_confirmation(
+    app: QtWidgets.QApplication,
+    bridge: UiBridge,
+    surface: str,
+    *,
+    status: str = "confirmed",
+    timeout_ms: int = 1200,
+) -> dict[str, object]:
+    deadline = QtCore.QDeadlineTimer(timeout_ms)
+    while not deadline.hasExpired():
+        app.processEvents()
+        QtTest.QTest.qWait(25)
+        for confirmation in reversed(bridge.uiRenderConfirmations):
+            if (
+                confirmation.get("surface") == surface
+                and confirmation.get("render_confirmation_status") == status
+            ):
+                return confirmation
+    raise AssertionError(
+        f"Missing render confirmation for {surface}; confirmations={bridge.uiRenderConfirmations[-8:]}"
+    )
+
+
+def _l71_route_event(cursor: int) -> dict[str, object]:
+    return {
+        "cursor": cursor,
+        "event_id": cursor,
+        "event_family": "route",
+        "event_type": "route.selected",
+        "severity": "info",
+        "subsystem": "planner",
+        "visibility_scope": "ghost_hint",
+        "message": "Route selected.",
+        "payload": {
+            "request_id": "qml-l71-route",
+            "route_family": "software_control",
+            "subject": "Calculator",
+            "stage": "route_selected",
+            "summary": "Software route selected.",
+        },
+    }
+
+
+def test_main_qml_emits_l71_render_confirmations_for_live_surfaces() -> None:
+    app, _, bridge, engine, root = _load_main_qml_scene()
+    try:
+        bridge.apply_stream_event(_l71_route_event(91_001))
+        ghost_confirmation = _wait_for_render_confirmation(
+            app,
+            bridge,
+            "ghost_primary",
+        )
+        assert ghost_confirmation["confirmation_source"] == "qml_component"
+        assert ghost_confirmation["event_id"] == "91001"
+
+        bridge.apply_stream_event(
+            {
+                "cursor": 91_002,
+                "event_id": 91_002,
+                "event_family": "voice",
+                "event_type": "voice.synthesis_started",
+                "severity": "info",
+                "subsystem": "voice",
+                "visibility_scope": "deck_context",
+                "message": "TTS started.",
+                "payload": {
+                    "turn_id": "qml-l71-voice",
+                    "speech_request_id": "speech-qml-l71",
+                    "status": "started",
+                },
+            }
+        )
+        voice_confirmation = _wait_for_render_confirmation(
+            app,
+            bridge,
+            "voice_core",
+        )
+        assert voice_confirmation["visible_state_value"] == "synthesizing"
+        assert bridge.voiceState.get("active_playback_status") is None
+
+        bridge.setMode("deck")
+        QtTest.QTest.qWait(420)
+        app.processEvents()
+        bridge.apply_stream_state(
+            {"source": "client", "phase": "reconnecting", "cursor": 91_003}
+        )
+        deck_confirmation = _wait_for_render_confirmation(
+            app,
+            bridge,
+            "deck_event_spine",
+        )
+        assert "reconnecting" in str(deck_confirmation["visible_state_value"])
+    finally:
+        _dispose_qt_objects(app, root, engine, bridge)
+
+
 def test_main_qml_exposes_shared_atmospheric_layers() -> None:
     app, _, bridge, engine, root = _load_main_qml_scene()
     try:

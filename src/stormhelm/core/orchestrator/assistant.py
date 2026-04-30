@@ -46,6 +46,11 @@ from stormhelm.core.orchestrator.route_triage import FastRouteClassifier
 from stormhelm.core.orchestrator.route_triage import RouteTriageResult
 from stormhelm.core.orchestrator.router import IntentRouter
 from stormhelm.core.orchestrator.router import ToolRequest
+from stormhelm.core.provider_fallback import ProviderAuditTiming
+from stormhelm.core.provider_fallback import build_provider_latency_summary
+from stormhelm.core.provider_fallback import default_provider_latency_budget
+from stormhelm.core.provider_fallback import evaluate_provider_fallback_eligibility
+from stormhelm.core.provider_fallback import sanitize_provider_payload_summary
 from stormhelm.core.screen_awareness import ScreenAwarenessSubsystem
 from stormhelm.core.screen_awareness import ScreenIntentType
 from stormhelm.core.orchestrator.session_state import ConversationStateStore
@@ -468,6 +473,70 @@ class AssistantOrchestrator:
             "yes",
         }
 
+    def _provider_fallback_runtime_enabled(self) -> bool:
+        provider_config = getattr(self.config, "provider_fallback", None)
+        return bool(
+            self.provider is not None
+            and self.config.openai.enabled
+            and getattr(provider_config, "enabled", False)
+        )
+
+    def _provider_blocked_message(self, reason: str) -> str:
+        return {
+            "provider_disabled": "Provider fallback is disabled.",
+            "provider_not_allowed": "Provider fallback was not allowed for this request.",
+            "provider_payload_not_safe": "Provider fallback was blocked for this payload.",
+            "provider_auth_missing": "Provider fallback is unavailable because provider authentication is missing.",
+            "provider_blocked_by_native_route": "Provider fallback was blocked because a native route can handle this.",
+            "provider_unavailable": "Provider fallback is unavailable.",
+        }.get(str(reason or "").strip(), "Provider fallback was blocked.")
+
+    def _publish_provider_fallback_event(
+        self,
+        *,
+        event_type: str,
+        session_id: str,
+        request_id: str,
+        provider_call_id: str,
+        payload: dict[str, Any],
+        severity: str = "info",
+        visibility_scope: str = "deck_context",
+        message: str = "",
+    ) -> None:
+        unsafe_keys = {
+            "prompt",
+            "raw_prompt",
+            "message",
+            "input",
+            "raw_payload",
+            "discord_payload",
+            "raw_audio",
+            "raw_screenshot",
+        }
+        safe_payload = {
+            key: value
+            for key, value in payload.items()
+            if str(key or "").strip().lower() not in unsafe_keys
+        }
+        self.events.publish(
+            event_family="provider",
+            event_type=event_type,
+            severity=severity,
+            subsystem="provider_fallback",
+            session_id=session_id,
+            subject=provider_call_id or request_id,
+            visibility_scope=visibility_scope,
+            retention_class="bounded_recent",
+            provenance={"channel": "assistant", "kind": "provider_fallback"},
+            message=message or "Provider fallback updated.",
+            payload={
+                "request_id": request_id,
+                "provider_call_id": provider_call_id,
+                "route_family": "generic_provider",
+                **safe_payload,
+            },
+        )
+
     def _workspace_summary_for_request(
         self,
         *,
@@ -524,7 +593,7 @@ class AssistantOrchestrator:
         provider_lookup = self.context_snapshots.get_or_refresh(
             ContextSnapshotFamily.PROVIDER_READINESS,
             refresh_fn=lambda: {
-                "enabled": bool(self.config.openai.enabled),
+                "enabled": bool(self.config.openai.enabled and getattr(self.config.provider_fallback, "enabled", False)),
                 "configured": _provider_configured(self.config),
                 "provider_available": self.provider is not None,
             },
@@ -1026,6 +1095,7 @@ class AssistantOrchestrator:
         openai_called = False
         llm_called = False
         embedding_called = False
+        provider_l9_metadata: dict[str, Any] = {}
         fail_fast_reason = ""
         resolved_response_profile, response_profile_reason = self._resolve_response_profile(
             explicit_profile=response_profile,
@@ -1070,7 +1140,7 @@ class AssistantOrchestrator:
         route_triage_result = self.route_triage.classify(
             message,
             active_request_state=minimal_active_request_state,
-            provider_enabled=bool(self.config.openai.enabled and self.provider is not None),
+            provider_enabled=self._provider_fallback_runtime_enabled(),
             provider_configured=_provider_configured(self.config),
             surface_mode=surface_mode,
             active_module=active_module,
@@ -1312,7 +1382,7 @@ class AssistantOrchestrator:
                     if planned.active_request_state:
                         set_cached_active_request_state(planned.active_request_state)
                         self._learn_from_message(session_id=session_id, message=message, request_state=planned.active_request_state)
-                    if self.provider is not None and self.config.openai.enabled and self.planner.should_escalate(
+                    if self._provider_fallback_runtime_enabled() and self.planner.should_escalate(
                         message,
                         tool_job_count=len(jobs),
                         actions=actions,
@@ -1659,20 +1729,264 @@ class AssistantOrchestrator:
                     assistant_text = self.persona.report(
                         f"I prepared the software-control plan for {target}. No external action has run."
                     )
-                elif self.provider is not None and self.config.openai.enabled:
-                    provider_started = perf_counter()
-                    provider_called = True
-                    openai_called = True
-                    llm_called = True
-                    assistant_text, jobs, actions = await self._handle_provider_turn(
-                        message=message,
-                        session_id=session_id,
-                        surface_mode=surface_mode,
-                        active_module=active_module,
-                        workspace_context=resolved_workspace_context,
-                        active_context=active_context,
+                elif self._provider_fallback_runtime_enabled():
+                    eligibility_started = perf_counter()
+                    provider_configured = _provider_configured(self.config)
+                    eligibility = evaluate_provider_fallback_eligibility(
+                        request_id=request_id,
+                        route_family="generic_provider",
+                        native_route_candidates=tuple(route_triage_result.likely_route_families),
+                        native_route_winner="",
+                        native_route_state="declined",
+                        provider_fallback_enabled=True,
+                        config_allows_provider=bool(getattr(self.config.provider_fallback, "enabled", False)),
+                        trust_allows_provider=True,
+                        privacy_allows_provider=True,
+                        payload_safe_for_provider=True,
+                        user_requested_open_ended_reasoning=True,
+                        provider_available=provider_configured,
+                        provider_unavailable_reason="provider_auth_missing" if not provider_configured else "",
                     )
-                    _record_stage_ms(stage_timings, "provider_fallback_ms", provider_started)
+                    _record_stage_ms(stage_timings, "provider_eligibility_ms", eligibility_started)
+                    provider_l9_metadata["provider_eligibility"] = eligibility.to_dict()
+                    provider_call_id = f"provider-{uuid4().hex}"
+                    budget = default_provider_latency_budget(
+                        self.config,
+                        route_family="generic_provider",
+                        provider_name="openai",
+                        model_name=self.config.openai.planner_model,
+                    )
+                    if not eligibility.provider_fallback_allowed:
+                        fail_fast_reason = eligibility.provider_fallback_blocked_reason
+                        audit = ProviderAuditTiming(
+                            provider_call_id=provider_call_id,
+                            request_id=request_id,
+                            provider_name="openai",
+                            model_name=self.config.openai.planner_model,
+                            allowed=False,
+                            denied=True,
+                            denial_reason=eligibility.provider_fallback_blocked_reason,
+                            fallback_reason=eligibility.provider_fallback_reason,
+                            payload_classification=sanitize_provider_payload_summary({"message": message}).get("payload_classification", "redacted"),
+                        )
+                        summary = build_provider_latency_summary(
+                            request_id=request_id,
+                            provider_call_id=provider_call_id,
+                            provider_name="openai",
+                            model_name=self.config.openai.planner_model,
+                            route_family="generic_provider",
+                            fallback_allowed=False,
+                            provider_enabled=True,
+                            failure_code=eligibility.provider_fallback_blocked_reason,
+                            budget=budget,
+                        )
+                        provider_l9_metadata["provider_audit_timing"] = audit.to_dict()
+                        provider_l9_metadata["provider_latency_summary"] = summary.to_dict()
+                        self._publish_provider_fallback_event(
+                            event_type="provider_failed",
+                            session_id=session_id,
+                            request_id=request_id,
+                            provider_call_id=provider_call_id,
+                            severity="warning",
+                            visibility_scope="ghost_hint",
+                            message=self._provider_blocked_message(eligibility.provider_fallback_blocked_reason),
+                            payload={
+                                **summary.to_dict(),
+                                "provider_fallback_state": summary.fallback_state,
+                                "failure_code": summary.failure_code,
+                            },
+                        )
+                        assistant_text = self.persona.report(self._provider_blocked_message(eligibility.provider_fallback_blocked_reason))
+                    else:
+                        self._publish_provider_fallback_event(
+                            event_type="provider_fallback_selected",
+                            session_id=session_id,
+                            request_id=request_id,
+                            provider_call_id=provider_call_id,
+                            visibility_scope="deck_context",
+                            message="Provider fallback selected.",
+                            payload={
+                                "provider_fallback_state": "selected",
+                                "fallback_reason": eligibility.provider_fallback_reason,
+                                "provider_budget_label": budget.label,
+                            },
+                        )
+                        self._publish_provider_fallback_event(
+                            event_type="provider_request_started",
+                            session_id=session_id,
+                            request_id=request_id,
+                            provider_call_id=provider_call_id,
+                            visibility_scope="ghost_hint",
+                            message="Provider fallback running.",
+                            payload={
+                                "provider_fallback_state": "running",
+                                "fallback_reason": eligibility.provider_fallback_reason,
+                                "provider_budget_label": budget.label,
+                            },
+                        )
+                        provider_started = perf_counter()
+                        provider_called = True
+                        openai_called = True
+                        llm_called = True
+                        try:
+                            assistant_text, jobs, actions = await asyncio.wait_for(
+                                self._handle_provider_turn(
+                                    message=message,
+                                    session_id=session_id,
+                                    surface_mode=surface_mode,
+                                    active_module=active_module,
+                                    workspace_context=resolved_workspace_context,
+                                    active_context=active_context,
+                                ),
+                                timeout=max(0.1, budget.hard_total_ms / 1000.0),
+                            )
+                            provider_ms = round((perf_counter() - provider_started) * 1000, 3)
+                            _record_stage_ms(stage_timings, "provider_fallback_ms", provider_started)
+                            summary = build_provider_latency_summary(
+                                request_id=request_id,
+                                provider_call_id=provider_call_id,
+                                provider_name="openai",
+                                model_name=self.config.openai.planner_model,
+                                route_family="generic_provider",
+                                fallback_allowed=True,
+                                fallback_reason=eligibility.provider_fallback_reason,
+                                provider_enabled=True,
+                                streaming_enabled=bool(getattr(self.config.provider_fallback, "allow_streaming", True)),
+                                streaming_used=False,
+                                cancellation_supported=bool(getattr(self.config.provider_fallback, "allow_cancellation", True)),
+                                first_output_ms=provider_ms,
+                                total_provider_ms=provider_ms,
+                                budget=budget,
+                            )
+                            audit = ProviderAuditTiming(
+                                provider_call_id=provider_call_id,
+                                request_id=request_id,
+                                provider_name="openai",
+                                model_name=self.config.openai.planner_model,
+                                allowed=True,
+                                denied=False,
+                                first_output_at=utc_now_iso(),
+                                completed_at=utc_now_iso(),
+                                total_ms=provider_ms,
+                                budget_label=budget.label,
+                                budget_exceeded=summary.provider_budget_exceeded,
+                                streaming_used=False,
+                                fallback_reason=eligibility.provider_fallback_reason,
+                                payload_classification=sanitize_provider_payload_summary({"message": message}).get("payload_classification", "redacted"),
+                            )
+                            provider_l9_metadata["provider_latency_summary"] = summary.to_dict()
+                            provider_l9_metadata["provider_audit_timing"] = audit.to_dict()
+                            self._publish_provider_fallback_event(
+                                event_type="provider_result_ready",
+                                session_id=session_id,
+                                request_id=request_id,
+                                provider_call_id=provider_call_id,
+                                visibility_scope="deck_context",
+                                message="Provider fallback result ready.",
+                                payload={
+                                    **summary.to_dict(),
+                                    "provider_fallback_state": summary.fallback_state,
+                                },
+                            )
+                        except asyncio.TimeoutError:
+                            provider_ms = round((perf_counter() - provider_started) * 1000, 3)
+                            _record_stage_ms(stage_timings, "provider_fallback_ms", provider_started)
+                            summary = build_provider_latency_summary(
+                                request_id=request_id,
+                                provider_call_id=provider_call_id,
+                                provider_name="openai",
+                                model_name=self.config.openai.planner_model,
+                                route_family="generic_provider",
+                                fallback_allowed=True,
+                                fallback_reason=eligibility.provider_fallback_reason,
+                                provider_enabled=True,
+                                failure_code="provider_timeout_total",
+                                total_provider_ms=provider_ms,
+                                timeout_ms=budget.hard_total_ms,
+                                budget=budget,
+                            )
+                            audit = ProviderAuditTiming(
+                                provider_call_id=provider_call_id,
+                                request_id=request_id,
+                                provider_name="openai",
+                                model_name=self.config.openai.planner_model,
+                                allowed=True,
+                                denied=False,
+                                timeout_at=utc_now_iso(),
+                                total_ms=provider_ms,
+                                budget_label=budget.label,
+                                budget_exceeded=True,
+                                fallback_reason=eligibility.provider_fallback_reason,
+                                payload_classification=sanitize_provider_payload_summary({"message": message}).get("payload_classification", "redacted"),
+                            )
+                            provider_l9_metadata["provider_latency_summary"] = summary.to_dict()
+                            provider_l9_metadata["provider_audit_timing"] = audit.to_dict()
+                            self._publish_provider_fallback_event(
+                                event_type="provider_timeout",
+                                session_id=session_id,
+                                request_id=request_id,
+                                provider_call_id=provider_call_id,
+                                severity="warning",
+                                visibility_scope="ghost_hint",
+                                message="Provider fallback timed out.",
+                                payload={
+                                    **summary.to_dict(),
+                                    "provider_fallback_state": summary.fallback_state,
+                                    "failure_code": summary.failure_code,
+                                },
+                            )
+                            assistant_text = self.persona.report("Provider fallback timed out. The local route remains available.")
+                            jobs = []
+                            actions = []
+                        except Exception:
+                            provider_ms = round((perf_counter() - provider_started) * 1000, 3)
+                            _record_stage_ms(stage_timings, "provider_fallback_ms", provider_started)
+                            summary = build_provider_latency_summary(
+                                request_id=request_id,
+                                provider_call_id=provider_call_id,
+                                provider_name="openai",
+                                model_name=self.config.openai.planner_model,
+                                route_family="generic_provider",
+                                fallback_allowed=True,
+                                fallback_reason=eligibility.provider_fallback_reason,
+                                provider_enabled=True,
+                                failure_code="provider_unknown_failure",
+                                total_provider_ms=provider_ms,
+                                budget=budget,
+                            )
+                            audit = ProviderAuditTiming(
+                                provider_call_id=provider_call_id,
+                                request_id=request_id,
+                                provider_name="openai",
+                                model_name=self.config.openai.planner_model,
+                                allowed=True,
+                                denied=False,
+                                failed_at=utc_now_iso(),
+                                total_ms=provider_ms,
+                                budget_label=budget.label,
+                                budget_exceeded=summary.provider_budget_exceeded,
+                                fallback_reason=eligibility.provider_fallback_reason,
+                                payload_classification=sanitize_provider_payload_summary({"message": message}).get("payload_classification", "redacted"),
+                            )
+                            provider_l9_metadata["provider_latency_summary"] = summary.to_dict()
+                            provider_l9_metadata["provider_audit_timing"] = audit.to_dict()
+                            self._publish_provider_fallback_event(
+                                event_type="provider_failed",
+                                session_id=session_id,
+                                request_id=request_id,
+                                provider_call_id=provider_call_id,
+                                severity="warning",
+                                visibility_scope="ghost_hint",
+                                message="Provider fallback failed.",
+                                payload={
+                                    **summary.to_dict(),
+                                    "provider_fallback_state": summary.fallback_state,
+                                    "failure_code": summary.failure_code,
+                                },
+                            )
+                            assistant_text = self.persona.report("Provider fallback failed before producing output.")
+                            jobs = []
+                            actions = []
                 else:
                     fail_fast_reason = "provider_disabled"
                     assistant_text = self.persona.report(
@@ -1724,6 +2038,9 @@ class AssistantOrchestrator:
             planner_obedience=planner_obedience,
             planned_decision=planned_decision,
         )
+        if provider_l9_metadata:
+            response_metadata.update(provider_l9_metadata)
+            planner_debug.update(provider_l9_metadata)
         triage_payload = route_triage_result.to_dict()
         route_family_seams_skipped = planner_debug.get("route_family_seams_skipped")
         route_family_seams_evaluated = planner_debug.get("route_family_seams_evaluated")
@@ -2653,7 +2970,7 @@ class AssistantOrchestrator:
         jobs: list[dict[str, Any]],
         actions: list[dict[str, Any]],
     ) -> str:
-        if self.provider is None or not self.config.openai.enabled:
+        if not self._provider_fallback_runtime_enabled():
             return self.persona.report(self._merge_job_summaries([], [action.get("type", "") for action in actions]))
         reasoning_response = await self.provider.generate(
             instructions=self._build_provider_instructions(
@@ -2693,7 +3010,7 @@ class AssistantOrchestrator:
         active_context: dict[str, Any] | None,
     ) -> PlannerDecision:
         del session_id, message, surface_mode, active_module, workspace_context, active_context
-        if self.provider is None or not self.config.openai.enabled:
+        if not self._provider_fallback_runtime_enabled():
             return planned
         if planned.structured_query is None or planned.execution_plan is None:
             return planned
@@ -2896,11 +3213,7 @@ class AssistantOrchestrator:
         workspace_context: dict[str, Any] | None,
         active_context: dict[str, Any] | None,
     ) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
-        tool_definitions = [
-            tool.response_tool_definition()
-            for tool in self.tool_registry.all_tools()
-            if self.config.tools.enabled.is_enabled(tool.name)
-        ]
+        tool_definitions: list[dict[str, Any]] = []
         resolved_workspace_context = workspace_context or (
             self.workspace_service.active_workspace_summary(session_id) if self.workspace_service is not None else {}
         )
@@ -2922,7 +3235,7 @@ class AssistantOrchestrator:
         final_text = ""
         latest_response_id = previous_response_id
 
-        for _ in range(max(1, self.config.openai.max_tool_rounds)):
+        for _ in range(1):
             result = await self.provider.generate(
                 instructions=instructions,
                 input_items=input_items,
@@ -2935,30 +3248,12 @@ class AssistantOrchestrator:
             if result.output_text:
                 final_text = result.output_text
 
-            if not result.tool_calls:
-                break
-
-            tool_text, jobs, actions = await self._execute_tool_requests(
-                result.tool_calls,
-                session_id=session_id,
-                prompt=message,
-                surface_mode=surface_mode,
-                active_module=active_module,
-            )
-            all_jobs.extend(jobs)
-            all_actions.extend(actions)
-            function_outputs = [
-                {
-                    "type": "function_call_output",
-                    "call_id": tool_call.call_id,
-                    "output": json.dumps(job.get("result") or {"success": False, "error": job.get("error", "unknown_tool_failure")}),
-                }
-                for tool_call, job in zip(result.tool_calls, jobs, strict=False)
-            ]
-            input_items = [*initial_context_items, *function_outputs] if initial_context_items else function_outputs
-            previous_response_id = result.response_id
-            if not final_text:
-                final_text = tool_text
+            if result.tool_calls:
+                final_text = final_text or (
+                    "Provider fallback returned tool intents, but Stormhelm keeps command authority in native routes. "
+                    "No provider tool execution was performed."
+                )
+            break
         else:
             if not final_text:
                 final_text = self.persona.report("Stormhelm reached the current tool round limit before finalizing a response.")
@@ -3993,6 +4288,17 @@ class AssistantOrchestrator:
             "heavy_context_reason",
             "provider_fallback_eligible",
             "provider_fallback_suppressed_reason",
+            "provider_fallback_allowed",
+            "provider_fallback_blocked_reason",
+            "provider_first_output_ms",
+            "provider_total_ms",
+            "provider_timeout_hit",
+            "provider_cancelled",
+            "provider_failure_code",
+            "provider_budget_label",
+            "provider_budget_exceeded",
+            "provider_streaming_used",
+            "provider_partial_result_count",
             "planner_candidates_pruned_count",
             "snapshot_hot_path_hit",
             "heavy_context_avoided_by_snapshot",
@@ -4050,6 +4356,9 @@ class AssistantOrchestrator:
             "async_route",
             "async_worker_utilization_summary",
             "subsystem_continuation",
+            "provider_eligibility",
+            "provider_latency_summary",
+            "provider_audit_timing",
         ):
             if isinstance(metadata.get(key), dict):
                 compact[key] = self._compact_value(metadata.get(key), profile=profile)
@@ -4140,6 +4449,9 @@ class AssistantOrchestrator:
             "heavy_context_loaded",
             "heavy_context_reason",
             "provider_fallback_suppressed_reason",
+            "provider_eligibility",
+            "provider_latency_summary",
+            "provider_audit_timing",
             "planner_candidates_pruned_count",
             "route_family_seams_evaluated",
             "route_family_seams_skipped",

@@ -19,12 +19,19 @@ from stormhelm.ui.ghost_adaptive import (
     default_ghost_placement,
     default_ghost_style,
 )
+from stormhelm.ui.latency import UiEventRenderLatencySummary
+from stormhelm.ui.latency import UiLatencyMark
+from stormhelm.ui.latency import UiRenderConfirmation
+from stormhelm.ui.latency import sanitized_render_value
+from stormhelm.ui.latency import ui_monotonic_ms
+from stormhelm.ui.latency import ui_wall_time
 from stormhelm.ui.voice_surface import build_voice_command_station
 from stormhelm.ui.voice_surface import build_voice_ui_state
 
 
 VISIBLE_MODES = {"ghost", "deck"}
 VOICE_STATES = {"idle", "listening", "thinking", "acting", "speaking", "warning"}
+TERMINAL_RESULT_STATES = {"verified", "failed", "blocked", "cancelled", "timed_out"}
 DECK_GRID_COLUMNS = 12
 DECK_GRID_ROWS = 8
 DECK_ANCHOR_NOTCH = (4, 0, 8, 3)
@@ -78,9 +85,36 @@ class UiBridge(QtCore.QObject):
         self._health: dict[str, Any] = {}
         self._status: dict[str, Any] = {}
         self._voice_state: dict[str, Any] = build_voice_ui_state({})
+        self._visualizer_updates_received = 0
+        self._visualizer_updates_coalesced = 0
+        self._visualizer_updates_dropped = 0
+        self._visualizer_first_received_monotonic = 0.0
+        self._visualizer_last_received_monotonic = 0.0
+        self._visualizer_last_receive_gap_ms = 0.0
+        self._visualizer_max_receive_gap_ms = 0.0
+        self._bridge_collection_rebuilds_during_speech = 0
+        self._qml_anchor_updates_during_speech = 0
         self._history: list[dict[str, Any]] = []
         self._jobs: list[dict[str, Any]] = []
         self._events: list[dict[str, Any]] = []
+        self._applied_stream_event_cursors: set[int] = set()
+        self._stream_state_cursor_by_key: dict[str, int] = {}
+        self._stream_duplicate_ignored_count = 0
+        self._stream_out_of_order_ignored_count = 0
+        self._event_stream_connection_state = "disconnected"
+        self._event_stream_reconciliation_requested = False
+        self._event_stream_reconciliation_completed = False
+        self._event_stream_reconnect_gap_recovered = False
+        self._event_stream_last_gap_report: dict[str, Any] = {}
+        self._ui_latency_marks: list[dict[str, Any]] = []
+        self._ui_event_render_latency_summaries: list[dict[str, Any]] = []
+        self._ui_render_confirmations: list[dict[str, Any]] = []
+        self._ui_render_confirmation_ids: set[str] = set()
+        self._render_model_revision_by_surface: dict[str, int] = {}
+        self._render_context_by_surface: dict[str, dict[str, Any]] = {}
+        self._ui_latency_sequence = 0
+        self._active_request_event_cursor = 0
+        self._job_event_cursors: dict[str, int] = {}
         self._notes: list[dict[str, Any]] = []
         self._settings: dict[str, Any] = {}
         self._tools: list[dict[str, Any]] = []
@@ -99,6 +133,7 @@ class UiBridge(QtCore.QObject):
         self._context_cards: list[dict[str, Any]] = []
         self._ghost_primary_card: dict[str, Any] = {}
         self._ghost_action_strip: list[dict[str, Any]] = []
+        self._dismissed_camera_card_signature = ""
         self._ghost_corner_readouts: list[dict[str, Any]] = []
         self._deck_modules: list[dict[str, Any]] = []
         self._active_deck_module: dict[str, Any] = {}
@@ -275,6 +310,154 @@ class UiBridge(QtCore.QObject):
     @QtCore.Property("QVariantMap", notify=voiceStateChanged)
     def voiceState(self) -> dict[str, Any]:
         return dict(self._voice_state)
+
+    @QtCore.Property("QVariantList", notify=statusChanged)
+    def uiLatencyMarks(self) -> list[dict[str, Any]]:
+        return [dict(mark) for mark in self._ui_latency_marks]
+
+    @QtCore.Property("QVariantList", notify=statusChanged)
+    def uiEventRenderLatencySummaries(self) -> list[dict[str, Any]]:
+        return [dict(summary) for summary in self._ui_event_render_latency_summaries]
+
+    @QtCore.Property("QVariantList", notify=statusChanged)
+    def uiRenderConfirmations(self) -> list[dict[str, Any]]:
+        return [dict(confirmation) for confirmation in self._ui_render_confirmations]
+
+    @QtCore.Property("QVariantMap", notify=statusChanged)
+    def renderConfirmationState(self) -> dict[str, Any]:
+        return {
+            "surfaces": {
+                surface: {
+                    "model_revision": revision,
+                    "latest_event_id": self._render_context_by_surface.get(surface, {}).get("event_id"),
+                    "latest_event_type": self._render_context_by_surface.get(surface, {}).get("event_type"),
+                    "render_status": self._render_context_by_surface.get(surface, {}).get(
+                        "render_confirmation_status",
+                        "unknown",
+                    ),
+                }
+                for surface, revision in sorted(self._render_model_revision_by_surface.items())
+            },
+            "confirmation_count": len(self._ui_render_confirmations),
+        }
+
+    @QtCore.Slot(str, result=int)
+    def renderSurfaceRevision(self, surface: str) -> int:
+        return int(
+            self._render_model_revision_by_surface.get(
+                self._normalize_render_surface(surface),
+                0,
+            )
+        )
+
+    @QtCore.Slot("QVariantMap")
+    def confirmRenderVisible(self, payload: dict[str, Any]) -> None:
+        if not isinstance(payload, dict):
+            return
+        surface = self._normalize_render_surface(str(payload.get("surface") or ""))
+        if not surface:
+            return
+        current_revision = self._render_model_revision_by_surface.get(surface, 0)
+        model_revision = self._int_or_none(payload.get("model_revision")) or 0
+        visible = payload.get("visible")
+        status = str(payload.get("render_confirmation_status") or "").strip().lower()
+        stale = bool(model_revision and current_revision and model_revision < current_revision)
+        if stale:
+            status = "stale"
+            render_confirmed = False
+        elif visible is False or status in {"hidden", "not_visible"}:
+            status = status if status in {"hidden", "not_visible"} else "hidden"
+            render_confirmed = False
+        elif status == "model_only":
+            render_confirmed = False
+        elif visible is True or status == "confirmed":
+            status = "confirmed"
+            render_confirmed = True
+        else:
+            status = status or "unknown"
+            render_confirmed = False
+
+        visible_key = sanitized_render_value(payload.get("visible_state_key") or "state")
+        visible_value = sanitized_render_value(payload.get("visible_state_value"))
+        confirmation_id = sanitized_render_value(payload.get("confirmation_id"))
+        if not confirmation_id:
+            confirmation_id = (
+                f"{surface}:{model_revision}:{visible_key}:{visible_value}:{status}"
+            )
+        if confirmation_id in self._ui_render_confirmation_ids:
+            return
+        self._ui_render_confirmation_ids.add(confirmation_id)
+
+        context = self._render_context_by_surface.get(surface, {})
+        rendered_at = self._float_or_none(payload.get("rendered_at_monotonic_ms"))
+        rendered_at = rendered_at if rendered_at is not None else ui_monotonic_ms()
+        confirmation = UiRenderConfirmation(
+            confirmation_id=confirmation_id,
+            request_id=sanitized_render_value(
+                payload.get("request_id") or context.get("request_id")
+            )
+            or None,
+            event_id=sanitized_render_value(
+                payload.get("event_id") or context.get("event_id")
+            )
+            or None,
+            event_type=sanitized_render_value(
+                payload.get("event_type") or context.get("event_type")
+            )
+            or None,
+            surface=surface,
+            model_revision=model_revision,
+            qml_component_id=sanitized_render_value(payload.get("qml_component_id"))
+            or None,
+            visible_state_key=visible_key,
+            visible_state_value=visible_value,
+            rendered_at_monotonic_ms=rendered_at,
+            rendered_at_wall_time=sanitized_render_value(
+                payload.get("rendered_at_wall_time") or ui_wall_time()
+            ),
+            render_confirmed=render_confirmed,
+            render_confirmation_status=status,
+            confirmation_source=sanitized_render_value(
+                payload.get("confirmation_source") or "qml_component"
+            ),
+            stale=stale,
+            reason=sanitized_render_value(payload.get("reason")) or None,
+        ).to_dict()
+        self._ui_render_confirmations.append(confirmation)
+        self._ui_render_confirmations = self._ui_render_confirmations[-160:]
+        self._render_context_by_surface[surface] = {
+            **context,
+            "render_confirmation_status": status,
+            "render_confirmation_source": confirmation["confirmation_source"],
+        }
+        if not stale:
+            self._update_summary_from_render_confirmation(confirmation)
+        self._record_ui_latency_mark(
+            request_id=confirmation.get("request_id"),
+            event_id=confirmation.get("event_id"),
+            event_type=confirmation.get("event_type"),
+            route_family=context.get("route_family"),
+            subsystem=context.get("subsystem") or "ui_bridge",
+            surface=surface,
+            mark_name="qml_render_visible_state_changed",
+            source=str(confirmation.get("confirmation_source") or "qml_component"),
+            sequence_number=context.get("sequence_number"),
+            stale=stale,
+            monotonic_ms=rendered_at,
+        )
+        self.statusChanged.emit()
+
+    @QtCore.Property("QVariantMap", notify=statusChanged)
+    def eventStreamConnectionState(self) -> dict[str, Any]:
+        return {
+            "connection_state": self._event_stream_connection_state,
+            "reconciliation_requested": self._event_stream_reconciliation_requested,
+            "reconciliation_completed": self._event_stream_reconciliation_completed,
+            "reconnect_gap_recovered": self._event_stream_reconnect_gap_recovered,
+            "duplicate_ignored_count": self._stream_duplicate_ignored_count,
+            "out_of_order_ignored_count": self._stream_out_of_order_ignored_count,
+            "last_gap_report": dict(self._event_stream_last_gap_report),
+        }
 
     @QtCore.Property(str, notify=statusChanged)
     def uiVersionLabel(self) -> str:
@@ -922,6 +1105,17 @@ class UiBridge(QtCore.QObject):
             self.statusChanged.emit()
             self.voiceReadinessRequested.emit()
             return
+        if normalized == "dismiss_camera_card":
+            signature = self._camera_card_signature(self._ghost_primary_card)
+            if signature:
+                self._dismissed_camera_card_signature = signature
+            self._rebuild_surface_models()
+            self.collectionsChanged.emit()
+            return
+        if normalized == "camera_open_in_deck_deferred":
+            self._status_line = "Camera Deck handoff is deferred until the visual artifact panel exists."
+            self.statusChanged.emit()
+            return
         if normalized == "open_route_inspector":
             self.setMode("deck")
             self.restoreDeckPanel("route-inspector")
@@ -1250,10 +1444,28 @@ class UiBridge(QtCore.QObject):
         active_request_state = payload.get("active_request_state")
         if isinstance(active_request_state, dict):
             normalized_request_state = dict(active_request_state)
-            if normalized_request_state != self._active_request_state:
-                self._active_request_state = normalized_request_state
-                collections_changed = True
-
+            if self._should_accept_snapshot_request_state(normalized_request_state):
+                if normalized_request_state != self._active_request_state:
+                    self._active_request_state = normalized_request_state
+                    collections_changed = True
+            else:
+                self._record_ui_latency_mark(
+                    request_id=str(
+                        self._active_request_state.get("request_id") or ""
+                    ).strip()
+                    or None,
+                    event_id=None,
+                    event_type="polling_reconcile",
+                    route_family=str(
+                        self._active_request_state.get("family") or ""
+                    ).strip()
+                    or None,
+                    subsystem="ui_bridge",
+                    surface="bridge",
+                    mark_name="stale_polling_reconcile_ignored",
+                    source="polling_reconcile",
+                    stale=True,
+                )
         active_task = payload.get("active_task")
         if isinstance(active_task, dict):
             normalized_active_task = dict(active_task)
@@ -1290,6 +1502,29 @@ class UiBridge(QtCore.QObject):
         ):
             self._rebuild_surface_models()
             self.collectionsChanged.emit()
+        if self._event_stream_reconciliation_requested:
+            self._event_stream_reconciliation_completed = True
+            self._event_stream_connection_state = "reconciled"
+            now_ms = ui_monotonic_ms()
+            self._register_surface_model_updates(
+                surfaces={"deck"},
+                request_id=None,
+                event_id=None,
+                event_type="snapshot.reconciled",
+                route_family=None,
+                subsystem="event_stream",
+                sequence_number=None,
+                frame_received_ms=now_ms,
+                event_parsed_ms=now_ms,
+                bridge_update_ms=now_ms,
+                model_notify_ms=now_ms,
+                source="polling_reconcile",
+                used_snapshot_reconciliation=True,
+                gap_recovered=True,
+            )
+            self._rebuild_surface_models()
+            self.collectionsChanged.emit()
+            self.statusChanged.emit()
 
     def apply_stream_event(self, payload: dict[str, Any]) -> None:
         event = dict(payload)
@@ -1300,6 +1535,53 @@ class UiBridge(QtCore.QObject):
         )
         if not isinstance(cursor, int):
             return
+        event_type = str(event.get("event_type") or event.get("type") or "").strip()
+        event_payload = (
+            event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        )
+        request_id = self._event_request_id(event)
+        route_family = self._event_route_family(event)
+        subsystem = str(
+            event.get("subsystem") or event.get("source") or event_payload.get("subsystem") or ""
+        ).strip() or None
+        sequence_number = self._event_sequence_number(event)
+        stream_timing = (
+            event.get("ui_stream_timing")
+            if isinstance(event.get("ui_stream_timing"), dict)
+            else {}
+        )
+        frame_received_ms = self._float_or_none(
+            stream_timing.get("frame_received_monotonic_ms")
+        ) or ui_monotonic_ms()
+        parsed_ms = self._float_or_none(stream_timing.get("event_parsed_monotonic_ms"))
+        self._record_ui_latency_mark(
+            request_id=request_id,
+            event_id=str(cursor),
+            event_type=event_type,
+            route_family=route_family,
+            subsystem=subsystem,
+            surface="bridge",
+            mark_name="event_stream_frame_received",
+            source="core_event",
+            sequence_number=sequence_number,
+            monotonic_ms=frame_received_ms,
+        )
+        if parsed_ms is not None:
+            self._record_ui_latency_mark(
+                request_id=request_id,
+                event_id=str(cursor),
+                event_type=event_type,
+                route_family=route_family,
+                subsystem=subsystem,
+                surface="bridge",
+                mark_name="bridge_event_parsed",
+                source="core_event",
+                sequence_number=sequence_number,
+                monotonic_ms=parsed_ms,
+            )
+        duplicate = cursor in self._applied_stream_event_cursors
+        if duplicate:
+            self._stream_duplicate_ignored_count += 1
         normalized_events = [
             dict(item) for item in self._events if isinstance(item, dict)
         ]
@@ -1320,8 +1602,63 @@ class UiBridge(QtCore.QObject):
         visibility = str(event.get("visibility_scope", "")).strip().lower()
         severity = str(event.get("severity", event.get("level", ""))).strip().lower()
         message = str(event.get("message", "")).strip()
-        event_type = str(event.get("event_type") or event.get("type") or "").strip()
         is_voice_event = event_type.startswith("voice.")
+        metadata_payload = (
+            event_payload.get("metadata")
+            if isinstance(event_payload.get("metadata"), dict)
+            else {}
+        )
+        voice_hot_path_only = is_voice_event and (
+            event_type in {"voice.visualizer_update", "voice.tts_stream_chunk"}
+            or bool(metadata_payload.get("visualizer_only"))
+        )
+        if duplicate:
+            self._append_event_latency_summary(
+                request_id=request_id,
+                event_id=str(cursor),
+                event_type=event_type,
+                frame_received_ms=frame_received_ms,
+                event_parsed_ms=parsed_ms,
+                bridge_update_ms=None,
+                model_notify_ms=None,
+            )
+            return
+        state_key = self._stream_state_key(event)
+        if self._is_out_of_order_state_event(state_key, cursor):
+            self._stream_out_of_order_ignored_count += 1
+            self._record_ui_latency_mark(
+                request_id=request_id,
+                event_id=str(cursor),
+                event_type=event_type,
+                route_family=route_family,
+                subsystem=subsystem,
+                surface="bridge",
+                mark_name="out_of_order_event_ignored",
+                source="core_event",
+                sequence_number=sequence_number,
+                stale=True,
+            )
+            self._append_event_latency_summary(
+                request_id=request_id,
+                event_id=str(cursor),
+                event_type=event_type,
+                frame_received_ms=frame_received_ms,
+                event_parsed_ms=parsed_ms,
+                bridge_update_ms=None,
+                model_notify_ms=None,
+            )
+            return
+        self._applied_stream_event_cursors.add(cursor)
+        self._stream_state_cursor_by_key[state_key] = max(
+            cursor, self._stream_state_cursor_by_key.get(state_key, 0)
+        )
+        bridge_update_ms = ui_monotonic_ms()
+        applied = self._apply_push_first_event(event)
+        surfaces = set(applied.get("surfaces", set()))
+        state_changed = bool(applied.get("state_changed", False))
+        immediate_model = bool(applied.get("immediate_model", False))
+        voice_state_signal_pending = False
+
         if visibility in {"ghost_hint", "operator_blocking"} and message:
             self._status_line = message
             if (
@@ -1330,15 +1667,991 @@ class UiBridge(QtCore.QObject):
             ):
                 self._set_assistant_state("warning")
             self.statusChanged.emit()
+            surfaces.add("ghost")
+            immediate_model = True
 
         if is_voice_event:
-            if self._apply_voice_state_from_stream_event(event):
+            voice_changed = self._apply_voice_state_from_stream_event(event)
+            if voice_changed:
                 self._apply_voice_assistant_state()
+                surfaces.add("voice")
+                state_changed = True
+                immediate_model = not voice_hot_path_only
+                voice_state_signal_pending = True
+                if voice_hot_path_only:
+                    model_notify_ms = ui_monotonic_ms()
+                    self._register_surface_model_updates(
+                        surfaces={"voice"},
+                        request_id=request_id,
+                        event_id=str(cursor),
+                        event_type=event_type,
+                        route_family=route_family,
+                        subsystem=subsystem,
+                        sequence_number=sequence_number,
+                        frame_received_ms=frame_received_ms,
+                        event_parsed_ms=parsed_ms,
+                        bridge_update_ms=bridge_update_ms,
+                        model_notify_ms=model_notify_ms,
+                    )
+                    self.voiceStateChanged.emit()
+                    self._record_ui_latency_mark(
+                        request_id=request_id,
+                        event_id=str(cursor),
+                        event_type=event_type,
+                        route_family=route_family,
+                        subsystem=subsystem,
+                        surface="bridge",
+                        mark_name="bridge_state_updated",
+                        source="core_event",
+                        sequence_number=sequence_number,
+                        monotonic_ms=bridge_update_ms,
+                    )
+                    self._record_ui_latency_mark(
+                        request_id=request_id,
+                        event_id=str(cursor),
+                        event_type=event_type,
+                        route_family=route_family,
+                        subsystem=subsystem,
+                        surface="voice",
+                        mark_name="voice_state_updated",
+                        source="core_event",
+                        sequence_number=sequence_number,
+                        monotonic_ms=model_notify_ms,
+                    )
+                    return
+            if voice_hot_path_only:
+                self._append_event_latency_summary(
+                    request_id=request_id,
+                    event_id=str(cursor),
+                    event_type=event_type,
+                    frame_received_ms=frame_received_ms,
+                    event_parsed_ms=parsed_ms,
+                    bridge_update_ms=None,
+                    model_notify_ms=None,
+                )
+                return
+
+        if state_changed and immediate_model:
+            self._rebuild_surface_models()
+            model_notify_ms = ui_monotonic_ms()
+            self._register_surface_model_updates(
+                surfaces=surfaces,
+                request_id=request_id,
+                event_id=str(cursor),
+                event_type=event_type,
+                route_family=route_family,
+                subsystem=subsystem,
+                sequence_number=sequence_number,
+                frame_received_ms=frame_received_ms,
+                event_parsed_ms=parsed_ms,
+                bridge_update_ms=bridge_update_ms,
+                model_notify_ms=model_notify_ms,
+            )
+            self._record_ui_latency_mark(
+                request_id=request_id,
+                event_id=str(cursor),
+                event_type=event_type,
+                route_family=route_family,
+                subsystem=subsystem,
+                surface="bridge",
+                mark_name="bridge_state_updated",
+                source="core_event",
+                sequence_number=sequence_number,
+                monotonic_ms=bridge_update_ms,
+            )
+            self._record_ui_latency_mark(
+                request_id=request_id,
+                event_id=str(cursor),
+                event_type=event_type,
+                route_family=route_family,
+                subsystem=subsystem,
+                surface="qml",
+                mark_name="qml_model_changed",
+                source="core_event",
+                sequence_number=sequence_number,
+                monotonic_ms=model_notify_ms,
+            )
+            for surface in sorted(surfaces):
+                self._record_ui_latency_mark(
+                    request_id=request_id,
+                    event_id=str(cursor),
+                    event_type=event_type,
+                    route_family=route_family,
+                    subsystem=subsystem,
+                    surface=surface,
+                    mark_name=self._surface_mark_name(surface),
+                    source="core_event",
+                    sequence_number=sequence_number,
+                )
+            if voice_state_signal_pending:
                 self.voiceStateChanged.emit()
+            self.collectionsChanged.emit()
             return
 
         if visibility != "internal_only" or self._module_requires_live_status_refresh():
             self._queue_stream_collections_changed()
+
+    def _apply_push_first_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        event_type = str(event.get("event_type") or event.get("type") or "").strip().lower()
+        event_family = str(event.get("event_family") or "").strip().lower()
+        event_payload = (
+            event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        )
+        changed = False
+        surfaces: set[str] = set()
+        if event_type.startswith("voice."):
+            return {
+                "state_changed": False,
+                "immediate_model": False,
+                "surfaces": surfaces,
+            }
+        if self._is_route_event(event_family, event_type):
+            changed = self._apply_request_state_from_event(event) or changed
+            surfaces.update({"ghost", "composer", "inspector"})
+            normalized_route_type = event_type.replace("_", ".")
+            if normalized_route_type.endswith("approval.required"):
+                surfaces.add("approval")
+            if normalized_route_type.endswith("clarification.required"):
+                surfaces.add("clarification")
+        if self._is_job_event(event_family, event_type):
+            changed = self._apply_job_state_from_event(event) or changed
+            surfaces.update({"deck", "watch"})
+        if self._is_verification_event(event_family, event_type):
+            changed = self._apply_verification_state_from_event(event) or changed
+            surfaces.update({"ghost", "deck", "inspector"})
+        if self._is_provider_event(event_family, event_type):
+            changed = self._apply_provider_state_from_event(event) or changed
+            surfaces.update({"ghost", "deck", "inspector"})
+        if event_type in {"failed", "blocked"} or event_type.endswith(".failed") or event_type.endswith(".blocked"):
+            changed = self._apply_failure_state_from_event(event) or changed
+            surfaces.update({"ghost", "deck", "inspector"})
+        if event_payload.get("budget_exceeded") or event_type in {
+            "budget_exceeded",
+            "latency.budget_exceeded",
+            "timed_out_continuing",
+            "latency.timed_out_continuing",
+        }:
+            changed = self._apply_budget_state_from_event(event) or changed
+            surfaces.update({"ghost", "deck", "inspector"})
+        return {
+            "state_changed": changed,
+            "immediate_model": changed,
+            "surfaces": surfaces,
+        }
+
+    def _is_route_event(self, event_family: str, event_type: str) -> bool:
+        normalized = event_type.replace("_", ".")
+        return (
+            event_family in {"route", "approval"}
+            or normalized
+            in {
+                "route.selected",
+                "route.planning.started",
+                "route.running",
+                "clarification.required",
+                "approval.required",
+                "approval.consumed",
+                "approval.cancelled",
+                "approval.rejected",
+                "approval.expired",
+                "recovery.handoff",
+            }
+            or normalized.endswith(".approval.required")
+            or normalized.endswith(".clarification.required")
+        )
+
+    def _is_job_event(self, event_family: str, event_type: str) -> bool:
+        return event_family in {"job", "task"} or event_type.startswith(
+            ("job.", "task.", "subsystem.continuation.")
+        )
+
+    def _is_verification_event(self, event_family: str, event_type: str) -> bool:
+        return event_family == "verification" or event_type.startswith("verification.")
+
+    def _is_provider_event(self, event_family: str, event_type: str) -> bool:
+        normalized = event_type.replace(".", "_")
+        return event_family == "provider" or normalized.startswith("provider_")
+
+    def _apply_request_state_from_event(self, event: dict[str, Any]) -> bool:
+        event_payload = (
+            event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        )
+        explicit = event_payload.get("active_request_state")
+        if isinstance(explicit, dict):
+            next_state = copy.deepcopy(explicit)
+        else:
+            next_state = copy.deepcopy(self._active_request_state)
+            event_type = str(event.get("event_type") or event.get("type") or "").strip().lower()
+            family = self._event_route_family(event)
+            if family:
+                next_state["family"] = family
+            subject = str(event_payload.get("subject") or event_payload.get("target") or "").strip()
+            if subject:
+                next_state["subject"] = subject
+            request_id = self._event_request_id(event)
+            if request_id:
+                next_state["request_id"] = request_id
+            parameters = (
+                dict(next_state.get("parameters"))
+                if isinstance(next_state.get("parameters"), dict)
+                else {}
+            )
+            trust = (
+                dict(next_state.get("trust"))
+                if isinstance(next_state.get("trust"), dict)
+                else {}
+            )
+            if event_type in {"clarification_required", "clarification.required"}:
+                parameters["request_stage"] = "clarify_payload"
+                parameters["result_state"] = "unresolved"
+                choices = event_payload.get("clarification_choices") or event_payload.get("ambiguity_choices")
+                if isinstance(choices, list):
+                    parameters["ambiguity_choices"] = [str(choice) for choice in choices if str(choice).strip()]
+            elif event_type in {"approval_required", "approval.required"} or event_type.endswith(".approval_required"):
+                next_state["family"] = family or "trust_approvals"
+                parameters["request_stage"] = "awaiting_confirmation"
+                trust["approval_state"] = "pending_operator_confirmation"
+                trust["decision"] = "confirmation_required"
+                trust["request_id"] = str(event_payload.get("approval_id") or event_payload.get("request_id") or request_id or "")
+                trust["operator_message"] = str(event_payload.get("operator_message") or event.get("message") or "").strip()
+                scopes = event_payload.get("available_scopes")
+                if isinstance(scopes, list):
+                    trust["available_scopes"] = [str(scope).strip().lower() for scope in scopes if str(scope).strip()]
+            elif event_type in {"approval.consumed", "approval_consumed"}:
+                parameters["request_stage"] = "approval_consumed"
+                trust["approval_state"] = str(event_payload.get("approval_state") or "consumed")
+                trust["decision"] = "consumed"
+                trust["operator_message"] = str(event_payload.get("operator_message") or event.get("message") or "").strip()
+                trust["available_scopes"] = []
+            elif event_type in {"approval.expired", "approval.cancelled", "approval.rejected", "approval_expired", "approval_cancelled", "approval_rejected"}:
+                parameters["request_stage"] = "approval_stale"
+                state = {
+                    "approval.expired": "expired",
+                    "approval_expired": "expired",
+                    "approval.cancelled": "revoked",
+                    "approval_cancelled": "revoked",
+                    "approval.rejected": "denied",
+                    "approval_rejected": "denied",
+                }.get(event_type, "revoked")
+                trust["approval_state"] = state
+                trust["decision"] = "blocked" if state == "denied" else state
+                trust["operator_message"] = str(event_payload.get("operator_message") or event.get("message") or "").strip()
+                trust["available_scopes"] = []
+            else:
+                stage = str(event_payload.get("stage") or event_payload.get("request_stage") or "").strip()
+                parameters["request_stage"] = stage or "route_selected"
+                result_state = str(event_payload.get("result_state") or event_payload.get("status") or "").strip()
+                if result_state:
+                    parameters["result_state"] = result_state
+            if event_payload.get("summary"):
+                parameters["progress_summary"] = str(event_payload.get("summary"))[:180]
+            next_state["parameters"] = parameters
+            if trust:
+                next_state["trust"] = trust
+        cursor = int(event.get("cursor") or event.get("event_id") or 0)
+        if not self._accept_event_request_state(next_state, cursor):
+            return False
+        self._active_request_state = next_state
+        self._active_request_event_cursor = max(self._active_request_event_cursor, cursor)
+        return True
+
+    def _apply_job_state_from_event(self, event: dict[str, Any]) -> bool:
+        event_payload = (
+            event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        )
+        job = (
+            dict(event_payload.get("job"))
+            if isinstance(event_payload.get("job"), dict)
+            else dict(event_payload)
+        )
+        job_id = str(job.get("job_id") or job.get("jobId") or "").strip()
+        if not job_id:
+            return False
+        cursor = int(event.get("cursor") or event.get("event_id") or 0)
+        if cursor < self._job_event_cursors.get(job_id, 0):
+            self._stream_out_of_order_ignored_count += 1
+            return False
+        self._job_event_cursors[job_id] = cursor
+        normalized = {
+            "job_id": job_id,
+            "tool_name": str(job.get("tool_name") or job.get("subsystem") or "operation"),
+            "status": str(job.get("status") or job.get("state") or "running").strip().lower() or "running",
+            "created_at": str(job.get("created_at") or event.get("timestamp") or ""),
+            "started_at": str(job.get("started_at") or event.get("timestamp") or ""),
+            "finished_at": str(job.get("finished_at") or ""),
+            "error": str(job.get("error") or job.get("error_message") or ""),
+            "result": {
+                "summary": str(job.get("summary") or job.get("progress_summary") or event.get("message") or "").strip(),
+                "data": dict(job.get("data")) if isinstance(job.get("data"), dict) else {},
+            },
+        }
+        merged = [dict(item) for item in self._jobs if isinstance(item, dict)]
+        replaced = False
+        for index, existing in enumerate(merged):
+            if str(existing.get("job_id") or existing.get("jobId") or "") == job_id:
+                merged[index] = {**existing, **normalized}
+                replaced = True
+                break
+        if not replaced:
+            merged.insert(0, normalized)
+        self._jobs = merged[:50]
+        task_id = str(job.get("task_id") or job.get("taskId") or "").strip()
+        if task_id:
+            self._active_task = {
+                **self._active_task,
+                "taskId": task_id,
+                "title": str(job.get("task_title") or self._active_task.get("title") or "Active job"),
+                "state": normalized["status"],
+                "latestSummary": normalized["result"]["summary"],
+            }
+        return True
+
+    def _apply_verification_state_from_event(self, event: dict[str, Any]) -> bool:
+        event_payload = (
+            event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        )
+        cursor = int(event.get("cursor") or event.get("event_id") or 0)
+        next_state = copy.deepcopy(self._active_request_state)
+        family = self._event_route_family(event)
+        if family:
+            next_state["family"] = family
+        request_id = self._event_request_id(event)
+        if request_id:
+            next_state["request_id"] = request_id
+        parameters = (
+            dict(next_state.get("parameters"))
+            if isinstance(next_state.get("parameters"), dict)
+            else {}
+        )
+        verification_state = str(
+            event_payload.get("verification_state")
+            or event_payload.get("verification_status")
+            or event_payload.get("status")
+            or event_payload.get("result_state")
+            or ""
+        ).strip().lower()
+        evidence = event_payload.get("evidence")
+        evidence_count = int(event_payload.get("verification_evidence_count") or 0)
+        if isinstance(evidence, list):
+            evidence_count = max(evidence_count, len(evidence))
+        verified = verification_state == "verified" and evidence_count > 0
+        if verified:
+            parameters["result_state"] = "verified"
+            parameters["request_stage"] = "verification_result"
+        elif verification_state in {"failed", "blocked"}:
+            parameters["result_state"] = verification_state
+            parameters["request_stage"] = "verification_result"
+        else:
+            parameters["result_state"] = "partial"
+            parameters["request_stage"] = "verification_pending"
+        parameters["verification_state"] = verification_state or "unknown"
+        parameters["verification_evidence_count"] = evidence_count
+        next_state["parameters"] = parameters
+        if not self._accept_event_request_state(next_state, cursor):
+            return False
+        self._active_request_state = next_state
+        self._active_request_event_cursor = max(self._active_request_event_cursor, cursor)
+        return True
+
+    def _apply_failure_state_from_event(self, event: dict[str, Any]) -> bool:
+        event_payload = (
+            event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        )
+        event_type = str(event.get("event_type") or event.get("type") or "").strip().lower()
+        result_state = "blocked" if event_type.endswith(".blocked") or event_type == "blocked" else "failed"
+        next_state = copy.deepcopy(self._active_request_state)
+        family = self._event_route_family(event)
+        if family:
+            next_state["family"] = family
+        parameters = (
+            dict(next_state.get("parameters"))
+            if isinstance(next_state.get("parameters"), dict)
+            else {}
+        )
+        parameters["request_stage"] = result_state
+        parameters["result_state"] = result_state
+        if event_payload.get("summary") or event.get("message"):
+            parameters["progress_summary"] = str(event_payload.get("summary") or event.get("message"))[:180]
+        next_state["parameters"] = parameters
+        cursor = int(event.get("cursor") or event.get("event_id") or 0)
+        if not self._accept_event_request_state(next_state, cursor):
+            return False
+        self._active_request_state = next_state
+        self._active_request_event_cursor = max(self._active_request_event_cursor, cursor)
+        return True
+
+    def _apply_budget_state_from_event(self, event: dict[str, Any]) -> bool:
+        event_payload = (
+            event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        )
+        next_state = copy.deepcopy(self._active_request_state)
+        family = self._event_route_family(event)
+        if family:
+            next_state["family"] = family
+        parameters = (
+            dict(next_state.get("parameters"))
+            if isinstance(next_state.get("parameters"), dict)
+            else {}
+        )
+        parameters["request_stage"] = "timed_out_continuing"
+        parameters["result_state"] = "timeout" if not event_payload.get("continuing", True) else "partial"
+        parameters["budget_exceeded"] = True
+        next_state["parameters"] = parameters
+        cursor = int(event.get("cursor") or event.get("event_id") or 0)
+        if not self._accept_event_request_state(next_state, cursor):
+            return False
+        self._active_request_state = next_state
+        self._active_request_event_cursor = max(self._active_request_event_cursor, cursor)
+        if self._pending_activity is None:
+            self._status_line = "Still checking."
+            self.statusChanged.emit()
+        return True
+
+    def _apply_provider_state_from_event(self, event: dict[str, Any]) -> bool:
+        event_payload = (
+            event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        )
+        event_type = str(event.get("event_type") or event.get("type") or "").strip().lower()
+        cursor = int(event.get("cursor") or event.get("event_id") or 0)
+        next_state = copy.deepcopy(self._active_request_state)
+        next_state["family"] = self._event_route_family(event) or "generic_provider"
+        request_id = self._event_request_id(event)
+        if request_id:
+            next_state["request_id"] = request_id
+        parameters = (
+            dict(next_state.get("parameters"))
+            if isinstance(next_state.get("parameters"), dict)
+            else {}
+        )
+        provider_state = str(
+            event_payload.get("provider_fallback_state")
+            or event_payload.get("fallback_state")
+            or self._provider_state_from_event_type(event_type)
+        ).strip().lower()
+        result_state = self._provider_result_state(provider_state, event_type)
+        parameters["request_stage"] = f"provider_{provider_state or 'updated'}"
+        parameters["result_state"] = result_state
+        message = str(event.get("message") or event_payload.get("summary") or "").strip()
+        if message:
+            parameters["progress_summary"] = message[:180]
+        provider_details: dict[str, Any] = {
+            "state": provider_state or "unknown",
+            "provider_budget_label": str(event_payload.get("provider_budget_label") or "").strip(),
+            "fallback_reason": str(event_payload.get("fallback_reason") or "").strip(),
+            "failure_code": str(event_payload.get("failure_code") or "").strip(),
+            "provider_name": str(event_payload.get("provider_name") or "").strip(),
+            "model_name": str(event_payload.get("model_name") or event_payload.get("provider_model_name") or "").strip(),
+            "streaming_used": bool(event_payload.get("streaming_used"))
+            if event_payload.get("streaming_used") is not None
+            else None,
+            "cancellation_supported": bool(event_payload.get("cancellation_supported"))
+            if event_payload.get("cancellation_supported") is not None
+            else None,
+            "native_route_blocked_by_provider": bool(event_payload.get("native_route_blocked_by_provider")),
+        }
+        for key in (
+            "first_byte_ms",
+            "first_token_ms",
+            "first_output_ms",
+            "total_provider_ms",
+            "total_user_visible_ms",
+            "timeout_ms",
+        ):
+            value = self._float_or_none(event_payload.get(key))
+            if value is not None:
+                provider_details[key] = value
+        parameters["provider_fallback"] = {
+            key: value
+            for key, value in provider_details.items()
+            if value not in {"", None}
+        }
+        next_state["parameters"] = parameters
+        if not self._accept_event_request_state(next_state, cursor):
+            return False
+        self._active_request_state = next_state
+        self._active_request_event_cursor = max(self._active_request_event_cursor, cursor)
+        if event_type in {"provider_request_started", "provider_fallback_selected"}:
+            self._status_line = "Provider fallback running."
+            self.statusChanged.emit()
+        elif event_type == "provider_timeout" or provider_state == "timed_out":
+            self._status_line = "Provider fallback timed out."
+            self.statusChanged.emit()
+        elif event_type == "provider_cancelled" or provider_state == "cancelled":
+            self._status_line = "Provider fallback cancelled."
+            self.statusChanged.emit()
+        elif event_type == "provider_failed" or provider_state == "failed":
+            self._status_line = "Provider fallback failed."
+            self.statusChanged.emit()
+        elif event_type in {"provider_first_output", "provider_partial_output"} or provider_state == "partial_result":
+            self._status_line = "Partial result available."
+            self.statusChanged.emit()
+        return True
+
+    def _provider_state_from_event_type(self, event_type: str) -> str:
+        return {
+            "provider_fallback_selected": "selected",
+            "provider_request_started": "running",
+            "provider_first_output": "partial_result",
+            "provider_partial_output": "partial_result",
+            "provider_stream_completed": "completed",
+            "provider_result_ready": "completed",
+            "provider_timeout": "timed_out",
+            "provider_cancelled": "cancelled",
+            "provider_failed": "failed",
+        }.get(event_type.replace(".", "_"), "running")
+
+    def _provider_result_state(self, provider_state: str, event_type: str) -> str:
+        normalized = provider_state.replace(".", "_")
+        event_name = event_type.replace(".", "_")
+        if normalized in {"running", "selected", "preparing", "eligible", "streaming"}:
+            return "provider_running"
+        if normalized == "timed_out" or event_name == "provider_timeout":
+            return "timeout"
+        if normalized == "cancelled" or event_name == "provider_cancelled":
+            return "provider_cancelled"
+        if normalized in {"failed", "blocked", "not_allowed", "disabled"}:
+            return "failed" if normalized == "failed" else "blocked"
+        if normalized in {"partial_result"} or event_name in {"provider_first_output", "provider_partial_output"}:
+            return "partial"
+        if normalized == "completed" or event_name in {"provider_stream_completed", "provider_result_ready"}:
+            return "fallback_used"
+        return "provider_running"
+
+    def _accept_event_request_state(self, next_state: dict[str, Any], cursor: int) -> bool:
+        if cursor >= self._active_request_event_cursor:
+            return True
+        current_rank = self._request_state_rank(self._active_request_state)
+        next_rank = self._request_state_rank(next_state)
+        return next_rank >= current_rank
+
+    def _should_accept_snapshot_request_state(self, next_state: dict[str, Any]) -> bool:
+        if not next_state:
+            self._active_request_event_cursor = 0
+            return True
+        if self._active_request_event_cursor <= 0:
+            return True
+        current_rank = self._request_state_rank(self._active_request_state)
+        next_rank = self._request_state_rank(next_state)
+        current_request_id = str(self._active_request_state.get("request_id") or "").strip()
+        next_request_id = str(next_state.get("request_id") or "").strip()
+        same_request = (
+            bool(current_request_id and next_request_id and current_request_id == next_request_id)
+            or not current_request_id
+            or not next_request_id
+        )
+        if same_request and next_rank < current_rank:
+            return False
+        return True
+
+    def _request_state_rank(self, state: dict[str, Any]) -> int:
+        parameters = state.get("parameters") if isinstance(state.get("parameters"), dict) else {}
+        trust = state.get("trust") if isinstance(state.get("trust"), dict) else {}
+        stage = str(parameters.get("request_stage") or "").strip().lower()
+        result_state = str(parameters.get("result_state") or "").strip().lower()
+        approval_state = str(trust.get("approval_state") or "").strip().lower()
+        if result_state in TERMINAL_RESULT_STATES or stage in TERMINAL_RESULT_STATES:
+            return 40
+        if approval_state in {"pending_operator_confirmation", "expired", "revoked", "denied", "consumed"}:
+            return 30
+        if stage in {"clarify_payload", "verification_pending", "timed_out_continuing"}:
+            return 25
+        if result_state in {"running", "provider_running", "partial", "timeout"}:
+            return 20
+        if stage or result_state:
+            return 10
+        return 0
+
+    def _record_ui_latency_mark(
+        self,
+        *,
+        request_id: str | None,
+        event_id: str | None,
+        event_type: str | None,
+        route_family: str | None,
+        subsystem: str | None,
+        surface: str,
+        mark_name: str,
+        source: str,
+        sequence_number: int | None = None,
+        stale: bool = False,
+        monotonic_ms: float | None = None,
+    ) -> None:
+        self._ui_latency_sequence += 1
+        mark = UiLatencyMark(
+            request_id=request_id,
+            event_id=event_id,
+            event_type=event_type,
+            route_family=route_family,
+            subsystem=subsystem,
+            surface=surface,
+            mark_name=mark_name,
+            monotonic_ms=monotonic_ms if monotonic_ms is not None else ui_monotonic_ms(),
+            wall_time=ui_wall_time(),
+            source=source,
+            sequence_number=sequence_number,
+            stale=stale,
+            render_confirmed="unknown",
+        ).to_dict()
+        self._ui_latency_marks.append(mark)
+        self._ui_latency_marks = self._ui_latency_marks[-240:]
+
+    def _record_http_latency_marks(
+        self,
+        request_id: str | None,
+        http_timing: dict[str, Any],
+    ) -> None:
+        for key, mark_name, source in (
+            (
+                "user_submitted_message_monotonic_ms",
+                "user_submitted_message",
+                "ui_action",
+            ),
+            (
+                "http_send_started_monotonic_ms",
+                "ui_http_send_started",
+                "ui_action",
+            ),
+            (
+                "http_response_received_monotonic_ms",
+                "ui_http_response_received",
+                "http_response",
+            ),
+        ):
+            monotonic_ms = self._float_or_none(http_timing.get(key))
+            if monotonic_ms is None:
+                continue
+            self._record_ui_latency_mark(
+                request_id=request_id,
+                event_id=None,
+                event_type="chat_http",
+                route_family=None,
+                subsystem="ui_bridge",
+                surface="composer",
+                mark_name=mark_name,
+                source=source,
+                monotonic_ms=monotonic_ms,
+            )
+
+    def _int_or_none(self, value: Any) -> int | None:
+        if isinstance(value, int):
+            return value
+        try:
+            text = str(value).strip()
+            if not text:
+                return None
+            return int(float(text))
+        except (TypeError, ValueError):
+            return None
+
+    def _normalize_render_surface(self, surface: str) -> str:
+        normalized = str(surface or "").strip().lower().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "ghost": "ghost_primary",
+            "primary_ghost": "ghost_primary",
+            "action_strip": "ghost_action_strip",
+            "composer": "composer_chips",
+            "route_chips": "composer_chips",
+            "status_chips": "composer_chips",
+            "voice": "voice_core",
+            "deck": "deck_event_spine",
+            "watch": "deck_event_spine",
+            "inspector": "route_inspector",
+            "approval": "approval_prompt",
+            "clarification": "clarification_prompt",
+        }
+        return aliases.get(normalized, normalized)
+
+    def _render_target_surfaces(self, surfaces: set[str]) -> set[str]:
+        mapping = {
+            "ghost": {"ghost_primary", "ghost_action_strip"},
+            "composer": {"composer_chips"},
+            "inspector": {"route_inspector"},
+            "deck": {"deck_event_spine"},
+            "watch": {"deck_event_spine"},
+            "voice": {"voice_core"},
+            "approval": {"approval_prompt"},
+            "clarification": {"clarification_prompt"},
+        }
+        targets: set[str] = set()
+        known_targets = {
+            "ghost_primary",
+            "ghost_action_strip",
+            "composer_chips",
+            "voice_core",
+            "approval_prompt",
+            "clarification_prompt",
+            "deck_event_spine",
+            "route_inspector",
+        }
+        for surface in surfaces:
+            raw = str(surface or "").strip().lower().replace("-", "_").replace(" ", "_")
+            if raw in mapping:
+                targets.update(mapping[raw])
+                continue
+            normalized = self._normalize_render_surface(raw)
+            if normalized in mapping:
+                targets.update(mapping[normalized])
+            elif normalized in known_targets:
+                targets.add(normalized)
+        return targets
+
+    def _register_surface_model_updates(
+        self,
+        *,
+        surfaces: set[str],
+        request_id: str | None,
+        event_id: str | None,
+        event_type: str | None,
+        route_family: str | None,
+        subsystem: str | None,
+        sequence_number: int | None,
+        frame_received_ms: float,
+        event_parsed_ms: float | None,
+        bridge_update_ms: float | None,
+        model_notify_ms: float | None,
+        source: str = "core_event",
+        used_polling_fallback: bool = False,
+        used_snapshot_reconciliation: bool = False,
+        gap_recovered: bool = False,
+        render_confirmation_status: str = "unknown",
+    ) -> set[str]:
+        targets = self._render_target_surfaces(surfaces)
+        if not targets:
+            targets = {"bridge"}
+        for surface in sorted(targets):
+            revision = self._render_model_revision_by_surface.get(surface, 0) + 1
+            self._render_model_revision_by_surface[surface] = revision
+            self._render_context_by_surface[surface] = {
+                "request_id": request_id,
+                "event_id": event_id,
+                "event_type": event_type,
+                "route_family": route_family,
+                "subsystem": subsystem,
+                "sequence_number": sequence_number,
+                "model_revision": revision,
+                "source": source,
+                "render_confirmation_status": render_confirmation_status,
+                "render_confirmation_source": "",
+            }
+            self._append_event_latency_summary(
+                request_id=request_id,
+                event_id=event_id,
+                event_type=event_type,
+                frame_received_ms=frame_received_ms,
+                event_parsed_ms=event_parsed_ms,
+                bridge_update_ms=bridge_update_ms,
+                model_notify_ms=model_notify_ms,
+                surface=surface,
+                model_revision=revision,
+                render_confirmation_status=render_confirmation_status,
+                used_polling_fallback=used_polling_fallback,
+                used_snapshot_reconciliation=used_snapshot_reconciliation,
+                gap_recovered=gap_recovered,
+            )
+        return targets
+
+    def _update_summary_from_render_confirmation(
+        self,
+        confirmation: dict[str, Any],
+    ) -> None:
+        surface = str(confirmation.get("surface") or "").strip()
+        event_id = str(confirmation.get("event_id") or "").strip()
+        model_revision = self._int_or_none(confirmation.get("model_revision"))
+        rendered_at = self._float_or_none(confirmation.get("rendered_at_monotonic_ms"))
+        if not surface or rendered_at is None:
+            return
+        for summary in reversed(self._ui_event_render_latency_summaries):
+            if str(summary.get("surface") or "") != surface:
+                continue
+            if event_id and str(summary.get("event_id") or "") != event_id:
+                continue
+            if model_revision is not None and summary.get("model_revision") != model_revision:
+                continue
+            model_notify = self._float_or_none(summary.get("model_notify_at_monotonic_ms"))
+            received = self._float_or_none(summary.get("event_received_at_monotonic_ms"))
+            if model_notify is not None:
+                summary["model_notify_to_render_confirmed_ms"] = round(
+                    max(0.0, rendered_at - model_notify),
+                    3,
+                )
+                summary["model_notify_to_render_visible_ms"] = summary[
+                    "model_notify_to_render_confirmed_ms"
+                ]
+            if received is not None:
+                summary["received_to_render_confirmed_ms"] = round(
+                    max(0.0, rendered_at - received),
+                    3,
+                )
+                summary["received_to_render_visible_ms"] = summary[
+                    "received_to_render_confirmed_ms"
+                ]
+            summary["render_confirmed_at_monotonic_ms"] = rendered_at
+            summary["render_confirmation_status"] = confirmation.get(
+                "render_confirmation_status",
+                "unknown",
+            )
+            summary["render_confirmation_source"] = confirmation.get(
+                "confirmation_source",
+                "",
+            )
+            summary["render_confirmed"] = bool(confirmation.get("render_confirmed"))
+            return
+
+    def _append_event_latency_summary(
+        self,
+        *,
+        request_id: str | None,
+        event_id: str | None,
+        event_type: str | None,
+        frame_received_ms: float,
+        event_parsed_ms: float | None = None,
+        bridge_update_ms: float | None = None,
+        model_notify_ms: float | None = None,
+        surface: str = "bridge",
+        model_revision: int | None = None,
+        render_confirmation_status: str = "unknown",
+        render_confirmation_source: str = "",
+        used_polling_fallback: bool = False,
+        used_snapshot_reconciliation: bool = False,
+        gap_recovered: bool = False,
+    ) -> None:
+        received_to_bridge = (
+            round(max(0.0, bridge_update_ms - frame_received_ms), 3)
+            if bridge_update_ms is not None
+            else None
+        )
+        bridge_to_model = (
+            round(max(0.0, model_notify_ms - bridge_update_ms), 3)
+            if bridge_update_ms is not None and model_notify_ms is not None
+            else None
+        )
+        summary = UiEventRenderLatencySummary(
+            request_id=request_id,
+            event_id=event_id,
+            event_type=event_type,
+            surface=surface,
+            event_received_at_monotonic_ms=frame_received_ms,
+            event_parsed_at_monotonic_ms=event_parsed_ms,
+            bridge_update_at_monotonic_ms=bridge_update_ms,
+            model_notify_at_monotonic_ms=model_notify_ms,
+            render_confirmed_at_monotonic_ms=None,
+            received_to_bridge_update_ms=received_to_bridge,
+            bridge_update_to_model_notify_ms=bridge_to_model,
+            model_notify_to_render_confirmed_ms=None,
+            received_to_render_confirmed_ms=None,
+            model_notify_to_render_visible_ms=None,
+            received_to_render_visible_ms=None,
+            render_confirmation_status=render_confirmation_status,
+            render_confirmation_source=render_confirmation_source,
+            used_polling_fallback=used_polling_fallback,
+            used_snapshot_reconciliation=used_snapshot_reconciliation,
+            gap_recovered=gap_recovered,
+            reconnect_gap_recovered=self._event_stream_reconnect_gap_recovered,
+            duplicate_ignored_count=self._stream_duplicate_ignored_count,
+            out_of_order_ignored_count=self._stream_out_of_order_ignored_count,
+            render_confirmed="unknown",
+            model_revision=model_revision,
+        ).to_dict()
+        self._ui_event_render_latency_summaries.append(summary)
+        self._ui_event_render_latency_summaries = (
+            self._ui_event_render_latency_summaries[-160:]
+        )
+
+    def _surface_mark_name(self, surface: str) -> str:
+        return {
+            "ghost": "ghost_state_updated",
+            "deck": "deck_inspector_updated",
+            "watch": "deck_inspector_updated",
+            "inspector": "deck_inspector_updated",
+            "composer": "composer_state_updated",
+            "voice": "voice_state_updated",
+            "approval": "approval_prompt_surfaced",
+        }.get(surface, f"{surface}_state_updated")
+
+    def _event_request_id(self, event: dict[str, Any]) -> str | None:
+        event_payload = (
+            event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        )
+        for key in (
+            "request_id",
+            "correlation_id",
+            "task_id",
+            "job_id",
+            "turn_id",
+            "capture_id",
+            "playback_id",
+        ):
+            value = event_payload.get(key) or event.get(key)
+            text = str(value or "").strip()
+            if text:
+                return text
+        return None
+
+    def _event_route_family(self, event: dict[str, Any]) -> str | None:
+        event_payload = (
+            event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        )
+        active_request = event_payload.get("active_request_state")
+        if isinstance(active_request, dict) and active_request.get("family"):
+            return str(active_request.get("family")).strip() or None
+        for key in ("route_family", "family"):
+            value = event_payload.get(key) or event.get(key)
+            text = str(value or "").strip()
+            if text:
+                return text
+        return None
+
+    def _event_sequence_number(self, event: dict[str, Any]) -> int | None:
+        for key in ("sequence_number", "cursor", "event_id"):
+            value = event.get(key)
+            if isinstance(value, int):
+                return value
+        return None
+
+    def _stream_state_key(self, event: dict[str, Any]) -> str:
+        event_payload = (
+            event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        )
+        event_type = str(event.get("event_type") or event.get("type") or "").strip().lower()
+        family = str(event.get("event_family") or "").strip().lower()
+        identity = (
+            event_payload.get("request_id")
+            or event_payload.get("approval_id")
+            or event_payload.get("job_id")
+            or event_payload.get("task_id")
+            or event_payload.get("turn_id")
+            or event_payload.get("capture_id")
+            or event_payload.get("playback_id")
+            or "default"
+        )
+        if event_type.startswith("voice."):
+            lane = "voice"
+        elif self._is_provider_event(family, event_type):
+            lane = "provider"
+        elif self._is_job_event(family, event_type):
+            lane = "job"
+        elif self._is_verification_event(family, event_type):
+            lane = "request"
+        elif self._is_route_event(family, event_type):
+            lane = "request"
+        else:
+            lane = family or "runtime"
+        return f"{lane}:{identity}"
+
+    def _is_out_of_order_state_event(self, state_key: str, cursor: int) -> bool:
+        latest = self._stream_state_cursor_by_key.get(state_key)
+        return latest is not None and cursor < latest
+
+    def _float_or_none(self, value: Any) -> float | None:
+        if isinstance(value, (int, float)):
+            return float(value)
+        try:
+            text = str(value).strip()
+            if not text:
+                return None
+            return float(text)
+        except (TypeError, ValueError):
+            return None
 
     def apply_voice_action_result(self, payload: dict[str, Any]) -> None:
         action = str(payload.get("action") or "voice.action").strip()
@@ -1391,23 +2704,82 @@ class UiBridge(QtCore.QObject):
         if source == "client":
             if phase == "connecting":
                 self._connection_state = "connecting"
+                self._event_stream_connection_state = "reconnecting"
                 if self._pending_activity is None:
                     self._status_line = "Reacquiring operational signal."
             elif phase == "reconnecting":
                 self._connection_state = "disrupted"
+                self._event_stream_connection_state = "reconnecting"
+                self._event_stream_reconciliation_requested = True
+                self._event_stream_reconciliation_completed = False
                 if self._pending_activity is None:
                     self._status_line = "Operational stream reconnecting."
+            elif phase == "disconnected":
+                self._connection_state = "disrupted"
+                self._event_stream_connection_state = "disconnected"
             elif phase == "stopped" and self._pending_activity is None:
+                self._event_stream_connection_state = "disconnected"
                 self._status_line = "Operational stream paused."
         elif phase == "connected":
             self._connection_state = "connected"
+            self._event_stream_connection_state = "connected"
+            if bool(payload.get("gap_detected")):
+                self._event_stream_connection_state = "stale"
+                self._event_stream_reconciliation_requested = True
+                self._event_stream_reconciliation_completed = False
+            elif self._event_stream_reconciliation_requested:
+                self._event_stream_reconciliation_completed = False
+        elif phase == "heartbeat":
+            if self._event_stream_connection_state not in {"stale", "reconnecting"}:
+                self._event_stream_connection_state = "connected"
+        if phase != "heartbeat":
+            now_ms = ui_monotonic_ms()
+            cursor = self._int_or_none(payload.get("cursor"))
+            self._register_surface_model_updates(
+                surfaces={"deck"},
+                request_id=None,
+                event_id=str(cursor) if cursor is not None else None,
+                event_type=f"stream_state.{phase or source or 'unknown'}",
+                route_family=None,
+                subsystem="event_stream",
+                sequence_number=cursor,
+                frame_received_ms=now_ms,
+                event_parsed_ms=now_ms,
+                bridge_update_ms=now_ms,
+                model_notify_ms=now_ms,
+            )
+            self._rebuild_surface_models()
+            self.collectionsChanged.emit()
         self.statusChanged.emit()
 
     def apply_stream_gap(self, payload: dict[str, Any]) -> None:
-        del payload
+        self._event_stream_last_gap_report = dict(payload)
+        self._event_stream_connection_state = "stale"
+        self._event_stream_reconciliation_requested = True
+        self._event_stream_reconciliation_completed = False
+        self._event_stream_reconnect_gap_recovered = False
         if self._pending_activity is None:
             self._status_line = "Recent event window expired; refreshing from snapshot."
-            self.statusChanged.emit()
+        now_ms = ui_monotonic_ms()
+        self._register_surface_model_updates(
+            surfaces={"deck"},
+            request_id=None,
+            event_id=sanitized_render_value(
+                payload.get("last_event_id_seen") or payload.get("stream_id")
+            )
+            or None,
+            event_type="stream_gap",
+            route_family=None,
+            subsystem="event_stream",
+            sequence_number=self._int_or_none(payload.get("last_event_id_seen")),
+            frame_received_ms=now_ms,
+            event_parsed_ms=now_ms,
+            bridge_update_ms=now_ms,
+            model_notify_ms=now_ms,
+        )
+        self._rebuild_surface_models()
+        self.collectionsChanged.emit()
+        self.statusChanged.emit()
 
     def _queue_stream_collections_changed(self) -> None:
         if self._stream_collections_timer.isActive():
@@ -1420,6 +2792,16 @@ class UiBridge(QtCore.QObject):
 
     def _apply_voice_state_from_stream_event(self, event: dict[str, Any]) -> bool:
         event_payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        event_type = str(event.get("event_type") or event.get("type") or "").strip()
+        metadata_payload = (
+            event_payload.get("metadata")
+            if isinstance(event_payload.get("metadata"), dict)
+            else {}
+        )
+        visualizer_event = (
+            event_type == "voice.visualizer_update"
+            or bool(metadata_payload.get("visualizer_only"))
+        )
         voice_payload = event.get("voice") if isinstance(event.get("voice"), dict) else None
         if voice_payload is None:
             candidate = event_payload.get("voice")
@@ -1430,11 +2812,11 @@ class UiBridge(QtCore.QObject):
             if isinstance(status_payload, dict) and isinstance(status_payload.get("voice"), dict):
                 voice_payload = status_payload.get("voice")
         if voice_payload is None:
-            metadata_payload = event_payload.get("metadata")
-            if isinstance(metadata_payload, dict):
-                candidate = metadata_payload.get("voice")
-                if isinstance(candidate, dict):
-                    voice_payload = candidate
+            candidate = metadata_payload.get("voice")
+            if isinstance(candidate, dict):
+                voice_payload = candidate
+        if voice_payload is None:
+            voice_payload = self._voice_payload_from_stage_event(event)
         if voice_payload is None:
             anchor_keys = {
                 "voice_anchor_state",
@@ -1469,6 +2851,8 @@ class UiBridge(QtCore.QObject):
             voice_payload = direct_voice or None
         if not isinstance(voice_payload, dict) or not voice_payload:
             return False
+        if visualizer_event:
+            self._record_visualizer_stream_update(voice_payload)
         next_status = dict(self._status)
         current_voice = (
             dict(next_status.get("voice"))
@@ -1480,11 +2864,299 @@ class UiBridge(QtCore.QObject):
         if next_status == self._status:
             return False
         self._status = next_status
-        return self._refresh_voice_state()
+        return self._refresh_voice_state(visualizer_update=visualizer_event)
+
+    def _voice_payload_from_stage_event(self, event: dict[str, Any]) -> dict[str, Any] | None:
+        event_type = str(event.get("event_type") or event.get("type") or "").strip().lower()
+        if not event_type.startswith("voice."):
+            return None
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        status = str(payload.get("status") or payload.get("state") or "").strip().lower()
+        voice: dict[str, Any] = {
+            "enabled": True,
+            "available": True,
+            "availability": {"available": True},
+            "capture": {"enabled": True, "available": True},
+            "raw_audio_present": bool(payload.get("raw_audio_present", False)),
+            "runtime_truth": {
+                "no_realtime": True,
+                "no_vad": True,
+                "always_listening": False,
+                "command_authority": "stormhelm_core",
+            },
+        }
+        turn_id = str(payload.get("turn_id") or "").strip()
+        if turn_id:
+            voice["turn_id"] = turn_id
+        if event_type in {
+            "voice.wake_detected",
+            "voice.wake_ghost_requested",
+            "voice.wake_ghost_shown",
+            "voice.wake_session_started",
+        }:
+            voice["wake_ghost"] = {
+                "active": True,
+                "requested": True,
+                "status": "shown"
+                if event_type in {"voice.wake_ghost_shown", "voice.wake_detected"}
+                else "requested",
+                "wake_status_label": "Bearing acquired.",
+                "wake_prompt_text": str(payload.get("detail") or event.get("message") or "Ghost ready."),
+                "wake_event_id": payload.get("wake_event_id"),
+                "wake_session_id": payload.get("wake_session_id"),
+                "wake_ghost_request_id": payload.get("wake_ghost_request_id"),
+                "no_post_wake_capture": True,
+                "no_command_from_wake": True,
+            }
+            voice["wake_supervised_loop"] = {"active_loop_stage": "ghost"}
+            return voice
+        if event_type in {
+            "voice.post_wake_listen_opened",
+            "voice.post_wake_listen_started",
+            "voice.listening_started",
+        }:
+            voice["post_wake_listen"] = {
+                "enabled": True,
+                "ready": True,
+                "active_listen_window_status": "active",
+                "active_listen_window_id": payload.get("listen_window_id"),
+            }
+            return voice
+        if event_type in {
+            "voice.capture_started",
+            "voice.post_wake_listen_capture_started",
+        }:
+            capture_id = str(payload.get("capture_id") or "").strip()
+            voice["capture"] = {
+                "enabled": True,
+                "available": True,
+                "active_capture_id": capture_id or None,
+                "active_capture_status": "started",
+                "last_capture_id": capture_id or None,
+                "last_capture_status": "started",
+            }
+            return voice
+        if event_type in {
+            "voice.capture_stopped",
+            "voice.post_wake_listen_captured",
+            "voice.capture_audio_created",
+        }:
+            capture_id = str(payload.get("capture_id") or "").strip()
+            voice["capture"] = {
+                "enabled": True,
+                "available": True,
+                "active_capture_id": None,
+                "active_capture_status": "stopped",
+                "last_capture_id": capture_id or None,
+                "last_capture_status": "stopped",
+                "last_capture_duration_ms": payload.get("duration_ms"),
+                "last_capture_size_bytes": payload.get("size_bytes"),
+            }
+            return voice
+        if event_type in {"voice.capture_failed", "voice.capture_blocked"}:
+            voice["capture"] = {
+                "enabled": True,
+                "available": event_type != "voice.capture_blocked",
+                "last_capture_status": "failed"
+                if event_type == "voice.capture_failed"
+                else "blocked",
+                "last_capture_error": {"code": payload.get("error_code")},
+            }
+            return voice
+        if event_type == "voice.transcription_started":
+            voice["state"] = "transcribing"
+            voice["stt"] = {
+                "last_transcription_id": payload.get("transcription_id"),
+                "last_transcription_state": "started",
+            }
+            return voice
+        if event_type in {"voice.transcription_completed", "voice.realtime_final_transcript"}:
+            voice["stt"] = {
+                "last_transcription_id": payload.get("transcription_id")
+                or payload.get("realtime_event_id"),
+                "last_transcription_state": "completed",
+                "last_transcript_preview": str(
+                    payload.get("transcript_preview")
+                    or payload.get("text_preview")
+                    or payload.get("transcript")
+                    or ""
+                )[:96],
+            }
+            if event_type == "voice.realtime_final_transcript":
+                voice["realtime"] = {
+                    "enabled": True,
+                    "available": True,
+                    "active_realtime_turn_id": payload.get("realtime_turn_id"),
+                    "final_transcript_preview": voice["stt"]["last_transcript_preview"],
+                    "direct_tools_allowed": bool(payload.get("direct_tools_allowed", False)),
+                    "core_bridge_required": bool(payload.get("core_bridge_required", True)),
+                }
+            return voice
+        if event_type == "voice.realtime_partial_transcript":
+            voice["realtime"] = {
+                "enabled": True,
+                "available": True,
+                "active_realtime_turn_id": payload.get("realtime_turn_id"),
+                "partial_transcript_preview": str(
+                    payload.get("transcript_preview")
+                    or payload.get("text_preview")
+                    or payload.get("transcript")
+                    or ""
+                )[:96],
+                "direct_tools_allowed": bool(payload.get("direct_tools_allowed", False)),
+                "core_bridge_required": bool(payload.get("core_bridge_required", True)),
+            }
+            return voice
+        if event_type == "voice.transcription_failed":
+            voice["stt"] = {
+                "last_transcription_id": payload.get("transcription_id"),
+                "last_transcription_state": "failed",
+                "last_transcription_error": {"code": payload.get("error_code")},
+            }
+            return voice
+        if event_type == "voice.core_request_started":
+            voice["state"] = "core_routing"
+            voice["manual_turns"] = {
+                "last_core_result_state": "routing",
+                "last_route_family": payload.get("route_family"),
+                "last_subsystem": payload.get("subsystem"),
+            }
+            return voice
+        if event_type in {
+            "voice.core_request_completed",
+            "voice.realtime_core_bridge_call_completed",
+        }:
+            voice["manual_turns"] = {
+                "last_core_result_state": status or str(payload.get("result_state") or "completed"),
+                "last_route_family": payload.get("route_family"),
+                "last_subsystem": payload.get("subsystem"),
+                "last_trust_posture": payload.get("trust_posture"),
+                "last_verification_posture": payload.get("verification_posture"),
+            }
+            return voice
+        if event_type == "voice.spoken_response_prepared":
+            voice["manual_turns"] = {
+                "last_core_result_state": "completed",
+                "last_spoken_response_preview": str(
+                    payload.get("spoken_preview") or payload.get("spoken_text") or ""
+                )[:96],
+            }
+            return voice
+        if event_type in {
+            "voice.speech_request_created",
+            "voice.synthesis_started",
+            "voice.tts_stream_started",
+        }:
+            voice["state"] = "synthesizing"
+            voice["tts"] = {
+                "last_synthesis_id": payload.get("synthesis_id"),
+                "last_synthesis_state": "started",
+                "last_spoken_text_preview": str(
+                    payload.get("spoken_preview") or payload.get("spoken_text") or ""
+                )[:96],
+            }
+            return voice
+        if event_type == "voice.tts_first_chunk_received":
+            voice["state"] = "synthesizing"
+            voice["tts"] = {
+                "last_synthesis_id": payload.get("synthesis_id"),
+                "last_synthesis_state": "first_chunk",
+                "first_audio_chunk_received": True,
+            }
+            return voice
+        if event_type in {"voice.synthesis_completed", "voice.tts_stream_completed"}:
+            voice["tts"] = {
+                "last_synthesis_id": payload.get("synthesis_id"),
+                "last_synthesis_state": "completed",
+            }
+            return voice
+        if event_type in {
+            "voice.playback_request_created",
+            "voice.playback_stream_started",
+        }:
+            playback_id = str(payload.get("playback_id") or "").strip()
+            voice["playback"] = {
+                "active_playback_id": playback_id or None,
+                "active_playback_status": "requested",
+                "last_playback_status": "requested",
+                "user_heard_claimed": bool(payload.get("user_heard_claimed", False)),
+            }
+            return voice
+        if event_type == "voice.playback_started":
+            playback_id = str(payload.get("playback_id") or "").strip()
+            voice["playback"] = {
+                "active_playback_id": playback_id or None,
+                "active_playback_status": "started",
+                "last_playback_status": "started",
+                "currently_speaking": True,
+                "live_playback_status": "playing",
+                "first_audio_started": True,
+                "user_heard_claimed": bool(payload.get("user_heard_claimed", False)),
+            }
+            return voice
+        if event_type in {
+            "voice.playback_completed",
+            "voice.playback_stopped",
+            "voice.playback_failed",
+            "voice.playback_stream_completed",
+            "voice.playback_stream_failed",
+        }:
+            failed = event_type.endswith("_failed") or event_type.endswith(".failed")
+            stopped = event_type.endswith("_stopped") or event_type.endswith(".stopped")
+            playback_status = "failed" if failed else "stopped" if stopped else "completed"
+            voice["playback"] = {
+                "active_playback_id": None,
+                "active_playback_status": playback_status,
+                "last_playback_status": playback_status,
+                "currently_speaking": False,
+                "user_heard_claimed": bool(payload.get("user_heard_claimed", False)),
+                "last_playback_error": {"code": payload.get("error_code")} if failed else {},
+            }
+            return voice
+        if event_type in {
+            "voice.spoken_confirmation_accepted",
+            "voice.spoken_confirmation_rejected",
+            "voice.spoken_confirmation_expired",
+            "voice.spoken_confirmation_consumed",
+            "voice.spoken_confirmation_failed",
+        }:
+            status_label = event_type.rsplit("_", 1)[-1]
+            voice["spoken_confirmation"] = {
+                "enabled": True,
+                "last_status": status_label,
+                "last_pending_confirmation_id": payload.get("pending_confirmation_id"),
+                "confirmation_accepted_does_not_execute_action": True,
+            }
+            return voice
+        return None
 
     def apply_chat_result(self, payload: dict[str, Any]) -> None:
         user_message = payload.get("user_message")
         assistant_message = payload.get("assistant_message")
+        http_timing = (
+            payload.get("ui_http_timing")
+            if isinstance(payload.get("ui_http_timing"), dict)
+            else {}
+        )
+        if http_timing:
+            metadata = (
+                assistant_message.get("metadata")
+                if isinstance(assistant_message, dict)
+                and isinstance(assistant_message.get("metadata"), dict)
+                else {}
+            )
+            trace = (
+                metadata.get("latency_trace")
+                if isinstance(metadata.get("latency_trace"), dict)
+                else {}
+            )
+            request_id = str(
+                payload.get("request_id")
+                or metadata.get("request_id")
+                or trace.get("request_id")
+                or ""
+            ).strip() or None
+            self._record_http_latency_marks(request_id, http_timing)
         additions: list[dict[str, Any]] = []
         if isinstance(user_message, dict):
             additions.append(self._normalize_message(user_message))
@@ -1904,12 +3576,95 @@ class UiBridge(QtCore.QObject):
             "signals",
         }
 
-    def _refresh_voice_state(self) -> bool:
+    def _refresh_voice_state(self, *, visualizer_update: bool = False) -> bool:
         next_state = build_voice_ui_state(self._status)
+        next_state.update(self._voice_visualizer_bridge_counters())
+        if visualizer_update and bool(next_state.get("speaking_visual_active")):
+            self._qml_anchor_updates_during_speech += 1
+            next_state["qml_anchor_updates_during_speech"] = (
+                self._qml_anchor_updates_during_speech
+            )
         if next_state == self._voice_state:
             return False
         self._voice_state = next_state
         return True
+
+    def _record_visualizer_stream_update(self, voice_payload: dict[str, Any]) -> None:
+        now = time.perf_counter()
+        if self._visualizer_first_received_monotonic <= 0.0:
+            self._visualizer_first_received_monotonic = now
+        if self._visualizer_last_received_monotonic > 0.0:
+            gap_ms = (now - self._visualizer_last_received_monotonic) * 1000.0
+            self._visualizer_last_receive_gap_ms = gap_ms
+            self._visualizer_max_receive_gap_ms = max(
+                self._visualizer_max_receive_gap_ms,
+                gap_ms,
+            )
+        self._visualizer_last_received_monotonic = now
+        self._visualizer_updates_received += 1
+        visualizer = (
+            voice_payload.get("voice_visualizer")
+            if isinstance(voice_payload.get("voice_visualizer"), dict)
+            else {}
+        )
+        self._visualizer_updates_coalesced = max(
+            self._visualizer_updates_coalesced,
+            self._int_value(visualizer.get("visualizer_updates_coalesced")),
+            self._int_value(voice_payload.get("voice_visualizer_updates_coalesced")),
+        )
+        self._visualizer_updates_dropped = max(
+            self._visualizer_updates_dropped,
+            self._int_value(visualizer.get("visualizer_updates_dropped")),
+            self._int_value(voice_payload.get("voice_visualizer_updates_dropped")),
+        )
+
+    def _voice_visualizer_bridge_counters(self) -> dict[str, Any]:
+        elapsed = (
+            self._visualizer_last_received_monotonic
+            - self._visualizer_first_received_monotonic
+            if self._visualizer_first_received_monotonic > 0.0
+            and self._visualizer_last_received_monotonic
+            > self._visualizer_first_received_monotonic
+            else 0.0
+        )
+        receive_rate_hz = (
+            (self._visualizer_updates_received - 1) / elapsed
+            if self._visualizer_updates_received > 1 and elapsed > 0
+            else 0.0
+        )
+        return {
+            "visualizer_updates_received": int(self._visualizer_updates_received),
+            "visualizer_updates_coalesced": int(self._visualizer_updates_coalesced),
+            "visualizer_updates_dropped": int(self._visualizer_updates_dropped),
+            "visualizer_frames_received_by_bridge": int(
+                self._visualizer_updates_received
+            ),
+            "bridge_receive_rate_hz": round(receive_rate_hz, 3),
+            "max_bridge_frame_gap_ms": round(
+                self._visualizer_max_receive_gap_ms,
+                3,
+            ),
+            "last_bridge_frame_gap_ms": round(
+                self._visualizer_last_receive_gap_ms,
+                3,
+            ),
+            "status_polling_used_for_visualizer": False,
+            "collection_rebuilds_during_visualizer_updates": int(
+                self._bridge_collection_rebuilds_during_speech
+            ),
+            "bridge_collection_rebuilds_during_speech": int(
+                self._bridge_collection_rebuilds_during_speech
+            ),
+            "qml_anchor_updates_during_speech": int(
+                self._qml_anchor_updates_during_speech
+            ),
+        }
+
+    def _int_value(self, value: Any) -> int:
+        try:
+            return int(value if value is not None else 0)
+        except (TypeError, ValueError):
+            return 0
 
     def _apply_voice_assistant_state(self) -> None:
         if self._pending_activity is not None or self._ghost_capture_active:
@@ -2035,7 +3790,34 @@ class UiBridge(QtCore.QObject):
             deduped.append(action)
         return deduped
 
+    def _camera_card_signature(self, card: dict[str, Any]) -> str:
+        camera = card.get("cameraGhost") if isinstance(card.get("cameraGhost"), dict) else {}
+        state = str(camera.get("state") or "").strip()
+        if not state:
+            return ""
+        return "|".join(
+            str(value or "").strip()
+            for value in (
+                state,
+                card.get("title"),
+                camera.get("sourceKind"),
+                camera.get("artifactExpired"),
+                camera.get("cleanupFailed"),
+                camera.get("errorCode"),
+            )
+        )
+
+    def _is_camera_surface_action(self, action: dict[str, Any]) -> bool:
+        local = str(action.get("localAction") or "").strip().lower()
+        send_text = str(action.get("sendText") or "").strip().lower()
+        if local in {"dismiss_camera_card", "camera_open_in_deck_deferred"}:
+            return True
+        return "camera" in send_text
+
     def _rebuild_surface_models(self) -> None:
+        if bool(self._voice_state.get("speaking_visual_active")):
+            self._bridge_collection_rebuilds_during_speech += 1
+            self._voice_state.update(self._voice_visualizer_bridge_counters())
         display_history = self._display_history()
         self._ghost_messages = [
             self._ghost_message_variant(item) for item in display_history[-3:]
@@ -2046,6 +3828,17 @@ class UiBridge(QtCore.QObject):
         self._ghost_action_strip = self._voice_actions_first(
             list(command_surface.get("ghostActionStrip") or [])
         )
+        if (
+            self._dismissed_camera_card_signature
+            and self._camera_card_signature(self._ghost_primary_card)
+            == self._dismissed_camera_card_signature
+        ):
+            self._ghost_primary_card = {}
+            self._ghost_action_strip = [
+                action
+                for action in self._ghost_action_strip
+                if not self._is_camera_surface_action(action)
+            ]
         self._request_composer = dict(command_surface.get("requestComposer") or {})
         self._route_inspector = dict(command_surface.get("routeInspector") or {})
         self._command_stations = self._voice_stations(
@@ -3901,6 +5694,28 @@ class UiBridge(QtCore.QObject):
                             "detail": f"{int(event_stream.get('connections_total') or connections)} total stream openings",
                         },
                         {
+                            "label": "UI Stream",
+                            "value": str(event_stream.get("ui_connection_state") or "unknown")
+                            .replace("_", " ")
+                            .title(),
+                            "detail": (
+                                "reconcile requested"
+                                if event_stream.get("ui_reconciliation_requested")
+                                and not event_stream.get("ui_reconciliation_completed")
+                                else "reconciled"
+                                if event_stream.get("ui_reconciliation_completed")
+                                else "stream state current"
+                            ),
+                        },
+                        {
+                            "label": "UI Timing",
+                            "value": f"{int(event_stream.get('ui_latency_summary_count') or 0)} summaries",
+                            "detail": (
+                                f"{int(event_stream.get('ui_duplicate_ignored_count') or 0)} duplicate ignored, "
+                                f"{int(event_stream.get('ui_out_of_order_ignored_count') or 0)} out-of-order ignored"
+                            ),
+                        },
+                        {
                             "label": "Visibility",
                             "value": str(
                                 len(event_stream.get("visibility_totals") or {})
@@ -4649,7 +6464,20 @@ class UiBridge(QtCore.QObject):
 
     def _event_stream_state(self) -> dict[str, Any]:
         event_stream = self._status.get("event_stream", {})
-        return event_stream if isinstance(event_stream, dict) else {}
+        state = dict(event_stream) if isinstance(event_stream, dict) else {}
+        state.update(
+            {
+                "ui_connection_state": self._event_stream_connection_state,
+                "ui_reconciliation_requested": self._event_stream_reconciliation_requested,
+                "ui_reconciliation_completed": self._event_stream_reconciliation_completed,
+                "ui_reconnect_gap_recovered": self._event_stream_reconnect_gap_recovered,
+                "ui_duplicate_ignored_count": self._stream_duplicate_ignored_count,
+                "ui_out_of_order_ignored_count": self._stream_out_of_order_ignored_count,
+                "ui_latency_summary_count": len(self._ui_event_render_latency_summaries),
+                "ui_last_gap_report": dict(self._event_stream_last_gap_report),
+            }
+        )
+        return state
 
     def _bridge_authority_state(self) -> dict[str, Any]:
         authority = self._status.get("bridge_authority", {})

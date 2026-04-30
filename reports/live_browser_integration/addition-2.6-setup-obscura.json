@@ -1,0 +1,64 @@
+{
+    "report_id":  "live-browser-deps-10cf3a4d0421",
+    "mode":  "explicit_install",
+    "started_at":  "2026-04-30T17:01:25.7712486Z",
+    "completed_at":  "2026-04-30T17:01:51.1823251Z",
+    "install_requested":  {
+                              "obscura":  true,
+                              "playwright_package":  false,
+                              "obscura_auto_install":  false,
+                              "playwright_chromium":  false
+                          },
+    "install_results":  [
+
+                        ],
+    "python_available":  true,
+    "python_executable":  "C:\\Users\\kkids\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+    "obscura":  {
+                    "error_code":  "",
+                    "bounded_error_message":  "",
+                    "binary_found":  true,
+                    "version_output_bounded":  "error: unexpected argument \u0027--version\u0027 found\nSystem.Management.Automation.RemoteException\n  tip: a similar argument exists: \u0027--verbose\u0027\nSystem.Management.Automation.RemoteException\nUsage: obscura.exe --verbose\nSystem.Management.Automation.RemoteException\nFor more information, try \u0027--help\u0027.",
+                    "obscura_release_name":  "v0.1.1",
+                    "download_attempted":  true,
+                    "binary_input":  "obscura",
+                    "install_note":  "Install Obscura only with explicit -InstallObscura and a local zip path or release URL. Pass -ObscuraBinary to live checks when avoiding PATH changes.",
+                    "install_requested":  true,
+                    "stormhelm_obscura_binary_set":  true,
+                    "obscura_asset_name":  "obscura-x86_64-windows.zip",
+                    "version_status":  "version_unknown",
+                    "install_status":  "installed",
+                    "zip_path":  "",
+                    "checksum_status":  "unavailable",
+                    "install_mode":  "official_release",
+                    "install_dir":  "C:\\Users\\kkids\\AppData\\Local\\Stormhelm\\tools\\obscura",
+                    "download_path":  "C:\\Users\\kkids\\AppData\\Local\\Temp\\stormhelm-obscura-92e38d4d217f47c1b0171cfba4ad744e.zip",
+                    "binary_executable":  true,
+                    "binary_path":  "C:\\Users\\kkids\\AppData\\Local\\Stormhelm\\tools\\obscura\\obscura.exe",
+                    "added_to_path":  false,
+                    "obscura_binary_path":  "C:\\Users\\kkids\\AppData\\Local\\Stormhelm\\tools\\obscura\\obscura.exe",
+                    "download_status":  "downloaded",
+                    "set_env_hint":  "STORMHELM_OBSCURA_BINARY=C:\\Users\\kkids\\AppData\\Local\\Stormhelm\\tools\\obscura\\obscura.exe",
+                    "binary_candidates_found":  1,
+                    "extraction_status":  "extracted",
+                    "obscura_asset_url_redacted_or_bounded":  "https://github.com/h4ckf0r0day/obscura/releases/download/v0.1.1/obscura-x86_64-windows.zip",
+                    "release_url":  "https://github.com/h4ckf0r0day/obscura/releases/download/v0.1.1/obscura-x86_64-windows.zip",
+                    "obscura_release_tag":  "v0.1.1",
+                    "obscura_release_repo":  "h4ckf0r0day/obscura"
+                },
+    "playwright":  {
+                       "uses_user_profile":  false,
+                       "dependency_installed":  true,
+                       "chromium_executable_path":  "C:\\Users\\kkids\\AppData\\Local\\ms-playwright\\chromium-1217\\chrome-win64\\chrome.exe",
+                       "actions_enabled":  false,
+                       "chromium_available":  true
+                   },
+    "safety":  {
+                   "no_path_mutation_without_explicit_flag":  true,
+                   "installs_are_explicit_only":  true,
+                   "no_obscura_download_without_install_flag":  true,
+                   "action_capabilities_disabled":  true,
+                   "no_user_browser_profile":  true,
+                   "normal_ci_dependency_free":  true
+               }
+}

@@ -1,0 +1,34 @@
+{
+  "action_capabilities_enabled_for_test": {
+    "click": true,
+    "focus": true
+  },
+  "claim_ceiling": "browser_semantic_action_execution",
+  "cleanup_failed_event_seen": false,
+  "click_action_attempted": true,
+  "click_action_completed": true,
+  "click_cleanup_status": "closed",
+  "click_error_code": "",
+  "click_status": "verified_supported",
+  "click_verification_status": "supported",
+  "controls_found": 3,
+  "fixture_url_host": "127.0.0.1",
+  "focus_action_attempted": true,
+  "focus_action_completed": true,
+  "focus_cleanup_status": "closed",
+  "focus_error_code": "",
+  "focus_status": "completed_unverified",
+  "focus_verification_status": "unsupported",
+  "forbidden_capabilities": {
+    "cookies": false,
+    "form_submit": false,
+    "login": false,
+    "scroll": false,
+    "type_text": false,
+    "user_profile": false
+  },
+  "isolated_context_used": true,
+  "provider": "playwright_live_semantic",
+  "status": "passed",
+  "user_profile_used": false
+}

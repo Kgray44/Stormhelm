@@ -7,9 +7,9 @@ from time import monotonic
 from uuid import uuid4
 
 from stormhelm.config.models import CalculationsConfig
-from stormhelm.core.calculations.helpers import build_helper_registry
 from stormhelm.core.calculations.helpers import CalculationHelperExecution
 from stormhelm.core.calculations.helpers import CalculationHelperMatch
+from stormhelm.core.calculations.helpers import get_cached_helper_registry
 from stormhelm.core.calculations.explanations import compose_explanation_response
 from stormhelm.core.calculations.explanations import render_direct_explanation
 from stormhelm.core.calculations.explanations import render_helper_explanation
@@ -37,6 +37,7 @@ from stormhelm.core.calculations.parser import CalculationParseError
 from stormhelm.core.calculations.parser import parse_expression
 from stormhelm.core.calculations.planner import CalculationsPlannerSeam
 from stormhelm.core.intelligence.language import normalize_phrase
+from stormhelm.core.subsystem_latency import classify_subsystem_hot_path
 
 
 @dataclass(slots=True)
@@ -48,7 +49,7 @@ class CalculationsSubsystem:
 
     def __post_init__(self) -> None:
         self.planner_seam = CalculationsPlannerSeam(self.config)
-        self.helper_registry = build_helper_registry()
+        self.helper_registry = get_cached_helper_registry()
 
     def status_snapshot(self) -> dict[str, object]:
         last_trace = self._recent_traces[-1].to_dict() if self._recent_traces else None
@@ -405,16 +406,19 @@ class CalculationsSubsystem:
             assistant_response = compose_explanation_response(explanation, default_response=default_response)
             provenance = CalculationProvenance.DETERMINISTIC_LOCAL_VERIFICATION
         else:
-            explanation = render_direct_explanation(
-                requested_mode=output_mode,
-                normalized_expression=normalized.normalized_expression,
-                syntax_tree=syntax_tree,
-                formatted_value=formatted.text,
-                approximate=formatted.approximate,
-                normalization_details=normalized.normalization_details,
-                follow_up_reuse=effective_request.follow_up_reuse,
-            )
-            assistant_response = compose_explanation_response(explanation, default_response=default_response)
+            if output_mode == CalculationOutputMode.ANSWER_ONLY:
+                assistant_response = default_response
+            else:
+                explanation = render_direct_explanation(
+                    requested_mode=output_mode,
+                    normalized_expression=normalized.normalized_expression,
+                    syntax_tree=syntax_tree,
+                    formatted_value=formatted.text,
+                    approximate=formatted.approximate,
+                    normalization_details=normalized.normalization_details,
+                    follow_up_reuse=effective_request.follow_up_reuse,
+                )
+                assistant_response = compose_explanation_response(explanation, default_response=default_response)
         result = CalculationResult(
             status="succeeded",
             numeric_value=numeric_value,
@@ -446,13 +450,14 @@ class CalculationsSubsystem:
             engineering_display_applied=formatted.engineering_applied,
             explanation_mode_requested=output_mode.value,
             explanation_mode_used=explanation.mode.value if explanation is not None else CalculationOutputMode.ANSWER_ONLY.value,
-            explanation_source_type="verification" if verification is not None else "direct_expression",
+            explanation_source_type="verification" if verification is not None else "direct_expression" if explanation is not None else "lazy_skipped",
             explanation_follow_up_reuse=effective_request.follow_up_reuse,
             explanation_steps=list(explanation.steps) if explanation is not None else [],
             explanation_formula=explanation.formula if explanation is not None else None,
             rounding_note_present=explanation.rounding_note is not None if explanation is not None else formatted.approximate,
             verification_claim=effective_request.verification_claim,
             verification_match=verification.matches if verification is not None else None,
+            **self._l8_trace_kwargs(operation="direct_expression"),
         )
         self._remember_trace(trace)
         response_contract = {
@@ -605,6 +610,7 @@ class CalculationsSubsystem:
             explanation_mode_used=CalculationOutputMode.FAILURE.value,
             explanation_follow_up_reuse=follow_up_reuse,
             verification_claim=verification_claim,
+            **self._l8_trace_kwargs(operation="failure"),
         )
         self._remember_trace(trace)
         response_contract = {
@@ -621,6 +627,22 @@ class CalculationsSubsystem:
 
     def _remember_trace(self, trace: CalculationTrace) -> None:
         self._recent_traces.append(trace)
+
+    def _l8_trace_kwargs(self, *, operation: str) -> dict[str, object]:
+        decision = classify_subsystem_hot_path(
+            subsystem_id="calculations",
+            route_family="calculations",
+            operation=operation,
+            metadata={"cache_hit": True, "fast_path_used": True},
+        )
+        return {
+            "hot_path_name": decision.hot_path_name,
+            "latency_mode": decision.latency_mode.value,
+            "cache_policy_id": decision.cache_policy_id,
+            "cache_hit": decision.cache_hit,
+            "provider_fallback_used": decision.provider_fallback_used,
+            "heavy_context_used": decision.heavy_context_used,
+        }
 
     def _resolve_helper_request(
         self,
@@ -703,6 +725,7 @@ class CalculationsSubsystem:
             explanation_steps=list(explanation.steps) if explanation is not None else [],
             explanation_formula=explanation.formula if explanation is not None else execution.formula_symbolic,
             rounding_note_present=explanation.rounding_note is not None if explanation is not None else execution.approximate,
+            **self._l8_trace_kwargs(operation="helper"),
         )
         self._remember_trace(trace)
         response_contract = {

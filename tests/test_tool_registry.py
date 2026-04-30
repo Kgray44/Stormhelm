@@ -23,6 +23,7 @@ from stormhelm.core.tools.builtins.system_state import (
     NetworkThroughputTool,
     PowerStatusTool,
     ResourceStatusTool,
+    SaveLocationTool,
     WeatherCurrentTool,
 )
 from stormhelm.core.tools.executor import ToolExecutor
@@ -112,6 +113,25 @@ class FakePowerProbe:
 
     def power_status(self) -> dict[str, object]:
         return dict(self._payload)
+
+
+class IpOnlyLocationProbe:
+    def resolve_best_location_for_request(self, **kwargs) -> dict[str, object]:
+        return {
+            "resolved": True,
+            "source": "ip_estimate",
+            "location_source": "ip_estimate",
+            "label": "Manchester, New Hampshire",
+            "latitude": 42.9956,
+            "longitude": -71.4548,
+            "approximate": True,
+            "location_confidence": "low",
+            "location_is_ip_estimate": True,
+            "location_needs_confirmation": True,
+        }
+
+    def save_home_location(self, **kwargs) -> dict[str, object]:
+        pytest.fail("SaveLocationTool should not save an unconfirmed IP estimate as home.")
 
 
 def _future_contract(adapter_id: str) -> AdapterContract:
@@ -294,6 +314,24 @@ def test_location_and_weather_tools_preserve_none_named_location() -> None:
 
     assert location_args["named_location"] is None
     assert weather_args["named_location"] is None
+
+
+def test_save_location_tool_refuses_ip_estimate_as_home(temp_config) -> None:
+    context = ToolContext(
+        job_id="test-job",
+        config=temp_config,
+        events=EventBuffer(),
+        notes=DummyNotesRepository(),
+        preferences=DummyPreferencesRepository(),
+        safety_policy=SafetyPolicy(temp_config),
+        system_probe=IpOnlyLocationProbe(),
+    )
+
+    result = SaveLocationTool().execute_sync(context, {"target": "home", "source_mode": "current", "name": None})
+
+    assert result.success is True
+    assert result.data["saved_location"] is None
+    assert "IP" in result.summary or "ip" in result.summary
 
 
 def test_resource_status_tool_reports_live_gpu_usage_before_identity(temp_config) -> None:

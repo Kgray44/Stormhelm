@@ -16,10 +16,11 @@ Stormhelm is split into a local core service and a desktop shell. The core is th
 | `src/stormhelm/core/trust` | Approval requests, grants, audit records. |
 | `src/stormhelm/core/safety` | Tool/file/software safety gates. |
 | `src/stormhelm/core/calculations` | Deterministic calculations subsystem. |
-| `src/stormhelm/core/screen_awareness` | Screen observation, interpretation, grounding, action, verification, problem-solving, workflow learning. |
+| `src/stormhelm/core/screen_awareness` | Screen observation, interpretation, grounding, action, verification, problem-solving, workflow learning, and disabled-by-default Playwright browser semantic readiness, mock observation, opt-in isolated live semantic snapshot extraction, semantic candidate ranking, guidance-only browser target grounding, semantic comparison, action previews, and trust-gated click/focus execution. |
 | `src/stormhelm/core/software_control` | Software target catalog, planner seam, operation planning/execution status. |
 | `src/stormhelm/core/software_recovery` | Local/cloud-advisory recovery planning. |
-| `src/stormhelm/core/web_retrieval` | Public URL safety including redirect checks, HTTP/Obscura CLI/Obscura CDP retrieval providers, managed headless CDP sessions, evidence bundles, and trace models. |
+| `src/stormhelm/core/web_retrieval` | Public URL safety including redirect checks, HTTP/Obscura CLI/Obscura CDP retrieval providers, managed headless CDP sessions, compatibility probing, evidence bundles, and trace models. |
+| `src/stormhelm/core/live_browser_integration.py` | Opt-in live Obscura/Playwright provider diagnostics, gated by environment variables and safe report boundaries. |
 | `src/stormhelm/core/discord_relay` | Discord alias/payload/preview/dispatch subsystem. |
 | `src/stormhelm/core/voice` | Disabled-by-default voice config/state, manual turns, controlled STT/TTS, capture/playback boundaries, diagnostics, and events. |
 | `src/stormhelm/core/system`, `core/network`, `core/power`, `core/operations` | Machine state, native control, telemetry, diagnostics. |
@@ -151,14 +152,14 @@ Tests: `tests/test_ui_bridge.py`, `tests/test_ui_bridge_authority_contracts.py`,
 | Subsystem | Owns | Does not own |
 |---|---|---|
 | Calculations | Local parse/evaluate/format/trace. | General math reasoning outside implemented parser/helper scope. |
-| Screen awareness | Current context observation, interpretation, grounding, verification, gated action result. | Unlimited screen control or surveillance. |
+| Screen awareness | Current context observation, interpretation, grounding, verification, gated action result, optional Playwright browser semantic readiness/mock observations, opt-in isolated Playwright semantic snapshot extraction, semantic target ranking, before/after semantic comparison, browser action previews, and trust-gated click/focus execution through isolated temporary contexts only. | Unlimited screen control or surveillance, direct Playwright command authority, live Playwright automation in normal CI, user-profile browser control, typing/scroll/form/login/cookie/payment/CAPTCHA automation, visible-screen verification, truth verification, or browser action execution outside explicit trust/verification contracts. |
 | Software control | Target resolution, plans, checkpoints, verification/launch attempts. | Claiming installation success without execution and verification. |
 | Software recovery | Failure classification and bounded recovery plans. | Final repair claims without verification. |
 | Discord relay | Destination/payload resolution, preview, dispatch attempt, provenance, duplicate/stale checks. | Official Discord bot delivery by default. |
 | Trust | Approval/grant/audit state. | UI-only confirmation without backend decision. |
 | Tasks | Durable task state and continuity. | Workspace fallback masquerading as durable task memory. |
 | Voice | Manual voice turns, controlled STT/TTS, explicit capture/playback state, diagnostics, and voice events. | Wake word, always-listening, Realtime, VAD, direct tool execution, or bypassing trust/safety. |
-| Web retrieval | Public URL safety validation, final redirect safety checks, HTTP extraction, optional Obscura CLI rendering/extraction, optional Obscura CDP localhost managed sessions for headless title/final URL/DOM/link/network/console inspection, evidence bundles, traces, fallback provenance, and typed provider failures. | Browser opening, Playwright/Puppeteer, CDP input actions, logged-in context, cookies/session reuse, form/click/type/scroll automation, CAPTCHA/anti-bot bypass, independent truth checking, or claims about the user's visible screen. |
+| Web retrieval | Public URL safety validation, final redirect safety checks, HTTP extraction, optional Obscura CLI rendering/extraction, optional Obscura CDP localhost managed sessions for headless title/final URL/DOM/link/network/console inspection, endpoint compatibility probing, evidence bundles, traces, fallback provenance, typed provider failures, and opt-in live provider diagnostics. | Browser opening, Playwright/Puppeteer replacement behavior, CDP input actions, logged-in context, cookies/session reuse, form/click/type/scroll automation, CAPTCHA/anti-bot bypass, independent truth checking, or claims about the user's visible screen. |
 | UI bridge | Presentation state and local UI actions. | Backend truth or safety policy. |
 
 Sources: `src/stormhelm/core/calculations/service.py`, `src/stormhelm/core/screen_awareness/service.py`, `src/stormhelm/core/software_control/service.py`, `src/stormhelm/core/software_recovery/service.py`, `src/stormhelm/core/web_retrieval/service.py`, `src/stormhelm/core/discord_relay/service.py`, `src/stormhelm/core/trust/service.py`, `src/stormhelm/core/tasks/service.py`, `src/stormhelm/core/voice/service.py`, `src/stormhelm/ui/bridge.py`
@@ -166,10 +167,10 @@ Tests: `tests/test_calculations.py`, `tests/test_screen_awareness_service.py`, `
 
 ## Adapter Boundaries
 
-Adapter contracts describe whether a tool/action has preview, approval, verification, rollback, and trust-tier metadata. The safety policy and tool executor use contract status to avoid executing invalid adapter routes. `web_retrieval.obscura.cli` is registered as an external-network/local-process adapter with preview support, no approval requirement, no rollback, and a maximum claim of observed rendered-page evidence. `web_retrieval.obscura.cdp` is registered separately as a localhost managed-session adapter with the `headless_cdp_page_evidence` ceiling and no declared browser input, cookie, visible-screen, truth-verification, or Playwright capabilities.
+Adapter contracts describe whether a tool/action has preview, approval, verification, rollback, and trust-tier metadata. The safety policy and tool executor use contract status to avoid executing invalid adapter routes. `web_retrieval.obscura.cli` is registered as an external-network/local-process adapter with preview support, no approval requirement, no rollback, and a maximum claim of observed rendered-page evidence. `web_retrieval.obscura.cdp` is registered separately as a localhost managed-session adapter with the `headless_cdp_page_evidence` ceiling and no declared browser input, cookie, visible-screen, truth-verification, or Playwright capabilities. CDP endpoint discovery treats `/json/version`, `/json/list`, `/json`, websocket host/scheme mismatches, malformed/non-JSON responses, timeouts, and connection refusal as typed compatibility states instead of assuming Chrome-perfect behavior. `screen_awareness.browser.playwright` is a Screen Awareness contract with observation, grounding, comparison, preview, and runtime-gated click/focus execution posture; Addition 5 exposes click/focus only through config/readiness status and trust approval, while type, scroll, form, login, cookie, payment, download, visible-screen, truth-verification, and workflow-replay capabilities remain undeclared.
 
 Sources: `src/stormhelm/core/adapters/contracts.py`, `src/stormhelm/core/tools/executor.py`, `src/stormhelm/core/safety/policy.py`
-Tests: `tests/test_adapter_contracts.py`, `tests/test_safety.py`
+Tests: `tests/test_adapter_contracts.py`, `tests/test_safety.py`, `tests/test_screen_awareness_playwright_adapter_integration.py`, `tests/test_screen_awareness_playwright_live_semantic.py`
 
 ## Configuration Loading
 

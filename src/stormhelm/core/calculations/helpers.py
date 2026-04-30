@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from decimal import InvalidOperation
 from decimal import ROUND_HALF_UP
+from functools import lru_cache
 import re
 from typing import Any
 from typing import Callable
@@ -274,6 +275,19 @@ class CalculationHelperRegistry:
 
 def build_helper_registry() -> CalculationHelperRegistry:
     return CalculationHelperRegistry()
+
+
+@lru_cache(maxsize=1)
+def get_cached_helper_registry() -> CalculationHelperRegistry:
+    return build_helper_registry()
+
+
+def helper_registry_cache_info():
+    return get_cached_helper_registry.cache_info()
+
+
+def helper_registry_cache_clear() -> None:
+    get_cached_helper_registry.cache_clear()
 
 
 def _match_power_request(raw_text: str, normalized_text: str) -> CalculationHelperMatch | None:

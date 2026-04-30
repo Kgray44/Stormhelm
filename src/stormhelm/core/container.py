@@ -24,6 +24,8 @@ from stormhelm.core.network import CloudflareQualityProvider, NetworkMonitor
 from stormhelm.core.operations.service import OperationalAwarenessService
 from stormhelm.core.calculations import CalculationsSubsystem
 from stormhelm.core.calculations import build_calculations_subsystem
+from stormhelm.core.camera_awareness import CameraAwarenessSubsystem
+from stormhelm.core.camera_awareness import build_camera_awareness_subsystem
 from stormhelm.core.discord_relay import DiscordRelaySubsystem
 from stormhelm.core.discord_relay import build_discord_relay_subsystem
 from stormhelm.core.orchestrator.assistant import AssistantOrchestrator
@@ -51,6 +53,7 @@ from stormhelm.core.tools.registry import ToolRegistry
 from stormhelm.core.trust import TrustRepository, TrustService
 from stormhelm.core.voice import VoiceService
 from stormhelm.core.voice import build_voice_subsystem
+from stormhelm.core.web_retrieval.service import WebRetrievalService
 from stormhelm.core.workspace.indexer import WorkspaceIndexer
 from stormhelm.core.workspace.repository import WorkspaceRepository
 from stormhelm.core.workspace.service import WorkspaceService
@@ -77,6 +80,7 @@ class CoreContainer:
     software_control: SoftwareControlSubsystem
     software_recovery: SoftwareRecoverySubsystem
     screen_awareness: ScreenAwarenessSubsystem
+    camera_awareness: CameraAwarenessSubsystem
     discord_relay: DiscordRelaySubsystem
     voice: VoiceService
     task_service: DurableTaskService
@@ -186,6 +190,8 @@ class CoreContainer:
         software_control_state = self.software_control.status_snapshot()
         software_recovery_state = self.software_recovery.status_snapshot()
         screen_awareness_state = self.screen_awareness.status_snapshot()
+        camera_awareness_state = self.camera_awareness.status_snapshot()
+        web_retrieval_state = self._web_retrieval_status_snapshot()
         discord_relay_state = self.discord_relay.status_snapshot()
         voice_state = self.voice.status_snapshot()
         trust_state = self.trust.status_snapshot(
@@ -245,6 +251,8 @@ class CoreContainer:
             "software_control": software_control_state,
             "software_recovery": software_recovery_state,
             "screen_awareness": screen_awareness_state,
+            "camera_awareness": camera_awareness_state,
+            "web_retrieval": web_retrieval_state,
             "discord_relay": discord_relay_state,
             "voice": voice_state,
             "trust": trust_state,
@@ -309,6 +317,8 @@ class CoreContainer:
         software_control_state = _timed("software_control", self.software_control.status_snapshot)
         software_recovery_state = _timed("software_recovery", self.software_recovery.status_snapshot)
         screen_awareness_state = _timed("screen_awareness", self.screen_awareness.status_snapshot)
+        camera_awareness_state = _timed("camera_awareness", self.camera_awareness.status_snapshot)
+        web_retrieval_state = _timed("web_retrieval", self._web_retrieval_status_snapshot)
         discord_relay_state = _timed("discord_relay", self.discord_relay.status_snapshot)
         watch_state = _timed("watch_state", lambda: self._watch_state_snapshot(jobs))
         return {
@@ -362,6 +372,8 @@ class CoreContainer:
             "software_control": software_control_state,
             "software_recovery": software_recovery_state,
             "screen_awareness": screen_awareness_state,
+            "camera_awareness": camera_awareness_state,
+            "web_retrieval": web_retrieval_state,
             "discord_relay": discord_relay_state,
             "voice": voice_state,
             "trust": trust_state,
@@ -539,6 +551,17 @@ class CoreContainer:
             "timeout_seconds": self.config.openai.timeout_seconds,
             "max_tool_rounds": self.config.openai.max_tool_rounds,
         }
+
+    def _web_retrieval_status_snapshot(self) -> dict[str, Any]:
+        try:
+            return WebRetrievalService(self.config.web_retrieval, events=self.events).status_snapshot()
+        except Exception as error:
+            return {
+                "enabled": bool(self.config.web_retrieval.enabled),
+                "providers": {},
+                "status": "failed",
+                "bounded_error_message": str(error)[:500],
+            }
 
     def _tool_state_snapshot(self) -> dict[str, Any]:
         metadata_list = self.tool_registry.metadata()
@@ -719,6 +742,13 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
         system_probe=system_probe,
         provider=provider,
         calculations=calculations,
+        events=events,
+    )
+    camera_awareness = build_camera_awareness_subsystem(
+        app_config.camera_awareness,
+        events=events,
+        openai_config=app_config.openai,
+        responses_provider=provider,
     )
     discord_relay = build_discord_relay_subsystem(
         app_config.discord_relay,
@@ -822,6 +852,7 @@ def build_container(config: AppConfig | None = None) -> CoreContainer:
         software_control=software_control,
         software_recovery=software_recovery,
         screen_awareness=screen_awareness,
+        camera_awareness=camera_awareness,
         discord_relay=discord_relay,
         voice=voice,
         task_service=task_service,

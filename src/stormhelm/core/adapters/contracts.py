@@ -9,6 +9,7 @@ from typing import Any, Callable
 class TrustTier(StrEnum):
     PASSIVE = "passive"
     BOUNDED_LOCAL = "bounded_local"
+    LOCAL_BROWSER_SEMANTIC_ADAPTER = "local_browser_semantic_adapter"
     LOCAL_NETWORK = "local_network"
     LOCAL_MUTATION = "local_mutation"
     EXTERNAL_DISPATCH = "external_dispatch"
@@ -933,6 +934,97 @@ def default_adapter_contract_registry() -> AdapterContractRegistry:
             local_first=True,
             external_side_effects=False,
             offline_behavior="full",
+        )
+    )
+    registry.register_contract(
+        AdapterContract(
+            adapter_id="screen_awareness.browser.playwright",
+            display_name="Playwright Browser Semantic Adapter",
+            family="screen_awareness",
+            description=(
+                "Provides Playwright-backed browser semantic observation, grounding, "
+                "comparison, and runtime-gated click/focus execution for Screen Awareness "
+                "without typing, login context, cookies, truth verification, or visible-screen claims."
+            ),
+            observation_modes=[
+                "browser.semantic_observe",
+                "browser.extract_accessibility_snapshot",
+                "browser.extract_dom_summary",
+                "browser.locate_element_by_role",
+                "browser.locate_element_by_text",
+                "browser.locate_element_by_label",
+                "browser.report_current_url",
+                "browser.report_title",
+                "browser.report_visible_controls",
+            ],
+            action_modes=["semantic_observation", "click_focus_execution_runtime_gated"],
+            artifact_modes=[
+                "browser_semantic_observation",
+                "accessibility_snapshot_summary",
+                "dom_summary",
+                "visible_control_list",
+                "grounding_candidates",
+                "browser_semantic_action_preview",
+                "browser_semantic_action_execution_result",
+            ],
+            preview_modes=["semantic_guidance_preview", "browser.action.preview", "browser.action.plan_preview"],
+            safety_posture=[
+                "screen_awareness_owned",
+                "backend_owned",
+                "disabled_by_default",
+                "click_focus_disabled_by_default",
+                "trust_required_for_click_focus",
+                "isolated_context_only",
+                "no_form_fill",
+                "no_login",
+                "no_cookies",
+                "no_user_profile",
+                "no_browser_launch_by_default",
+                "no_visible_screen_claim",
+                "no_truth_verification",
+                "bounded_snapshot",
+            ],
+            failure_posture=[
+                "disabled_state_explicit",
+                "dependency_missing_explicit",
+                "semantic_snapshot_unavailable",
+                "ambiguous_grounding_explicit",
+                "approval_required_for_click_focus",
+                "action_result_requires_semantic_comparison",
+            ],
+            trust_tier=TrustTier.LOCAL_BROWSER_SEMANTIC_ADAPTER,
+            approval=ApprovalDescriptor(
+                required=True,
+                preview_allowed=True,
+                suggested_scope="once",
+                available_scopes=["once", "session", "task"],
+                note="Click/focus execution is available only when runtime config gates declare it and trust approval is granted.",
+            ),
+            verification=VerificationDescriptor(
+                posture="browser_semantic_observation_only",
+                max_claimable_outcome=ClaimOutcome.OBSERVED,
+                evidence=[
+                    "bounded accessibility snapshot summary",
+                    "bounded DOM/control summary",
+                    "page URL and title",
+                    "grounding candidates",
+                ],
+                notes=[
+                    "Does not verify the user's visible screen.",
+                    "Does not verify page truth.",
+                    "Does not claim action completion.",
+                ],
+            ),
+            rollback=RollbackDescriptor(supported=False, posture="none"),
+            planner_tags=[
+                "screen_awareness",
+                "browser_semantic_observation",
+                "playwright_scaffold",
+                "guidance_only",
+            ],
+            local_first=True,
+            external_side_effects=False,
+            offline_behavior="partial",
         )
     )
     registry.register_contract(

@@ -342,6 +342,12 @@ class CalculationTrace:
     provenance_stack: list[str] = field(default_factory=list)
     evidence_confidence: float | None = None
     evidence_confidence_note: str | None = None
+    hot_path_name: str = ""
+    latency_mode: str = ""
+    cache_policy_id: str = ""
+    cache_hit: bool = False
+    provider_fallback_used: bool = False
+    heavy_context_used: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -385,6 +391,12 @@ class CalculationTrace:
             "provenance_stack": list(self.provenance_stack),
             "evidence_confidence": self.evidence_confidence,
             "evidence_confidence_note": self.evidence_confidence_note,
+            "hot_path_name": self.hot_path_name,
+            "latency_mode": self.latency_mode,
+            "cache_policy_id": self.cache_policy_id,
+            "cache_hit": self.cache_hit,
+            "provider_fallback_used": self.provider_fallback_used,
+            "heavy_context_used": self.heavy_context_used,
         }
 
 

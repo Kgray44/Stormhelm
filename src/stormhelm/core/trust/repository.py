@@ -128,6 +128,42 @@ class TrustRepository:
             ).fetchone()
         return self._approval_request_from_row(row) if row is not None else None
 
+    def latest_denied_request(
+        self,
+        *,
+        session_id: str,
+        family: str,
+        action_key: str,
+        subject: str,
+        task_id: str = "",
+    ) -> ApprovalRequest | None:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT approval_request_id, action_request_id, family, action_key, subject, session_id, task_id,
+                       action_kind, state, suggested_scope, available_scopes_json, operator_justification,
+                       operator_message, details_json, created_at, updated_at, expires_at, resolved_at
+                FROM trust_approval_requests
+                WHERE session_id = ?
+                  AND family = ?
+                  AND action_key = ?
+                  AND subject = ?
+                  AND COALESCE(task_id, '') = ?
+                  AND state = ?
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT 1
+                """,
+                (
+                    session_id,
+                    family,
+                    action_key,
+                    subject,
+                    task_id,
+                    ApprovalState.DENIED.value,
+                ),
+            ).fetchone()
+        return self._approval_request_from_row(row) if row is not None else None
+
     def list_pending_requests(self, *, session_id: str) -> list[ApprovalRequest]:
         with self.database.connect() as connection:
             rows = connection.execute(

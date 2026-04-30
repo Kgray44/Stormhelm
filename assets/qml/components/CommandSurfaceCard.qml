@@ -84,6 +84,16 @@ Item {
                 lineHeight: 1.22
             }
 
+            Text {
+                Layout.fillWidth: true
+                text: root.safeCard.metaLine || ""
+                color: "#8fb0be"
+                font.family: "Segoe UI"
+                font.pixelSize: root.compact ? 10 : 11
+                wrapMode: Text.Wrap
+                visible: text.length > 0
+            }
+
             Flow {
                 id: provenanceFlow
                 Layout.fillWidth: true

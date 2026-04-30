@@ -1,0 +1,46 @@
+# Stormhelm live browser provider integration profile.
+# Copy or pass this file explicitly for local diagnostics only.
+# Normal defaults remain disabled and normal CI does not require Obscura or Playwright.
+
+[web_retrieval]
+enabled = true
+
+[web_retrieval.obscura]
+enabled = true
+binary_path = "obscura"
+mode = "cli"
+allow_cdp_server = false
+stealth_enabled = false
+allow_js_eval = false
+
+[web_retrieval.obscura.cdp]
+enabled = true
+binary_path = "obscura"
+host = "127.0.0.1"
+port = 0
+allow_runtime_eval = false
+allow_input_domain = false
+allow_cookies = false
+allow_logged_in_context = false
+allow_screenshots = false
+
+[screen_awareness.browser_adapters.playwright]
+enabled = true
+provider = "playwright"
+mode = "semantic_observation"
+allow_dev_adapter = true
+allow_browser_launch = false
+allow_connect_existing = false
+allow_actions = false
+allow_click = false
+allow_focus = false
+allow_type_text = false
+allow_scroll = false
+allow_form_fill = false
+allow_form_submit = false
+allow_login = false
+allow_cookies = false
+allow_user_profile = false
+allow_screenshots = false
+allow_dev_actions = false
+debug_events_enabled = true

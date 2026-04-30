@@ -121,7 +121,94 @@ class ObscuraCDPReadiness:
     warnings: list[str] = field(default_factory=list)
     claim_ceiling: str = CLAIM_CEILING_HEADLESS_CDP_PAGE_EVIDENCE
     status: str = "disabled"
+    endpoint_status: str = ""
+    protocol_compatibility_level: str = ""
+    optional_domains: dict[str, Any] = field(default_factory=dict)
+    last_startup_error_code: str = ""
+    last_navigation_error_code: str = ""
+    last_cleanup_status: str = ""
+    bounded_error_message: str = ""
+    last_compatibility_report: dict[str, Any] = field(default_factory=dict)
+    endpoint_discovered: bool = False
+    navigation_supported: bool = False
+    page_inspection_supported: bool = False
+    extraction_supported: bool = False
+    diagnostic_only: bool = False
+    recommended_fallback_provider: str = ""
+    status_message: str = ""
     checked_at: str = field(default_factory=_utc_now)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class ObscuraCDPEndpointDiscovery:
+    endpoint_url: str
+    version_endpoint_status: str = "unknown"
+    version_endpoint_url: str = ""
+    browser_websocket_url_found: bool = False
+    browser_websocket_url: str = ""
+    page_list_endpoint_status: str = "unknown"
+    page_list_endpoint_url: str = ""
+    page_websocket_url_found: bool = False
+    page_websocket_url: str = ""
+    protocol_version: str = ""
+    browser_name: str = ""
+    browser_revision: str = ""
+    cdp_domains_available: dict[str, Any] = field(default_factory=dict)
+    compatible: bool = False
+    compatibility_level: str = "failed"
+    blocking_reasons: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    bounded_error_message: str = ""
+    endpoint_discovered: bool = False
+    navigation_supported: bool = False
+    page_inspection_supported: bool = False
+    extraction_supported: bool = False
+    diagnostic_only: bool = False
+    recommended_fallback_provider: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(slots=True)
+class ObscuraCDPCompatibilityReport:
+    report_id: str = field(default_factory=lambda: f"cdp-compat-{uuid4().hex[:12]}")
+    started_at: str = field(default_factory=_utc_now)
+    completed_at: str = ""
+    binary_path: str = ""
+    binary_found: bool = False
+    binary_version: str = ""
+    host: str = "127.0.0.1"
+    port: int = 0
+    process_started: bool = False
+    process_id: int = 0
+    version_endpoint_status: str = "unknown"
+    version_endpoint_url: str = ""
+    browser_websocket_url_found: bool = False
+    page_list_endpoint_status: str = "unknown"
+    page_websocket_url_found: bool = False
+    protocol_version: str = ""
+    browser_name: str = ""
+    browser_revision: str = ""
+    cdp_domains_available: dict[str, Any] = field(default_factory=dict)
+    navigation_probe_status: str = "not_run"
+    extraction_probe_status: str = "not_run"
+    cleanup_status: str = "not_started"
+    compatible: bool = False
+    compatibility_level: str = "failed"
+    blocking_reasons: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    bounded_error_message: str = ""
+    raw_output_redacted: bool = True
+    endpoint_discovered: bool = False
+    navigation_supported: bool = False
+    page_inspection_supported: bool = False
+    extraction_supported: bool = False
+    diagnostic_only: bool = False
+    recommended_fallback_provider: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return _serialize(self)
@@ -254,6 +341,7 @@ class RenderedWebPage:
     network_summary: dict[str, Any] = field(default_factory=dict)
     console_summary: dict[str, Any] = field(default_factory=dict)
     claim_ceiling: str = CLAIM_CEILING_RENDERED_PAGE_EVIDENCE
+    fallback_provider: str = ""
 
     @property
     def text_chars(self) -> int:
@@ -299,6 +387,7 @@ class RenderedWebPage:
             "network_summary": _serialize(self.network_summary),
             "console_summary": _serialize(self.console_summary),
             "claim_ceiling": self.claim_ceiling,
+            "fallback_provider": self.fallback_provider,
         }
         if include_text:
             payload["text"] = self.text

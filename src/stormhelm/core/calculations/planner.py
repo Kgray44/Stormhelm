@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 
 from stormhelm.config.models import CalculationsConfig
-from stormhelm.core.calculations.helpers import build_helper_registry
+from stormhelm.core.calculations.helpers import get_cached_helper_registry
 from stormhelm.core.calculations.models import CalculationOutputMode
 from stormhelm.core.calculations.models import CalculationPlannerEvaluation
 from stormhelm.core.calculations.models import CalculationRouteDisposition
@@ -54,7 +54,7 @@ CONTINUITY_FOLLOW_UP_PHRASES = (
 class CalculationsPlannerSeam:
     def __init__(self, config: CalculationsConfig) -> None:
         self.config = config
-        self._helpers = build_helper_registry()
+        self._helpers = get_cached_helper_registry()
 
     def evaluate(
         self,

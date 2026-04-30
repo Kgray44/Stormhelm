@@ -266,3 +266,89 @@ def test_ui_bridge_surfaces_cdp_evidence_without_visible_screen_claims(temp_conf
     assert entries["Console"]["secondary"] == "2 errors"
     assert entries["Claim Ceiling"]["secondary"] == "Headless Cdp Page Evidence"
     assert "not the user's visible screen" in entries["Limitations"]["detail"].lower()
+
+
+def test_ui_bridge_surfaces_cdp_diagnostic_only_with_cli_fallback(temp_config) -> None:
+    bridge = UiBridge(temp_config)
+    bridge.apply_snapshot(
+        {
+            "history": [
+                {
+                    "message_id": "assistant-cdp-diagnostic",
+                    "role": "assistant",
+                    "content": "CDP inspection is not supported by this Obscura release. I can use the working Obscura CLI extraction path instead.",
+                    "created_at": "2026-04-30T12:00:00Z",
+                    "metadata": {
+                        "bearing_title": "CDP Diagnostic Only",
+                        "micro_response": "CDP inspection is not supported by this Obscura release.",
+                        "route_state": {
+                            "winner": {"route_family": "web_retrieval", "query_shape": "web_retrieval_request", "status": "fallback_available"},
+                            "decomposition": {"subject": "https://example.com"},
+                        },
+                    },
+                }
+            ],
+            "active_request_state": {
+                "family": "web_retrieval",
+                "subject": "https://example.com",
+                "request_type": "web_retrieval_response",
+                "parameters": {
+                    "request_stage": "fallback_available",
+                    "result_state": "fallback_available",
+                    "evidence_bundle": {
+                        "result_state": "fallback_available",
+                        "provider_chain": ["obscura_cdp"],
+                        "fallback_used": False,
+                        "claim_ceiling": "headless_cdp_page_evidence",
+                        "pages": [
+                            {
+                                "requested_url": "https://example.com",
+                                "final_url": "https://example.com",
+                                "provider": "obscura_cdp",
+                                "status": "fallback_available",
+                                "error_code": "cdp_navigation_unsupported",
+                                "error_message": "CDP endpoint detected; page navigation unsupported.",
+                                "fallback_provider": "obscura",
+                                "limitations": ["cdp_diagnostic_only", "not_user_visible_screen", "not_truth_verified"],
+                                "claim_ceiling": "headless_cdp_page_evidence",
+                            }
+                        ],
+                        "limitations": ["cdp_diagnostic_only", "not_user_visible_screen", "not_truth_verified"],
+                    },
+                    "trace": {
+                        "selected_provider": "obscura_cdp",
+                        "attempted_providers": ["obscura_cdp"],
+                        "result_state": "fallback_available",
+                        "claim_ceiling": "headless_cdp_page_evidence",
+                        "cdp": {
+                            "protocol_compatibility_level": "diagnostic_only",
+                            "endpoint_status": "available",
+                            "protocol_version": "1.3",
+                            "navigation_supported": False,
+                            "page_inspection_supported": False,
+                            "diagnostic_only": True,
+                            "recommended_fallback_provider": "obscura_cli",
+                        },
+                    },
+                },
+            },
+        }
+    )
+
+    primary = bridge.ghostPrimaryCard
+    assert primary["resultState"] == "fallback_available"
+    assert "clicked" not in str(primary).lower()
+    assert "verified" not in str(primary).lower()
+
+    panels = {panel["panelId"]: panel for panel in bridge.deckPanels}
+    station = panels["web-evidence-station"]["stationData"]
+    entries = {
+        entry["primary"]: entry
+        for section in station["sections"]
+        for entry in section["entries"]
+    }
+
+    assert entries["CDP Compatibility"]["secondary"] == "Diagnostic Only"
+    assert entries["CDP Navigation"]["secondary"] == "Unsupported"
+    assert entries["Recommended Fallback"]["secondary"] == "Obscura Cli"
+    assert entries["Claim Ceiling"]["secondary"] == "Headless Cdp Page Evidence"
