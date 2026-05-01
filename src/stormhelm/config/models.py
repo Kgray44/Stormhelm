@@ -37,11 +37,199 @@ class ConcurrencyConfig:
 
 
 @dataclass(slots=True)
+class StormforgeFogConfig:
+    enabled: bool = False
+    mode: str = "volumetric"
+    quality: str = "medium"
+    intensity: float = 0.35
+    motion: bool = True
+    edge_fog: bool = True
+    foreground_wisps: bool = True
+    max_foreground_opacity: float = 0.08
+    center_clear_strength: float = 0.65
+    lower_bias: float = 0.45
+    drift_speed: float = 0.055
+    drift_direction: str = "right_to_left"
+    flow_scale: float = 1.0
+    crosswind_wobble: float = 0.18
+    rolling_speed: float = 0.035
+    wisp_stretch: float = 1.8
+    card_clear_strength: float = 0.72
+    anchor_clear_radius: float = 0.18
+    debug_visible: bool = False
+    debug_intensity_multiplier: float = 3.0
+    debug_tint: bool = True
+
+    def __post_init__(self) -> None:
+        mode = str(self.mode or "volumetric").strip().lower()
+        self.mode = mode if mode in {"volumetric", "fallback"} else "volumetric"
+
+        quality = str(self.quality or "medium").strip().lower()
+        self.quality = quality if quality in {"off", "low", "medium", "high"} else "medium"
+
+        try:
+            intensity = float(self.intensity)
+        except (TypeError, ValueError):
+            intensity = 0.35
+        self.intensity = min(1.0, max(0.0, intensity))
+
+        self.enabled = bool(self.enabled)
+        self.motion = bool(self.motion)
+        self.edge_fog = bool(self.edge_fog)
+        self.foreground_wisps = bool(self.foreground_wisps)
+        self.max_foreground_opacity = self._clamped_float(
+            self.max_foreground_opacity,
+            default=0.08,
+            minimum=0.0,
+            maximum=0.16,
+        )
+        self.center_clear_strength = self._clamped_float(
+            self.center_clear_strength,
+            default=0.65,
+            minimum=0.0,
+            maximum=1.0,
+        )
+        self.lower_bias = self._clamped_float(
+            self.lower_bias,
+            default=0.45,
+            minimum=0.0,
+            maximum=1.0,
+        )
+        self.drift_speed = self._clamped_float(
+            self.drift_speed,
+            default=0.055,
+            minimum=0.01,
+            maximum=0.12,
+        )
+        direction = str(self.drift_direction or "right_to_left").strip().lower()
+        self.drift_direction = (
+            direction
+            if direction in {"right_to_left", "left_to_right", "still"}
+            else "right_to_left"
+        )
+        self.flow_scale = self._clamped_float(
+            self.flow_scale,
+            default=1.0,
+            minimum=0.2,
+            maximum=2.0,
+        )
+        self.crosswind_wobble = self._clamped_float(
+            self.crosswind_wobble,
+            default=0.18,
+            minimum=0.0,
+            maximum=0.4,
+        )
+        self.rolling_speed = self._clamped_float(
+            self.rolling_speed,
+            default=0.035,
+            minimum=0.005,
+            maximum=0.08,
+        )
+        self.wisp_stretch = self._clamped_float(
+            self.wisp_stretch,
+            default=1.8,
+            minimum=0.8,
+            maximum=2.8,
+        )
+        self.card_clear_strength = self._clamped_float(
+            self.card_clear_strength,
+            default=0.72,
+            minimum=0.0,
+            maximum=1.0,
+        )
+        self.anchor_clear_radius = self._clamped_float(
+            self.anchor_clear_radius,
+            default=0.18,
+            minimum=0.08,
+            maximum=0.40,
+        )
+        self.debug_visible = bool(self.debug_visible)
+        self.debug_intensity_multiplier = self._clamped_float(
+            self.debug_intensity_multiplier,
+            default=3.0,
+            minimum=1.0,
+            maximum=8.0,
+        )
+        self.debug_tint = bool(self.debug_tint)
+
+    @staticmethod
+    def _clamped_float(
+        value: Any,
+        *,
+        default: float,
+        minimum: float,
+        maximum: float,
+    ) -> float:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            parsed = default
+        return min(maximum, max(minimum, parsed))
+
+    @property
+    def quality_samples(self) -> int:
+        if not self.enabled or self.quality == "off":
+            return 0
+        return {"low": 8, "medium": 14, "high": 24}.get(self.quality, 14)
+
+    @property
+    def drift_direction_vector(self) -> tuple[float, float]:
+        if self.drift_direction == "left_to_right":
+            return (1.0, 0.05)
+        if self.drift_direction == "still":
+            return (0.0, 0.0)
+        return (-1.0, 0.05)
+
+    def to_qml_map(self) -> dict[str, Any]:
+        drift_direction_x, drift_direction_y = self.drift_direction_vector
+        return {
+            "enabled": self.enabled,
+            "mode": self.mode,
+            "quality": self.quality,
+            "intensity": self.intensity,
+            "motion": self.motion,
+            "edgeFog": self.edge_fog,
+            "foregroundWisps": self.foreground_wisps,
+            "qualitySamples": self.quality_samples,
+            "density": 0.62,
+            "driftSpeed": self.drift_speed,
+            "driftDirection": self.drift_direction,
+            "driftDirectionX": drift_direction_x,
+            "driftDirectionY": drift_direction_y,
+            "flowScale": self.flow_scale,
+            "crosswindWobble": self.crosswind_wobble,
+            "rollingSpeed": self.rolling_speed,
+            "wispStretch": self.wisp_stretch,
+            "noiseScale": 1.12,
+            "edgeDensity": 0.88 if self.edge_fog else 0.24,
+            "lowerFogBias": self.lower_bias,
+            "centerClearRadius": 0.40,
+            "centerClearStrength": self.center_clear_strength,
+            "foregroundAmount": 0.18 if self.foreground_wisps else 0.0,
+            "foregroundOpacityLimit": self.max_foreground_opacity
+            if self.foreground_wisps
+            else 0.0,
+            "opacityLimit": 0.22,
+            "protectedCenterX": 0.5,
+            "protectedCenterY": 0.58,
+            "protectedRadius": 0.36,
+            "anchorCenterX": 0.5,
+            "anchorCenterY": 0.30,
+            "anchorRadius": self.anchor_clear_radius,
+            "cardClearStrength": self.card_clear_strength,
+            "debugVisible": self.debug_visible,
+            "debugIntensityMultiplier": self.debug_intensity_multiplier,
+            "debugTint": self.debug_tint,
+        }
+
+
+@dataclass(slots=True)
 class UIConfig:
     poll_interval_ms: int
     hide_to_tray_on_close: bool
     ghost_shortcut: str
     visual_variant: str = "classic"
+    stormforge_fog: StormforgeFogConfig = field(default_factory=StormforgeFogConfig)
 
 
 @dataclass(slots=True)
@@ -115,18 +303,30 @@ class PlaywrightBrowserAdapterConfig:
     allow_click: bool = False
     allow_focus: bool = False
     allow_type_text: bool = False
+    allow_check: bool = False
+    allow_uncheck: bool = False
+    allow_select_option: bool = False
     allow_scroll: bool = False
+    allow_scroll_to_target: bool = False
     allow_form_fill: bool = False
     allow_form_submit: bool = False
     allow_login: bool = False
     allow_cookies: bool = False
     allow_user_profile: bool = False
+    allow_payment: bool = False
     allow_screenshots: bool = False
     allow_dev_adapter: bool = False
     allow_dev_actions: bool = False
+    allow_dev_type_text: bool = False
+    allow_dev_choice_controls: bool = False
+    allow_dev_scroll: bool = False
     max_session_seconds: int = 120
     navigation_timeout_seconds: int = 12000
     observation_timeout_seconds: int = 8000
+    max_scroll_attempts: int = 5
+    scroll_step_pixels: int = 700
+    scroll_timeout_seconds: float = 8.0
+    max_scroll_distance_pixels: int = 5000
     debug_events_enabled: bool = True
 
 

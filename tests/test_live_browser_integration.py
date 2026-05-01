@@ -68,14 +68,22 @@ def test_live_profile_enables_requested_providers_without_action_capabilities(te
     assert playwright.allow_click is False
     assert playwright.allow_focus is False
     assert playwright.allow_type_text is False
+    assert playwright.allow_check is False
+    assert playwright.allow_uncheck is False
+    assert playwright.allow_select_option is False
     assert playwright.allow_scroll is False
+    assert playwright.allow_scroll_to_target is False
     assert playwright.allow_form_fill is False
     assert playwright.allow_form_submit is False
     assert playwright.allow_login is False
     assert playwright.allow_cookies is False
     assert playwright.allow_user_profile is False
+    assert playwright.allow_payment is False
     assert playwright.allow_screenshots is False
     assert playwright.allow_dev_actions is False
+    assert playwright.allow_dev_type_text is False
+    assert playwright.allow_dev_choice_controls is False
+    assert playwright.allow_dev_scroll is False
 
 
 def test_missing_obscura_binary_reports_structured_unavailable(temp_config) -> None:
@@ -289,7 +297,12 @@ def test_live_enabled_adapter_contracts_remain_evidence_only(temp_config) -> Non
     forbidden = {
         "browser.input.click",
         "browser.input.type",
+        "browser.input.type_text",
+        "browser.input.check",
+        "browser.input.uncheck",
+        "browser.input.select_option",
         "browser.input.scroll",
+        "browser.input.scroll_to_target",
         "browser.form.fill",
         "browser.form.submit",
         "browser.login",
@@ -401,13 +414,21 @@ def test_live_profile_example_and_script_preserve_disabled_actions() -> None:
     assert "allow_click = false" in profile
     assert "allow_focus = false" in profile
     assert "allow_type_text = false" in profile
+    assert "allow_check = false" in profile
+    assert "allow_uncheck = false" in profile
+    assert "allow_select_option = false" in profile
     assert "allow_scroll = false" in profile
+    assert "allow_scroll_to_target = false" in profile
     assert "allow_form_fill = false" in profile
     assert "allow_form_submit = false" in profile
     assert "allow_login = false" in profile
     assert "allow_cookies = false" in profile
     assert "allow_user_profile = false" in profile
+    assert "allow_payment = false" in profile
     assert "allow_dev_actions = false" in profile
+    assert "allow_dev_type_text = false" in profile
+    assert "allow_dev_choice_controls = false" in profile
+    assert "allow_dev_scroll = false" in profile
     assert "allow_input_domain = false" in profile
     assert "allow_runtime_eval = false" in profile
     assert "STORMHELM_LIVE_BROWSER_TESTS" in script

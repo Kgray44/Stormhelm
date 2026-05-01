@@ -24,6 +24,7 @@ Item {
     property real adaptiveSecondaryTextContrast: 0.05
     property real adaptiveShadowOpacity: 0.1
     property real adaptiveBackdropOpacity: 0.04
+    property var stormforgeFogConfig: ({})
     readonly property string effectiveVariant: String(root.visualVariant || "classic").toLowerCase() === "stormforge" ? "stormforge" : "classic"
 
     enabled: false
@@ -59,6 +60,7 @@ Item {
     Binding { target: shellLoader.item; property: "adaptiveSecondaryTextContrast"; value: root.adaptiveSecondaryTextContrast; when: shellLoader.item !== null }
     Binding { target: shellLoader.item; property: "adaptiveShadowOpacity"; value: root.adaptiveShadowOpacity; when: shellLoader.item !== null }
     Binding { target: shellLoader.item; property: "adaptiveBackdropOpacity"; value: root.adaptiveBackdropOpacity; when: shellLoader.item !== null }
+    Binding { target: shellLoader.item; property: "stormforgeFogConfig"; value: root.stormforgeFogConfig; when: shellLoader.item !== null && root.effectiveVariant === "stormforge" }
 
     Connections {
         target: shellLoader.item

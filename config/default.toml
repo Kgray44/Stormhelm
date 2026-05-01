@@ -31,6 +31,29 @@ hide_to_tray_on_close = true
 ghost_shortcut = "Ctrl+Space"
 visual_variant = "classic"
 
+[ui.stormforge.fog]
+enabled = false
+mode = "volumetric"
+quality = "medium"
+intensity = 0.35
+motion = true
+edge_fog = true
+foreground_wisps = true
+max_foreground_opacity = 0.08
+center_clear_strength = 0.65
+lower_bias = 0.45
+drift_speed = 0.055
+drift_direction = "right_to_left"
+flow_scale = 1.0
+crosswind_wobble = 0.18
+rolling_speed = 0.035
+wisp_stretch = 1.8
+card_clear_strength = 0.72
+anchor_clear_radius = 0.18
+debug_visible = false
+debug_intensity_multiplier = 3.0
+debug_tint = true
+
 [event_stream]
 enabled = true
 retention_capacity = 500
@@ -101,18 +124,30 @@ allow_actions = false
 allow_click = false
 allow_focus = false
 allow_type_text = false
+allow_check = false
+allow_uncheck = false
+allow_select_option = false
 allow_scroll = false
+allow_scroll_to_target = false
 allow_form_fill = false
 allow_form_submit = false
 allow_login = false
 allow_cookies = false
 allow_user_profile = false
+allow_payment = false
 allow_screenshots = false
 allow_dev_adapter = false
 allow_dev_actions = false
+allow_dev_type_text = false
+allow_dev_choice_controls = false
+allow_dev_scroll = false
 max_session_seconds = 120
 navigation_timeout_seconds = 12000
 observation_timeout_seconds = 8000
+max_scroll_attempts = 5
+scroll_step_pixels = 700
+scroll_timeout_seconds = 8.0
+max_scroll_distance_pixels = 5000
 debug_events_enabled = true
 
 [camera_awareness]

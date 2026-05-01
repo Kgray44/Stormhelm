@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import UTC
 from datetime import datetime
 from importlib.util import find_spec
+import hashlib
 import ipaddress
 from typing import Any, Callable, Iterable, Sequence
 from urllib.parse import urlsplit, urlunsplit
@@ -141,6 +142,14 @@ _CONTROL_EXTRACTION_SCRIPT = r"""elements => {
     const rect = element.getBoundingClientRect();
     const sensitive = type === 'password' || /password|secret|token|api key|passcode/i.test(`${name} ${label} ${element.getAttribute('name') || ''}`);
     const hasValue = !!element.value;
+    const options = tag === 'select' ? Array.from(element.options).slice(0, 40).map((option, optionIndex) => ({
+        label: (option.label || option.textContent || '').trim(),
+        value_summary: option.value ? `[option value, ${String(option.value).length} chars]` : '',
+        selected: option.selected === true,
+        disabled: option.disabled === true,
+        ordinal: optionIndex + 1
+    })) : [];
+    const selectedOption = tag === 'select' ? options.find(option => option.selected) : null;
     return {
         control_id: element.id || `${role || 'control'}-${index + 1}`,
         role,
@@ -156,7 +165,8 @@ _CONTROL_EXTRACTION_SCRIPT = r"""elements => {
         required: element.required === true || element.getAttribute('aria-required') === 'true',
         readonly: element.readOnly === true || element.getAttribute('aria-readonly') === 'true',
         input_type: type,
-        value_summary: sensitive ? '[redacted sensitive field]' : hasValue ? '[redacted value]' : '',
+        value_summary: sensitive ? '[redacted sensitive field]' : selectedOption ? `selected option: ${selectedOption.label}` : hasValue ? '[redacted value]' : '',
+        options,
         risk_hint: sensitive ? 'sensitive_input' : (type === 'hidden' ? 'hidden_input' : '')
     };
   });
@@ -249,6 +259,30 @@ class PlaywrightBrowserSemanticAdapter:
     def status_snapshot(self) -> dict[str, Any]:
         readiness = self.get_readiness(emit_event=False).to_dict()
         declared_action_capabilities = _declared_action_capabilities(self.config, readiness)
+        forbidden_action_capabilities = [
+            capability
+            for capability in [
+                "browser.input.type",
+                "browser.input.type_text",
+                "browser.input.check",
+                "browser.input.uncheck",
+                "browser.input.select_option",
+                "browser.input.scroll",
+                "browser.input.scroll_to_target",
+                "browser.form.fill",
+                "browser.form.submit",
+                "browser.login",
+                "browser.cookies.read",
+                "browser.cookies.write",
+                "browser.download",
+                "browser.payment",
+                "browser.user_profile.attach",
+                "browser.visible_screen_verify",
+                "browser.truth_verify",
+                "browser.workflow_replay",
+            ]
+            if capability not in declared_action_capabilities
+        ]
         readiness.update(
             {
                 "playwright_adapter_enabled": readiness["enabled"],
@@ -262,22 +296,14 @@ class PlaywrightBrowserSemanticAdapter:
                 "live_actions_enabled": bool(declared_action_capabilities),
                 "click_enabled": "browser.input.click" in declared_action_capabilities,
                 "focus_enabled": "browser.input.focus" in declared_action_capabilities,
+                "type_text_enabled": "browser.input.type_text" in declared_action_capabilities,
+                "check_enabled": "browser.input.check" in declared_action_capabilities,
+                "uncheck_enabled": "browser.input.uncheck" in declared_action_capabilities,
+                "select_option_enabled": "browser.input.select_option" in declared_action_capabilities,
+                "scroll_enabled": "browser.input.scroll" in declared_action_capabilities,
+                "scroll_to_target_enabled": "browser.input.scroll_to_target" in declared_action_capabilities,
                 "declared_action_capabilities": declared_action_capabilities,
-                "forbidden_action_capabilities": [
-                    "browser.input.type",
-                    "browser.input.scroll",
-                    "browser.form.fill",
-                    "browser.form.submit",
-                    "browser.login",
-                    "browser.cookies.read",
-                    "browser.cookies.write",
-                    "browser.download",
-                    "browser.payment",
-                    "browser.user_profile.attach",
-                    "browser.visible_screen_verify",
-                    "browser.truth_verify",
-                    "browser.workflow_replay",
-                ],
+                "forbidden_action_capabilities": forbidden_action_capabilities,
                 "last_observation_summary": self.last_observation_summary,
                 "last_grounding_summary": self.last_grounding_summary,
                 "last_verification_summary": self.last_verification_summary,
@@ -875,7 +901,7 @@ class PlaywrightBrowserSemanticAdapter:
                 reason="ambiguous_target",
                 candidates=candidates,
             )
-        elif not candidates and action_kind != "scroll_to":
+        elif not candidates and action_kind not in {"scroll", "scroll_to_target"}:
             preview = _action_preview_from_state(
                 observation,
                 target_phrase=target_phrase,
@@ -883,7 +909,7 @@ class PlaywrightBrowserSemanticAdapter:
                 state="unsupported",
                 reason="target_not_grounded",
             )
-        elif candidates and candidates[0].match_reason == "closest_match":
+        elif candidates and candidates[0].match_reason == "closest_match" and action_kind not in {"scroll", "scroll_to_target"}:
             preview = _action_preview_from_state(
                 observation,
                 target_phrase=target_phrase,
@@ -902,7 +928,7 @@ class PlaywrightBrowserSemanticAdapter:
                 candidates=candidates,
             )
         else:
-            candidate = candidates[0] if candidates else _page_scroll_candidate(target_phrase, observation)
+            candidate = _page_scroll_candidate(target_phrase, observation) if action_kind in {"scroll", "scroll_to_target"} else candidates[0]
             preview = _action_preview_for_candidate(
                 observation,
                 candidate,
@@ -980,14 +1006,25 @@ class PlaywrightBrowserSemanticAdapter:
         plan_model = _coerce_action_plan(plan)
         request = _execution_request_from_plan(plan_model, session_id=session_id, task_id=task_id)
         self._publish(
-            "screen_awareness.playwright_action_execution_requested",
+            _action_event_type(
+                plan_model.action_kind,
+                "screen_awareness.playwright_action_execution_requested",
+                "screen_awareness.playwright_type_request_created",
+            ),
             "Playwright browser action execution requested.",
             _execution_event_payload(request, plan_model, status="requested"),
         )
 
         gate_result = self._execution_gate_result(request, plan_model)
         if gate_result is not None:
-            return self._finalize_action_execution(gate_result, event_type="screen_awareness.playwright_action_execution_blocked")
+            return self._finalize_action_execution(
+                gate_result,
+                event_type=_action_event_type(
+                    plan_model.action_kind,
+                    "screen_awareness.playwright_action_execution_blocked",
+                    "screen_awareness.playwright_type_blocked",
+                ),
+            )
 
         action_request = _trust_action_request(request, plan_model)
         if trust_service is None:
@@ -999,7 +1036,14 @@ class PlaywrightBrowserSemanticAdapter:
                 user_message="Approval is required before this browser action can run.",
                 limitations=["approval_required", "trust_service_required", "no_action_attempted"],
             )
-            return self._finalize_action_execution(result, event_type="screen_awareness.playwright_action_approval_required")
+            return self._finalize_action_execution(
+                result,
+                event_type=_action_event_type(
+                    plan_model.action_kind,
+                    "screen_awareness.playwright_action_approval_required",
+                    "screen_awareness.playwright_type_approval_required",
+                ),
+            )
 
         trust_decision = trust_service.evaluate_action(action_request)
         if trust_decision.outcome != TrustDecisionOutcome.ALLOWED:
@@ -1019,9 +1063,17 @@ class PlaywrightBrowserSemanticAdapter:
             return self._finalize_action_execution(
                 result,
                 event_type=(
-                    "screen_awareness.playwright_action_execution_blocked"
+                    _action_event_type(
+                        plan_model.action_kind,
+                        "screen_awareness.playwright_action_execution_blocked",
+                        "screen_awareness.playwright_type_blocked",
+                    )
                     if blocked_by_operator
-                    else "screen_awareness.playwright_action_approval_required"
+                    else _action_event_type(
+                        plan_model.action_kind,
+                        "screen_awareness.playwright_action_approval_required",
+                        "screen_awareness.playwright_type_approval_required",
+                    )
                 ),
             )
 
@@ -1063,11 +1115,22 @@ class PlaywrightBrowserSemanticAdapter:
                     user_message="That browser action is not available under the current Playwright gates.",
                     limitations=["launch_or_url_blocked", launch_blocker or url_blocker],
                 )
-                final_result = self._finalize_action_execution(result, event_type="screen_awareness.playwright_action_execution_blocked")
+                final_result = self._finalize_action_execution(
+                    result,
+                    event_type=_action_event_type(
+                        plan_model.action_kind,
+                        "screen_awareness.playwright_action_execution_blocked",
+                        "screen_awareness.playwright_type_blocked",
+                    ),
+                )
                 return final_result
 
             self._publish(
-                "screen_awareness.playwright_action_execution_started",
+                _action_event_type(
+                    plan_model.action_kind,
+                    "screen_awareness.playwright_action_execution_started",
+                    "screen_awareness.playwright_type_execution_started",
+                ),
                 "Trust-gated Playwright browser action execution started.",
                 _execution_event_payload(request, plan_model, status="executing"),
             )
@@ -1089,6 +1152,262 @@ class PlaywrightBrowserSemanticAdapter:
                         adapter_id=self.adapter_id,
                         session_id=f"playwright-action-before-{uuid4().hex[:10]}",
                     )
+                    if plan_model.action_kind in {"scroll", "scroll_to_target"}:
+                        scroll_context_blocker = _scroll_context_blocker(before)
+                        if scroll_context_blocker:
+                            result = _execution_result(
+                                request,
+                                plan_model,
+                                status="blocked",
+                                trust_request_id=action_request.request_id,
+                                approval_grant_id=trust_decision.grant.grant_id if trust_decision.grant is not None else "",
+                                trust_scope=trust_decision.grant.scope.value if trust_decision.grant is not None else action_request.suggested_scope.value,
+                                before_observation_id=before.observation_id,
+                                error_code=scroll_context_blocker,
+                                user_message="Scroll blocked: page appears sensitive or restricted.",
+                                limitations=["scroll_blocked", scroll_context_blocker, "no_action_attempted"],
+                            )
+                            final_result = self._finalize_action_execution(
+                                result,
+                                event_type="screen_awareness.playwright_scroll_blocked",
+                            )
+                            return final_result
+                        submit_count_before = _safe_submit_counter(page)
+                        scroll_before = _safe_scroll_state(page)
+                        scroll_details = _scroll_details_from_plan(plan_model, request)
+                        target_phrase = _bounded_text(scroll_details.get("target_phrase") or request.scroll_target_phrase or plan_model.target_candidate.get("name") or "", 120)
+                        if plan_model.action_kind == "scroll_to_target":
+                            target_match, target_blocker = _scroll_target_match(before, target_phrase)
+                            if target_blocker == "target_ambiguous":
+                                result = _execution_result(
+                                    request,
+                                    plan_model,
+                                    status="ambiguous",
+                                    trust_request_id=action_request.request_id,
+                                    approval_grant_id=trust_decision.grant.grant_id if trust_decision.grant is not None else "",
+                                    trust_scope=trust_decision.grant.scope.value if trust_decision.grant is not None else action_request.suggested_scope.value,
+                                    before_observation_id=before.observation_id,
+                                    error_code=target_blocker,
+                                    user_message="Scroll blocked: the requested target is ambiguous.",
+                                    limitations=["target_ambiguous", "no_action_attempted"],
+                                )
+                                final_result = self._finalize_action_execution(result, event_type="screen_awareness.playwright_scroll_blocked")
+                                return final_result
+                            if target_blocker == "target_sensitive":
+                                result = _execution_result(
+                                    request,
+                                    plan_model,
+                                    status="blocked",
+                                    trust_request_id=action_request.request_id,
+                                    approval_grant_id=trust_decision.grant.grant_id if trust_decision.grant is not None else "",
+                                    trust_scope=trust_decision.grant.scope.value if trust_decision.grant is not None else action_request.suggested_scope.value,
+                                    before_observation_id=before.observation_id,
+                                    error_code=target_blocker,
+                                    user_message="Scroll blocked: target appears sensitive.",
+                                    limitations=["target_sensitive", "no_action_attempted"],
+                                )
+                                final_result = self._finalize_action_execution(result, event_type="screen_awareness.playwright_scroll_blocked")
+                                return final_result
+                            if target_match is not None:
+                                trust_service.mark_action_executed(
+                                    action_request=action_request,
+                                    grant=trust_decision.grant,
+                                    summary=f"No-op Playwright scroll_to_target; target {target_phrase or target_match.get('name') or 'target'} was already present.",
+                                    details={
+                                        "plan_id": plan_model.plan_id,
+                                        "preview_id": plan_model.preview_id,
+                                        "action_kind": plan_model.action_kind,
+                                        "claim_ceiling": _ACTION_EXECUTION_CLAIM_CEILING,
+                                        "target_phrase": target_phrase,
+                                        "already_in_expected_state": True,
+                                    },
+                                )
+                                result = _execution_result(
+                                    request,
+                                    plan_model,
+                                    status="verified_supported",
+                                    action_attempted=False,
+                                    action_completed=False,
+                                    verification_attempted=True,
+                                    verification_status="supported",
+                                    before_observation_id=before.observation_id,
+                                    after_observation_id=before.observation_id,
+                                    trust_request_id=action_request.request_id,
+                                    approval_grant_id=trust_decision.grant.grant_id if trust_decision.grant is not None else "",
+                                    trust_scope=trust_decision.grant.scope.value if trust_decision.grant is not None else action_request.suggested_scope.value,
+                                    user_message="Scroll target was already present; no browser scroll was issued.",
+                                    limitations=[
+                                        "target_found",
+                                        "already_in_expected_state",
+                                        "no_action_needed",
+                                        "isolated_temporary_browser_context",
+                                        "not_visible_screen_verification",
+                                        "not_truth_verified",
+                                    ],
+                                )
+                                self._publish(
+                                    "screen_awareness.playwright_scroll_target_found",
+                                    "Playwright scroll target was already present.",
+                                    _execution_event_payload(request, plan_model, status="target_found", target=target_match),
+                                )
+                                final_result = self._finalize_action_execution(
+                                    result,
+                                    event_type="screen_awareness.playwright_scroll_no_op_supported",
+                                )
+                                return final_result
+
+                        self._publish(
+                            "screen_awareness.playwright_scroll_execution_started",
+                            "Trust-gated Playwright scroll execution started.",
+                            _execution_event_payload(request, plan_model, status="executing"),
+                        )
+                        observed_after_attempt: BrowserSemanticObservation | None = None
+                        target_found = False
+                        target_ambiguous = False
+                        target_sensitive = False
+                        attempts = 1 if plan_model.action_kind == "scroll" else int(scroll_details.get("max_attempts") or 1)
+                        for _attempt_index in range(attempts):
+                            _perform_scroll(page, str(scroll_details.get("direction") or "down"), int(scroll_details.get("amount_pixels") or 700))
+                            action_completed = True
+                            self._publish(
+                                "screen_awareness.playwright_scroll_attempted",
+                                "Playwright browser scroll command was issued.",
+                                _execution_event_payload(request, plan_model, status="attempted"),
+                            )
+                            _wait_for_semantic_stabilization(page)
+                            observed_after_attempt = _live_observation_from_page(
+                                page,
+                                adapter_id=self.adapter_id,
+                                session_id=f"playwright-action-scroll-{uuid4().hex[:10]}",
+                            )
+                            if plan_model.action_kind == "scroll_to_target":
+                                target_match, target_blocker = _scroll_target_match(observed_after_attempt, target_phrase)
+                                if target_blocker == "target_ambiguous":
+                                    target_ambiguous = True
+                                    break
+                                if target_blocker == "target_sensitive":
+                                    target_sensitive = True
+                                    break
+                                if target_match is not None:
+                                    target_found = True
+                                    self._publish(
+                                        "screen_awareness.playwright_scroll_target_found",
+                                        "Playwright scroll target found within bounded attempts.",
+                                        _execution_event_payload(request, plan_model, status="target_found", target=target_match),
+                                    )
+                                    break
+                            if plan_model.action_kind == "scroll":
+                                break
+                        trust_service.mark_action_executed(
+                            action_request=action_request,
+                            grant=trust_decision.grant,
+                            summary=f"Attempted Playwright {plan_model.action_kind} with bounded scroll.",
+                            details={
+                                "plan_id": plan_model.plan_id,
+                                "preview_id": plan_model.preview_id,
+                                "action_kind": plan_model.action_kind,
+                                "claim_ceiling": _ACTION_EXECUTION_CLAIM_CEILING,
+                                "scroll_direction": request.scroll_direction,
+                                "scroll_amount_pixels": request.scroll_amount_pixels,
+                                "scroll_max_attempts": request.scroll_max_attempts,
+                                "scroll_target_phrase": request.scroll_target_phrase,
+                            },
+                        )
+                        after = observed_after_attempt
+                        if after is None:
+                            after = _live_observation_from_page(
+                                page,
+                                adapter_id=self.adapter_id,
+                                session_id=f"playwright-action-after-{uuid4().hex[:10]}",
+                            )
+                        submit_count_after = _safe_submit_counter(page)
+                        self._publish(
+                            "screen_awareness.playwright_scroll_after_observation_captured",
+                            "Playwright browser scroll after-observation captured.",
+                            _execution_event_payload(request, plan_model, status="after_observation_captured"),
+                        )
+                        if _submit_counter_changed(submit_count_before, submit_count_after):
+                            result = _execution_result(
+                                request,
+                                plan_model,
+                                status="failed",
+                                action_attempted=True,
+                                action_completed=action_completed,
+                                verification_attempted=True,
+                                verification_status="failed",
+                                before_observation_id=before.observation_id,
+                                after_observation_id=after.observation_id,
+                                trust_request_id=action_request.request_id,
+                                approval_grant_id=trust_decision.grant.grant_id if trust_decision.grant is not None else "",
+                                trust_scope=trust_decision.grant.scope.value if trust_decision.grant is not None else action_request.suggested_scope.value,
+                                error_code="unexpected_form_submission",
+                                user_message="Scroll changed a fixture submit counter, so Stormhelm is not treating it as successful.",
+                                limitations=["unexpected_form_submission", "submit_prevention_failed", "not_visible_screen_verification", "not_truth_verified"],
+                            )
+                            final_result = self._finalize_action_execution(result, event_type="screen_awareness.playwright_scroll_verification_completed", severity=EventSeverity.WARNING)
+                            return final_result
+                        scroll_after = _safe_scroll_state(page)
+                        comparison = _best_action_comparison(self, before, after, plan_model)
+                        status, verification_status, user_message = _scroll_execution_status(
+                            plan_model,
+                            comparison,
+                            scroll_before,
+                            scroll_after,
+                            target_found=target_found,
+                            target_ambiguous=target_ambiguous,
+                            target_sensitive=target_sensitive,
+                        )
+                        error_code = ""
+                        if target_ambiguous:
+                            error_code = "target_ambiguous"
+                            self._publish(
+                                "screen_awareness.playwright_scroll_target_not_found",
+                                "Playwright scroll target became ambiguous.",
+                                _execution_event_payload(request, plan_model, status="target_ambiguous"),
+                                severity=EventSeverity.WARNING,
+                            )
+                        elif target_sensitive:
+                            error_code = "target_sensitive"
+                        elif plan_model.action_kind == "scroll_to_target" and not target_found:
+                            error_code = "target_not_found"
+                            self._publish(
+                                "screen_awareness.playwright_scroll_target_not_found",
+                                "Playwright scroll target was not found within bounded attempts.",
+                                _execution_event_payload(request, plan_model, status="target_not_found"),
+                                severity=EventSeverity.WARNING,
+                            )
+                        result = _execution_result(
+                            request,
+                            plan_model,
+                            status=status,
+                            action_attempted=True,
+                            action_completed=action_completed,
+                            verification_attempted=True,
+                            verification_status=verification_status,
+                            before_observation_id=before.observation_id,
+                            after_observation_id=after.observation_id,
+                            comparison_result_id=comparison.result_id if comparison is not None else "",
+                            trust_request_id=action_request.request_id,
+                            approval_grant_id=trust_decision.grant.grant_id if trust_decision.grant is not None else "",
+                            trust_scope=trust_decision.grant.scope.value if trust_decision.grant is not None else action_request.suggested_scope.value,
+                            error_code=error_code,
+                            user_message=user_message,
+                            limitations=_action_execution_limitations(
+                                list(comparison.limitations if comparison is not None else ["comparison_unavailable"])
+                                + [
+                                    "scroll_bounds_enforced",
+                                    "side_effects_prevented",
+                                    "target_found" if target_found else "",
+                                    error_code,
+                                ]
+                            ),
+                        )
+                        final_result = self._finalize_action_execution(
+                            result,
+                            event_type="screen_awareness.playwright_scroll_verification_completed",
+                            severity=EventSeverity.WARNING if status in {"partial", "failed", "ambiguous", "completed_unverified"} else EventSeverity.INFO,
+                        )
+                        return final_result
                     target_candidate = _resolve_execution_candidate(plan_model, before)
                     candidate_blocker = _candidate_execution_blocker(plan_model.action_kind, target_candidate)
                     if candidate_blocker:
@@ -1101,10 +1420,17 @@ class PlaywrightBrowserSemanticAdapter:
                             trust_scope=trust_decision.grant.scope.value if trust_decision.grant is not None else action_request.suggested_scope.value,
                             before_observation_id=before.observation_id,
                             error_code=candidate_blocker,
-                            user_message="That browser target is not safe or specific enough for click/focus execution.",
+                            user_message="That browser target is not safe or specific enough for Playwright action execution.",
                             limitations=["target_blocked", candidate_blocker],
                         )
-                        final_result = self._finalize_action_execution(result, event_type="screen_awareness.playwright_action_execution_blocked")
+                        final_result = self._finalize_action_execution(
+                            result,
+                            event_type=_action_event_type(
+                                plan_model.action_kind,
+                                "screen_awareness.playwright_action_execution_blocked",
+                                "screen_awareness.playwright_type_blocked",
+                            ),
+                        )
                         return final_result
 
                     locator, locator_blocker = _locator_for_execution(page, target_candidate)
@@ -1121,13 +1447,146 @@ class PlaywrightBrowserSemanticAdapter:
                             user_message="The grounded browser target was ambiguous or unavailable at execution time.",
                             limitations=["locator_blocked", locator_blocker],
                         )
-                        final_result = self._finalize_action_execution(result, event_type="screen_awareness.playwright_action_execution_blocked")
+                        final_result = self._finalize_action_execution(
+                            result,
+                            event_type=_action_event_type(
+                                plan_model.action_kind,
+                                "screen_awareness.playwright_action_execution_blocked",
+                                "screen_awareness.playwright_type_blocked",
+                            ),
+                        )
+                        return final_result
+
+                    submit_count_before = _safe_submit_counter(page)
+                    if plan_model.action_kind in {"check", "uncheck"} and _choice_already_in_expected_state(plan_model.action_kind, target_candidate):
+                        trust_service.mark_action_executed(
+                            action_request=action_request,
+                            grant=trust_decision.grant,
+                            summary=f"No-op Playwright {plan_model.action_kind} on {target_candidate.get('name') or target_candidate.get('role')}; target already had requested state.",
+                            details={
+                                "plan_id": plan_model.plan_id,
+                                "preview_id": plan_model.preview_id,
+                                "action_kind": plan_model.action_kind,
+                                "claim_ceiling": _ACTION_EXECUTION_CLAIM_CEILING,
+                                "expected_checked_state": _expected_checked_state_for_action(plan_model.action_kind),
+                                "already_in_expected_state": True,
+                            },
+                        )
+                        result = _execution_result(
+                            request,
+                            plan_model,
+                            status="verified_supported",
+                            action_attempted=False,
+                            action_completed=False,
+                            verification_attempted=True,
+                            verification_status="supported",
+                            before_observation_id=before.observation_id,
+                            after_observation_id=before.observation_id,
+                            trust_request_id=action_request.request_id,
+                            approval_grant_id=trust_decision.grant.grant_id if trust_decision.grant is not None else "",
+                            trust_scope=trust_decision.grant.scope.value if trust_decision.grant is not None else action_request.suggested_scope.value,
+                            user_message="Choice already had the requested state; no browser action was issued.",
+                            limitations=[
+                                "already_in_expected_state",
+                                "no_action_needed",
+                                "isolated_temporary_browser_context",
+                                "not_visible_screen_verification",
+                                "not_truth_verified",
+                            ],
+                        )
+                        final_result = self._finalize_action_execution(
+                            result,
+                            event_type="screen_awareness.playwright_choice_no_op_supported",
+                        )
+                        return final_result
+
+                    selected_option, option_blocker = _select_option_for_execution(plan_model, target_candidate)
+                    if option_blocker:
+                        result = _execution_result(
+                            request,
+                            plan_model,
+                            status="blocked",
+                            trust_request_id=action_request.request_id,
+                            approval_grant_id=trust_decision.grant.grant_id if trust_decision.grant is not None else "",
+                            trust_scope=trust_decision.grant.scope.value if trust_decision.grant is not None else action_request.suggested_scope.value,
+                            before_observation_id=before.observation_id,
+                            error_code=option_blocker,
+                            user_message="That dropdown option is unavailable, disabled, ambiguous, or unsafe.",
+                            limitations=["option_blocked", option_blocker],
+                        )
+                        final_result = self._finalize_action_execution(
+                            result,
+                            event_type=_action_event_type(
+                                plan_model.action_kind,
+                                "screen_awareness.playwright_action_execution_blocked",
+                                "screen_awareness.playwright_type_blocked",
+                            ),
+                        )
+                        return final_result
+
+                    if _select_option_already_in_expected_state(plan_model, selected_option):
+                        trust_service.mark_action_executed(
+                            action_request=action_request,
+                            grant=trust_decision.grant,
+                            summary=f"No-op Playwright select_option on {target_candidate.get('name') or target_candidate.get('role')}; option already selected.",
+                            details={
+                                "plan_id": plan_model.plan_id,
+                                "preview_id": plan_model.preview_id,
+                                "action_kind": plan_model.action_kind,
+                                "claim_ceiling": _ACTION_EXECUTION_CLAIM_CEILING,
+                                "option_redacted_summary": request.option_redacted_summary,
+                                "option_fingerprint": request.option_fingerprint,
+                                "option_ordinal": request.option_ordinal,
+                                "already_in_expected_state": True,
+                            },
+                        )
+                        result = _execution_result(
+                            request,
+                            plan_model,
+                            status="verified_supported",
+                            action_attempted=False,
+                            action_completed=False,
+                            verification_attempted=True,
+                            verification_status="supported",
+                            before_observation_id=before.observation_id,
+                            after_observation_id=before.observation_id,
+                            trust_request_id=action_request.request_id,
+                            approval_grant_id=trust_decision.grant.grant_id if trust_decision.grant is not None else "",
+                            trust_scope=trust_decision.grant.scope.value if trust_decision.grant is not None else action_request.suggested_scope.value,
+                            user_message="Choice already had the requested selected option; no browser action was issued.",
+                            limitations=[
+                                "already_in_expected_state",
+                                "no_action_needed",
+                                "isolated_temporary_browser_context",
+                                "not_visible_screen_verification",
+                                "not_truth_verified",
+                            ],
+                        )
+                        final_result = self._finalize_action_execution(
+                            result,
+                            event_type="screen_awareness.playwright_choice_no_op_supported",
+                        )
                         return final_result
 
                     if plan_model.action_kind == "click":
                         locator.click(timeout=int(self.config.observation_timeout_seconds or 8000))
                     elif plan_model.action_kind == "focus":
                         locator.focus(timeout=int(self.config.observation_timeout_seconds or 8000))
+                    elif plan_model.action_kind == "type_text":
+                        locator.focus(timeout=int(self.config.observation_timeout_seconds or 8000))
+                        locator.fill(
+                            _typed_text_value(getattr(plan_model, "action_arguments_private", {}) or {}),
+                            timeout=int(self.config.observation_timeout_seconds or 8000),
+                        )
+                    elif plan_model.action_kind == "check":
+                        locator.check(timeout=int(self.config.observation_timeout_seconds or 8000))
+                    elif plan_model.action_kind == "uncheck":
+                        locator.uncheck(timeout=int(self.config.observation_timeout_seconds or 8000))
+                    elif plan_model.action_kind == "select_option":
+                        locator.select_option(
+                            label=selected_option.get("label"),
+                            timeout=int(self.config.observation_timeout_seconds or 8000),
+                        )
                     else:
                         raise RuntimeError(f"Unsupported action kind reached execution: {plan_model.action_kind}")
                     action_completed = True
@@ -1137,7 +1596,11 @@ class PlaywrightBrowserSemanticAdapter:
                         _execution_event_payload(request, plan_model, status="action_command_returned", target=target_candidate),
                     )
                     self._publish(
-                        "screen_awareness.playwright_action_execution_attempted",
+                        _action_event_type(
+                            plan_model.action_kind,
+                            "screen_awareness.playwright_action_execution_attempted",
+                            "screen_awareness.playwright_type_attempted",
+                        ),
                         "Playwright browser action command was issued.",
                         _execution_event_payload(request, plan_model, status="attempted", target=target_candidate),
                     )
@@ -1150,6 +1613,14 @@ class PlaywrightBrowserSemanticAdapter:
                             "preview_id": plan_model.preview_id,
                             "action_kind": plan_model.action_kind,
                             "claim_ceiling": _ACTION_EXECUTION_CLAIM_CEILING,
+                            "typed_text_redacted": request.typed_text_redacted,
+                            "text_redacted_summary": request.text_redacted_summary,
+                            "text_length": request.text_length,
+                            "text_fingerprint": request.text_fingerprint,
+                            "option_redacted_summary": request.option_redacted_summary,
+                            "option_fingerprint": request.option_fingerprint,
+                            "option_ordinal": request.option_ordinal,
+                            "expected_checked_state": request.expected_checked_state,
                         },
                     )
                     _wait_for_semantic_stabilization(page)
@@ -1163,6 +1634,7 @@ class PlaywrightBrowserSemanticAdapter:
                         adapter_id=self.adapter_id,
                         session_id=f"playwright-action-after-{uuid4().hex[:10]}",
                     )
+                    submit_count_after = _safe_submit_counter(page)
                     if _after_observation_unusable(before, after):
                         result = _execution_result(
                             request,
@@ -1190,17 +1662,76 @@ class PlaywrightBrowserSemanticAdapter:
                         )
                         final_result = self._finalize_action_execution(
                             result,
-                            event_type="screen_awareness.playwright_action_verification_completed",
+                            event_type=_action_event_type(
+                                plan_model.action_kind,
+                                "screen_awareness.playwright_action_verification_completed",
+                                "screen_awareness.playwright_type_verification_completed",
+                            ),
                             severity=EventSeverity.WARNING,
                         )
                         return final_result
                     self._publish(
-                        "screen_awareness.playwright_action_after_observation_captured",
+                        _action_event_type(
+                            plan_model.action_kind,
+                            "screen_awareness.playwright_action_after_observation_captured",
+                            "screen_awareness.playwright_type_after_observation_captured",
+                        ),
                         "Playwright browser action after-observation captured.",
                         _execution_event_payload(request, plan_model, status="after_observation_captured", target=target_candidate),
                     )
+                    if _submit_counter_changed(submit_count_before, submit_count_after):
+                        result = _execution_result(
+                            request,
+                            plan_model,
+                            status="failed",
+                            action_attempted=True,
+                            action_completed=action_completed,
+                            verification_attempted=True,
+                            verification_status="failed",
+                            before_observation_id=before.observation_id,
+                            after_observation_id=after.observation_id,
+                            trust_request_id=action_request.request_id,
+                            approval_grant_id=trust_decision.grant.grant_id if trust_decision.grant is not None else "",
+                            trust_scope=trust_decision.grant.scope.value if trust_decision.grant is not None else action_request.suggested_scope.value,
+                            error_code="unexpected_form_submission",
+                            user_message="The browser action changed a fixture submit counter, so Stormhelm is not treating it as successful.",
+                            limitations=[
+                                "unexpected_form_submission",
+                                "submit_prevention_failed",
+                                "not_visible_screen_verification",
+                                "not_truth_verified",
+                            ],
+                        )
+                        final_result = self._finalize_action_execution(
+                            result,
+                            event_type=_action_event_type(
+                                plan_model.action_kind,
+                                "screen_awareness.playwright_action_verification_completed",
+                                "screen_awareness.playwright_type_verification_completed",
+                            ),
+                            severity=EventSeverity.WARNING,
+                        )
+                        return final_result
                     comparison = _best_action_comparison(self, before, after, plan_model)
                     status, verification_status, user_message = _execution_status_from_comparison(plan_model.action_kind, comparison)
+                    error_code = ""
+                    comparison_limitations = list(comparison.limitations if comparison is not None else ["comparison_unavailable"])
+                    if plan_model.action_kind in {"check", "uncheck", "select_option"} and _choice_unexpected_navigation(before, after):
+                        status = "failed"
+                        verification_status = "failed"
+                        error_code = "unexpected_navigation"
+                        user_message = "Choice action changed the page URL unexpectedly, so Stormhelm is not treating it as successful."
+                        comparison_limitations.append("unexpected_navigation")
+                    elif (
+                        plan_model.action_kind in {"check", "uncheck", "select_option"}
+                        and _choice_unexpected_warning_added(before, after)
+                        and status == "verified_supported"
+                    ):
+                        status = "partial"
+                        verification_status = "partial"
+                        error_code = "unexpected_warning_added"
+                        user_message = "Choice state changed, but an unexpected warning appeared, so the result is only partial."
+                        comparison_limitations.append("unexpected_warning_added")
                     result = _execution_result(
                         request,
                         plan_model,
@@ -1215,15 +1746,18 @@ class PlaywrightBrowserSemanticAdapter:
                         trust_request_id=action_request.request_id,
                         approval_grant_id=trust_decision.grant.grant_id if trust_decision.grant is not None else "",
                         trust_scope=trust_decision.grant.scope.value if trust_decision.grant is not None else action_request.suggested_scope.value,
+                        error_code=error_code,
                         user_message=user_message,
-                        limitations=list(
-                            dict.fromkeys(
-                                ["isolated_temporary_browser_context", "no_user_profile", "not_visible_screen_verification", "not_truth_verified"]
-                                + (comparison.limitations if comparison is not None else ["comparison_unavailable"])
-                            )
+                        limitations=_action_execution_limitations(comparison_limitations),
+                    )
+                    final_result = self._finalize_action_execution(
+                        result,
+                        event_type=_action_event_type(
+                            plan_model.action_kind,
+                            "screen_awareness.playwright_action_verification_completed",
+                            "screen_awareness.playwright_type_verification_completed",
                         ),
                     )
-                    final_result = self._finalize_action_execution(result, event_type="screen_awareness.playwright_action_verification_completed")
                     return final_result
                 finally:
                     cleanup_status, cleanup_error = self._cleanup_isolated_browser_resources(
@@ -1256,7 +1790,11 @@ class PlaywrightBrowserSemanticAdapter:
                 )
                 final_result = self._finalize_action_execution(
                     result,
-                    event_type="screen_awareness.playwright_action_verification_completed",
+                    event_type=_action_event_type(
+                        plan_model.action_kind,
+                        "screen_awareness.playwright_action_verification_completed",
+                        "screen_awareness.playwright_type_verification_completed",
+                    ),
                     severity=EventSeverity.WARNING,
                 )
                 return final_result
@@ -1278,7 +1816,15 @@ class PlaywrightBrowserSemanticAdapter:
                 user_message="The browser action failed before Stormhelm could produce a bounded verified result.",
                 limitations=["action_execution_failed", "isolated_temporary_browser_context"],
             )
-            final_result = self._finalize_action_execution(result, event_type="screen_awareness.playwright_action_execution_failed", severity=EventSeverity.WARNING)
+            final_result = self._finalize_action_execution(
+                result,
+                event_type=_action_event_type(
+                    plan_model.action_kind,
+                    "screen_awareness.playwright_action_execution_failed",
+                    "screen_awareness.playwright_type_failed",
+                ),
+                severity=EventSeverity.WARNING,
+            )
             return final_result
         finally:
             if cleanup_status == "not_started" and (context is not None or browser is not None):
@@ -1302,7 +1848,7 @@ class PlaywrightBrowserSemanticAdapter:
         request: BrowserSemanticActionExecutionRequest,
         plan: BrowserSemanticActionPlan,
     ) -> BrowserSemanticActionExecutionResult | None:
-        if plan.action_kind not in {"click", "focus"}:
+        if plan.action_kind not in {"click", "focus", "type_text", "check", "uncheck", "select_option", "scroll", "scroll_to_target"}:
             return _execution_result(
                 request,
                 plan,
@@ -1331,6 +1877,21 @@ class PlaywrightBrowserSemanticAdapter:
                 user_message="That approval cannot be used because the planned browser target changed.",
                 limitations=["approval_binding_mismatch", target_binding_blocker, "no_action_attempted"],
             )
+        argument_binding_blocker = _plan_argument_binding_blocker(plan)
+        if argument_binding_blocker:
+            argument_family = "scroll_arguments_blocked" if plan.action_kind in {"scroll", "scroll_to_target"} else "typed_text_blocked"
+            return _execution_result(
+                request,
+                plan,
+                status="blocked",
+                error_code=argument_binding_blocker,
+                user_message=(
+                    "Scrolling is blocked because the approved direction, amount, or target no longer matches the plan."
+                    if plan.action_kind in {"scroll", "scroll_to_target"}
+                    else "Typing is blocked because the text payload is missing, sensitive-like, or no longer matches the approved plan."
+                ),
+                limitations=[argument_family, argument_binding_blocker, "no_action_attempted"],
+            )
         if plan.result_state in {"blocked", "ambiguous", "unsupported"}:
             error_code = next(
                 (
@@ -1348,7 +1909,7 @@ class PlaywrightBrowserSemanticAdapter:
                 ),
                 plan.result_state,
             )
-            if error_code == "sensitive_or_restricted_context":
+            if error_code in {"sensitive_or_restricted_context", "payment_or_restricted_context"}:
                 error_code = "restricted_context_deferred"
             return _execution_result(
                 request,
@@ -1753,17 +2314,23 @@ def _unsafe_flag_warnings(config: PlaywrightBrowserAdapterConfig) -> list[str]:
     if config.allow_connect_existing:
         warnings.append("connect_existing_allowed")
     if config.allow_actions:
-        warnings.append("actions_requested_requires_specific_click_focus_gates")
+        warnings.append("actions_requested_requires_specific_action_gates")
     if getattr(config, "allow_click", False):
         warnings.append("click_requested_requires_trust_gate")
     if getattr(config, "allow_focus", False):
         warnings.append("focus_requested_requires_trust_gate")
+    if getattr(config, "allow_type_text", False):
+        warnings.append("type_text_requested_requires_trust_gate")
+    if getattr(config, "allow_dev_type_text", False):
+        warnings.append("dev_type_text_allowed")
     if getattr(config, "allow_dev_actions", False):
         warnings.append("dev_actions_allowed")
-    if getattr(config, "allow_type_text", False):
-        warnings.append("type_text_requested_but_unsupported")
     if getattr(config, "allow_scroll", False):
-        warnings.append("scroll_requested_but_unsupported")
+        warnings.append("scroll_requested_requires_trust_gate")
+    if getattr(config, "allow_scroll_to_target", False):
+        warnings.append("scroll_to_target_requested_requires_trust_gate")
+    if getattr(config, "allow_dev_scroll", False):
+        warnings.append("dev_scroll_allowed")
     if config.allow_form_fill:
         warnings.append("form_fill_requested_but_unsupported")
     if getattr(config, "allow_form_submit", False):
@@ -1774,6 +2341,8 @@ def _unsafe_flag_warnings(config: PlaywrightBrowserAdapterConfig) -> list[str]:
         warnings.append("cookies_requested_but_unsupported")
     if getattr(config, "allow_user_profile", False):
         warnings.append("user_profile_requested_but_unsupported")
+    if getattr(config, "allow_payment", False):
+        warnings.append("payment_requested_but_unsupported")
     if config.allow_screenshots:
         warnings.append("screenshots_requested_but_not_screen_truth")
     if config.allow_dev_adapter:
@@ -1992,6 +2561,8 @@ def _control_from_live_payload(raw: dict[str, Any]) -> BrowserSemanticControl:
     value_summary = _bounded_text(raw.get("value_summary") or "")
     if sensitive:
         value_summary = "[redacted sensitive field]"
+    elif value_summary.startswith("selected option: "):
+        value_summary = _bounded_text(value_summary, 80)
     elif value_summary and value_summary not in {"checked", "unchecked", "selected value present"}:
         value_summary = "[redacted value]"
     return BrowserSemanticControl(
@@ -2010,16 +2581,13 @@ def _control_from_live_payload(raw: dict[str, Any]) -> BrowserSemanticControl:
         readonly=_optional_bool(raw.get("readonly")),
         value_summary=value_summary,
         risk_hint="sensitive_input" if sensitive else _bounded_text(raw.get("risk_hint") or ""),
+        options=_bounded_choice_options(raw.get("options")),
         confidence=float(raw.get("confidence") or 0.76),
     )
 
 
 def _unsupported_flag_blockers(config: PlaywrightBrowserAdapterConfig) -> list[str]:
     blockers: list[str] = []
-    if getattr(config, "allow_type_text", False):
-        blockers.append("type_text_not_supported")
-    if getattr(config, "allow_scroll", False):
-        blockers.append("scroll_not_supported")
     if config.allow_form_fill:
         blockers.append("form_fill_not_supported")
     if getattr(config, "allow_form_submit", False):
@@ -2030,6 +2598,8 @@ def _unsupported_flag_blockers(config: PlaywrightBrowserAdapterConfig) -> list[s
         blockers.append("cookies_not_supported")
     if getattr(config, "allow_user_profile", False):
         blockers.append("user_profile_not_supported")
+    if getattr(config, "allow_payment", False):
+        blockers.append("payment_not_supported")
     if config.allow_screenshots:
         blockers.append("screenshots_not_supported")
     return blockers
@@ -2058,8 +2628,30 @@ def _control_from_mapping(raw: dict[str, Any]) -> BrowserSemanticControl:
         readonly=_optional_bool(raw.get("readonly")),
         value_summary=value_summary,
         risk_hint="sensitive_input" if sensitive else _bounded_text(raw.get("risk_hint") or ""),
+        options=_bounded_choice_options(raw.get("options")),
         confidence=float(raw.get("confidence") or 0.72),
     )
+
+
+def _bounded_choice_options(value: Any) -> list[dict[str, Any]]:
+    options = _mapping_list(value)[:_LIST_LIMIT]
+    bounded: list[dict[str, Any]] = []
+    for index, option in enumerate(options, start=1):
+        label = _bounded_text(option.get("label") or option.get("text") or option.get("name") or "", 80)
+        value_summary = _bounded_text(option.get("value_summary") or option.get("value") or "", 80)
+        if _looks_like_secret(value_summary):
+            value_summary = "[redacted option value]"
+        bounded.append(
+            {
+                "label": label,
+                "value_summary": value_summary,
+                "selected": bool(option.get("selected", False)),
+                "disabled": bool(option.get("disabled", False)),
+                "ordinal": _safe_int(option.get("ordinal"), default=index),
+                "option_fingerprint": _option_fingerprint(label, value_summary, _safe_int(option.get("ordinal"), default=index)),
+            }
+        )
+    return bounded
 
 
 def _control_payload_is_sensitive(raw: dict[str, Any]) -> bool:
@@ -2185,6 +2777,7 @@ def _adapter_semantics_payload(observation: BrowserSemanticObservation) -> dict[
                 "required": control.required,
                 "readonly": control.readonly,
                 "value_summary": _bounded_text(control.value_summary, 80),
+                "options": _bounded_choice_options(control.options)[:_LIST_LIMIT],
                 "semantic_type": _bounded_text(control.risk_hint, 80),
                 "source_provider": observation.provider,
                 "source_observation_id": observation.observation_id,
@@ -3226,21 +3819,29 @@ def _classify_action_kind(action_phrase: str, candidate: BrowserGroundingCandida
             return "focus"
         if role == "checkbox":
             return "check"
+        if role == "radio":
+            return "check"
         if role == "combobox":
             return "select_option"
         return "unsupported"
     if "submit" in phrase and ("form" in phrase or role == "button"):
         return "submit_form"
-    if any(term in phrase for term in ("type", "enter", "write", "fill")):
+    if any(term in phrase for term in ("type", "enter", "write", "fill", "append text", "add text", "add more text")):
         return "type_text"
     if any(term in phrase for term in ("uncheck", "untick", "clear checkbox")):
         return "uncheck"
-    if any(term in phrase for term in ("check", "tick")) and role == "checkbox":
+    if any(term in phrase for term in ("check", "tick")) and role in {"checkbox", "radio"}:
+        return "check"
+    if any(term in phrase for term in ("select", "choose", "pick")) and role == "radio":
         return "check"
     if any(term in phrase for term in ("select", "choose", "pick")) and role == "combobox":
         return "select_option"
-    if any(term in phrase for term in ("scroll", "move down", "move up")):
-        return "scroll_to"
+    if any(term in phrase for term in ("scroll", "move down", "move up", "bring")):
+        if any(term in phrase for term in ("scroll to", "bring", "until you find", "find the")) and not any(
+            term in phrase for term in ("top", "bottom")
+        ):
+            return "scroll_to_target"
+        return "scroll"
     if any(term in phrase for term in ("focus", "place cursor", "go to")):
         return "focus"
     if any(term in phrase for term in ("click", "press", "open", "tap")):
@@ -3281,6 +3882,24 @@ def _action_preview_from_state(
     )
 
 
+def _control_options_for_candidate(
+    observation: BrowserSemanticObservation,
+    candidate: BrowserGroundingCandidate | None,
+) -> list[dict[str, Any]]:
+    if candidate is None:
+        return []
+    candidate_ids = {
+        _bounded_text(candidate.control_id or "", 80),
+        _bounded_text(candidate.candidate_id or "", 80),
+    }
+    candidate_ids.discard("")
+    for control in observation.controls:
+        control_id = _bounded_text(getattr(control, "control_id", "") or "", 80)
+        if control_id in candidate_ids:
+            return _bounded_choice_options(getattr(control, "options", None))
+    return []
+
+
 def _action_preview_for_candidate(
     observation: BrowserSemanticObservation,
     candidate: BrowserGroundingCandidate,
@@ -3300,16 +3919,18 @@ def _action_preview_for_candidate(
         limitations.extend(["action_execution_deferred", "no_actions"])
     if blocked_reason:
         limitations.append(blocked_reason)
-    if _redacted_action_arguments(action_kind, action_arguments):
+    if _redacted_action_arguments(action_kind, action_arguments, target_phrase=target_phrase, config=config):
         limitations.append("action_arguments_redacted")
+    target_options = _control_options_for_candidate(observation, candidate) if action_kind == "select_option" else []
     return BrowserSemanticActionPreview(
         observation_id=observation.observation_id,
         source_provider=observation.provider,
         target_phrase=_bounded_text(target_phrase),
-        target_candidate_id=candidate.candidate_id,
+        target_candidate_id=_bounded_text(candidate.control_id or candidate.candidate_id, 80),
         target_role=candidate.role,
         target_name=_candidate_label(candidate),
         target_label=candidate.label,
+        target_options=target_options,
         action_kind=action_kind,
         preview_state=state,
         action_supported_now=bool(capability_declared and not blocked_reason),
@@ -3347,9 +3968,35 @@ def _action_risk_and_trust(action_kind: str, candidate: BrowserGroundingCandidat
         return "blocked", "blocked_until_future_policy", "sensitive_or_restricted_context"
     if any(term in haystack for term in ("payment", "billing", "checkout", "card", "purchase")):
         return "blocked", "blocked_until_future_policy", "payment_or_restricted_context"
+    if action_kind in {"check", "uncheck", "select_option"} and any(
+        term in haystack
+        for term in (
+            "terms",
+            "privacy",
+            "privacy consent",
+            "legal",
+            "authorize",
+            "authorization",
+            "delete",
+            "permanent",
+            "remove my data",
+            "consent",
+            "security",
+            "robot",
+            "human verification",
+            "captcha",
+            "remember me",
+            "trust this device",
+            "age",
+            "compliance",
+            "export",
+            "unsubscribe",
+        )
+    ):
+        return "blocked", "blocked_until_future_policy", "sensitive_or_restricted_context"
     if action_kind in {"type_text", "submit_form"}:
         return "high", "browser_action_strong_confirmation_future", ""
-    if action_kind in {"focus", "scroll_to"}:
+    if action_kind in {"focus", "scroll", "scroll_to_target"}:
         return "low", "browser_action_once_future", ""
     if action_kind in {"click", "check", "uncheck", "select_option"}:
         return "medium", "browser_action_once_future", ""
@@ -3380,7 +4027,11 @@ def _expected_outcomes_for_action(action_kind: str) -> list[str]:
             "warning_removed",
             "form_summary_changed",
         ]
-    if action_kind in {"focus", "scroll_to"}:
+    if action_kind == "scroll":
+        return ["page_scroll_position_changed"]
+    if action_kind == "scroll_to_target":
+        return ["target_available_after_scroll"]
+    if action_kind == "focus":
         return ["control_state_changed"]
     return []
 
@@ -3389,28 +4040,279 @@ def _action_capability_required(action_kind: str) -> str:
     return {
         "click": "browser.input.click",
         "focus": "browser.input.focus",
-        "type_text": "browser.input.type",
+        "type_text": "browser.input.type_text",
         "select_option": "browser.input.select_option",
         "check": "browser.input.check",
         "uncheck": "browser.input.uncheck",
-        "scroll_to": "browser.input.scroll",
+        "scroll": "browser.input.scroll",
+        "scroll_to_target": "browser.input.scroll_to_target",
+        "scroll_to": "browser.input.scroll_to_target",
         "submit_form": "browser.form.submit",
     }.get(action_kind, "browser.action.unsupported")
 
 
-def _redacted_action_arguments(action_kind: str, action_arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+def _typed_text_value(action_arguments: dict[str, Any] | None = None) -> str:
+    raw = dict(action_arguments or {})
+    if "text" in raw:
+        return str(raw.get("text") or "")
+    if "value" in raw:
+        return str(raw.get("value") or "")
+    return ""
+
+
+def _typed_text_redacted_summary(text: str) -> str:
+    return f"[redacted text, {len(str(text or ''))} chars]"
+
+
+def _typed_text_fingerprint(text: str) -> str:
+    return hashlib.sha256(str(text or "").encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+
+def _option_value(action_arguments: dict[str, Any] | None = None) -> str:
+    raw = dict(action_arguments or {})
+    for key in ("option", "label", "value"):
+        if key in raw:
+            return str(raw.get(key) or "")
+    return ""
+
+
+def _option_fingerprint(label: str, value_summary: str = "", ordinal: int = 0) -> str:
+    material = "|".join([_normalize(label), _normalize(value_summary), str(int(ordinal or 0))])
+    return hashlib.sha256(material.encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+
+def _scroll_direction(action_arguments: dict[str, Any] | None = None, action_phrase: str = "") -> str:
+    raw = dict(action_arguments or {})
+    direction = _normalize(str(raw.get("direction") or ""))
+    phrase = _normalize(action_phrase)
+    if direction in {"up", "down"}:
+        return direction
+    if direction in {"top"}:
+        return "up"
+    if "up" in phrase or "top" in phrase:
+        return "up"
+    return "down"
+
+
+def _scroll_amount_pixels(action_arguments: dict[str, Any] | None = None, config: PlaywrightBrowserAdapterConfig | None = None) -> int:
+    raw = dict(action_arguments or {})
+    default = int(getattr(config, "scroll_step_pixels", 700) or 700)
+    amount = _safe_int(raw.get("amount_pixels") or raw.get("amount") or raw.get("pixels"), default=default)
+    if amount <= 0:
+        amount = default
+    max_distance = int(getattr(config, "max_scroll_distance_pixels", 5000) or 5000)
+    return max(1, min(amount, max_distance))
+
+
+def _scroll_max_attempts(action_arguments: dict[str, Any] | None = None, config: PlaywrightBrowserAdapterConfig | None = None) -> int:
+    raw = dict(action_arguments or {})
+    default = int(getattr(config, "max_scroll_attempts", 5) or 5)
+    attempts = _safe_int(raw.get("max_attempts") or raw.get("attempts"), default=default)
+    return max(1, min(attempts, default, 10))
+
+
+def _scroll_target_phrase(
+    action_arguments: dict[str, Any] | None = None,
+    *,
+    fallback: str = "",
+) -> str:
+    raw = dict(action_arguments or {})
+    return _bounded_text(raw.get("target_phrase") or raw.get("target") or fallback, 120)
+
+
+def _scroll_fingerprint(direction: str, amount_pixels: int, max_attempts: int, target_phrase: str = "") -> str:
+    material = "|".join([_normalize(direction), str(int(amount_pixels or 0)), str(int(max_attempts or 0)), _normalize(target_phrase)])
+    return hashlib.sha256(material.encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+
+def _scroll_metadata(
+    action_kind: str,
+    action_arguments: dict[str, Any] | None = None,
+    *,
+    target_phrase: str = "",
+    config: PlaywrightBrowserAdapterConfig | None = None,
+) -> dict[str, Any]:
+    raw = dict(action_arguments or {})
+    direction = _scroll_direction(raw)
+    amount = _scroll_amount_pixels(raw, config)
+    attempts = _scroll_max_attempts(raw, config)
+    target = _scroll_target_phrase(raw, fallback=target_phrase) if action_kind == "scroll_to_target" else ""
+    return {
+        "direction": direction,
+        "amount_pixels": amount,
+        "max_attempts": attempts,
+        "target_phrase": target,
+        "scroll_fingerprint": _scroll_fingerprint(direction, amount, attempts, target),
+    }
+
+
+def _select_option_metadata(
+    action_arguments: dict[str, Any] | None = None,
+    target_options: Sequence[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    raw = dict(action_arguments or {})
+    option = _option_value(raw)
+    ordinal = _safe_int(raw.get("ordinal"), default=0)
+    if not option and ordinal <= 0:
+        return {
+            "option_redacted_summary": "",
+            "option_fingerprint": "",
+            "option_request_fingerprint": "",
+            "option_ordinal": 0,
+        }
+    request_fingerprint = _option_fingerprint(option, "", ordinal)
+    bound_fingerprint = request_fingerprint
+    options = _bounded_choice_options(target_options)
+    matched_option: dict[str, Any] | None = None
+    if options:
+        if option:
+            matches = [item for item in options if _normalize(item.get("label") or "") == _normalize(option)]
+        else:
+            matches = [item for item in options if _safe_int(item.get("ordinal"), default=0) == ordinal]
+        if len(matches) == 1:
+            matched_option = dict(matches[0])
+    if matched_option is not None:
+        bound_fingerprint = _option_fingerprint(
+            str(matched_option.get("label") or option),
+            str(matched_option.get("value_summary") or ""),
+            _safe_int(matched_option.get("ordinal"), default=ordinal),
+        )
+    return {
+        "option_redacted_summary": _bounded_text(option or f"option {ordinal}", 80),
+        "option_fingerprint": bound_fingerprint,
+        "option_request_fingerprint": request_fingerprint,
+        "option_ordinal": ordinal,
+    }
+
+
+def _compact_digits(text: str) -> str:
+    return "".join(ch for ch in str(text or "") if ch.isdigit())
+
+
+def _classify_typed_text(text: str) -> str:
+    value = str(text or "")
+    lowered = value.lower()
+    digits = _compact_digits(value)
+    if not value:
+        return "blocked"
+    if _looks_like_secret(lowered):
+        return "sensitive_like"
+    if any(
+        term in lowered
+        for term in (
+            "password",
+            "passcode",
+            "secret",
+            "token",
+            "api key",
+            "apikey",
+            "recovery code",
+            "2fa",
+            "mfa",
+            "otp",
+            "cvv",
+            "cvc",
+            "security code",
+            "expiration date",
+            "expiry date",
+            "bank",
+            "routing",
+            "account number",
+        )
+    ):
+        return "sensitive_like"
+    if value.strip().lower().startswith(("sk-", "pk_live_", "rk_live_")):
+        return "sensitive_like"
+    if len(digits) == 6 and value.strip().isdigit():
+        return "sensitive_like"
+    if len(digits) in range(13, 20):
+        return "sensitive_like"
+    pieces = value.replace("-", " ").split()
+    if len(pieces) == 3 and all(piece.isdigit() for piece in pieces) and [len(piece) for piece in pieces] == [3, 2, 4]:
+        return "sensitive_like"
+    if any(
+        term in lowered
+        for term in (
+            "credit card",
+            "card number",
+            "bank account",
+            "routing number",
+            "ssn",
+            "social security",
+            "billing",
+            "checkout",
+            "payment",
+        )
+    ):
+        return "sensitive_like"
+    return "plain"
+
+
+def _type_text_metadata(action_arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+    text = _typed_text_value(action_arguments)
+    if text == "":
+        return {
+            "typed_text_redacted": True,
+            "text_redacted_summary": "[redacted text, 0 chars]",
+            "text_length": 0,
+            "text_fingerprint": "",
+            "text_classification": "blocked",
+        }
+    return {
+        "typed_text_redacted": True,
+        "text_redacted_summary": _typed_text_redacted_summary(text),
+        "text_length": len(text),
+        "text_fingerprint": _typed_text_fingerprint(text),
+        "text_classification": _classify_typed_text(text),
+    }
+
+
+def _private_action_arguments(
+    action_kind: str,
+    action_arguments: dict[str, Any] | None = None,
+    *,
+    target_phrase: str = "",
+    config: PlaywrightBrowserAdapterConfig | None = None,
+) -> dict[str, Any]:
+    raw = dict(action_arguments or {})
+    if action_kind == "type_text":
+        text = _typed_text_value(raw)
+        return {"text": text, "mode": _bounded_text(raw.get("mode") or "replace_value", 40)}
+    if action_kind == "select_option":
+        return {
+            "option": _option_value(raw),
+            "ordinal": _safe_int(raw.get("ordinal"), default=0),
+        }
+    if action_kind in {"scroll", "scroll_to_target"}:
+        return _scroll_metadata(action_kind, raw, target_phrase=target_phrase, config=config)
+    return {}
+
+
+def _redacted_action_arguments(
+    action_kind: str,
+    action_arguments: dict[str, Any] | None = None,
+    *,
+    target_options: Sequence[dict[str, Any]] | None = None,
+    target_phrase: str = "",
+    config: PlaywrightBrowserAdapterConfig | None = None,
+) -> dict[str, Any]:
     raw = dict(action_arguments or {})
     redacted: dict[str, Any] = {}
     if action_kind == "type_text":
-        if "text" in raw or "value" in raw:
-            redacted["text"] = "[redacted text]"
+        redacted.update(_type_text_metadata(raw))
+        redacted["mode"] = _bounded_text(raw.get("mode") or "replace_value", 40)
     elif action_kind == "select_option":
-        if "option" in raw:
-            redacted["option"] = _bounded_text(raw.get("option"), 80)
+        redacted.update(_select_option_metadata(raw, target_options=target_options))
+    elif action_kind in {"scroll", "scroll_to_target"}:
+        redacted.update(_scroll_metadata(action_kind, raw, target_phrase=target_phrase, config=config))
     elif action_kind in {"check", "uncheck", "click", "focus", "scroll_to", "submit_form"}:
         for key in ("direction", "position", "button"):
             if key in raw:
                 redacted[key] = _bounded_text(raw.get(key), 80)
+        if action_kind == "check":
+            redacted["expected_checked_state"] = True
+        if action_kind == "uncheck":
+            redacted["expected_checked_state"] = False
     return redacted
 
 
@@ -3427,6 +4329,7 @@ def _coerce_action_preview(value: BrowserSemanticActionPreview | dict[str, Any])
         target_role=_bounded_text(payload.get("target_role") or payload.get("role") or ""),
         target_name=_bounded_text(payload.get("target_name") or payload.get("name") or ""),
         target_label=_bounded_text(payload.get("target_label") or payload.get("label") or ""),
+        target_options=_bounded_choice_options(payload.get("target_options")),
         action_kind=_bounded_text(payload.get("action_kind") or "unsupported"),
         preview_state=_bounded_text(payload.get("preview_state") or payload.get("status") or "unsupported"),
         action_supported_now=bool(payload.get("action_supported_now", payload.get("action_supported", False))),
@@ -3471,8 +4374,16 @@ def _action_plan_from_preview(
         "label": _bounded_text(preview.target_label, 80),
         "confidence": round(float(preview.confidence or 0.0), 3),
     }
+    if preview.action_kind == "select_option":
+        target_candidate["options"] = _bounded_choice_options(preview.target_options)
     target_candidate["target_fingerprint"] = _target_fingerprint(target_candidate)
-    redacted_arguments = _redacted_action_arguments(preview.action_kind, action_arguments)
+    redacted_arguments = _redacted_action_arguments(
+        preview.action_kind,
+        action_arguments,
+        target_options=preview.target_options,
+        target_phrase=preview.target_phrase,
+        config=config,
+    )
     redacted_arguments["target_fingerprint"] = target_candidate["target_fingerprint"]
     return BrowserSemanticActionPlan(
         preview_id=preview.preview_id,
@@ -3500,6 +4411,12 @@ def _action_plan_from_preview(
                 + ([] if capability_declared else ["no_action_execution"])
             )
         ),
+        action_arguments_private=_private_action_arguments(
+            preview.action_kind,
+            action_arguments,
+            target_phrase=preview.target_phrase,
+            config=config,
+        ),
     )
 
 
@@ -3517,6 +4434,7 @@ def _coerce_action_plan(value: BrowserSemanticActionPlan | dict[str, Any]) -> Br
         action_arguments_redacted=dict(payload.get("action_arguments_redacted") or {})
         if isinstance(payload.get("action_arguments_redacted"), dict)
         else {},
+        action_arguments_private={},
         preconditions=list(payload.get("preconditions") or []),
         approval_request_hint=_bounded_text(payload.get("approval_request_hint") or ""),
         adapter_capability_required=_bounded_text(payload.get("adapter_capability_required") or ""),
@@ -3533,7 +4451,30 @@ def _coerce_action_plan(value: BrowserSemanticActionPlan | dict[str, Any]) -> Br
 
 
 def _action_gates_requested(config: PlaywrightBrowserAdapterConfig) -> bool:
-    return bool(config.allow_actions and getattr(config, "allow_dev_actions", False) and (getattr(config, "allow_click", False) or getattr(config, "allow_focus", False)))
+    return bool(
+        config.allow_actions
+        and getattr(config, "allow_dev_actions", False)
+        and (
+            getattr(config, "allow_click", False)
+            or getattr(config, "allow_focus", False)
+            or (getattr(config, "allow_type_text", False) and getattr(config, "allow_dev_type_text", False))
+            or (
+                getattr(config, "allow_dev_choice_controls", False)
+                and (
+                    getattr(config, "allow_check", False)
+                    or getattr(config, "allow_uncheck", False)
+                    or getattr(config, "allow_select_option", False)
+                )
+            )
+            or (
+                getattr(config, "allow_dev_scroll", False)
+                and (
+                    getattr(config, "allow_scroll", False)
+                    or getattr(config, "allow_scroll_to_target", False)
+                )
+            )
+        )
+    )
 
 
 def _parse_utc_timestamp(value: str) -> datetime | None:
@@ -3555,7 +4496,7 @@ def _plan_freshness_blocker(plan: BrowserSemanticActionPlan) -> str:
         return ""
     age_seconds = (datetime.now(UTC) - created).total_seconds()
     if age_seconds > _STALE_OBSERVATION_SECONDS:
-        return "blocked_stale_plan"
+        return "stale_plan"
     return ""
 
 
@@ -3587,6 +4528,74 @@ def _plan_target_binding_blocker(plan: BrowserSemanticActionPlan) -> str:
     return ""
 
 
+def _plan_argument_binding_blocker(plan: BrowserSemanticActionPlan) -> str:
+    if plan.action_kind == "type_text":
+        private_text = _typed_text_value(getattr(plan, "action_arguments_private", {}) or {})
+        stored = ""
+        if isinstance(plan.action_arguments_redacted, dict):
+            stored = _bounded_text(plan.action_arguments_redacted.get("text_fingerprint") or "", 80)
+        if not private_text:
+            return "typed_text_missing"
+        computed = _typed_text_fingerprint(private_text)
+        if stored and stored != computed:
+            return "approval_invalid"
+        classification = _classify_typed_text(private_text)
+        if classification != "plain":
+            return "sensitive_text_blocked"
+        mode = _bounded_text((getattr(plan, "action_arguments_private", {}) or {}).get("mode") or "replace_value", 40)
+        if mode != "replace_value":
+            return "typing_mode_unsupported"
+    if plan.action_kind == "select_option":
+        private_args = getattr(plan, "action_arguments_private", {}) or {}
+        option = _option_value(private_args)
+        ordinal = _safe_int(private_args.get("ordinal"), default=0)
+        stored = ""
+        stored_full = ""
+        if isinstance(plan.action_arguments_redacted, dict):
+            stored = _bounded_text(
+                plan.action_arguments_redacted.get("option_request_fingerprint")
+                or plan.action_arguments_redacted.get("option_fingerprint")
+                or "",
+                80,
+            )
+            stored_full = _bounded_text(plan.action_arguments_redacted.get("option_fingerprint") or "", 80)
+        if not option and ordinal <= 0:
+            return "option_missing"
+        computed = _option_fingerprint(option, "", ordinal)
+        if stored and stored != computed:
+            return "approval_invalid"
+        if stored_full and stored_full != computed:
+            options = _bounded_choice_options((plan.target_candidate or {}).get("options"))
+            if options:
+                if option:
+                    matches = [item for item in options if _normalize(item.get("label") or "") == _normalize(option)]
+                else:
+                    matches = [item for item in options if _safe_int(item.get("ordinal"), default=0) == ordinal]
+                if len(matches) == 1:
+                    expected_full = _option_fingerprint(
+                        str(matches[0].get("label") or ""),
+                        str(matches[0].get("value_summary") or ""),
+                        _safe_int(matches[0].get("ordinal"), default=0),
+                    )
+                    if expected_full != stored_full:
+                        return "approval_invalid"
+    if plan.action_kind in {"scroll", "scroll_to_target"}:
+        private_args = getattr(plan, "action_arguments_private", {}) or {}
+        direction = _bounded_text(private_args.get("direction") or "", 20)
+        amount = _safe_int(private_args.get("amount_pixels"), default=0)
+        attempts = _safe_int(private_args.get("max_attempts"), default=0)
+        target = _bounded_text(private_args.get("target_phrase") or "", 120)
+        stored = ""
+        if isinstance(plan.action_arguments_redacted, dict):
+            stored = _bounded_text(plan.action_arguments_redacted.get("scroll_fingerprint") or "", 80)
+        if not direction or amount <= 0 or attempts <= 0:
+            return "scroll_arguments_missing"
+        computed = _scroll_fingerprint(direction, amount, attempts, target)
+        if stored and stored != computed:
+            return "approval_invalid"
+    return ""
+
+
 def _declared_action_capabilities(
     config: PlaywrightBrowserAdapterConfig,
     readiness: PlaywrightAdapterReadiness | dict[str, Any] | None = None,
@@ -3605,6 +4614,20 @@ def _declared_action_capabilities(
         capabilities.append("browser.input.click")
     if getattr(config, "allow_focus", False):
         capabilities.append("browser.input.focus")
+    if getattr(config, "allow_type_text", False) and getattr(config, "allow_dev_type_text", False):
+        capabilities.append("browser.input.type_text")
+    if getattr(config, "allow_dev_choice_controls", False):
+        if getattr(config, "allow_check", False):
+            capabilities.append("browser.input.check")
+        if getattr(config, "allow_uncheck", False):
+            capabilities.append("browser.input.uncheck")
+        if getattr(config, "allow_select_option", False):
+            capabilities.append("browser.input.select_option")
+    if getattr(config, "allow_dev_scroll", False):
+        if getattr(config, "allow_scroll", False):
+            capabilities.append("browser.input.scroll")
+        if getattr(config, "allow_scroll_to_target", False):
+            capabilities.append("browser.input.scroll_to_target")
     return capabilities
 
 
@@ -3612,7 +4635,16 @@ def _action_capability_declared(config: PlaywrightBrowserAdapterConfig | None, a
     if config is None:
         return False
     capability = _action_capability_required(action_kind)
-    if capability not in {"browser.input.click", "browser.input.focus"}:
+    if capability not in {
+        "browser.input.click",
+        "browser.input.focus",
+        "browser.input.type_text",
+        "browser.input.check",
+        "browser.input.uncheck",
+        "browser.input.select_option",
+        "browser.input.scroll",
+        "browser.input.scroll_to_target",
+    }:
         return False
     return capability in _declared_action_capabilities(config)
 
@@ -3632,7 +4664,28 @@ def _action_gate_blocker(config: PlaywrightBrowserAdapterConfig, action_kind: st
         return "click_disabled"
     if action_kind == "focus" and not getattr(config, "allow_focus", False):
         return "focus_disabled"
-    if action_kind not in {"click", "focus"}:
+    if action_kind == "type_text":
+        if not getattr(config, "allow_type_text", False):
+            return "type_text_disabled"
+        if not getattr(config, "allow_dev_type_text", False):
+            return "dev_type_text_gate_required"
+    if action_kind in {"check", "uncheck", "select_option"}:
+        if not getattr(config, "allow_dev_choice_controls", False):
+            return "dev_choice_controls_gate_required"
+        if action_kind == "check" and not getattr(config, "allow_check", False):
+            return "check_disabled"
+        if action_kind == "uncheck" and not getattr(config, "allow_uncheck", False):
+            return "uncheck_disabled"
+        if action_kind == "select_option" and not getattr(config, "allow_select_option", False):
+            return "select_option_disabled"
+    if action_kind in {"scroll", "scroll_to_target"}:
+        if not getattr(config, "allow_dev_scroll", False):
+            return "dev_scroll_gate_required"
+        if action_kind == "scroll" and not getattr(config, "allow_scroll", False):
+            return "scroll_disabled"
+        if action_kind == "scroll_to_target" and not getattr(config, "allow_scroll_to_target", False):
+            return "scroll_to_target_disabled"
+    if action_kind not in {"click", "focus", "type_text", "check", "uncheck", "select_option", "scroll", "scroll_to_target"}:
         return "unsupported_action_kind"
     blockers = _unsupported_flag_blockers(config)
     return blockers[0] if blockers else ""
@@ -3645,6 +4698,10 @@ def _execution_request_from_plan(
     task_id: str,
 ) -> BrowserSemanticActionExecutionRequest:
     target = dict(plan.target_candidate or {})
+    text_meta = dict(plan.action_arguments_redacted or {}) if plan.action_kind == "type_text" else {}
+    option_meta = dict(plan.action_arguments_redacted or {}) if plan.action_kind == "select_option" else {}
+    checked_meta = dict(plan.action_arguments_redacted or {}) if plan.action_kind in {"check", "uncheck"} else {}
+    scroll_meta = dict(plan.action_arguments_redacted or {}) if plan.action_kind in {"scroll", "scroll_to_target"} else {}
     expected = []
     template = dict(plan.verification_request_template or {})
     if template.get("expected_change_kind"):
@@ -3662,6 +4719,20 @@ def _execution_request_from_plan(
         task_id=task_id,
         source_provider="playwright_live_semantic",
         expected_outcome=expected,
+        typed_text_redacted=bool(text_meta.get("typed_text_redacted", False)),
+        text_fingerprint=_bounded_text(text_meta.get("text_fingerprint") or "", 80),
+        text_length=_safe_int(text_meta.get("text_length"), default=0),
+        text_classification=_bounded_text(text_meta.get("text_classification") or "", 40),
+        text_redacted_summary=_bounded_text(text_meta.get("text_redacted_summary") or "", 80),
+        option_redacted_summary=_bounded_text(option_meta.get("option_redacted_summary") or "", 80),
+        option_fingerprint=_bounded_text(option_meta.get("option_fingerprint") or "", 80),
+        option_ordinal=_safe_int(option_meta.get("option_ordinal"), default=0),
+        expected_checked_state=checked_meta.get("expected_checked_state") if isinstance(checked_meta.get("expected_checked_state"), bool) else None,
+        scroll_direction=_bounded_text(scroll_meta.get("direction") or "", 20),
+        scroll_amount_pixels=_safe_int(scroll_meta.get("amount_pixels"), default=0),
+        scroll_max_attempts=_safe_int(scroll_meta.get("max_attempts"), default=0),
+        scroll_target_phrase=_bounded_text(scroll_meta.get("target_phrase") or "", 120),
+        scroll_fingerprint=_bounded_text(scroll_meta.get("scroll_fingerprint") or "", 80),
     )
 
 
@@ -3719,6 +4790,21 @@ def _execution_result(
         approval_grant_id=approval_grant_id,
         provider="playwright_live_semantic",
         claim_ceiling=_ACTION_EXECUTION_CLAIM_CEILING,
+        typed_text_redacted=bool(request.typed_text_redacted),
+        text_fingerprint=_bounded_text(request.text_fingerprint, 80),
+        text_length=int(request.text_length or 0),
+        text_classification=_bounded_text(request.text_classification, 40),
+        text_redacted_summary=_bounded_text(request.text_redacted_summary, 80),
+        option_redacted_summary=_bounded_text(request.option_redacted_summary, 80),
+        option_fingerprint=_bounded_text(request.option_fingerprint, 80),
+        option_ordinal=int(request.option_ordinal or 0),
+        expected_checked_state=request.expected_checked_state,
+        scroll_direction=_bounded_text(request.scroll_direction, 20),
+        scroll_amount_pixels=int(request.scroll_amount_pixels or 0),
+        scroll_max_attempts=int(request.scroll_max_attempts or 0),
+        scroll_target_phrase=_bounded_text(request.scroll_target_phrase, 120),
+        scroll_target_found="target_found" in list(limitations or []),
+        scroll_fingerprint=_bounded_text(request.scroll_fingerprint, 80),
         limitations=list(dict.fromkeys([_bounded_text(item, 120) for item in list(limitations or []) if _bounded_text(item, 120)])),
         error_code=_bounded_text(error_code, 80),
         bounded_error_message=_bounded_text(bounded_error_message),
@@ -3733,7 +4819,11 @@ def _risk_level_from_plan(plan: BrowserSemanticActionPlan) -> str:
     risk = str(target.get("risk_level") or "").strip().lower()
     if risk:
         return _bounded_text(risk, 40)
+    if plan.action_kind == "type_text":
+        return "high"
     if plan.action_kind == "focus":
+        return "low"
+    if plan.action_kind in {"scroll", "scroll_to_target"}:
         return "low"
     if plan.action_kind == "click":
         return "medium"
@@ -3746,11 +4836,22 @@ def _trust_action_request(
 ) -> TrustActionRequest:
     target = _target_summary_from_plan(plan)
     target_fingerprint = _target_fingerprint(dict(plan.target_candidate or {}))
+    text_fingerprint = _bounded_text(request.text_fingerprint or "", 80)
+    option_fingerprint = _bounded_text(request.option_fingerprint or "", 80)
+    scroll_fingerprint = _bounded_text(request.scroll_fingerprint or "", 80)
+    if plan.action_kind == "type_text":
+        action_key_tail = f"{target_fingerprint}.{text_fingerprint}"
+    elif plan.action_kind == "select_option":
+        action_key_tail = f"{target_fingerprint}.{option_fingerprint}"
+    elif plan.action_kind in {"scroll", "scroll_to_target"}:
+        action_key_tail = f"{target_fingerprint}.{scroll_fingerprint}"
+    else:
+        action_key_tail = target_fingerprint
     subject = f"{plan.action_kind} {target.get('role') or 'target'} {target.get('name') or target.get('label') or ''}".strip()
     return TrustActionRequest(
         request_id=f"trust-playwright-action-{uuid4().hex[:12]}",
         family="screen_awareness",
-        action_key=f"screen_awareness.playwright.{plan.action_kind}.{plan.plan_id}.{target_fingerprint}",
+        action_key=f"screen_awareness.playwright.{plan.action_kind}.{plan.plan_id}.{action_key_tail}",
         subject=_bounded_text(subject, 120),
         session_id=request.session_id or "default",
         task_id=request.task_id,
@@ -3762,7 +4863,15 @@ def _trust_action_request(
         operator_justification=(
             f"Playwright would {plan.action_kind} a grounded browser target inside an isolated temporary browser context."
         ),
-        operator_message=f"Approval is required before Stormhelm can {plan.action_kind} {target.get('name') or 'this browser target'}.",
+        operator_message=(
+            f"Approval is required before Stormhelm can type redacted text into {target.get('name') or 'this browser target'}."
+            if plan.action_kind == "type_text"
+            else f"Approval is required before Stormhelm can change {target.get('name') or 'this browser choice control'}."
+            if plan.action_kind in {"check", "uncheck", "select_option"}
+            else f"Approval is required before Stormhelm can perform bounded browser scrolling."
+            if plan.action_kind in {"scroll", "scroll_to_target"}
+            else f"Approval is required before Stormhelm can {plan.action_kind} {target.get('name') or 'this browser target'}."
+        ),
         verification_label="Semantic before/after browser comparison",
         details={
             "plan_id": plan.plan_id,
@@ -3772,6 +4881,20 @@ def _trust_action_request(
             "target": target,
             "claim_ceiling": _ACTION_EXECUTION_CLAIM_CEILING,
             "expected_outcome": list(request.expected_outcome)[:8],
+            "typed_text_redacted": request.typed_text_redacted,
+            "text_redacted_summary": request.text_redacted_summary,
+            "text_length": request.text_length,
+            "text_fingerprint": text_fingerprint,
+            "text_classification": request.text_classification,
+            "option_redacted_summary": request.option_redacted_summary,
+            "option_fingerprint": option_fingerprint,
+            "option_ordinal": request.option_ordinal,
+            "expected_checked_state": request.expected_checked_state,
+            "scroll_direction": request.scroll_direction,
+            "scroll_amount_pixels": request.scroll_amount_pixels,
+            "scroll_max_attempts": request.scroll_max_attempts,
+            "scroll_target_phrase": request.scroll_target_phrase,
+            "scroll_fingerprint": scroll_fingerprint,
         },
     )
 
@@ -3790,7 +4913,15 @@ def _resolve_execution_candidate(plan: BrowserSemanticActionPlan, observation: B
         control_name = _normalize(str(control.get("name") or ""))
         control_label = _normalize(str(control.get("label") or ""))
         if target_id and target_id == control_id:
-            matches.append(control)
+            resolved = dict(control)
+            if (role and control_role and role != control_role) or (
+                name and control_name and name != control_name and name != control_label
+            ) or (label and control_label and label != control_label and label != control_name):
+                resolved["_target_drift"] = True
+                resolved["_expected_role"] = role
+                resolved["_expected_name"] = name
+                resolved["_expected_label"] = label
+            matches.append(resolved)
             continue
         if role and control_role != role:
             continue
@@ -3799,10 +4930,68 @@ def _resolve_execution_candidate(plan: BrowserSemanticActionPlan, observation: B
         elif label and (control_label == label or control_name == label):
             matches.append(control)
     if not matches:
-        return {"_execution_blocker": "target_not_found_at_execution"}
+        return {"_execution_blocker": "target_missing"}
     if len(matches) > 1:
-        return {"_execution_blocker": "ambiguous_target_at_execution", "match_count": len(matches)}
+        return {"_execution_blocker": "target_ambiguous", "match_count": len(matches)}
     return matches[0]
+
+
+def _sensitive_target_haystack(haystack: str) -> bool:
+    sensitive_terms = (
+        "password",
+        "passcode",
+        "secret",
+        "token",
+        "api key",
+        "apikey",
+        "credential",
+        "login",
+        "sign in",
+        "signin",
+        "2fa",
+        "mfa",
+        "otp",
+        "recovery code",
+        "captcha",
+        "payment",
+        "billing",
+        "card",
+        "cvv",
+        "cvc",
+        "checkout",
+        "purchase",
+        "ssn",
+        "social security",
+        "bank",
+        "routing",
+        "account number",
+        "profile",
+        "sensitive",
+        "terms",
+        "terms agreement",
+        "legal",
+        "consent",
+        "privacy",
+        "privacy consent",
+        "authorize",
+        "authorization",
+        "delete",
+        "permanent",
+        "charge my card",
+        "save payment",
+        "remember me",
+        "robot",
+        "human verification",
+        "trust this device",
+        "age",
+        "compliance",
+        "account deletion",
+        "export",
+        "unsubscribe",
+        "remove my data",
+        "security",
+    )
+    return any(term in haystack for term in sensitive_terms)
 
 
 def _candidate_execution_blocker(action_kind: str, target: dict[str, Any]) -> str:
@@ -3815,18 +5004,44 @@ def _candidate_execution_blocker(action_kind: str, target: dict[str, Any]) -> st
             for key in ("control_id", "role", "name", "label", "text", "value_summary", "risk_hint")
         )
     )
-    if any(term in haystack for term in ("password", "passcode", "secret", "token", "credential", "login", "sign in", "captcha")):
-        return "restricted_context_deferred"
-    if any(term in haystack for term in ("payment", "billing", "card", "purchase")):
-        return "payment_or_restricted_context"
+    if _sensitive_target_haystack(haystack):
+        return "target_sensitive"
+    if any(term in haystack for term in ("file input", "file upload", "upload file", "upload")):
+        return "target_uneditable"
     if target.get("visible") is False:
-        return "target_not_visible"
+        return "target_hidden"
     if target.get("enabled") is False:
         return "target_disabled"
+    if target.get("readonly") is True:
+        return "target_readonly"
+    if (
+        target.get("_target_drift")
+        and action_kind in {"check", "uncheck", "select_option"}
+        and _canonical_role(str(target.get("_expected_role") or ""))
+        and role != _canonical_role(str(target.get("_expected_role") or ""))
+    ):
+        return "target_type_changed"
+    if target.get("_target_drift"):
+        return "target_drift"
     if action_kind == "click" and role not in {"button", "link"}:
         return "click_target_role_not_allowed"
     if action_kind == "focus" and role not in {"textbox", "button", "link", "checkbox", "radio", "combobox"}:
         return "focus_target_role_not_allowed"
+    if action_kind == "type_text":
+        if role not in {"textbox", "searchbox"}:
+            return "target_uneditable"
+        if any(term in haystack for term in ("readonly", "read only", "hidden", "file input", "upload")):
+            if "readonly" in haystack or "read only" in haystack:
+                return "target_readonly"
+            if "hidden" in haystack:
+                return "target_hidden"
+            return "target_uneditable"
+    if action_kind == "check" and role not in {"checkbox", "radio"}:
+        return "target_type_changed"
+    if action_kind == "uncheck" and role != "checkbox":
+        return "target_type_changed"
+    if action_kind == "select_option" and role not in {"combobox", "select"}:
+        return "target_type_changed"
     return ""
 
 
@@ -3855,7 +5070,7 @@ def _locator_for_execution(page: Any, target: dict[str, Any]) -> tuple[Any | Non
                     selector_locator = page.locator(selector)
                     selector_count = int(selector_locator.count())
                 except Exception:
-                    return None, "locator_selector_disagrees"
+                    return None, "locator_missing"
                 if selector_count == 0:
                     return None, "locator_selector_disagrees"
                 if selector_count > 1:
@@ -3886,12 +5101,199 @@ def _locator_for_execution(page: Any, target: dict[str, Any]) -> tuple[Any | Non
             locator = page.locator(selector)
             count = int(locator.count())
         except Exception:
-            return None, "locator_unavailable"
+            return None, "locator_missing"
         if count == 1:
             return locator, ""
         if count > 1:
             return None, "locator_ambiguous"
-    return None, "locator_not_found"
+    return None, "locator_missing"
+
+
+def _expected_checked_state_for_action(action_kind: str) -> bool | None:
+    if action_kind == "check":
+        return True
+    if action_kind == "uncheck":
+        return False
+    return None
+
+
+def _choice_already_in_expected_state(action_kind: str, target: dict[str, Any]) -> bool:
+    expected = _expected_checked_state_for_action(action_kind)
+    if expected is None:
+        return False
+    return target.get("checked") is expected
+
+
+def _select_option_already_in_expected_state(plan: BrowserSemanticActionPlan, selected_option: dict[str, Any]) -> bool:
+    if plan.action_kind != "select_option":
+        return False
+    return bool(selected_option.get("selected"))
+
+
+def _select_option_for_execution(
+    plan: BrowserSemanticActionPlan,
+    target: dict[str, Any],
+) -> tuple[dict[str, Any], str]:
+    if plan.action_kind != "select_option":
+        return {}, ""
+    raw = getattr(plan, "action_arguments_private", {}) or {}
+    option_label = _option_value(raw)
+    option_ordinal = _safe_int(raw.get("ordinal"), default=0)
+    options = _bounded_choice_options(target.get("options"))
+    if not options:
+        return {}, "options_unavailable"
+    if option_label:
+        matches = [option for option in options if _normalize(option.get("label") or "") == _normalize(option_label)]
+    elif option_ordinal > 0:
+        matches = [option for option in options if _safe_int(option.get("ordinal"), default=0) == option_ordinal]
+    else:
+        return {}, "option_missing"
+    if not matches:
+        return {}, "option_not_found"
+    if len(matches) > 1:
+        return {}, "option_ambiguous"
+    option = dict(matches[0])
+    if option.get("disabled"):
+        return {}, "option_disabled"
+    haystack = _normalize(" ".join(str(option.get(key) or "") for key in ("label", "value_summary")))
+    if _sensitive_target_haystack(haystack):
+        return {}, "option_sensitive"
+    if isinstance(plan.action_arguments_redacted, dict):
+        stored_fingerprint = _bounded_text(plan.action_arguments_redacted.get("option_fingerprint") or "", 80)
+        request_fingerprint = _bounded_text(plan.action_arguments_redacted.get("option_request_fingerprint") or "", 80)
+        if stored_fingerprint and stored_fingerprint != request_fingerprint:
+            current_fingerprint = _option_fingerprint(
+                str(option.get("label") or ""),
+                str(option.get("value_summary") or ""),
+                _safe_int(option.get("ordinal"), default=0),
+            )
+            if current_fingerprint != stored_fingerprint:
+                return {}, "option_drift"
+    return option, ""
+
+
+def _scroll_details_from_plan(
+    plan: BrowserSemanticActionPlan,
+    request: BrowserSemanticActionExecutionRequest,
+) -> dict[str, Any]:
+    private_args = dict(getattr(plan, "action_arguments_private", {}) or {})
+    return {
+        "direction": _bounded_text(private_args.get("direction") or request.scroll_direction or "down", 20),
+        "amount_pixels": _safe_int(private_args.get("amount_pixels") or request.scroll_amount_pixels, default=700),
+        "max_attempts": _safe_int(private_args.get("max_attempts") or request.scroll_max_attempts, default=1),
+        "target_phrase": _bounded_text(private_args.get("target_phrase") or request.scroll_target_phrase or "", 120),
+    }
+
+
+def _scroll_context_blocker(observation: BrowserSemanticObservation) -> str:
+    page_haystack = _normalize(" ".join([str(observation.page_url or ""), str(observation.page_title or "")]))
+    if any(term in page_haystack for term in ("captcha", "payment", "checkout", "billing", "login", "sign in", "signin", "security", "profile")):
+        return "target_sensitive"
+    return ""
+
+
+def _safe_scroll_state(page: Any) -> dict[str, Any]:
+    try:
+        value = page.evaluate(
+            "() => ({__stormhelmScrollState: true, x: Number(window.scrollX || 0), y: Number(window.scrollY || 0), max_y: Math.max(0, Number(document.documentElement.scrollHeight || 0) - Number(window.innerHeight || 0)), at_top: Number(window.scrollY || 0) <= 0, at_bottom: Number(window.scrollY || 0) >= Math.max(0, Number(document.documentElement.scrollHeight || 0) - Number(window.innerHeight || 0))})"
+        )
+    except Exception:
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    return {
+        "x": _safe_int(value.get("x"), default=0),
+        "y": _safe_int(value.get("y"), default=0),
+        "max_y": _safe_int(value.get("max_y"), default=0),
+        "at_top": bool(value.get("at_top", False)),
+        "at_bottom": bool(value.get("at_bottom", False)),
+    }
+
+
+def _perform_scroll(page: Any, direction: str, amount_pixels: int) -> None:
+    delta = abs(int(amount_pixels or 0))
+    if delta <= 0:
+        delta = 700
+    if _normalize(direction) == "up":
+        delta = -delta
+    mouse = getattr(page, "mouse", None)
+    wheel = getattr(mouse, "wheel", None)
+    if not callable(wheel):
+        raise RuntimeError("Playwright page mouse wheel is unavailable for bounded scroll.")
+    wheel(0, delta)
+
+
+def _scroll_target_match(
+    observation: BrowserSemanticObservation,
+    target_phrase: str,
+) -> tuple[dict[str, Any] | None, str]:
+    phrase = _normalize(target_phrase)
+    if not phrase:
+        return None, "target_missing"
+    matches: list[dict[str, Any]] = []
+    for control in observation.controls:
+        control_map = control.to_dict()
+        haystack = _normalize(
+            " ".join(
+                str(control_map.get(key) or "")
+                for key in ("control_id", "role", "name", "label", "text", "risk_hint")
+            )
+        )
+        phrase_terms = [term for term in phrase.split() if len(term) > 1 and term not in {"the", "a", "an", "to"}]
+        if phrase not in haystack and haystack not in phrase and not all(term in haystack for term in phrase_terms):
+            continue
+        role = _canonical_role(str(control_map.get("role") or ""))
+        if _sensitive_target_haystack(haystack) and not (role == "link" and "privacy policy" in haystack):
+            return None, "target_sensitive"
+        if control_map.get("visible") is False:
+            continue
+        matches.append(control_map)
+    if not matches:
+        return None, "target_missing"
+    if len(matches) > 1:
+        return None, "target_ambiguous"
+    return matches[0], ""
+
+
+def _safe_submit_counter(page: Any) -> int | None:
+    try:
+        value = page.evaluate("() => Number(window.__stormhelmSubmitCount || 0)")
+    except Exception:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _submit_counter_changed(before: int | None, after: int | None) -> bool:
+    if before is None or after is None:
+        return False
+    return after != before
+
+
+def _choice_unexpected_navigation(before: BrowserSemanticObservation, after: BrowserSemanticObservation) -> bool:
+    before_url = str(before.page_url or "").strip()
+    after_url = str(after.page_url or "").strip()
+    return bool(before_url and after_url and before_url != after_url)
+
+
+def _warning_keys(observation: BrowserSemanticObservation) -> set[str]:
+    keys: set[str] = set()
+    for item in list(observation.alerts or []) + list(observation.dialogs or []):
+        if not isinstance(item, dict):
+            continue
+        role = _normalize(str(item.get("role") or ""))
+        name = _normalize(str(item.get("name") or ""))
+        text = _normalize(str(item.get("text") or ""))
+        item_id = _normalize(str(item.get("alert_id") or item.get("dialog_id") or ""))
+        if role in {"alert", "dialog"} or name or text or item_id:
+            keys.add("|".join([role, name, text, item_id]))
+    return keys
+
+
+def _choice_unexpected_warning_added(before: BrowserSemanticObservation, after: BrowserSemanticObservation) -> bool:
+    return bool(_warning_keys(after) - _warning_keys(before))
 
 
 def _best_action_comparison(
@@ -3917,6 +5319,7 @@ def _best_action_comparison(
             after_observation_id=after.observation_id,
             expected_change_kind=kind,
             target_phrase=_comparison_target_phrase(kind, plan, template),
+            expected_state=_expected_checked_state_for_action(plan.action_kind),
             source_provider="playwright_live_semantic",
         )
         result = adapter.compare_semantic_observations(before, after, expected=request)
@@ -3933,6 +5336,10 @@ def _execution_status_from_comparison(
     if comparison is None:
         return "completed_unverified", "unavailable", "The action was attempted, but semantic comparison was unavailable."
     if comparison.status == "supported":
+        if action_kind == "type_text":
+            return "verified_supported", "supported", "Text entered; semantic verification supports the field changed."
+        if action_kind in {"check", "uncheck", "select_option"}:
+            return "verified_supported", "supported", "Choice updated; semantic verification supports the change."
         return "verified_supported", "supported", comparison.user_message or "The expected semantic change is supported."
     if comparison.status == "partial":
         return "partial", "partial", comparison.user_message or "I found a related semantic change, but not the full expected outcome."
@@ -3941,8 +5348,74 @@ def _execution_status_from_comparison(
     if comparison.status == "unsupported":
         if action_kind == "focus":
             return "completed_unverified", "unsupported", "Focus was attempted, but semantic comparison did not support the expected change."
+        if action_kind == "type_text":
+            change_types = {change.change_type for change in comparison.changes}
+            if not change_types:
+                return "verified_unsupported", "unsupported", "Typing was attempted, but the semantic snapshots show the field did not change."
+            if "value_summary_changed" not in change_types:
+                return "completed_unverified", "unsupported", "Typing was attempted, but the field value could not be verified from semantic snapshots."
+            return "verified_unsupported", "unsupported", "Typing was attempted, but semantic comparison did not support the expected field change."
+        if action_kind in {"check", "uncheck", "select_option"}:
+            change_types = {change.change_type for change in comparison.changes}
+            if not change_types:
+                return "verified_unsupported", "unsupported", "Choice action was attempted, but the semantic snapshots show the selected state did not change."
+            return "completed_unverified", "unsupported", "Choice action was attempted, but I could not verify the selected state."
         return "verified_unsupported", "unsupported", "The action was attempted, but the expected semantic change is not supported."
     return "completed_unverified", comparison.status, "The action was attempted, but I could not verify the expected change from semantic snapshots."
+
+
+def _scroll_position_changed(before: dict[str, Any], after: dict[str, Any]) -> bool:
+    if not before or not after:
+        return False
+    return _safe_int(before.get("y"), default=0) != _safe_int(after.get("y"), default=0)
+
+
+def _scroll_execution_status(
+    plan: BrowserSemanticActionPlan,
+    comparison: BrowserSemanticVerificationResult | None,
+    before_scroll: dict[str, Any],
+    after_scroll: dict[str, Any],
+    *,
+    target_found: bool,
+    target_ambiguous: bool,
+    target_sensitive: bool,
+) -> tuple[str, str, str]:
+    if target_sensitive:
+        return "blocked", "blocked", "Scroll target appears sensitive."
+    if target_ambiguous:
+        return "ambiguous", "ambiguous", "Scroll target became ambiguous within the bounded scroll limit."
+    if plan.action_kind == "scroll_to_target":
+        if target_found:
+            return "verified_supported", "supported", "Scroll attempted; target found."
+        if comparison is not None and comparison.status == "partial":
+            return "partial", "partial", "I could not find that target within the bounded scroll limit, though related page content changed."
+        return "partial", "not_found", "I could not find that target within the bounded scroll limit."
+    if _scroll_position_changed(before_scroll, after_scroll):
+        return "verified_supported", "supported", "Scroll attempted; semantic evidence supports that the page position changed."
+    if comparison is not None and comparison.status == "supported":
+        return "verified_supported", "supported", comparison.user_message or "Scroll attempted; semantic evidence supports a page change."
+    if comparison is not None and comparison.status == "partial":
+        return "partial", "partial", comparison.user_message or "Scroll attempted and related semantic content changed."
+    if comparison is not None and comparison.status == "ambiguous":
+        return "ambiguous", "ambiguous", comparison.user_message or "Scroll comparison is ambiguous."
+    if comparison is not None and comparison.status == "unsupported":
+        return "verified_unsupported", "unsupported", "Scroll was attempted, but semantic evidence did not show the expected change."
+    return "completed_unverified", "unavailable", "Scroll attempted, but I could not verify a semantic change."
+
+
+def _action_execution_limitations(comparison_limitations: Sequence[str]) -> list[str]:
+    action_limits = [
+        "isolated_temporary_browser_context",
+        "no_user_profile",
+        "not_visible_screen_verification",
+        "not_truth_verified",
+    ]
+    observation_only = {"no_actions"}
+    for item in comparison_limitations:
+        text = str(item or "").strip()
+        if text and text not in observation_only:
+            action_limits.append(text)
+    return list(dict.fromkeys(action_limits))
 
 
 def _comparison_target_phrase(kind: str, plan: BrowserSemanticActionPlan, template: dict[str, Any]) -> str:
@@ -3968,10 +5441,22 @@ def _default_execution_user_message(status: str, action_kind: str) -> str:
     if status == "blocked":
         return "That browser action is blocked by the current gates or target safety."
     if status == "verified_supported":
+        if action_kind == "type_text":
+            return "Text entered; semantic verification supports the field changed."
+        if action_kind in {"check", "uncheck", "select_option"}:
+            return "Choice updated; semantic verification supports the change."
+        if action_kind in {"scroll", "scroll_to_target"}:
+            return "Scroll attempted; semantic verification supports the change."
         return f"The semantic snapshots support the expected result of the {action_kind}."
     if status == "verified_unsupported":
         return f"The {action_kind} was attempted, but the expected semantic change is not supported."
     if status == "completed_unverified":
+        if action_kind == "type_text":
+            return "Typing was attempted, but the field value could not be verified from semantic snapshots."
+        if action_kind in {"check", "uncheck", "select_option"}:
+            return "Choice action was attempted, but I could not verify the selected state."
+        if action_kind in {"scroll", "scroll_to_target"}:
+            return "Scroll attempted, but I could not verify a semantic change."
         return f"The {action_kind} was attempted, but semantic verification is not conclusive."
     return "Browser action execution produced a bounded result."
 
@@ -3999,6 +5484,18 @@ def _action_execution_summary(result: BrowserSemanticActionExecutionResult) -> d
         "cleanup_status": result.cleanup_status,
         "provider": result.provider,
         "claim_ceiling": result.claim_ceiling,
+        "typed_text_redacted": result.typed_text_redacted,
+        "text_redacted_summary": result.text_redacted_summary,
+        "text_length": result.text_length,
+        "text_classification": result.text_classification,
+        "option_redacted_summary": result.option_redacted_summary,
+        "option_ordinal": result.option_ordinal,
+        "expected_checked_state": result.expected_checked_state,
+        "scroll_direction": result.scroll_direction,
+        "scroll_amount_pixels": result.scroll_amount_pixels,
+        "scroll_max_attempts": result.scroll_max_attempts,
+        "scroll_target_phrase": result.scroll_target_phrase,
+        "scroll_target_found": result.scroll_target_found,
         "limitations": list(result.limitations)[:8],
         "error_code": result.error_code,
         "user_message": _bounded_text(result.user_message),
@@ -4012,7 +5509,7 @@ def _execution_event_payload(
     status: str,
     target: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "request_id": request.request_id,
         "plan_id": plan.plan_id,
         "preview_id": plan.preview_id,
@@ -4027,10 +5524,39 @@ def _execution_event_payload(
         "claim_ceiling": _ACTION_EXECUTION_CLAIM_CEILING,
         "limitations": ["isolated_temporary_browser_context", "no_user_profile", "not_visible_screen_verification", "not_truth_verified"],
     }
+    if plan.action_kind == "type_text":
+        payload.update(
+            {
+                "typed_text_redacted": True,
+                "text_redacted_summary": request.text_redacted_summary,
+                "text_length": request.text_length,
+                "text_classification": request.text_classification,
+            }
+        )
+    if plan.action_kind in {"check", "uncheck", "select_option"}:
+        payload.update(
+            {
+                "option_redacted_summary": request.option_redacted_summary,
+                "option_ordinal": request.option_ordinal,
+                "expected_checked_state": request.expected_checked_state,
+                "submit_prevented": True,
+            }
+        )
+    if plan.action_kind in {"scroll", "scroll_to_target"}:
+        payload.update(
+            {
+                "scroll_direction": request.scroll_direction,
+                "scroll_amount_pixels": request.scroll_amount_pixels,
+                "scroll_max_attempts": request.scroll_max_attempts,
+                "target_phrase": request.scroll_target_phrase,
+                "side_effects_prevented": True,
+            }
+        )
+    return payload
 
 
 def _action_execution_event_payload(result: BrowserSemanticActionExecutionResult) -> dict[str, Any]:
-    return {
+    payload = {
         "request_id": result.request_id,
         "plan_id": result.plan_id,
         "action_kind": result.action_kind,
@@ -4045,9 +5571,69 @@ def _action_execution_event_payload(result: BrowserSemanticActionExecutionResult
         "error_code": result.error_code,
         "bounded_error_message": _bounded_text(result.bounded_error_message),
     }
+    if result.action_kind == "type_text":
+        payload.update(
+            {
+                "typed_text_redacted": True,
+                "text_redacted_summary": result.text_redacted_summary,
+                "text_length": result.text_length,
+                "text_classification": result.text_classification,
+            }
+        )
+    if result.action_kind in {"check", "uncheck", "select_option"}:
+        payload.update(
+            {
+                "option_redacted_summary": result.option_redacted_summary,
+                "option_ordinal": result.option_ordinal,
+                "expected_checked_state": result.expected_checked_state,
+                "submit_prevented": "unexpected_form_submission" not in result.limitations,
+            }
+        )
+    if result.action_kind in {"scroll", "scroll_to_target"}:
+        payload.update(
+            {
+                "scroll_direction": result.scroll_direction,
+                "scroll_amount_pixels": result.scroll_amount_pixels,
+                "scroll_max_attempts": result.scroll_max_attempts,
+                "target_phrase": result.scroll_target_phrase,
+                "target_found": result.scroll_target_found,
+                "side_effects_prevented": "unexpected_form_submission" not in result.limitations,
+            }
+        )
+    return payload
 
 
 def _action_execution_event_message(result: BrowserSemanticActionExecutionResult) -> str:
+    if result.action_kind == "type_text":
+        if result.status == "approval_required":
+            return "Playwright browser typing approval is required."
+        if result.status in {"blocked", "unsupported", "ambiguous"}:
+            return "Playwright browser typing was blocked."
+        if result.status == "failed":
+            return "Playwright browser typing failed."
+        if result.status in {"verified_supported", "verified_unsupported", "partial", "completed_unverified"}:
+            return "Playwright browser typing verification completed."
+        return "Playwright browser typing state updated."
+    if result.action_kind in {"check", "uncheck", "select_option"}:
+        if result.status == "approval_required":
+            return "Playwright browser choice-control approval is required."
+        if result.status in {"blocked", "unsupported", "ambiguous"}:
+            return "Playwright browser choice-control action was blocked."
+        if result.status == "failed":
+            return "Playwright browser choice-control action failed."
+        if result.status in {"verified_supported", "verified_unsupported", "partial", "completed_unverified"}:
+            return "Playwright browser choice-control verification completed."
+        return "Playwright browser choice-control state updated."
+    if result.action_kind in {"scroll", "scroll_to_target"}:
+        if result.status == "approval_required":
+            return "Playwright browser scroll approval is required."
+        if result.status in {"blocked", "unsupported", "ambiguous"}:
+            return "Playwright browser scroll was blocked."
+        if result.status == "failed":
+            return "Playwright browser scroll failed."
+        if result.status in {"verified_supported", "verified_unsupported", "partial", "completed_unverified"}:
+            return "Playwright browser scroll verification completed."
+        return "Playwright browser scroll state updated."
     if result.status == "approval_required":
         return "Playwright browser action approval is required."
     if result.status in {"blocked", "unsupported", "ambiguous"}:
@@ -4057,6 +5643,36 @@ def _action_execution_event_message(result: BrowserSemanticActionExecutionResult
     if result.status in {"verified_supported", "verified_unsupported", "partial", "completed_unverified"}:
         return "Playwright browser action verification completed."
     return "Playwright browser action execution state updated."
+
+
+def _action_event_type(action_kind: str, generic: str, type_text_event: str) -> str:
+    if action_kind == "type_text":
+        return type_text_event
+    if action_kind in {"check", "uncheck", "select_option"}:
+        mapping = {
+            "screen_awareness.playwright_action_execution_requested": "screen_awareness.playwright_choice_request_created",
+            "screen_awareness.playwright_action_approval_required": "screen_awareness.playwright_choice_approval_required",
+            "screen_awareness.playwright_action_execution_started": "screen_awareness.playwright_choice_execution_started",
+            "screen_awareness.playwright_action_execution_attempted": "screen_awareness.playwright_choice_attempted",
+            "screen_awareness.playwright_action_after_observation_captured": "screen_awareness.playwright_choice_after_observation_captured",
+            "screen_awareness.playwright_action_verification_completed": "screen_awareness.playwright_choice_verification_completed",
+            "screen_awareness.playwright_action_execution_blocked": "screen_awareness.playwright_choice_blocked",
+            "screen_awareness.playwright_action_execution_failed": "screen_awareness.playwright_choice_failed",
+        }
+        return mapping.get(generic, generic)
+    if action_kind in {"scroll", "scroll_to_target"}:
+        mapping = {
+            "screen_awareness.playwright_action_execution_requested": "screen_awareness.playwright_scroll_request_created",
+            "screen_awareness.playwright_action_approval_required": "screen_awareness.playwright_scroll_approval_required",
+            "screen_awareness.playwright_action_execution_started": "screen_awareness.playwright_scroll_execution_started",
+            "screen_awareness.playwright_action_execution_attempted": "screen_awareness.playwright_scroll_attempted",
+            "screen_awareness.playwright_action_after_observation_captured": "screen_awareness.playwright_scroll_after_observation_captured",
+            "screen_awareness.playwright_action_verification_completed": "screen_awareness.playwright_scroll_verification_completed",
+            "screen_awareness.playwright_action_execution_blocked": "screen_awareness.playwright_scroll_blocked",
+            "screen_awareness.playwright_action_execution_failed": "screen_awareness.playwright_scroll_failed",
+        }
+        return mapping.get(generic, generic)
+    return generic
 
 
 def _approval_hint(preview: BrowserSemanticActionPreview) -> str:

@@ -275,6 +275,10 @@ class UiBridge(QtCore.QObject):
     def uiVisualVariant(self) -> str:
         return self.config.ui.visual_variant
 
+    @QtCore.Property("QVariantMap", constant=True)
+    def uiStormforgeFog(self) -> dict[str, Any]:
+        return self.config.ui.stormforge_fog.to_qml_map()
+
     @QtCore.Property(str, notify=assistantStateChanged)
     def assistantState(self) -> str:
         return self._assistant_state

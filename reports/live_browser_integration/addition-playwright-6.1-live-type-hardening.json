@@ -1,0 +1,63 @@
+{
+  "claim_ceiling": "browser_semantic_action_execution",
+  "created_at": "2026-05-01T01:38:44.862172+00:00",
+  "declared_action_capabilities": [
+    "browser.input.type_text"
+  ],
+  "disabled_field": {
+    "cleanup_status": "closed",
+    "error_code": "target_disabled",
+    "status": "blocked"
+  },
+  "fixture_base_url": "http://127.0.0.1:55629",
+  "forbidden_action_capabilities": [
+    "browser.input.type",
+    "browser.input.scroll",
+    "browser.form.fill",
+    "browser.form.submit",
+    "browser.login",
+    "browser.cookies.read",
+    "browser.cookies.write",
+    "browser.download",
+    "browser.payment",
+    "browser.user_profile.attach",
+    "browser.visible_screen_verify",
+    "browser.truth_verify",
+    "browser.workflow_replay"
+  ],
+  "forbidden_capabilities": {
+    "captcha": false,
+    "cookies": false,
+    "form_submit": false,
+    "login": false,
+    "payment": false,
+    "scroll": false,
+    "user_profile": false
+  },
+  "form_submission_prevented": true,
+  "isolated_context_required": true,
+  "password_field": {
+    "cleanup_status": "not_started",
+    "error_code": "sensitive_text_blocked",
+    "status": "blocked"
+  },
+  "raw_text_absent_from_report": true,
+  "readonly_field": {
+    "cleanup_status": "closed",
+    "error_code": "target_readonly",
+    "status": "blocked"
+  },
+  "report_id": "addition-playwright-6.1-live-type-hardening",
+  "safe_field": {
+    "action_attempted": true,
+    "cleanup_status": "closed",
+    "status": "verified_supported",
+    "text_length": 31,
+    "text_redacted_summary": "[redacted text, 31 chars]",
+    "typed_text_redacted": true,
+    "verification_status": "supported"
+  },
+  "status": "passed",
+  "submit_counter": 0,
+  "user_profile_used": false
+}

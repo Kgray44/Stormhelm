@@ -84,6 +84,168 @@ def test_load_config_invalid_ui_visual_variant_falls_back_to_classic(
     assert "Unknown Stormhelm UI visual variant 'fogbank'" in caplog.text
 
 
+def test_load_config_defaults_stormforge_fog_to_disabled_medium_volumetric(
+    temp_project_root: Path,
+) -> None:
+    config = load_config(project_root=temp_project_root, env={})
+    fog = config.ui.stormforge_fog
+
+    assert fog.enabled is False
+    assert fog.mode == "volumetric"
+    assert fog.quality == "medium"
+    assert fog.intensity == pytest.approx(0.35)
+    assert fog.motion is True
+    assert fog.edge_fog is True
+    assert fog.foreground_wisps is True
+    assert fog.max_foreground_opacity == pytest.approx(0.08)
+    assert fog.center_clear_strength == pytest.approx(0.65)
+    assert fog.lower_bias == pytest.approx(0.45)
+    assert fog.drift_speed == pytest.approx(0.055)
+    assert fog.drift_direction == "right_to_left"
+    assert fog.flow_scale == pytest.approx(1.0)
+    assert fog.crosswind_wobble == pytest.approx(0.18)
+    assert fog.rolling_speed == pytest.approx(0.035)
+    assert fog.wisp_stretch == pytest.approx(1.8)
+    assert fog.card_clear_strength == pytest.approx(0.72)
+    assert fog.anchor_clear_radius == pytest.approx(0.18)
+    assert fog.debug_visible is False
+    assert fog.debug_intensity_multiplier == pytest.approx(3.0)
+    assert fog.debug_tint is True
+    assert fog.quality_samples == 0
+    assert fog.to_qml_map()["driftDirection"] == "right_to_left"
+    assert fog.to_qml_map()["driftDirectionX"] == pytest.approx(-1.0)
+    assert fog.to_qml_map()["driftDirectionY"] == pytest.approx(0.05)
+
+
+def test_load_config_applies_stormforge_fog_environment_override(
+    temp_project_root: Path,
+) -> None:
+    config = load_config(
+        project_root=temp_project_root,
+        env={"STORMHELM_STORMFORGE_FOG": "1"},
+    )
+    fog = config.ui.stormforge_fog
+
+    assert fog.enabled is True
+    assert fog.mode == "volumetric"
+    assert fog.quality == "medium"
+    assert fog.quality_samples == 14
+
+
+def test_load_config_applies_stormforge_fog_debug_environment_override(
+    temp_project_root: Path,
+) -> None:
+    config = load_config(
+        project_root=temp_project_root,
+        env={
+            "STORMHELM_STORMFORGE_FOG": "1",
+            "STORMHELM_STORMFORGE_FOG_DEBUG_VISIBLE": "true",
+        },
+    )
+    fog = config.ui.stormforge_fog
+
+    assert fog.enabled is True
+    assert fog.debug_visible is True
+    assert fog.to_qml_map()["debugVisible"] is True
+
+
+def test_load_config_normalizes_invalid_stormforge_fog_values(
+    temp_project_root: Path,
+) -> None:
+    config_path = temp_project_root / "stormforge-fog.toml"
+    config_path.write_text(
+        """
+[ui.stormforge.fog]
+enabled = true
+mode = "smoke_machine"
+quality = "cinema"
+intensity = 8.0
+motion = false
+edge_fog = false
+foreground_wisps = false
+max_foreground_opacity = 4.0
+center_clear_strength = -2.0
+lower_bias = 7.0
+drift_speed = 9.0
+drift_direction = "sideways"
+flow_scale = 99.0
+crosswind_wobble = -4.0
+rolling_speed = 9.0
+wisp_stretch = 99.0
+card_clear_strength = -1.0
+anchor_clear_radius = 2.0
+debug_visible = true
+debug_intensity_multiplier = 99.0
+debug_tint = false
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(
+        project_root=temp_project_root,
+        config_path=config_path,
+        env={},
+    )
+    fog = config.ui.stormforge_fog
+
+    assert fog.enabled is True
+    assert fog.mode == "volumetric"
+    assert fog.quality == "medium"
+    assert fog.intensity == pytest.approx(1.0)
+    assert fog.motion is False
+    assert fog.edge_fog is False
+    assert fog.foreground_wisps is False
+    assert fog.max_foreground_opacity == pytest.approx(0.16)
+    assert fog.center_clear_strength == pytest.approx(0.0)
+    assert fog.lower_bias == pytest.approx(1.0)
+    assert fog.drift_speed == pytest.approx(0.12)
+    assert fog.drift_direction == "right_to_left"
+    assert fog.flow_scale == pytest.approx(2.0)
+    assert fog.crosswind_wobble == pytest.approx(0.0)
+    assert fog.rolling_speed == pytest.approx(0.08)
+    assert fog.wisp_stretch == pytest.approx(2.8)
+    assert fog.card_clear_strength == pytest.approx(0.0)
+    assert fog.anchor_clear_radius == pytest.approx(0.40)
+    assert fog.debug_visible is True
+    assert fog.debug_intensity_multiplier == pytest.approx(8.0)
+    assert fog.debug_tint is False
+    assert fog.quality_samples == 14
+
+
+@pytest.mark.parametrize(
+    ("quality", "samples"),
+    [
+        ("off", 0),
+        ("low", 8),
+        ("medium", 14),
+        ("high", 24),
+    ],
+)
+def test_load_config_stormforge_fog_quality_modes(
+    temp_project_root: Path,
+    quality: str,
+    samples: int,
+) -> None:
+    config_path = temp_project_root / f"stormforge-fog-{quality}.toml"
+    config_path.write_text(
+        f"""
+[ui.stormforge.fog]
+enabled = true
+quality = "{quality}"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(
+        project_root=temp_project_root,
+        config_path=config_path,
+        env={},
+    )
+
+    assert config.ui.stormforge_fog.quality == quality
+    assert config.ui.stormforge_fog.quality_samples == samples
+
+
 def test_load_config_applies_hardware_telemetry_environment_overrides(temp_project_root: Path) -> None:
     config = load_config(
         project_root=temp_project_root,
@@ -154,13 +316,25 @@ def test_load_config_defaults_playwright_click_focus_execution_disabled(temp_pro
     assert playwright.allow_click is False
     assert playwright.allow_focus is False
     assert playwright.allow_type_text is False
+    assert playwright.allow_check is False
+    assert playwright.allow_uncheck is False
+    assert playwright.allow_select_option is False
     assert playwright.allow_scroll is False
+    assert playwright.allow_scroll_to_target is False
     assert playwright.allow_form_fill is False
     assert playwright.allow_form_submit is False
     assert playwright.allow_login is False
     assert playwright.allow_cookies is False
     assert playwright.allow_user_profile is False
+    assert playwright.allow_payment is False
     assert playwright.allow_dev_actions is False
+    assert playwright.allow_dev_type_text is False
+    assert playwright.allow_dev_choice_controls is False
+    assert playwright.allow_dev_scroll is False
+    assert playwright.max_scroll_attempts == 5
+    assert playwright.scroll_step_pixels == 700
+    assert playwright.scroll_timeout_seconds == 8.0
+    assert playwright.max_scroll_distance_pixels == 5000
 
 
 def test_load_config_applies_playwright_click_focus_execution_environment_overrides(temp_project_root: Path) -> None:
@@ -174,10 +348,22 @@ def test_load_config_applies_playwright_click_focus_execution_environment_overri
             "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_DEV_ACTIONS": "true",
             "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_CLICK": "true",
             "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_FOCUS": "true",
-            "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_TYPE_TEXT": "false",
-            "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_SCROLL": "false",
+            "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_TYPE_TEXT": "true",
+            "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_DEV_TYPE_TEXT": "true",
+            "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_CHECK": "true",
+            "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_UNCHECK": "true",
+            "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_SELECT_OPTION": "true",
+            "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_DEV_CHOICE_CONTROLS": "true",
+            "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_SCROLL": "true",
+            "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_SCROLL_TO_TARGET": "true",
+            "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_DEV_SCROLL": "true",
+            "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_MAX_SCROLL_ATTEMPTS": "4",
+            "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_SCROLL_STEP_PIXELS": "650",
+            "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_SCROLL_TIMEOUT_SECONDS": "6.5",
+            "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_MAX_SCROLL_DISTANCE_PIXELS": "2600",
             "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_FORM_SUBMIT": "false",
             "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_USER_PROFILE": "false",
+            "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_PAYMENT": "false",
         },
     )
     playwright = config.screen_awareness.browser_adapters.playwright
@@ -189,10 +375,22 @@ def test_load_config_applies_playwright_click_focus_execution_environment_overri
     assert playwright.allow_dev_actions is True
     assert playwright.allow_click is True
     assert playwright.allow_focus is True
-    assert playwright.allow_type_text is False
-    assert playwright.allow_scroll is False
+    assert playwright.allow_type_text is True
+    assert playwright.allow_dev_type_text is True
+    assert playwright.allow_check is True
+    assert playwright.allow_uncheck is True
+    assert playwright.allow_select_option is True
+    assert playwright.allow_dev_choice_controls is True
+    assert playwright.allow_scroll is True
+    assert playwright.allow_scroll_to_target is True
+    assert playwright.allow_dev_scroll is True
+    assert playwright.max_scroll_attempts == 4
+    assert playwright.scroll_step_pixels == 650
+    assert playwright.scroll_timeout_seconds == 6.5
+    assert playwright.max_scroll_distance_pixels == 2600
     assert playwright.allow_form_submit is False
     assert playwright.allow_user_profile is False
+    assert playwright.allow_payment is False
 
 
 def test_load_config_defaults_calculations_to_enabled_local_routing(temp_project_root: Path) -> None:

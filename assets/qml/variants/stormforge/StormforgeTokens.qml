@@ -70,6 +70,61 @@ QtObject {
     readonly property int durationBase: 220
     readonly property int durationSlow: 360
     readonly property int durationReveal: 520
+    readonly property int durationAnchorPulse: 5000
+    readonly property int durationAnchorOrbit: 9800
+    readonly property int durationAnchorIdleBreath: 9200
+    readonly property int durationAnchorStateTransition: 420
+    readonly property int durationAnchorStateMinimumDwell: 140
+
+    readonly property real anchorStrokeHairline: 0.75
+    readonly property real anchorStrokePrimary: 1.15
+    readonly property real anchorStrokeHeavy: 1.75
+    readonly property real anchorHaloOpacity: 0.10
+    readonly property real anchorVisualSoftness: 0.60
+    readonly property real anchorInnerGlassOpacity: 0.12
+    readonly property real anchorDepthShadowOpacity: 0.18
+    readonly property real anchorBezelOpacity: 0.30
+    readonly property real anchorHorizonOpacity: 0.18
+    readonly property real anchorSweepOpacity: 0.16
+    readonly property real anchorMotionRestraint: 0.78
+    readonly property real anchorHeadingMarkerOpacity: 0.34
+    readonly property real anchorOuterClampOpacity: 0.28
+    readonly property real anchorCenterApertureOpacity: 0.24
+    readonly property real anchorSignalPointOpacity: 0.38
+    readonly property real anchorCrownAccentOpacity: 0.30
+    readonly property real anchorCenterLensRadiusRatio: 0.31
+    readonly property real anchorCenterLensRimOpacity: 0.31
+    readonly property real anchorCenterLensShadowOpacity: 0.22
+    readonly property real anchorCenterLensHighlightOpacity: 0.26
+    readonly property real anchorCenterIrisOpacity: 0.22
+    readonly property real anchorCenterPetalOpacity: 0.18
+    readonly property real anchorCenterPearlOpacity: 0.46
+    readonly property real anchorCenterMotionRestraint: 0.62
+    readonly property real anchorIdleMinimumRingOpacity: 0.16
+    readonly property real anchorIdleMinimumCenterLensOpacity: 0.17
+    readonly property real anchorIdleMinimumBearingTickOpacity: 0.11
+    readonly property real anchorIdleMinimumSignalPointOpacity: 0.18
+    readonly property real anchorIdleMinimumLabelOpacity: 0.74
+    readonly property real anchorIdlePulseMinOpacity: 0.055
+    readonly property real anchorIdlePulseMaxOpacity: 0.16
+    readonly property real anchorIdleLensPulseStrength: 0.060
+    readonly property real anchorIdleApertureShimmerOpacity: 0.045
+    readonly property real anchorIdleBearingDriftStrength: 0.012
+    readonly property real anchorUnavailableMinimumRingOpacity: 0.055
+    readonly property real anchorUnavailableMinimumCenterLensOpacity: 0.060
+    readonly property real anchorUnavailableMinimumBearingTickOpacity: 0.040
+    readonly property real anchorUnavailableMinimumSignalPointOpacity: 0.055
+    readonly property real anchorUnavailableMinimumLabelOpacity: 0.56
+    readonly property real anchorOrbitalSpeedScale: 0.42
+    readonly property real anchorListeningRippleSpeedScale: 0.64
+    readonly property real anchorSpeakingRadianceSpeedScale: 0.68
+    readonly property real anchorWarningPulseLimit: 0.18
+    readonly property int anchorCenterLensLayerCount: 7
+    readonly property int anchorCenterApertureSegmentCount: 4
+    readonly property int anchorDepthLayerCount: 7
+    readonly property int anchorNauticalDetailCount: 8
+    readonly property int anchorSignatureFeatureCount: 5
+    readonly property int anchorBearingTickCount: 40
 
     readonly property int zBackground: 0
     readonly property int zSurface: 10
@@ -82,6 +137,18 @@ QtObject {
             return "mock_dev"
         if (key === "approval" || key === "requires_approval" || key === "approval-required")
             return "approval_required"
+        if (key === "ghost_ready")
+            return "wake_detected"
+        if (key === "ready")
+            return "active"
+        if (key === "routing")
+            return "thinking"
+        if (key === "executing")
+            return "acting"
+        if (key === "warning")
+            return "blocked"
+        if (key === "error")
+            return "failed"
         if (key === "unverified_result")
             return "unverified"
         if (key === "confirmed" || key === "complete" || key === "completed")
@@ -92,20 +159,27 @@ QtObject {
     function stateAccent(state) {
         switch (normalizeState(state)) {
         case "active":
+        case "ready":
+        case "wake_detected":
         case "listening":
+        case "capturing":
+        case "transcribing":
         case "speaking":
         case "verified":
             return seaGreen
         case "thinking":
+        case "routing":
         case "planned":
         case "running":
             return signalCyan
         case "acting":
+        case "executing":
         case "recovery":
             return brass
         case "approval_required":
             return amber
         case "blocked":
+            return amber
         case "failed":
             return danger
         case "stale":

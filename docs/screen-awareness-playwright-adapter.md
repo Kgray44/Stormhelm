@@ -1,6 +1,6 @@
 # Screen Awareness Playwright Browser Adapter
 
-This page defines the Playwright-backed browser semantic adapter for Stormhelm. Addition 1 turns the scaffold into runtime readiness plus mock semantic observation for backend/UI plumbing. Addition 1.1 audits and hardens that behavior through the runtime config, container, Screen Awareness service, bounded events, status snapshots, and Command Deck payload path. Addition 2.2 adds opt-in live semantic smoke diagnostics. Playwright Addition 2 adds real, bounded semantic snapshot extraction from isolated temporary Playwright browser contexts when explicit dev/runtime gates and local dependencies are present. Playwright Addition 3 deepens semantic target grounding, candidate ranking, ambiguity handling, form/dialog summaries, and guidance text while remaining observation/guidance-only. Playwright Addition 3.1 hardens observation and grounding for messy real-world page structures without adding browser actions. Playwright Addition 4 adds verification-only before/after semantic comparison without executing browser actions. Playwright Addition 4.1 adds backend-owned browser action previews and trust-gated plan scaffolds. Playwright Addition 5 adds the first execution path for trust-gated click and focus only, still inside isolated temporary Playwright contexts and still followed by semantic before/after comparison. Playwright Addition 5.1 hardens that path against stale plans, target drift, exact trust-binding mistakes, locator ambiguity, cleanup failures, and verification ambiguity. Playwright Addition 5.2 unifies the implementation with the canonical Screen Awareness pipeline so Playwright is a provider/adapter/executor seam, not a second Screen Awareness authority.
+This page defines the Playwright-backed browser semantic adapter for Stormhelm. Addition 1 turns the scaffold into runtime readiness plus mock semantic observation for backend/UI plumbing. Addition 1.1 audits and hardens that behavior through the runtime config, container, Screen Awareness service, bounded events, status snapshots, and Command Deck payload path. Addition 2.2 adds opt-in live semantic smoke diagnostics. Playwright Addition 2 adds real, bounded semantic snapshot extraction from isolated temporary Playwright browser contexts when explicit dev/runtime gates and local dependencies are present. Playwright Addition 3 deepens semantic target grounding, candidate ranking, ambiguity handling, form/dialog summaries, and guidance text while remaining observation/guidance-only. Playwright Addition 3.1 hardens observation and grounding for messy real-world page structures without adding browser actions. Playwright Addition 4 adds verification-only before/after semantic comparison without executing browser actions. Playwright Addition 4.1 adds backend-owned browser action previews and trust-gated plan scaffolds. Playwright Addition 5 adds the first execution path for trust-gated click and focus only, still inside isolated temporary Playwright contexts and still followed by semantic before/after comparison. Playwright Addition 5.1 hardens that path against stale plans, target drift, exact trust-binding mistakes, locator ambiguity, cleanup failures, and verification ambiguity. Playwright Addition 5.2 unifies the implementation with the canonical Screen Awareness pipeline so Playwright is a provider/adapter/executor seam, not a second Screen Awareness authority. Playwright Addition 6 adds trust-gated `type_text` execution into safe, non-sensitive fields only, with raw typed text redacted from reporting surfaces. Playwright Addition 6.1 hardens safe typing against target drift, text-fingerprint replay, redaction leaks, accidental form submission, sensitive-field expansion, and weak field-state verification. Playwright Addition 7 adds trust-gated safe choice controls for checkboxes, radio buttons, and dropdown/select options, still disabled by default and still blocked from submitting forms. Playwright Addition 7.1 hardens that choice path against target drift, option drift, wrong grants, legally/financially sensitive controls, no-op ambiguity, unexpected navigation/warnings, and cleanup failures. Playwright Addition 8 adds trust-gated bounded `scroll` and `scroll_to_target` execution, disabled by default, with exact approval binding, bounded attempts, no click/type/submit side effects, and semantic before/after verification.
 
 ## Purpose
 
@@ -68,7 +68,7 @@ Addition 5.2 makes the ownership map explicit:
 | Adapter resolution | `SemanticAdapterRegistry` and `BrowserSemanticAdapter` | Converts `BrowserSemanticObservation` into the canonical `adapter_semantics["browser"]` payload. |
 | Grounding | `DeterministicGroundingEngine` | Supplies browser controls as `AppSemanticTarget` / adapter-semantic candidates. |
 | Guidance/navigation | `DeterministicNavigationEngine` plus response composition | Supplies provider detail and provenance, but does not own user-facing route authority. |
-| Action planning/gating/result language | `DeterministicActionEngine` and Screen Awareness service | Executes scoped click/focus through the provider seam and maps results into canonical `ActionExecutionResult` summaries. |
+| Action planning/gating/result language | `DeterministicActionEngine` and Screen Awareness service | Executes scoped click/focus/safe-field type/safe choice controls/bounded scroll through the provider seam and maps results into canonical `ActionExecutionResult` summaries. |
 | Approval/grants/audit | `TrustService` | Requests/evaluates exact grants; Playwright does not create a parallel approval path. |
 | Verification | Screen Awareness semantic comparison/verification | Supplies before/after observations; comparison remains bounded semantic evidence only. |
 | UI | Command surface from backend status | Renders canonical state plus Playwright provenance; UI does not infer execution state. |
@@ -79,7 +79,8 @@ What remains Playwright-specific:
 
 - isolated browser launch and cleanup
 - bounded semantic snapshot extraction
-- browser-specific locator resolution for click/focus
+- browser-specific locator resolution for click/focus/type/choice controls
+- browser-specific bounded scroll execution and scroll target detection
 - browser-specific target fingerprint/drift checks
 - browser-specific before/after observation capture
 
@@ -106,13 +107,13 @@ The scaffold seam is `PlaywrightBrowserSemanticAdapter` with these operations:
 - `verify_semantic_change(request, before=..., after=...)`
 - `preview_semantic_action(observation, target_phrase, action_phrase)` preview only
 - `build_semantic_action_plan(preview)` preview only
-- `request_semantic_action_execution(plan, url=..., trust_service=...)` approval/check path for click/focus only
-- `execute_semantic_action(plan, url=..., trust_service=...)` gated click/focus execution only
+- `request_semantic_action_execution(plan, url=..., trust_service=...)` approval/check path for click/focus/safe-field `type_text`/safe choice controls/bounded scroll
+- `execute_semantic_action(plan, url=..., trust_service=...)` gated click/focus/safe-field `type_text`/safe choice-control/bounded-scroll execution
 - `get_latest_playwright_action_execution_summary()`
 - `build_action_preview(candidate)` compatibility preview, still non-executable
 - `verify_after_action(before, after, expected_change)` future action verification only, still unsupported
 
-Current runtime posture is disabled unless explicitly enabled and dev-gated. With `allow_dev_adapter = true`, the mock provider can produce labeled mock observations for tests and UI plumbing without Playwright installed. With `enabled = true`, `allow_dev_adapter = true`, `allow_browser_launch = true`, an installed Playwright package, and installed browser engine, the adapter can launch an isolated temporary browser context for semantic observation. Semantic before/after comparison operates only on observations that already exist. Addition 4.1 can build `BrowserSemanticActionPreview` and `BrowserSemanticActionPlan` objects from grounded semantic targets. Addition 5 executes only `click` and `focus` when `allow_actions = true`, `allow_dev_actions = true`, and the specific `allow_click` or `allow_focus` gate is enabled, and only after the existing trust service grants approval. Addition 5.1 revalidates plan freshness and target fingerprint before trust/launch, re-resolves the target in an execution-time observation, blocks locator ambiguity or role/selector disagreement, records cleanup status, and treats unusable after-observation evidence as `completed_unverified` rather than success. Typing, scrolling, form fill/submit, login, cookies, user-profile attachment, payment, CAPTCHA, visible-screen verification, and truth verification remain unsupported.
+Current runtime posture is disabled unless explicitly enabled and dev-gated. With `allow_dev_adapter = true`, the mock provider can produce labeled mock observations for tests and UI plumbing without Playwright installed. With `enabled = true`, `allow_dev_adapter = true`, `allow_browser_launch = true`, an installed Playwright package, and installed browser engine, the adapter can launch an isolated temporary browser context for semantic observation. Semantic before/after comparison operates only on observations that already exist. Addition 4.1 can build `BrowserSemanticActionPreview` and `BrowserSemanticActionPlan` objects from grounded semantic targets. Addition 5 executes only `click` and `focus` when `allow_actions = true`, `allow_dev_actions = true`, and the specific `allow_click` or `allow_focus` gate is enabled, and only after the existing trust service grants approval. Addition 6 adds `type_text` only when `allow_type_text = true` and `allow_dev_type_text = true` are also set; it is limited to safe, visible, enabled, editable text/search fields and still requires trust approval. Addition 7 adds `check`, `uncheck`, and `select_option` only when `allow_dev_choice_controls = true` and the matching `allow_check`, `allow_uncheck`, or `allow_select_option` gate is enabled. Addition 8 adds `scroll` and `scroll_to_target` only when `allow_dev_scroll = true` and the matching `allow_scroll` or `allow_scroll_to_target` gate is enabled. Scroll approval binds to the plan, action kind, direction, bounded amount, max attempts, provider, claim ceiling, and target phrase for `scroll_to_target`. Scroll execution uses bounded wheel scrolling or no-op target-present evidence, never clicks/types/selects/submits afterward, blocks login/payment/CAPTCHA/security/profile-like page contexts, and stops when the target is found, ambiguous, sensitive, or not found within the configured attempt limit. Choice approval binds to the exact action, target fingerprint, expected state, and dropdown option fingerprint when applicable. Addition 7.1 binds dropdown options to the preview-time label/value-summary/ordinal fingerprint, revalidates option state immediately before execution, blocks stale ordinals and option fingerprint drift, and reports already-correct checkbox/dropdown states as no-op evidence without issuing a Playwright command. Checkbox/radio/dropdown targets are revalidated at execution time; hidden, disabled, type-changed, ambiguous, stale, sensitive, legal-consent, payment, login, CAPTCHA, delete/security, file, or unsupported embedded-context controls block. Dropdown options are bounded and redacted, duplicate or missing options block, and disabled/sensitive/drifted options block. Addition 6.1 keeps typing to `replace_value` only: append/add-more modes are blocked as `typing_mode_unsupported`, approval binds to the exact text fingerprint and target, serialized plans cannot execute typing because raw text is dropped, and target revalidation fails closed with precise reason codes such as `target_missing`, `target_drift`, `target_sensitive`, `target_readonly`, `target_disabled`, `target_hidden`, `target_uneditable`, `target_ambiguous`, `locator_missing`, or `locator_ambiguous`. Addition 5.1/6.1/7.1/8 revalidate plan freshness and target/action arguments before trust/launch, re-resolve semantic evidence in execution-time observations where applicable, block locator ambiguity or role/selector disagreement for control actions, record cleanup status, and treat unusable after-observation evidence as `completed_unverified` rather than success. Choice-control and scroll actions do not press Enter, auto-tab, click submit, dispatch submit events, or call form-submit APIs. Unexpected submit counters, unexpected navigation, and unexpected warnings prevent `verified_supported`. Form fill/submit, login, cookies, user-profile attachment, payment, CAPTCHA, visible-screen verification, and truth verification remain unsupported.
 
 ## Relationship To Web Retrieval And Obscura
 
@@ -154,13 +155,17 @@ Runtime-gated execution capabilities:
 
 - `browser.input.click`
 - `browser.input.focus`
+- `browser.input.type_text`
+- `browser.input.check`
+- `browser.input.uncheck`
+- `browser.input.select_option`
+- `browser.input.scroll`
+- `browser.input.scroll_to_target`
 
-These are available only when the Playwright adapter is enabled, browser launch is allowed, action gates are enabled, the specific click/focus gate is enabled, the dev action gate is enabled, Playwright runtime readiness passes, a grounded target remains fresh, safe, unchanged, and unambiguous, and the trust service grants approval bound to the exact action kind and target fingerprint. They are disabled in default config and in the live browser diagnostic profile.
+These are available only when the Playwright adapter is enabled, browser launch is allowed, action gates are enabled, the relevant dev gate is enabled, the specific action gate is enabled, Playwright runtime readiness passes, a grounded target or page-level scroll request remains fresh, safe, unchanged, editable/selectable where applicable, and unambiguous, and the trust service grants approval bound to the exact action kind, target fingerprint, typed-text fingerprint, dropdown option fingerprint, expected checked state, or scroll direction/amount/target phrase when applicable. For `type_text`, raw text exists only in memory long enough to execute the approved action, serialized plans drop it, reporting surfaces use redacted summaries and non-reversible fingerprints. For `select_option`, option summaries are bounded/redacted and duplicate/missing/disabled/drifted options block; ordinals are accepted only while they still point to the same option fingerprint. For `scroll_to_target`, target search is bounded by configured attempts and returns target-found, ambiguous, target-not-found, or unverifiable evidence without clicking the target. The executor does not press Enter, auto-tab, click submit controls, dispatch submit events, or call form-submit APIs for typing, choice controls, or scrolling. They are disabled in default config and in the live browser diagnostic profile.
 
 Not declared in this phase:
 
-- `browser.input.type`
-- `browser.input.scroll`
 - `browser.form.fill`
 - `browser.form.submit`
 - `browser.login`
@@ -231,8 +236,8 @@ Addition 4.1 defines action planning so Stormhelm can show the likely target, ac
 
 Preview models:
 
-- `BrowserSemanticActionPreview` has claim ceiling `browser_semantic_action_preview`, risk level, required trust scope, expected outcome templates, and limitations. `action_supported_now` may be true only for click/focus when the runtime gates are active; `executable_now` remains false until a trust grant is present.
-- `BrowserSemanticActionPlan` stores a bounded target candidate summary, redacted action arguments, preconditions, capability required, `adapter_capability_declared`, `result_state = preview_only | unsupported | ambiguous | blocked`, and a verification request template.
+- `BrowserSemanticActionPreview` has claim ceiling `browser_semantic_action_preview`, risk level, required trust scope, expected outcome templates, and limitations. `action_supported_now` may be true only for click/focus/safe-field `type_text`/safe choice controls when the runtime gates are active; `executable_now` remains false until a trust grant is present.
+- `BrowserSemanticActionPlan` stores a bounded target candidate summary, redacted action arguments, private in-memory typed text for immediate execution only, preconditions, capability required, `adapter_capability_declared`, `result_state = preview_only | unsupported | ambiguous | blocked`, and a verification request template. Its serialized form omits the private typed text.
 
 Supported preview classifications include `click`, `focus`, `type_text`, `select_option`, `check`, `uncheck`, `scroll_to`, `submit_form`, and `unsupported`. Sensitive text is redacted. Login, password, payment, CAPTCHA, cookie, and user-profile contexts are blocked/deferred.
 
@@ -241,10 +246,14 @@ Addition 5 execution models:
 - `BrowserSemanticActionExecutionRequest` binds plan id, preview id, observation id, target candidate id, action kind, optional trust/grant ids, session/task id, expected outcome, source provider, and created time.
 - `BrowserSemanticActionExecutionResult` records exact status, whether a Playwright action command was attempted and completed, before/after observation ids, semantic comparison result id, verification status, trust scope, cleanup status, provider, risk, limitations, bounded errors, and claim ceiling `browser_semantic_action_execution`.
 
-Supported execution kinds in Addition 5:
+Supported execution kinds:
 
 - `click`
 - `focus`
+- `type_text` into safe text/search fields only
+- `check` for safe checkboxes/radio buttons only
+- `uncheck` for safe checkboxes only
+- `select_option` for safe dropdown/select options only
 
 Execution requires all of these:
 
@@ -252,12 +261,18 @@ Execution requires all of these:
 - the trust gate approves it
 - Screen Awareness grounds the target
 - a preview is shown
+- typed text is classified as plain and remains redacted in reporting surfaces
+- selected options are bounded/redacted and unambiguous
 - result state distinguishes attempted, completed, and verified
 - verification is bounded and truthful
 
-Execution uses a new isolated temporary Playwright browser context, does not attach to the user's browser, captures a semantic before snapshot, performs the approved click/focus command through a bounded locator, captures an after snapshot, compares the snapshots, clears temporary cookies/storage, and closes the context/browser before the Playwright manager exits. Addition 5.1 blocks execution before launch for stale plans, tampered plan targets, denied approvals, expired or consumed grants, and action/target mismatches. After launch it blocks target drift, hidden/disabled/sensitive targets, role/selector disagreement, zero-match locators, and multi-match locators unless a later phase adds an explicit safe ordinal binding. Playwright command return is never treated as verification by itself.
+Execution uses a new isolated temporary Playwright browser context, does not attach to the user's browser, captures a semantic before snapshot, performs the approved click/focus/type/choice command through a bounded locator, captures an after snapshot, compares the snapshots, clears temporary cookies/storage, and closes the context/browser before the Playwright manager exits. Addition 5.1/6/7 blocks execution before launch for stale plans, tampered plan targets, changed typed-text or option fingerprints, denied approvals, expired or consumed grants, and action/target mismatches. After launch it blocks target drift, hidden/disabled/readonly/sensitive targets, role/selector disagreement, zero-match locators, and multi-match locators unless a later phase adds an explicit safe ordinal binding. Playwright command return is never treated as verification by itself.
 
-Unsupported execution kinds return typed `unsupported` or `blocked` results. Typing, scrolling, form fill/submit, login, cookies, user profiles, downloads, payments, CAPTCHA/anti-bot handling, arbitrary JavaScript click, visible-screen verification, truth verification, and workflow replay remain unavailable.
+Typing uses `replace_value` mode only, focuses the target, calls Playwright fill on the safe field, does not press Enter, does not submit a form, and does not expose raw typed text in events/status/Deck/audit. Sensitive-looking typed text and password/login/payment/CAPTCHA/token/secret targets block even with approval.
+
+Choice controls use Playwright `check`, `uncheck`, or `select_option` only after the exact trust grant is present. Safe already-in-state checkbox and dropdown requests are treated as no-op evidence when the semantic snapshot already shows the expected state. Dropdown selection requires a single safe option match by label/value summary or bounded ordinal and rechecks that the option label, value summary, disabled state, and ordinal fingerprint still match immediately before execution. Terms agreement, privacy consent, payment authorization, delete/security, login-like, CAPTCHA-like, hidden, disabled, type-changed, stale, and ambiguous choice controls block. Choice execution does not press Enter, click submit, dispatch submit events, or call form-submit APIs; if a fixture-visible submit counter changes unexpectedly, the result is not `verified_supported`. Unexpected page navigation fails the choice result, and unexpected warnings downgrade it to partial.
+
+Unsupported execution kinds return typed `unsupported` or `blocked` results. Scrolling, form fill/submit, login, cookies, user profiles, downloads, payments, CAPTCHA/anti-bot handling, arbitrary JavaScript click, visible-screen verification, truth verification, and workflow replay remain unavailable.
 
 ## Verification Model
 
@@ -288,7 +303,7 @@ Allowed wording includes "The semantic snapshots support that the warning disapp
 
 ## Trust And Approval Posture
 
-Observation is disabled by default and does not require approval. Action previews do not create trust grants. Addition 5 click/focus execution always requires the existing trust service to approve a bound request. The approval request is scoped to the action kind, target summary, target fingerprint, plan/session/task binding, risk level, expected outcome, provider, and claim ceiling. A preview is not approval, stale or ambiguous targets are blocked, denied approvals remain blocked for the same action key, expired grants require fresh approval, and once grants are consumed through the trust audit path. Focus is low risk when the target is non-sensitive. Click is medium risk for ordinary fixture/test buttons or links. Password, login, payment, CAPTCHA, cookie, profile, hidden, disabled, or sensitive contexts are blocked/deferred.
+Observation is disabled by default and does not require approval. Action previews do not create trust grants. Addition 5/6/7 click/focus/type/choice execution always requires the existing trust service to approve a bound request. The approval request is scoped to the action kind, target summary, target fingerprint, plan/session/task binding, risk level, expected outcome, provider, claim ceiling, typed-text fingerprint/length, option fingerprint/ordinal, and expected checked state when applicable. A preview is not approval, stale or ambiguous targets are blocked, denied approvals remain blocked for the same action key, expired grants require fresh approval, and once grants are consumed through the trust audit path. Focus is low risk when the target is non-sensitive. Click is medium risk for ordinary fixture/test buttons or links. Safe-field typing is high risk and requires exact text fingerprint binding. Safe newsletter/filter choice controls are low or medium risk; legal consent, payment authorization, delete/security, login, CAPTCHA, cookie, profile, hidden, disabled, readonly, or sensitive contexts are blocked/deferred.
 
 ## Ghost And Deck Behavior
 
@@ -299,6 +314,10 @@ For semantic comparison, Ghost may say "The warning appears to have disappeared.
 For action previews, Ghost may say "Action preview ready.", "Execution is not enabled yet.", or "Target is ambiguous." It must not show an execute action or claim that anything was performed.
 
 For Addition 5/5.1 click/focus execution, Ghost remains compact. It may say "Approval required.", "Click blocked: target changed.", "Click blocked: target is ambiguous.", "Click verified by semantic comparison.", "The click was attempted, but I could not verify the expected change.", or "Focus attempted; focus state could not be verified." It must not say "Done" alone, "I saw your screen", "I used your browser", "Typed", "Submitted", or "Logged in."
+
+For Addition 6 safe-field typing, Ghost remains compact and redacted. It may say "Approval required.", "Typing blocked: field appears sensitive.", "Text entered; semantic verification supports the field changed.", or "Typing attempted, but the field value could not be verified." It must not show the raw typed text or imply form submission/login completion.
+
+For Addition 7/7.1 choice controls, Ghost remains compact and bounded. It may say "Approval required.", "Choice updated; semantic verification supports the change.", "Choice action blocked: target changed.", "Blocked: this checkbox appears legally or financially sensitive.", "Blocked: option became ambiguous.", or "Choice already had the requested state; no browser action was issued." It must not imply form completion or expose hidden option values.
 
 Command Deck may show:
 
@@ -318,7 +337,7 @@ Command Deck may show:
 - last grounding summary
 - latest semantic comparison status and bounded change evidence
 - latest action preview/plan summary with target candidate, action kind, risk, future approval requirement, capability required, `executable_now = false`, expected semantic comparison, limitations, and claim ceiling
-- latest click/focus execution summary with action kind, trust/approval state, before/after observation ids, verification status, cleanup status, comparison summary, limitations, and claim ceiling
+- latest click/focus/type/choice execution summary with action kind, target summary, redacted typed-text or bounded option summary when applicable, expected checked/selected state, trust/approval state, before/after observation ids, verification status, submit-prevention state, cleanup status, comparison summary, limitations, and claim ceiling
 
 Deck must not expose cookies, credentials, hidden form values, sensitive field contents, raw full DOM by default, huge snapshots, or active controls for unsupported action kinds.
 
@@ -337,9 +356,10 @@ Deck must not expose cookies, credentials, hidden form values, sensitive field c
 - no CAPTCHA or anti-bot bypass
 - no hidden browser sessions
 - no persistent raw DOM memory by default
-- click/focus execution disabled by default and available only with explicit action gates plus exact trust approval
+- click/focus/type_text/choice execution disabled by default and available only with explicit action gates plus exact trust approval
 - stale plans, target drift, locator ambiguity, denied approval, consumed grants, and unusable after-observation evidence fail closed or return bounded `completed_unverified`
-- no typing, scrolling, form fill/submit, login, cookies/session reuse, user-profile attachment, payment, CAPTCHA/anti-bot handling, arbitrary public-site clicking, or unrestricted browser automation
+- no raw typed text in reporting surfaces
+- no unsafe/sensitive typing or choice changes, scrolling, form fill/submit, login, cookies/session reuse, user-profile attachment, payment, CAPTCHA/anti-bot handling, arbitrary public-site clicking/typing/choice-changing, or unrestricted browser automation
 - no visible-screen or truth-verification claims
 
 ## Phased Roadmap
@@ -354,8 +374,10 @@ Deck must not expose cookies, credentials, hidden form values, sensitive field c
 8. Playwright Addition 5.1: click/focus hardening for stale plans, target drift, trust binding, locator ambiguity, cleanup, and verification ambiguity.
 9. Playwright Addition 5.2: canonical Screen Awareness path unification.
 10. Playwright Addition 5.3: adversarial canonical-path regression tests for routing, provenance, trust, action-result mapping, UI state, and duplicate-path audits.
-11. Playwright Addition 6: trust-gated typing/form assistance.
-12. Playwright Addition 7: workflow replay with task and trust binding.
+11. Playwright Addition 6: trust-gated typing into safe, non-sensitive fields only.
+12. Playwright Addition 6.1: safe typing hardening and field-state verification.
+13. Playwright Addition 7: trust-gated safe choice controls for checkbox, radio, and dropdown/select changes.
+14. Playwright Addition 7.1: target/option drift hardening, exact choice approval binding, no-op truthfulness, sensitive/legal choice blocking, submit-side-effect regression tests, and cleanup/status hardening.
 
 ## Explicit Non-Goals
 
@@ -363,7 +385,8 @@ Deck must not expose cookies, credentials, hidden form values, sensitive field c
 - browser launch outside explicit Playwright dev/runtime gates
 - connecting to real user browser sessions
 - user-profile attachment or persistent browser context
-- typing
+- typing outside safe, trust-gated, non-sensitive text/search fields
+- choice changes outside safe, trust-gated, non-sensitive checkbox/radio/dropdown controls
 - scrolling
 - form filling
 - form submission
@@ -376,6 +399,7 @@ Deck must not expose cookies, credentials, hidden form values, sensitive field c
 - truth verification
 - workflow replay
 - arbitrary public-site clicking
+- arbitrary public-site typing or choice-changing
 - replacing Obscura
 - replacing browser destination/open behavior
 - replacing Screen Awareness
@@ -385,7 +409,7 @@ Deck must not expose cookies, credentials, hidden form values, sensitive field c
 Normal CI uses config, contract, model, fake readiness, mock observation, mock grounding, guidance, status, Deck model, fake-backed live semantic extraction, and event tests only. No live Playwright dependency is required. Addition 2.2 adds `tests/test_live_browser_provider_smoke.py`, which is marked `live_browser` and skipped unless the explicit environment gate is set. Playwright Addition 2 adds `tests/test_screen_awareness_playwright_live_semantic.py` for isolated-context policy, semantic normalization, sensitive-value redaction, grounding/guidance, events, status, and Deck payloads without requiring the real Playwright package in normal CI. Playwright Addition 3 adds `tests/test_screen_awareness_playwright_grounding_guidance.py` for richer target grounding, ranking, ambiguity, closest-match behavior, stale observation downgrades, form/dialog summaries, and Deck candidate evidence. Playwright Addition 3.1 adds `tests/test_screen_awareness_playwright_grounding_robustness.py` for messy labels/states, embedded-context limitations, dynamic stabilization, synonyms/negation, form-like summaries, live-event evidence bounding, and Deck limitation payloads.
 Playwright Addition 4 adds `tests/test_screen_awareness_playwright_semantic_verification.py` for typed comparison models, URL/title/control/dialog/link/form/limitation change detection, expected-outcome statuses, stale/partial/ambiguous basis handling, bounded events, status propagation, Deck payloads, sensitive redaction, and action-disabled preservation.
 Playwright Addition 4.1 adds `tests/test_screen_awareness_playwright_action_preview.py` for typed action previews/plans, action-kind classification, redaction, risk/trust posture, expected outcome templates, bounded events, Deck payloads, preview-only adapter contract declarations, and proof that execution capabilities remain absent.
-Playwright Addition 5 adds `tests/test_screen_awareness_playwright_click_focus_execution.py` for typed execution models, config gates, approval-required behavior, approved fixture click/focus execution through the Screen Awareness service path, isolated context cleanup, semantic before/after verification, bounded events, Deck payloads, and proof that type/scroll/form/login/cookie/profile actions remain unsupported. Playwright Addition 5.1 extends that same file with stale-plan blocking, target-fingerprint binding, denied/expired/consumed approval handling, cross-action grant isolation, locator ambiguity and role/selector disagreement blockers, after-observation failure classification, cleanup status, and event sequence checks. Playwright Addition 5.3 adds `tests/test_screen_awareness_playwright_canonical_kraken.py` to keep Playwright inside canonical Screen Awareness: Playwright observations must resolve through `BrowserSemanticAdapter`, browser controls must become canonical adapter-semantic targets, generic grounding must consume those targets, planner/UI code must not call Playwright execution directly, route boundaries must keep web retrieval/browser-open/Discord relay separate, canonical action status must lead Deck/Ghost summaries, and Playwright must use injected `TrustService` plus provider-local cleanup rather than a parallel trust authority.
+Playwright Addition 5 adds `tests/test_screen_awareness_playwright_click_focus_execution.py` for typed execution models, config gates, approval-required behavior, approved fixture click/focus execution through the Screen Awareness service path, isolated context cleanup, semantic before/after verification, bounded events, Deck payloads, and proof that type/scroll/form/login/cookie/profile actions remain unsupported. Playwright Addition 5.1 extends that same file with stale-plan blocking, target-fingerprint binding, denied/expired/consumed approval handling, cross-action grant isolation, locator ambiguity and role/selector disagreement blockers, after-observation failure classification, cleanup status, and event sequence checks. Playwright Addition 5.3 adds `tests/test_screen_awareness_playwright_canonical_kraken.py` to keep Playwright inside canonical Screen Awareness: Playwright observations must resolve through `BrowserSemanticAdapter`, browser controls must become canonical adapter-semantic targets, generic grounding must consume those targets, planner/UI code must not call Playwright execution directly, route boundaries must keep web retrieval/browser-open/Discord relay separate, canonical action status must lead Deck/Ghost summaries, and Playwright must use injected `TrustService` plus provider-local cleanup rather than a parallel trust authority. Playwright Addition 6 extends the click/focus execution tests for `type_text` gates, approval-required behavior, exact text-fingerprint binding, serialized-plan raw-text removal, safe textbox execution, redacted value-summary verification, readonly/disabled/hidden/ambiguous/sensitive blockers, type-specific events, and proof that raw typed text does not appear in result/status/event surfaces. Playwright Addition 7 extends the same execution suite for choice gates, approval-required check/uncheck/select, exact option/target/action grant binding, safe checkbox/radio/dropdown execution, already-correct no-op state, disabled/hidden/sensitive blockers, duplicate/missing/disabled option blockers, unexpected submit detection, choice-specific events, audit records, and bounded Deck/Ghost summaries. Playwright Addition 7.1 extends it again with target-missing/drift/type-change blockers, dropdown option removed/disabled/duplicate/value-drift/stale-ordinal blockers, legal/payment/CAPTCHA/delete sensitive-choice blockers, dropdown no-op evidence, wrong/reused grant checks, unexpected navigation/warning classification, submit-counter proof, bounded event/audit payloads, and preservation of click/focus/type behavior.
 
 Focused scaffold tests:
 
@@ -408,10 +432,10 @@ Focused scaffold tests:
 - robustness tests for aria/placeholder/nearby label normalization, readonly state, not-disabled/not-required grounding, last ordinal grounding, iframe/shadow limitations, large-page truncation, form-like grouping, unchecked required controls, and bounded event/Deck payloads
 - semantic comparison tests for supported, unsupported, partial, ambiguous, stale, insufficient-basis, and redacted before/after outcomes
 - action preview tests for non-executable click/type/select/check/submit planning, blocked sensitive contexts, ambiguous targets, unsupported requests, redaction, and bounded Deck/events
-- click/focus execution tests for approval gates, isolated context policy, stale plans, target drift, trust-binding exactness, locator ambiguity, disabled/sensitive target blockers, after-observation capture/failure handling, semantic comparison, trust audit use, cleanup status, bounded events, and Deck status
+- click/focus/type_text/choice execution tests for approval gates, isolated context policy, stale plans, target drift, trust-binding exactness, typed-text/option fingerprint binding, locator ambiguity, readonly/disabled/hidden/sensitive target blockers, disabled/missing/duplicate option blockers, submit-prevention checks, after-observation capture/failure handling, semantic comparison, trust audit use, cleanup status, bounded events, and Deck status
 - canonical-path regression tests for Playwright-to-`BrowserSemanticAdapter` resolution, canonical target provenance, generic grounding, planner/UI no-direct-execution audits, Screen Awareness route ownership for browser-control requests, web retrieval/browser destination/Discord route preservation, provider-to-canonical action-result mapping, and injected trust/cleanup proof
-- static contract keeps observation/preview/comparison posture while runtime status declares click/focus only when gates are enabled
-- click/focus action execution capabilities are declared only by runtime-gated status, disabled by default, and absent for type/scroll/form/login/cookie/profile/payment/CAPTCHA/screen/truth capabilities
+- static contract keeps observation/preview/comparison posture while runtime status declares click/focus/type_text/check/uncheck/select_option only when gates are enabled
+- click/focus/type_text/choice action execution capabilities are declared only by runtime-gated status, disabled by default, and absent for scroll/form/login/cookie/profile/payment/CAPTCHA/screen/truth capabilities
 - claim ceiling is `browser_semantic_observation`
 - Screen Awareness status lists the disabled adapter
 - planner does not route click/type/form/login requests to Playwright

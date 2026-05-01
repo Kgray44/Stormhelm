@@ -83,15 +83,26 @@ def test_core_api_client_parses_stream_frames_and_tracks_cursor() -> None:
     )
 
     assert states == [{"phase": "connected", "latest_cursor": 4}]
-    assert events == [
-        {
-            "cursor": 5,
-            "event_id": 5,
-            "event_family": "job",
-            "event_type": "job.completed",
-            "severity": "info",
-        }
-    ]
+    assert len(events) == 1
+    event = events[0]
+    assert {
+        "cursor": event["cursor"],
+        "event_id": event["event_id"],
+        "event_family": event["event_family"],
+        "event_type": event["event_type"],
+        "severity": event["severity"],
+    } == {
+        "cursor": 5,
+        "event_id": 5,
+        "event_family": "job",
+        "event_type": "job.completed",
+        "severity": "info",
+    }
+    timing = event["ui_stream_timing"]
+    assert timing["source"] == "core_event"
+    assert timing["render_confirmed"] == "unknown"
+    assert isinstance(timing["frame_received_monotonic_ms"], float)
+    assert isinstance(timing["event_parsed_monotonic_ms"], float)
     assert gaps == [{"requested_cursor": 1, "earliest_cursor": 4, "latest_cursor": 5}]
     assert client._stream_last_cursor == 5
 

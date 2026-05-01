@@ -39,6 +39,7 @@ from stormhelm.config.models import (
     RuntimePathConfig,
     SafetyConfig,
     StorageConfig,
+    StormforgeFogConfig,
     PlaywrightBrowserAdapterConfig,
     ScreenAwarenessBrowserAdaptersConfig,
     ToolConfig,
@@ -159,12 +160,75 @@ def _build_app_config(
     )
 
     ui_data = data.get("ui", {})
+    ui_stormforge_data = (
+        ui_data.get("stormforge", {}) if isinstance(ui_data.get("stormforge"), dict) else {}
+    )
+    ui_stormforge_fog_data = (
+        ui_stormforge_data.get("fog", {})
+        if isinstance(ui_stormforge_data.get("fog"), dict)
+        else {}
+    )
     ui_config = UIConfig(
         poll_interval_ms=int(ui_data.get("poll_interval_ms", 1500)),
         hide_to_tray_on_close=bool(ui_data.get("hide_to_tray_on_close", True)),
         ghost_shortcut=str(ui_data.get("ghost_shortcut", "Ctrl+Space")),
         visual_variant=_normalize_ui_visual_variant(
             ui_data.get("visual_variant", DEFAULT_UI_VISUAL_VARIANT)
+        ),
+        stormforge_fog=StormforgeFogConfig(
+            enabled=_coerce_config_bool(ui_stormforge_fog_data.get("enabled"), False),
+            mode=str(ui_stormforge_fog_data.get("mode", "volumetric")),
+            quality=str(ui_stormforge_fog_data.get("quality", "medium")),
+            intensity=ui_stormforge_fog_data.get("intensity", 0.35),
+            motion=_coerce_config_bool(ui_stormforge_fog_data.get("motion"), True),
+            edge_fog=_coerce_config_bool(
+                ui_stormforge_fog_data.get("edge_fog"),
+                True,
+            ),
+            foreground_wisps=_coerce_config_bool(
+                ui_stormforge_fog_data.get("foreground_wisps"),
+                True,
+            ),
+            max_foreground_opacity=ui_stormforge_fog_data.get(
+                "max_foreground_opacity",
+                0.08,
+            ),
+            center_clear_strength=ui_stormforge_fog_data.get(
+                "center_clear_strength",
+                0.65,
+            ),
+            lower_bias=ui_stormforge_fog_data.get("lower_bias", 0.45),
+            drift_speed=ui_stormforge_fog_data.get("drift_speed", 0.055),
+            drift_direction=str(
+                ui_stormforge_fog_data.get("drift_direction", "right_to_left")
+            ),
+            flow_scale=ui_stormforge_fog_data.get("flow_scale", 1.0),
+            crosswind_wobble=ui_stormforge_fog_data.get(
+                "crosswind_wobble",
+                0.18,
+            ),
+            rolling_speed=ui_stormforge_fog_data.get("rolling_speed", 0.035),
+            wisp_stretch=ui_stormforge_fog_data.get("wisp_stretch", 1.8),
+            card_clear_strength=ui_stormforge_fog_data.get(
+                "card_clear_strength",
+                0.72,
+            ),
+            anchor_clear_radius=ui_stormforge_fog_data.get(
+                "anchor_clear_radius",
+                0.18,
+            ),
+            debug_visible=_coerce_config_bool(
+                ui_stormforge_fog_data.get("debug_visible"),
+                False,
+            ),
+            debug_intensity_multiplier=ui_stormforge_fog_data.get(
+                "debug_intensity_multiplier",
+                3.0,
+            ),
+            debug_tint=_coerce_config_bool(
+                ui_stormforge_fog_data.get("debug_tint"),
+                True,
+            ),
         ),
     )
 
@@ -342,18 +406,30 @@ def _build_app_config(
                 allow_click=bool(screen_awareness_playwright_data.get("allow_click", False)),
                 allow_focus=bool(screen_awareness_playwright_data.get("allow_focus", False)),
                 allow_type_text=bool(screen_awareness_playwright_data.get("allow_type_text", False)),
+                allow_check=bool(screen_awareness_playwright_data.get("allow_check", False)),
+                allow_uncheck=bool(screen_awareness_playwright_data.get("allow_uncheck", False)),
+                allow_select_option=bool(screen_awareness_playwright_data.get("allow_select_option", False)),
                 allow_scroll=bool(screen_awareness_playwright_data.get("allow_scroll", False)),
+                allow_scroll_to_target=bool(screen_awareness_playwright_data.get("allow_scroll_to_target", False)),
                 allow_form_fill=bool(screen_awareness_playwright_data.get("allow_form_fill", False)),
                 allow_form_submit=bool(screen_awareness_playwright_data.get("allow_form_submit", False)),
                 allow_login=bool(screen_awareness_playwright_data.get("allow_login", False)),
                 allow_cookies=bool(screen_awareness_playwright_data.get("allow_cookies", False)),
                 allow_user_profile=bool(screen_awareness_playwright_data.get("allow_user_profile", False)),
+                allow_payment=bool(screen_awareness_playwright_data.get("allow_payment", False)),
                 allow_screenshots=bool(screen_awareness_playwright_data.get("allow_screenshots", False)),
                 allow_dev_adapter=bool(screen_awareness_playwright_data.get("allow_dev_adapter", False)),
                 allow_dev_actions=bool(screen_awareness_playwright_data.get("allow_dev_actions", False)),
+                allow_dev_type_text=bool(screen_awareness_playwright_data.get("allow_dev_type_text", False)),
+                allow_dev_choice_controls=bool(screen_awareness_playwright_data.get("allow_dev_choice_controls", False)),
+                allow_dev_scroll=bool(screen_awareness_playwright_data.get("allow_dev_scroll", False)),
                 max_session_seconds=int(screen_awareness_playwright_data.get("max_session_seconds", 120)),
                 navigation_timeout_seconds=int(screen_awareness_playwright_data.get("navigation_timeout_seconds", 12000)),
                 observation_timeout_seconds=int(screen_awareness_playwright_data.get("observation_timeout_seconds", 8000)),
+                max_scroll_attempts=int(screen_awareness_playwright_data.get("max_scroll_attempts", 5)),
+                scroll_step_pixels=int(screen_awareness_playwright_data.get("scroll_step_pixels", 700)),
+                scroll_timeout_seconds=float(screen_awareness_playwright_data.get("scroll_timeout_seconds", 8.0)),
+                max_scroll_distance_pixels=int(screen_awareness_playwright_data.get("max_scroll_distance_pixels", 5000)),
                 debug_events_enabled=bool(screen_awareness_playwright_data.get("debug_events_enabled", True)),
             )
         ),
@@ -1296,6 +1372,18 @@ def _apply_env_overrides(data: ConfigDict, env: Mapping[str, str]) -> ConfigDict
         "STORMHELM_CORE_PORT": ("network.port", int),
         "STORMHELM_DATA_DIR": ("storage.data_dir", str),
         "STORMHELM_UI_VARIANT": ("ui.visual_variant", str),
+        "STORMHELM_STORMFORGE_FOG": (
+            "ui.stormforge.fog.enabled",
+            _parse_bool,
+        ),
+        "STORMHELM_STORMFORGE_FOG_QUALITY": (
+            "ui.stormforge.fog.quality",
+            str,
+        ),
+        "STORMHELM_STORMFORGE_FOG_DEBUG_VISIBLE": (
+            "ui.stormforge.fog.debug_visible",
+            _parse_bool,
+        ),
         "STORMHELM_MAX_CONCURRENT_JOBS": ("concurrency.max_workers", int),
         "STORMHELM_DEFAULT_JOB_TIMEOUT_SECONDS": (
             "concurrency.default_job_timeout_seconds",
@@ -1947,9 +2035,53 @@ def _apply_env_overrides(data: ConfigDict, env: Mapping[str, str]) -> ConfigDict
             "screen_awareness.browser_adapters.playwright.allow_type_text",
             _parse_bool,
         ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_CHECK": (
+            "screen_awareness.browser_adapters.playwright.allow_check",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_UNCHECK": (
+            "screen_awareness.browser_adapters.playwright.allow_uncheck",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_SELECT_OPTION": (
+            "screen_awareness.browser_adapters.playwright.allow_select_option",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_DEV_TYPE_TEXT": (
+            "screen_awareness.browser_adapters.playwright.allow_dev_type_text",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_DEV_CHOICE_CONTROLS": (
+            "screen_awareness.browser_adapters.playwright.allow_dev_choice_controls",
+            _parse_bool,
+        ),
         "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_SCROLL": (
             "screen_awareness.browser_adapters.playwright.allow_scroll",
             _parse_bool,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_SCROLL_TO_TARGET": (
+            "screen_awareness.browser_adapters.playwright.allow_scroll_to_target",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_DEV_SCROLL": (
+            "screen_awareness.browser_adapters.playwright.allow_dev_scroll",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_MAX_SCROLL_ATTEMPTS": (
+            "screen_awareness.browser_adapters.playwright.max_scroll_attempts",
+            int,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_SCROLL_STEP_PIXELS": (
+            "screen_awareness.browser_adapters.playwright.scroll_step_pixels",
+            int,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_SCROLL_TIMEOUT_SECONDS": (
+            "screen_awareness.browser_adapters.playwright.scroll_timeout_seconds",
+            float,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_MAX_SCROLL_DISTANCE_PIXELS": (
+            "screen_awareness.browser_adapters.playwright.max_scroll_distance_pixels",
+            int,
         ),
         "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_DEV_ACTIONS": (
             "screen_awareness.browser_adapters.playwright.allow_dev_actions",
@@ -1985,6 +2117,10 @@ def _apply_env_overrides(data: ConfigDict, env: Mapping[str, str]) -> ConfigDict
         ),
         "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_USER_PROFILE": (
             "screen_awareness.browser_adapters.playwright.allow_user_profile",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_PAYMENT": (
+            "screen_awareness.browser_adapters.playwright.allow_payment",
             _parse_bool,
         ),
         "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_SCREENSHOTS": (
@@ -2151,6 +2287,21 @@ def _normalize_ui_visual_variant(raw: Any) -> str:
 
 def _parse_bool(raw: str) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _coerce_config_bool(raw: Any, default: bool) -> bool:
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        value = raw.strip().lower()
+        if value in {"1", "true", "yes", "on"}:
+            return True
+        if value in {"0", "false", "no", "off"}:
+            return False
+        return default
+    return bool(raw)
 
 
 def _parse_seconds_to_ms(raw: str) -> int:

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtQml, QtTest, QtWidgets
 from PySide6.QtQuickControls2 import QQuickStyle
+import pytest
 import shiboken6
 
 from stormhelm.config.loader import load_config
@@ -163,6 +164,7 @@ def test_main_qml_loads_classic_variant_surfaces_by_default() -> None:
         assert root.findChild(QtCore.QObject, "classicDeckShell") is not None
         assert root.findChild(QtCore.QObject, "stormforgeGhostShell") is None
         assert root.findChild(QtCore.QObject, "stormforgeDeckShell") is None
+        assert root.findChild(QtCore.QObject, "stormforgeVolumetricFogLayer") is None
     finally:
         _dispose_qt_objects(app, engine, root)
 
@@ -367,6 +369,592 @@ Item {
         _dispose_qt_objects(app, root, engine)
 
 
+def test_stormforge_anchor_core_constructs_representative_states_truthfully() -> None:
+    app = _ensure_app()
+    QQuickStyle.setStyle("Basic")
+    workspace_config = load_config(project_root=Path.cwd(), env={})
+    engine = QtQml.QQmlEngine()
+    engine.addImportPath(str(workspace_config.runtime.assets_dir / "qml"))
+    component = QtQml.QQmlComponent(engine)
+
+    harness_qml = """
+import QtQuick 2.15
+import "variants/stormforge"
+
+Item {
+    width: 980
+    height: 620
+
+    Grid {
+        columns: 4
+        spacing: 16
+
+        StormforgeAnchorCore {
+            objectName: "idleAnchor"
+            width: 180
+            height: width
+            state: ""
+        }
+
+        StormforgeAnchorCore {
+            objectName: "readyAnchor"
+            width: 180
+            height: width
+            state: "ready"
+        }
+
+        StormforgeAnchorCore {
+            objectName: "unknownAnchor"
+            width: 180
+            height: width
+            state: "future_backend_state_without_visual_contract"
+            assistantState: ""
+            voiceState: ({})
+        }
+
+        StormforgeAnchorCore {
+            objectName: "listeningAnchor"
+            width: 180
+            height: width
+            state: "listening"
+            audioLevel: 0.42
+            active: true
+        }
+
+        StormforgeAnchorCore {
+            objectName: "transcribingAnchor"
+            width: 180
+            height: width
+            state: "transcribing"
+            audioLevel: 0.18
+            active: true
+        }
+
+        StormforgeAnchorCore {
+            objectName: "speakingAnchor"
+            width: 180
+            height: width
+            voiceState: {
+                "voice_anchor_state": "speaking",
+                "voice_current_phase": "playback_active",
+                "speaking_visual_active": true,
+                "active_playback_status": "playing",
+                "voice_center_blob_scale_drive": 0.67,
+                "voice_outer_speaking_motion": 0.48,
+                "voice_audio_reactive_available": true,
+                "voice_audio_reactive_source": "playback_output_envelope"
+            }
+        }
+
+        StormforgeAnchorCore {
+            objectName: "requestedPlaybackAnchor"
+            width: 180
+            height: width
+            voiceState: {
+                "voice_anchor_state": "speaking",
+                "voice_current_phase": "synthesizing",
+                "speaking_visual_active": false,
+                "active_playback_status": "requested"
+            }
+        }
+
+        StormforgeAnchorCore {
+            objectName: "thinkingAnchor"
+            width: 180
+            height: width
+            state: "routing"
+        }
+
+        StormforgeAnchorCore {
+            objectName: "actingAnchor"
+            width: 180
+            height: width
+            state: "executing"
+        }
+
+        StormforgeAnchorCore {
+            objectName: "approvalAnchor"
+            width: 180
+            height: width
+            state: "approval_required"
+            warning: true
+        }
+
+        StormforgeAnchorCore {
+            objectName: "blockedAnchor"
+            width: 180
+            height: width
+            state: "blocked"
+        }
+
+        StormforgeAnchorCore {
+            objectName: "failedAnchor"
+            width: 180
+            height: width
+            state: "failed"
+        }
+
+        StormforgeAnchorCore {
+            objectName: "mockAnchor"
+            width: 180
+            height: width
+            state: "mock_dev"
+        }
+
+        StormforgeAnchorCore {
+            objectName: "unavailableAnchor"
+            width: 180
+            height: width
+            state: "listening"
+            disabled: true
+        }
+    }
+}
+""".strip()
+
+    root = None
+    try:
+        with _capture_qt_messages() as messages:
+            component.setData(
+                harness_qml.encode("utf-8"),
+                QtCore.QUrl.fromLocalFile(
+                    str(
+                        workspace_config.runtime.assets_dir
+                        / "qml"
+                        / "StormforgeAnchorHarness.qml"
+                    )
+                ),
+            )
+            root = component.create()
+            app.processEvents()
+            QtTest.QTest.qWait(80)
+            app.processEvents()
+
+        assert component.isReady(), component.errors()
+        assert root is not None
+        assert [message for message in messages if "StormforgeAnchor" in message] == []
+
+        idle = root.findChild(QtCore.QObject, "idleAnchor")
+        ready = root.findChild(QtCore.QObject, "readyAnchor")
+        unknown = root.findChild(QtCore.QObject, "unknownAnchor")
+        listening = root.findChild(QtCore.QObject, "listeningAnchor")
+        transcribing = root.findChild(QtCore.QObject, "transcribingAnchor")
+        speaking = root.findChild(QtCore.QObject, "speakingAnchor")
+        requested = root.findChild(QtCore.QObject, "requestedPlaybackAnchor")
+        thinking = root.findChild(QtCore.QObject, "thinkingAnchor")
+        acting = root.findChild(QtCore.QObject, "actingAnchor")
+        approval = root.findChild(QtCore.QObject, "approvalAnchor")
+        blocked = root.findChild(QtCore.QObject, "blockedAnchor")
+        failed = root.findChild(QtCore.QObject, "failedAnchor")
+        mock = root.findChild(QtCore.QObject, "mockAnchor")
+        unavailable = root.findChild(QtCore.QObject, "unavailableAnchor")
+
+        assert idle is not None
+        assert ready is not None
+        assert unknown is not None
+        assert listening is not None
+        assert transcribing is not None
+        assert speaking is not None
+        assert requested is not None
+        assert thinking is not None
+        assert acting is not None
+        assert approval is not None
+        assert blocked is not None
+        assert failed is not None
+        assert mock is not None
+        assert unavailable is not None
+
+        assert idle.property("resolvedState") == "idle"
+        assert idle.property("normalizedState") == "idle"
+        assert idle.property("visualState") == "idle"
+        assert idle.property("resolvedLabel") == "Ready"
+        assert idle.property("motionProfile") == "breathing"
+        assert idle.property("visualTuningVersion") == "UI-P2A.5"
+        assert idle.property("idlePresenceHotfixVersion") == "UI-P2A.4A"
+        assert idle.property("stateStabilityVersion") == "UI-P2A.5"
+        assert idle.property("signatureSilhouette") == "helm_crown_lens_aperture"
+        assert idle.property("centerLensSignature") == "living_helm_lens"
+        assert int(idle.property("bearingTickCount")) == 40
+        assert float(idle.property("visualSoftness")) >= 0.45
+        assert int(idle.property("presenceDepthLayerCount")) >= 6
+        assert int(idle.property("nauticalDetailCount")) >= 7
+        assert int(idle.property("signatureFeatureCount")) >= 4
+        assert int(idle.property("centerLensLayerCount")) >= 6
+        assert int(idle.property("centerApertureSegmentCount")) == 4
+        assert 0.28 <= float(idle.property("centerLensRadiusRatio")) <= 0.40
+        assert float(idle.property("instrumentGlassOpacity")) > 0.0
+        assert float(idle.property("depthShadowOpacity")) > 0.0
+        assert float(idle.property("centerApertureStrength")) > float(idle.property("instrumentGlassOpacity"))
+        assert float(idle.property("centerPearlStrength")) > float(idle.property("centerApertureStrength"))
+        assert float(idle.property("headingMarkerStrength")) > 0.0
+        assert float(idle.property("outerClampStrength")) > 0.0
+        assert float(idle.property("minimumRingOpacity")) >= 0.14
+        assert float(idle.property("minimumCenterLensOpacity")) >= 0.14
+        assert float(idle.property("minimumBearingTickOpacity")) >= 0.10
+        assert float(idle.property("minimumSignalPointOpacity")) >= 0.16
+        assert float(idle.property("minimumLabelOpacity")) >= 0.70
+        assert float(idle.property("visualPresenceFloor")) >= 0.10
+        assert float(idle.property("anchorVisibleFloor")) == pytest.approx(float(idle.property("visualPresenceFloor")))
+        assert float(idle.property("lensVisibleFloor")) == pytest.approx(float(idle.property("minimumCenterLensOpacity")))
+        assert float(idle.property("ringVisibleFloor")) == pytest.approx(float(idle.property("minimumRingOpacity")))
+        assert bool(idle.property("idleMotionActive")) is True
+        assert 0.0 <= float(idle.property("idleBreathValue")) <= 1.0
+        assert float(idle.property("idlePulseMin")) > 0.0
+        assert float(idle.property("idlePulseMax")) > float(idle.property("idlePulseMin"))
+        assert int(idle.property("stateTransitionDurationMs")) >= 260
+        assert int(idle.property("stateMinimumDwellMs")) >= 80
+        assert idle.property("anchorVisibilityStatus") == "visible_idle_floor"
+        assert idle.property("stateVisualSignature") == "powered_watch"
+        assert idle.property("stateGeometrySignature") == "closed_watch_crown"
+        assert idle.property("centerStateSignature") == "calm_helm_lens"
+        assert float(idle.property("motionSpeedScale")) < float(listening.property("motionSpeedScale"))
+        assert ready.property("resolvedState") == "ready"
+        assert ready.property("normalizedState") == "ready"
+        assert ready.property("visualState") == "ready"
+        assert ready.property("anchorVisibilityStatus") == "visible_idle_floor"
+        assert bool(ready.property("idleMotionActive")) is True
+        assert float(ready.property("minimumRingOpacity")) >= float(idle.property("minimumRingOpacity"))
+        assert float(ready.property("minimumCenterLensOpacity")) >= float(idle.property("minimumCenterLensOpacity"))
+        assert float(ready.property("minimumBearingTickOpacity")) >= float(idle.property("minimumBearingTickOpacity"))
+        assert float(ready.property("minimumSignalPointOpacity")) >= float(idle.property("minimumSignalPointOpacity"))
+        assert unknown.property("resolvedState") == "idle"
+        assert unknown.property("normalizedState") == "idle"
+        assert unknown.property("visualState") == "idle"
+        assert unknown.property("normalizedStateFallback") == "idle"
+        assert unknown.property("anchorVisibilityStatus") == "visible_idle_floor"
+        assert bool(unknown.property("idleMotionActive")) is True
+        assert float(unknown.property("visualPresenceFloor")) >= 0.10
+        assert listening.property("resolvedState") == "listening"
+        assert listening.property("resolvedLabel") == "Listening"
+        assert listening.property("motionProfile") == "listening_wave"
+        assert listening.property("stateVisualSignature") == "receive_wave"
+        assert listening.property("stateGeometrySignature") == "open_receive_aperture"
+        assert listening.property("centerStateSignature") == "receptive_open_aperture"
+        assert transcribing.property("resolvedState") == "transcribing"
+        assert transcribing.property("motionProfile") == "listening_wave"
+        assert transcribing.property("stateGeometrySignature") == "segmented_processing_aperture"
+        assert transcribing.property("centerStateSignature") == "segmented_processing_lens"
+        assert speaking.property("resolvedState") == "speaking"
+        assert speaking.property("normalizedState") == "speaking"
+        assert speaking.property("resolvedLabel") == "Speaking"
+        assert speaking.property("motionProfile") == "radiating"
+        assert speaking.property("stateVisualSignature") == "playback_radiance"
+        assert speaking.property("stateGeometrySignature") == "response_aperture_radiance"
+        assert speaking.property("centerStateSignature") == "radiant_voice_lens"
+        assert speaking.property("audioReactiveSource") == "playback_output_envelope"
+        assert float(speaking.property("effectiveSpeakingLevel")) == pytest.approx(0.67)
+        assert requested.property("resolvedState") == "thinking"
+        assert requested.property("normalizedState") == "thinking"
+        assert requested.property("visualState") == "thinking"
+        assert requested.property("resolvedLabel") == "Thinking"
+        assert requested.property("motionProfile") == "orbit"
+        assert requested.property("stateGeometrySignature") == "internal_orbit_aperture"
+        assert requested.property("centerStateSignature") == "slow_internal_iris"
+        assert thinking.property("resolvedState") == "thinking"
+        assert thinking.property("motionProfile") == "orbit"
+        assert thinking.property("stateVisualSignature") == "orbital_bearing"
+        assert thinking.property("stateGeometrySignature") == "internal_orbit_aperture"
+        assert thinking.property("centerStateSignature") == "slow_internal_iris"
+        assert acting.property("resolvedState") == "acting"
+        assert acting.property("motionProfile") == "directional_trace"
+        assert acting.property("stateVisualSignature") == "bearing_trace"
+        assert acting.property("stateGeometrySignature") == "directional_helm_trace"
+        assert acting.property("centerStateSignature") == "bearing_directed_lens"
+        assert approval.property("resolvedState") == "approval_required"
+        assert approval.property("resolvedLabel") == "Approval required"
+        assert approval.property("motionProfile") == "approval_halo"
+        assert approval.property("stateVisualSignature") == "approval_bezel"
+        assert approval.property("stateGeometrySignature") == "brass_clamp_bezel"
+        assert approval.property("centerStateSignature") == "brass_locked_lens"
+        assert blocked.property("resolvedState") == "blocked"
+        assert blocked.property("stateVisualSignature") == "warning_bezel"
+        assert blocked.property("stateGeometrySignature") == "amber_boundary_clamp"
+        assert blocked.property("centerStateSignature") == "amber_bound_lens"
+        assert failed.property("resolvedState") == "failed"
+        assert failed.property("stateVisualSignature") == "failure_bezel"
+        assert failed.property("stateGeometrySignature") == "diagnostic_break_segment"
+        assert failed.property("centerStateSignature") == "fractured_diagnostic_lens"
+        assert mock.property("resolvedState") == "mock_dev"
+        assert mock.property("stateVisualSignature") == "development_trace"
+        assert mock.property("stateGeometrySignature") == "synthetic_trace_aperture"
+        assert mock.property("centerStateSignature") == "synthetic_violet_lens"
+        assert unavailable.property("resolvedState") == "unavailable"
+        assert unavailable.property("normalizedState") == "unavailable"
+        assert unavailable.property("visualState") == "unavailable"
+        assert unavailable.property("motionProfile") == "muted"
+        assert unavailable.property("stateVisualSignature") == "offline_muted"
+        assert unavailable.property("stateGeometrySignature") == "dimmed_lens"
+        assert unavailable.property("centerStateSignature") == "nearly_dark_lens"
+        assert unavailable.property("anchorVisibilityStatus") == "visible_unavailable_floor"
+        assert bool(unavailable.property("idleMotionActive")) is False
+        assert 0.04 <= float(unavailable.property("minimumRingOpacity")) < float(idle.property("minimumRingOpacity"))
+        assert 0.04 <= float(unavailable.property("minimumCenterLensOpacity")) < float(idle.property("minimumCenterLensOpacity"))
+        assert 0.03 <= float(unavailable.property("minimumBearingTickOpacity")) < float(idle.property("minimumBearingTickOpacity"))
+        assert 0.04 <= float(unavailable.property("minimumSignalPointOpacity")) < float(idle.property("minimumSignalPointOpacity"))
+        assert unavailable.property("animationRunning") is False
+    finally:
+        _dispose_qt_objects(app, root, engine)
+
+
+def test_stormforge_ghost_idle_anchor_keeps_presence_floor() -> None:
+    app = _ensure_app()
+    QQuickStyle.setStyle("Basic")
+    workspace_config = load_config(project_root=Path.cwd(), env={})
+    engine = QtQml.QQmlEngine()
+    engine.addImportPath(str(workspace_config.runtime.assets_dir / "qml"))
+    component = QtQml.QQmlComponent(engine)
+
+    harness_qml = """
+import QtQuick 2.15
+import "variants/stormforge"
+
+Item {
+    width: 960
+    height: 680
+
+    StormforgeGhostShell {
+        objectName: "idleGhostShell"
+        anchors.fill: parent
+        stormforgeFogConfig: {"enabled": false}
+        voiceState: ({})
+        statusLine: "Standing watch."
+    }
+}
+""".strip()
+
+    root = None
+    try:
+        with _capture_qt_messages() as messages:
+            component.setData(
+                harness_qml.encode("utf-8"),
+                QtCore.QUrl.fromLocalFile(
+                    str(
+                        workspace_config.runtime.assets_dir
+                        / "qml"
+                        / "StormforgeGhostIdleAnchorHarness.qml"
+                    )
+                ),
+            )
+            root = component.create()
+            app.processEvents()
+            QtTest.QTest.qWait(80)
+            app.processEvents()
+
+        assert component.isReady(), component.errors()
+        assert root is not None
+        assert [message for message in messages if "Stormforge" in message] == []
+
+        anchor_host = root.findChild(QtCore.QObject, "stormforgeAnchorHost")
+        anchor_core = root.findChild(QtCore.QObject, "stormforgeAnchorCore")
+        assert anchor_host is not None
+        assert anchor_core is not None
+        assert anchor_host.property("resolvedState") == "idle"
+        assert anchor_core.property("resolvedState") == "idle"
+        assert anchor_core.property("anchorVisibilityStatus") == "visible_idle_floor"
+        assert float(anchor_core.property("minimumRingOpacity")) >= 0.14
+        assert float(anchor_core.property("minimumCenterLensOpacity")) >= 0.14
+        assert float(anchor_core.property("minimumBearingTickOpacity")) >= 0.10
+        assert float(anchor_core.property("minimumSignalPointOpacity")) >= 0.16
+        assert float(anchor_core.property("minimumLabelOpacity")) >= 0.70
+        assert bool(anchor_core.property("visible")) is True
+        assert float(anchor_host.property("opacity")) > 0.0
+        assert float(anchor_core.property("opacity")) > 0.0
+    finally:
+        _dispose_qt_objects(app, root, engine)
+
+
+def test_stormforge_anchor_aliases_normalize_to_stable_visual_states() -> None:
+    app = _ensure_app()
+    QQuickStyle.setStyle("Basic")
+    workspace_config = load_config(project_root=Path.cwd(), env={})
+    engine = QtQml.QQmlEngine()
+    engine.addImportPath(str(workspace_config.runtime.assets_dir / "qml"))
+    component = QtQml.QQmlComponent(engine)
+
+    harness_qml = """
+import QtQuick 2.15
+import "variants/stormforge"
+
+Item {
+    width: 1080
+    height: 520
+
+    Grid {
+        columns: 5
+        spacing: 12
+
+        StormforgeAnchorCore { objectName: "signalAlias"; width: 150; height: 190; state: "signal_acquired" }
+        StormforgeAnchorCore { objectName: "ghostReadyAlias"; width: 150; height: 190; state: "ghost_ready" }
+        StormforgeAnchorCore { objectName: "captureAlias"; width: 150; height: 190; state: "capture_active" }
+        StormforgeAnchorCore { objectName: "routingAlias"; width: 150; height: 190; state: "routing" }
+        StormforgeAnchorCore { objectName: "executingAlias"; width: 150; height: 190; state: "executing" }
+        StormforgeAnchorCore {
+            objectName: "speakingRequestedOnly"
+            width: 150; height: 190
+            voiceState: ({
+                "voice_anchor_state": "speaking",
+                "voice_current_phase": "requested",
+                "speaking_visual_active": false,
+                "active_playback_status": "requested"
+            })
+        }
+        StormforgeAnchorCore {
+            objectName: "speakingSupported"
+            width: 150; height: 190
+            voiceState: ({
+                "voice_anchor_state": "speaking",
+                "voice_current_phase": "playback_active",
+                "speaking_visual_active": true,
+                "active_playback_status": "playing"
+            })
+        }
+        StormforgeAnchorCore { objectName: "approvalAlias"; width: 150; height: 190; state: "requires_approval" }
+        StormforgeAnchorCore { objectName: "warningAlias"; width: 150; height: 190; state: "warning" }
+        StormforgeAnchorCore { objectName: "errorAlias"; width: 150; height: 190; state: "error" }
+        StormforgeAnchorCore { objectName: "disabledAlias"; width: 150; height: 190; state: "disabled" }
+        StormforgeAnchorCore { objectName: "devAlias"; width: 150; height: 190; state: "dev" }
+        StormforgeAnchorCore { objectName: "unknownAlias"; width: 150; height: 190; state: "new_backend_hint" }
+        StormforgeAnchorCore { objectName: "inactiveWord"; width: 150; height: 190; state: "inactive" }
+    }
+}
+""".strip()
+
+    root = None
+    try:
+        with _capture_qt_messages() as messages:
+            component.setData(
+                harness_qml.encode("utf-8"),
+                QtCore.QUrl.fromLocalFile(
+                    str(
+                        workspace_config.runtime.assets_dir
+                        / "qml"
+                        / "StormforgeAnchorAliasHarness.qml"
+                    )
+                ),
+            )
+            root = component.create()
+            app.processEvents()
+            QtTest.QTest.qWait(120)
+            app.processEvents()
+
+        assert component.isReady(), component.errors()
+        assert root is not None
+        assert [message for message in messages if "StormforgeAnchor" in message] == []
+
+        expected = {
+            "signalAlias": "wake_detected",
+            "ghostReadyAlias": "wake_detected",
+            "captureAlias": "capturing",
+            "routingAlias": "thinking",
+            "executingAlias": "acting",
+            "speakingRequestedOnly": "thinking",
+            "speakingSupported": "speaking",
+            "approvalAlias": "approval_required",
+            "warningAlias": "blocked",
+            "errorAlias": "failed",
+            "disabledAlias": "unavailable",
+            "devAlias": "mock_dev",
+            "unknownAlias": "idle",
+            "inactiveWord": "idle",
+        }
+        for object_name, state_name in expected.items():
+            anchor = root.findChild(QtCore.QObject, object_name)
+            assert anchor is not None, object_name
+            assert anchor.property("normalizedState") == state_name
+            assert anchor.property("resolvedState") == state_name
+            assert anchor.property("visualState") == state_name
+            assert anchor.property("anchorVisibilityStatus") != ""
+    finally:
+        _dispose_qt_objects(app, root, engine)
+
+
+def test_stormforge_anchor_visual_state_latches_transient_noncritical_changes() -> None:
+    app = _ensure_app()
+    QQuickStyle.setStyle("Basic")
+    workspace_config = load_config(project_root=Path.cwd(), env={})
+    engine = QtQml.QQmlEngine()
+    engine.addImportPath(str(workspace_config.runtime.assets_dir / "qml"))
+    component = QtQml.QQmlComponent(engine)
+
+    harness_qml = """
+import QtQuick 2.15
+import "variants/stormforge"
+
+StormforgeAnchorCore {
+    objectName: "transitionAnchor"
+    width: 220
+    height: 260
+    state: ""
+}
+""".strip()
+
+    anchor = None
+    try:
+        with _capture_qt_messages() as messages:
+            component.setData(
+                harness_qml.encode("utf-8"),
+                QtCore.QUrl.fromLocalFile(
+                    str(
+                        workspace_config.runtime.assets_dir
+                        / "qml"
+                        / "StormforgeAnchorTransitionHarness.qml"
+                    )
+                ),
+            )
+            anchor = component.create()
+            app.processEvents()
+            QtTest.QTest.qWait(80)
+            app.processEvents()
+
+        assert component.isReady(), component.errors()
+        assert anchor is not None
+        assert [message for message in messages if "StormforgeAnchor" in message] == []
+
+        assert anchor.property("normalizedState") == "idle"
+        assert anchor.property("visualState") == "idle"
+        initial_serial = int(anchor.property("visualStateChangeSerial"))
+        dwell_ms = int(anchor.property("stateMinimumDwellMs"))
+        transition_ms = int(anchor.property("stateTransitionDurationMs"))
+
+        anchor.setProperty("state", "routing")
+        app.processEvents()
+        QtTest.QTest.qWait(20)
+        app.processEvents()
+        assert anchor.property("normalizedState") == "thinking"
+        assert anchor.property("visualState") == "idle"
+        assert anchor.property("pendingVisualState") == "thinking"
+        assert int(anchor.property("visualStateChangeSerial")) == initial_serial
+
+        QtTest.QTest.qWait(dwell_ms + 40)
+        app.processEvents()
+        assert anchor.property("visualState") == "thinking"
+        assert anchor.property("previousVisualState") == "idle"
+        changed_serial = int(anchor.property("visualStateChangeSerial"))
+        assert changed_serial > initial_serial
+
+        anchor.setProperty("state", "routing")
+        app.processEvents()
+        QtTest.QTest.qWait(30)
+        app.processEvents()
+        assert int(anchor.property("visualStateChangeSerial")) == changed_serial
+
+        anchor.setProperty("state", "failed")
+        app.processEvents()
+        QtTest.QTest.qWait(20)
+        app.processEvents()
+        assert anchor.property("normalizedState") == "failed"
+        assert anchor.property("visualState") == "failed"
+        assert anchor.property("pendingVisualState") == ""
+        assert int(anchor.property("visualStateChangeSerial")) > changed_serial
+
+        QtTest.QTest.qWait(transition_ms + 40)
+        app.processEvents()
+        assert anchor.property("stateTransitionActive") is False
+        assert float(anchor.property("transitionProgress")) == pytest.approx(1.0)
+    finally:
+        _dispose_qt_objects(app, anchor, engine)
+
+
 def test_main_qml_stormforge_variant_uses_foundation_shells_without_replacing_classic() -> None:
     app, _, bridge, engine, root = _load_main_qml_scene(
         {"STORMHELM_UI_VARIANT": "stormforge"}
@@ -377,17 +965,710 @@ def test_main_qml_stormforge_variant_uses_foundation_shells_without_replacing_cl
         stormforge_deck = root.findChild(QtCore.QObject, "stormforgeDeckShell")
         classic_ghost = root.findChild(QtCore.QObject, "classicGhostShell")
         classic_deck = root.findChild(QtCore.QObject, "classicDeckShell")
+        shared_center = root.findChild(QtCore.QObject, "sharedGhostCenterCluster")
 
         assert stormforge_ghost is not None
         assert stormforge_deck is not None
         assert classic_ghost is None
         assert classic_deck is None
+        assert shared_center is not None
+        assert shared_center.property("visible") is False
         assert stormforge_ghost.property("stormforgeFoundationReady") is True
         assert stormforge_deck.property("stormforgeFoundationReady") is True
         assert root.findChild(QtCore.QObject, "stormforgeGhostFoundationPanel") is not None
         assert root.findChild(QtCore.QObject, "stormforgeDeckFoundationPanel") is not None
     finally:
         _dispose_qt_objects(app, engine, root)
+
+
+def test_main_qml_stormforge_ghost_loads_with_volumetric_fog_disabled() -> None:
+    app, _, bridge, engine, root = _load_main_qml_scene(
+        {"STORMHELM_UI_VARIANT": "stormforge"}
+    )
+    try:
+        assert bridge.uiVisualVariant == "stormforge"
+        fog = root.findChild(QtCore.QObject, "stormforgeVolumetricFogLayer")
+        atmosphere = root.findChild(QtCore.QObject, "stormforgeGhostAtmosphereSlot")
+        anchor_core = root.findChild(QtCore.QObject, "stormforgeAnchorCore")
+        assert fog is not None
+        assert atmosphere is not None
+        assert anchor_core is not None
+        assert fog.property("rendererType") == "shader"
+        assert fog.property("fogMode") == "volumetric"
+        assert fog.property("active") is False
+        assert fog.property("animationRunning") is False
+        assert int(fog.property("qualitySamples")) == 0
+        assert bool(fog.property("visible")) is False
+        assert atmosphere.property("fogActive") is False
+        assert bool(atmosphere.property("visible")) is False
+    finally:
+        _dispose_qt_objects(app, engine, root)
+
+
+def test_main_qml_stormforge_ghost_loads_with_volumetric_fog_enabled() -> None:
+    app, _, bridge, engine, root = _load_main_qml_scene(
+        {
+            "STORMHELM_UI_VARIANT": "stormforge",
+            "STORMHELM_STORMFORGE_FOG": "1",
+        }
+    )
+    try:
+        assert bridge.uiVisualVariant == "stormforge"
+        fog = root.findChild(QtCore.QObject, "stormforgeVolumetricFogLayer")
+        atmosphere = root.findChild(QtCore.QObject, "stormforgeGhostAtmosphereSlot")
+        fallback = root.findChild(QtCore.QObject, "stormforgeFogFallbackLayer")
+        assert fog is not None
+        assert atmosphere is not None
+        assert fallback is None
+        assert fog.property("rendererType") == "shader"
+        assert fog.property("fogMode") == "volumetric"
+        assert fog.property("quality") == "medium"
+        assert fog.property("active") is True
+        assert fog.property("animationRunning") is True
+        assert int(fog.property("qualitySamples")) == 14
+        assert float(fog.property("intensity")) == pytest.approx(0.35)
+        assert bool(fog.property("visible")) is True
+        assert atmosphere.property("fogActive") is True
+        assert bool(atmosphere.property("visible")) is True
+    finally:
+        _dispose_qt_objects(app, engine, root)
+
+
+def test_stormforge_volumetric_fog_layer_exposes_production_readability_controls() -> None:
+    app = _ensure_app()
+    QQuickStyle.setStyle("Basic")
+    workspace_config = load_config(project_root=Path.cwd(), env={})
+    engine = QtQml.QQmlEngine()
+    engine.addImportPath(str(workspace_config.runtime.assets_dir / "qml"))
+    component = QtQml.QQmlComponent(engine)
+
+    harness_qml = """
+import QtQuick 2.15
+import "variants/stormforge"
+
+Item {
+    width: 960
+    height: 680
+
+    StormforgeVolumetricFogLayer {
+        id: fog
+        objectName: "productionFogLayer"
+        anchors.fill: parent
+        config: {
+            "enabled": true,
+            "mode": "volumetric",
+            "quality": "high",
+            "intensity": 0.42,
+            "motion": true,
+            "edgeFog": true,
+            "foregroundWisps": true,
+            "qualitySamples": 24,
+            "density": 0.62,
+            "driftSpeed": 0.055,
+            "driftDirection": "right_to_left",
+            "driftDirectionX": -1.0,
+            "driftDirectionY": 0.05,
+            "flowScale": 1.0,
+            "crosswindWobble": 0.18,
+            "rollingSpeed": 0.035,
+            "wispStretch": 1.8,
+            "noiseScale": 1.12,
+            "edgeDensity": 0.88,
+            "lowerFogBias": 0.45,
+            "centerClearRadius": 0.40,
+            "centerClearStrength": 0.70,
+            "foregroundAmount": 0.18,
+            "foregroundOpacityLimit": 0.06,
+            "opacityLimit": 0.22,
+            "protectedCenterX": 0.50,
+            "protectedCenterY": 0.58,
+            "protectedRadius": 0.36,
+            "anchorCenterX": 0.50,
+            "anchorCenterY": 0.30,
+            "anchorRadius": 0.18,
+            "cardClearStrength": 0.78
+        }
+    }
+}
+""".strip()
+
+    root = None
+    try:
+        with _capture_qt_messages() as messages:
+            component.setData(
+                harness_qml.encode("utf-8"),
+                QtCore.QUrl.fromLocalFile(
+                    str(
+                        workspace_config.runtime.assets_dir
+                        / "qml"
+                        / "StormforgeFogProductionHarness.qml"
+                    )
+                ),
+            )
+            root = component.create()
+            app.processEvents()
+            QtTest.QTest.qWait(40)
+            app.processEvents()
+
+        assert component.isReady(), component.errors()
+        assert root is not None
+        assert [message for message in messages if "StormforgeVolumetricFog" in message] == []
+
+        fog = root.findChild(QtCore.QObject, "productionFogLayer")
+        assert fog is not None
+        assert fog.property("active") is True
+        assert int(fog.property("qualitySamples")) == 24
+        assert float(fog.property("driftSpeed")) == pytest.approx(0.055)
+        assert fog.property("driftDirection") == "right_to_left"
+        assert float(fog.property("driftDirectionX")) == pytest.approx(-1.0)
+        assert float(fog.property("driftDirectionY")) == pytest.approx(0.05)
+        assert float(fog.property("flowScale")) == pytest.approx(1.0)
+        assert float(fog.property("crosswindWobble")) == pytest.approx(0.18)
+        assert float(fog.property("rollingSpeed")) == pytest.approx(0.035)
+        assert float(fog.property("wispStretch")) == pytest.approx(1.8)
+        assert float(fog.property("protectedCenterX")) == pytest.approx(0.50)
+        assert float(fog.property("protectedCenterY")) == pytest.approx(0.58)
+        assert float(fog.property("protectedRadius")) == pytest.approx(0.36)
+        assert float(fog.property("anchorRadius")) == pytest.approx(0.18)
+        assert float(fog.property("cardClearStrength")) == pytest.approx(0.78)
+        assert float(fog.property("foregroundOpacityLimit")) == pytest.approx(0.06)
+    finally:
+        _dispose_qt_objects(app, root, engine)
+
+
+def test_stormforge_volumetric_fog_layer_exposes_activation_diagnostics_and_debug_visible_mode() -> None:
+    app = _ensure_app()
+    QQuickStyle.setStyle("Basic")
+    workspace_config = load_config(project_root=Path.cwd(), env={})
+    engine = QtQml.QQmlEngine()
+    engine.addImportPath(str(workspace_config.runtime.assets_dir / "qml"))
+    component = QtQml.QQmlComponent(engine)
+
+    harness_qml = """
+import QtQuick 2.15
+import "variants/stormforge"
+
+Item {
+    width: 960
+    height: 680
+
+    StormforgeVolumetricFogLayer {
+        id: fog
+        objectName: "diagnosticFogLayer"
+        width: parent.width
+        height: parent.height
+        z: 4
+        config: {
+            "enabled": true,
+            "mode": "volumetric",
+            "quality": "medium",
+            "intensity": 0.35,
+            "motion": true,
+            "qualitySamples": 14,
+            "debugVisible": true,
+            "debugIntensityMultiplier": 3.0,
+            "debugTint": true,
+            "centerClearStrength": 0.65,
+            "cardClearStrength": 0.72,
+            "protectedRadius": 0.36,
+            "anchorRadius": 0.18
+        }
+    }
+}
+""".strip()
+
+    root = None
+    try:
+        component.setData(
+            harness_qml.encode("utf-8"),
+            QtCore.QUrl.fromLocalFile(
+                str(
+                    workspace_config.runtime.assets_dir
+                    / "qml"
+                    / "StormforgeFogDiagnosticsHarness.qml"
+                )
+            ),
+        )
+        root = component.create()
+        app.processEvents()
+        QtTest.QTest.qWait(50)
+        app.processEvents()
+
+        assert component.isReady(), component.errors()
+        assert root is not None
+
+        fog = root.findChild(QtCore.QObject, "diagnosticFogLayer")
+        assert fog is not None
+        assert fog.property("fogEnabledRequested") is True
+        assert fog.property("fogActive") is True
+        assert fog.property("fogVisible") is True
+        assert fog.property("shaderEnabled") is True
+        assert fog.property("fallbackEnabled") is False
+        assert fog.property("renderMode") == "debug_visible"
+        assert fog.property("disabledReason") == ""
+        assert int(fog.property("qualitySamples")) == 14
+        assert float(fog.property("effectiveOpacity")) > 0.0
+        assert int(fog.property("layerWidth")) == 960
+        assert int(fog.property("layerHeight")) == 680
+        assert float(fog.property("zLayer")) == pytest.approx(4.0)
+        assert fog.property("debugVisible") is True
+
+        mask_strengths = fog.property("maskStrengths")
+        if hasattr(mask_strengths, "toVariant"):
+            mask_strengths = mask_strengths.toVariant()
+        assert mask_strengths["centerClearStrength"] == pytest.approx(0.65)
+        assert mask_strengths["cardClearStrength"] == pytest.approx(0.72)
+        assert mask_strengths["protectedRadius"] == pytest.approx(0.36)
+        assert mask_strengths["anchorRadius"] == pytest.approx(0.18)
+
+        motion_controls = fog.property("motionControls")
+        if hasattr(motion_controls, "toVariant"):
+            motion_controls = motion_controls.toVariant()
+        assert motion_controls["driftDirection"] == "right_to_left"
+        assert motion_controls["driftDirectionX"] == pytest.approx(-1.0)
+        assert motion_controls["flowScale"] == pytest.approx(1.0)
+        assert motion_controls["wispStretch"] == pytest.approx(1.8)
+
+        debug_probe = root.findChild(QtCore.QObject, "stormforgeFogDebugVisibleProbe")
+        assert debug_probe is not None
+        assert bool(debug_probe.property("visible")) is True
+        assert float(debug_probe.property("opacity")) > 0.0
+    finally:
+        _dispose_qt_objects(app, root, engine)
+
+
+def test_stormforge_volumetric_fog_layer_reports_disabled_reason_for_zero_geometry() -> None:
+    app = _ensure_app()
+    QQuickStyle.setStyle("Basic")
+    workspace_config = load_config(project_root=Path.cwd(), env={})
+    engine = QtQml.QQmlEngine()
+    engine.addImportPath(str(workspace_config.runtime.assets_dir / "qml"))
+    component = QtQml.QQmlComponent(engine)
+
+    harness_qml = """
+import QtQuick 2.15
+import "variants/stormforge"
+
+Item {
+    StormforgeVolumetricFogLayer {
+        id: fog
+        objectName: "zeroSizeFogLayer"
+        width: 0
+        height: 0
+        config: {
+            "enabled": true,
+            "mode": "volumetric",
+            "quality": "medium",
+            "qualitySamples": 14
+        }
+    }
+}
+""".strip()
+
+    root = None
+    try:
+        component.setData(
+            harness_qml.encode("utf-8"),
+            QtCore.QUrl.fromLocalFile(
+                str(
+                    workspace_config.runtime.assets_dir
+                    / "qml"
+                    / "StormforgeFogZeroSizeHarness.qml"
+                )
+            ),
+        )
+        root = component.create()
+        app.processEvents()
+
+        assert component.isReady(), component.errors()
+        assert root is not None
+
+        fog = root.findChild(QtCore.QObject, "zeroSizeFogLayer")
+        assert fog is not None
+        assert fog.property("fogEnabledRequested") is True
+        assert fog.property("fogActive") is False
+        assert fog.property("shaderEnabled") is False
+        assert fog.property("disabledReason") == "zero_geometry"
+        assert int(fog.property("qualitySamples")) == 0
+    finally:
+        _dispose_qt_objects(app, root, engine)
+
+
+def test_stormforge_fog_visual_probe_captures_motion_artifacts() -> None:
+    script_source = Path("scripts/run_stormforge_fog_visual_probe.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "ghost_fog_on_t0.png" in script_source
+    assert "ghost_fog_on_t1.png" in script_source
+    assert "fog_motion_diff.png" in script_source
+    assert '"on_t0_vs_on_t1"' in script_source
+    assert '"motion_shader_capture_was_distinguishable"' in script_source
+    assert '"motion_direction_estimate"' in script_source
+    assert '"estimated_horizontal_shift_pixels"' in script_source
+
+
+def test_stormforge_ghost_fog_fallback_is_explicit_and_non_volumetric() -> None:
+    app = _ensure_app()
+    QQuickStyle.setStyle("Basic")
+    workspace_config = load_config(project_root=Path.cwd(), env={})
+    engine = QtQml.QQmlEngine()
+    engine.addImportPath(str(workspace_config.runtime.assets_dir / "qml"))
+    component = QtQml.QQmlComponent(engine)
+
+    harness_qml = """
+import QtQuick 2.15
+import "variants/stormforge"
+
+Item {
+    width: 920
+    height: 640
+
+    StormforgeGhostShell {
+        objectName: "fallbackFogShell"
+        anchors.fill: parent
+        stormforgeFogConfig: {
+            "enabled": true,
+            "mode": "fallback",
+            "quality": "medium",
+            "intensity": 0.35,
+            "motion": true
+        }
+    }
+}
+""".strip()
+
+    root = None
+    try:
+        with _capture_qt_messages() as messages:
+            component.setData(
+                harness_qml.encode("utf-8"),
+                QtCore.QUrl.fromLocalFile(
+                    str(
+                        workspace_config.runtime.assets_dir
+                        / "qml"
+                        / "StormforgeFogFallbackHarness.qml"
+                    )
+                ),
+            )
+            root = component.create()
+            app.processEvents()
+            QtTest.QTest.qWait(50)
+            app.processEvents()
+
+        assert component.isReady(), component.errors()
+        assert root is not None
+        assert [message for message in messages if "StormforgeFog" in message] == []
+
+        volumetric = root.findChild(QtCore.QObject, "stormforgeVolumetricFogLayer")
+        fallback = root.findChild(QtCore.QObject, "stormforgeFogFallbackLayer")
+        atmosphere_slot = root.findChild(QtCore.QObject, "stormforgeGhostAtmosphereSlot")
+
+        assert volumetric is not None
+        assert volumetric.property("fogMode") == "fallback"
+        assert volumetric.property("active") is False
+        assert fallback is not None
+        assert fallback.property("rendererType") == "fallback"
+        assert fallback.property("active") is True
+        assert fallback.property("animationRunning") is True
+        assert atmosphere_slot is not None
+        assert atmosphere_slot.property("fogActive") is True
+    finally:
+        _dispose_qt_objects(app, root, engine)
+
+
+def test_stormforge_ghost_shell_uses_distinct_low_density_composition() -> None:
+    app = _ensure_app()
+    QQuickStyle.setStyle("Basic")
+    workspace_config = load_config(project_root=Path.cwd(), env={})
+    engine = QtQml.QQmlEngine()
+    engine.addImportPath(str(workspace_config.runtime.assets_dir / "qml"))
+    component = QtQml.QQmlComponent(engine)
+
+    harness_qml = """
+import QtQuick 2.15
+import "variants/stormforge"
+
+Item {
+    width: 960
+    height: 680
+
+    StormforgeGhostShell {
+        id: ghost
+        objectName: "stormforgeGhostHarnessShell"
+        anchors.fill: parent
+        coreBottom: 328
+        messages: [
+            {"role": "user", "speaker": "You", "content": "Open the installer"},
+            {"role": "assistant", "speaker": "Stormhelm", "content": "Approval is required before changing this machine."},
+            {"role": "assistant", "speaker": "Stormhelm", "content": "I can hold here until you confirm."}
+        ]
+        primaryCard: {
+            "title": "Approval Required",
+            "subtitle": "Software control",
+            "body": "Installing software changes this machine.",
+            "resultState": "approval_required",
+            "routeLabel": "Software"
+        }
+        contextCards: [
+            {"title": "Plan ready", "subtitle": "Installer", "body": "Review before execution.", "resultState": "planned"},
+            {"title": "Verification pending", "subtitle": "Truth", "body": "No install claim yet.", "resultState": "unverified"},
+            {"title": "Extra card", "body": "This should stay out of Ghost density.", "resultState": "stale"}
+        ]
+        actionStrip: [
+            {"label": "Open Deck", "localAction": "open_deck", "state": "planned"},
+            {"label": "Cancel", "sendText": "cancel", "state": "blocked"}
+        ]
+        statusLine: "Awaiting approval."
+        connectionLabel: "Signal steady"
+        timeLabel: "14:12"
+        voiceState: {
+            "voice_current_phase": "listening",
+            "voice_anchor_state": "listening",
+            "speaking_visual_active": false
+        }
+    }
+}
+""".strip()
+
+    root = None
+    try:
+        with _capture_qt_messages() as messages:
+            component.setData(
+                harness_qml.encode("utf-8"),
+                QtCore.QUrl.fromLocalFile(
+                    str(
+                        workspace_config.runtime.assets_dir
+                        / "qml"
+                        / "StormforgeGhostHarness.qml"
+                    )
+                ),
+            )
+            root = component.create()
+            app.processEvents()
+            QtTest.QTest.qWait(60)
+            app.processEvents()
+
+        assert component.isReady(), component.errors()
+        assert root is not None
+        assert [message for message in messages if "StormforgeGhost" in message] == []
+
+        shell = root.findChild(QtCore.QObject, "stormforgeGhostHarnessShell")
+        backdrop = root.findChild(QtCore.QObject, "stormforgeGhostBackdrop")
+        stage = root.findChild(QtCore.QObject, "stormforgeGhostStage")
+        anchor_host = root.findChild(QtCore.QObject, "stormforgeAnchorHost")
+        anchor_core = root.findChild(QtCore.QObject, "stormforgeAnchorCore")
+        status_line = root.findChild(QtCore.QObject, "stormforgeGhostStatusLine")
+        transcript = root.findChild(QtCore.QObject, "stormforgeGhostTranscript")
+        card_stack = root.findChild(QtCore.QObject, "stormforgeGhostCardStack")
+        context_region = root.findChild(QtCore.QObject, "stormforgeGhostContextRegion")
+        permission_prompt = root.findChild(QtCore.QObject, "stormforgeGhostPermissionPrompt")
+        action_region = root.findChild(QtCore.QObject, "stormforgeGhostActionRegion")
+        action_strip = root.findChild(QtCore.QObject, "stormforgeGhostActionStrip")
+        atmosphere_slot = root.findChild(QtCore.QObject, "stormforgeGhostAtmosphereSlot")
+        fog = root.findChild(QtCore.QObject, "stormforgeVolumetricFogLayer")
+
+        assert shell is not None
+        assert shell.property("stormforgeGhostComposition") == "UI-P2S"
+        assert backdrop is not None
+        assert stage is not None
+        assert anchor_host is not None
+        assert anchor_core is not None
+        assert status_line is not None
+        assert transcript is not None
+        assert card_stack is not None
+        assert context_region is not None
+        assert permission_prompt is not None
+        assert action_region is not None
+        assert action_strip is not None
+        assert atmosphere_slot is not None
+        assert anchor_host.property("anchorHostMode") == "core"
+        assert anchor_host.property("finalAnchorImplemented") is True
+        assert float(anchor_host.property("width")) >= 180.0
+        assert float(anchor_host.property("height")) > float(anchor_host.property("width"))
+        assert anchor_host.property("resolvedState") == "approval_required"
+        assert anchor_core.property("resolvedState") == "approval_required"
+        assert anchor_core.property("motionProfile") == "approval_halo"
+        assert status_line.property("stateTone") == "approval_required"
+        assert int(transcript.property("visibleMessageCount")) == 2
+        assert int(card_stack.property("visibleCardCount")) == 2
+        assert int(context_region.property("visibleCardCount")) == 2
+        assert permission_prompt.property("promptTone") == "approval_required"
+        assert action_region.property("actionCount") == 2
+        assert int(action_strip.property("actionCount")) == 2
+        assert atmosphere_slot.property("fogImplemented") is True
+        assert atmosphere_slot.property("fogActive") is False
+        assert fog is not None
+        assert fog.property("active") is False
+    finally:
+        _dispose_qt_objects(app, root, engine)
+
+
+def test_stormforge_ghost_shell_does_not_import_classic_or_deck_fog() -> None:
+    shell_source = (
+        Path.cwd()
+        / "assets"
+        / "qml"
+        / "variants"
+        / "stormforge"
+        / "StormforgeGhostShell.qml"
+    ).read_text(encoding="utf-8")
+
+    assert "ClassicGhostShell" not in shell_source
+    assert 'import "../classic"' not in shell_source
+    assert "StormforgeAnchorHost" in shell_source
+    assert "StormforgeVoiceCore" not in shell_source
+    assert "StormforgeVolumetricFogLayer" in shell_source
+    assert "StormforgeFogFallbackLayer" in shell_source
+    assert "CommandDeck" not in shell_source
+    assert "Particle" not in shell_source
+
+
+def test_stormforge_ghost_merge_ownership_boundaries_are_clean() -> None:
+    stormforge_dir = Path.cwd() / "assets" / "qml" / "variants" / "stormforge"
+    shell_source = (stormforge_dir / "StormforgeGhostShell.qml").read_text(encoding="utf-8")
+    stage_source = (stormforge_dir / "StormforgeGhostStage.qml").read_text(encoding="utf-8")
+    host_source = (stormforge_dir / "StormforgeAnchorHost.qml").read_text(encoding="utf-8")
+    core_source = (stormforge_dir / "StormforgeAnchorCore.qml").read_text(encoding="utf-8")
+
+    assert "StormforgeAnchorHost" in shell_source
+    assert "StormforgeAnchorCore {" not in shell_source
+    assert "StormforgeVoiceCore" not in shell_source
+    assert "StormforgeVolumetricFogLayer" not in stage_source
+    assert "StormforgeAnchorCore" not in stage_source
+
+    assert 'componentRole: "stormforge_anchor_host"' in host_source
+    assert "ownsAnchorAnimation: false" in host_source
+    assert "StormforgeAnchorCore" in host_source
+    assert "Canvas" not in host_source
+    assert "NumberAnimation" not in host_source
+    assert "Timer" not in host_source
+
+    assert 'componentRole: "stormforge_anchor_core"' in core_source
+    assert "Canvas" in core_source
+    assert "Timer" in core_source
+    assert "StormforgeGhostStage" not in core_source
+    assert "StormforgeVolumetricFogLayer" not in core_source
+
+
+def test_stormforge_ghost_merge_z_layers_and_fog_slot_contract() -> None:
+    app = _ensure_app()
+    QQuickStyle.setStyle("Basic")
+    workspace_config = load_config(project_root=Path.cwd(), env={})
+    engine = QtQml.QQmlEngine()
+    engine.addImportPath(str(workspace_config.runtime.assets_dir / "qml"))
+    component = QtQml.QQmlComponent(engine)
+
+    harness_qml = """
+import QtQuick 2.15
+import "variants/stormforge"
+
+Item {
+    width: 960
+    height: 680
+
+    StormforgeGhostShell {
+        id: ghost
+        objectName: "mergeGhostShell"
+        anchors.fill: parent
+        stormforgeFogConfig: {
+            "enabled": true,
+            "mode": "volumetric",
+            "quality": "medium",
+            "intensity": 0.35
+        }
+        primaryCard: {
+            "title": "Plan ready",
+            "body": "No execution claim yet.",
+            "resultState": "planned"
+        }
+        voiceState: {
+            "voice_anchor_state": "speaking",
+            "voice_current_phase": "playback_active",
+            "speaking_visual_active": true,
+            "active_playback_status": "playing"
+        }
+    }
+}
+""".strip()
+
+    root = None
+    try:
+        with _capture_qt_messages() as messages:
+            component.setData(
+                harness_qml.encode("utf-8"),
+                QtCore.QUrl.fromLocalFile(
+                    str(
+                        workspace_config.runtime.assets_dir
+                        / "qml"
+                        / "StormforgeGhostMergeHarness.qml"
+                    )
+                ),
+            )
+            root = component.create()
+            app.processEvents()
+            QtTest.QTest.qWait(80)
+            app.processEvents()
+
+        assert component.isReady(), component.errors()
+        assert root is not None
+        assert [message for message in messages if "Stormforge" in message] == []
+
+        stage = root.findChild(QtCore.QObject, "stormforgeGhostStage")
+        atmosphere = root.findChild(QtCore.QObject, "stormforgeGhostAtmosphereSlot")
+        instrumentation = root.findChild(QtCore.QObject, "stormforgeGhostInstrumentationLayer")
+        anchor_host = root.findChild(QtCore.QObject, "stormforgeAnchorHost")
+        anchor_core = root.findChild(QtCore.QObject, "stormforgeAnchorCore")
+        status_line = root.findChild(QtCore.QObject, "stormforgeGhostStatusLine")
+        card_stack = root.findChild(QtCore.QObject, "stormforgeGhostCardStack")
+        action_region = root.findChild(QtCore.QObject, "stormforgeGhostActionRegion")
+        fog = root.findChild(QtCore.QObject, "stormforgeVolumetricFogLayer")
+
+        assert stage is not None
+        assert atmosphere is not None
+        assert instrumentation is not None
+        assert anchor_host is not None
+        assert anchor_core is not None
+        assert status_line is not None
+        assert card_stack is not None
+        assert action_region is not None
+        assert fog is not None
+
+        assert int(stage.property("layerBackdrop")) < int(stage.property("layerAtmosphere"))
+        assert int(stage.property("layerAtmosphere")) < int(stage.property("layerInstrumentation"))
+        assert int(stage.property("layerInstrumentation")) < int(stage.property("layerAnchor"))
+        assert int(stage.property("layerAnchor")) < int(stage.property("layerTranscript"))
+        assert int(stage.property("layerTranscript")) < int(stage.property("layerCards"))
+        assert int(stage.property("layerCards")) < int(stage.property("layerActions"))
+        assert int(stage.property("layerActions")) < int(stage.property("layerForegroundAtmosphere"))
+
+        assert float(atmosphere.property("z")) < float(stage.property("z"))
+        assert float(instrumentation.property("z")) == float(stage.property("layerInstrumentation"))
+        assert float(anchor_host.property("z")) == float(stage.property("layerAnchor"))
+        assert float(status_line.property("z")) == float(stage.property("layerTranscript"))
+        assert float(card_stack.property("z")) == float(stage.property("layerCards"))
+        assert float(action_region.property("z")) == float(stage.property("layerActions"))
+        assert anchor_host.property("ownsAnchorAnimation") is False
+        assert anchor_core.property("finalAnchorImplemented") is True
+        assert atmosphere.property("fogActive") is True
+        assert fog.property("active") is True
+    finally:
+        _dispose_qt_objects(app, root, engine)
+
+
+def test_stormforge_ghost_docs_match_merge_ownership_contract() -> None:
+    docs = (Path.cwd() / "docs" / "ui-surfaces.md").read_text(encoding="utf-8")
+    required_phrases = [
+        "UI-P2M merge seam contract",
+        "`StormforgeGhostStage.qml` owns Ghost stage layer constants",
+        "`StormforgeAnchorHost.qml` owns anchor placement and integration",
+        "`StormforgeAnchorCore.qml` owns anchor identity, state animation",
+        "`stormforgeGhostAtmosphereSlot` remains the only Ghost shell fog host",
+        "`ownsAnchorAnimation: false`",
+    ]
+
+    for phrase in required_phrases:
+        assert phrase in docs
 
 
 def _wait_for_render_confirmation(

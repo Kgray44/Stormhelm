@@ -2,7 +2,7 @@
 
 Stormhelm live browser provider checks are explicit local diagnostics for Obscura CLI, Obscura CDP, and Playwright semantic observation. They are disabled by default, skipped in normal CI, and do not change the default production posture.
 
-These checks prove live provider paths can run when a developer intentionally enables them. The live browser diagnostic profile does not enable Addition 5 click/focus action gates; action execution remains a separate Screen Awareness path requiring explicit config and trust approval.
+These checks prove live provider paths can run when a developer intentionally enables them. The live browser diagnostic profile does not enable Addition 5/6 click/focus/type action gates; action execution remains a separate Screen Awareness path requiring explicit config and trust approval.
 
 ## Scope
 
@@ -19,7 +19,7 @@ Still out of scope:
 
 - enabling live providers by default
 - requiring Obscura or Playwright in normal CI
-- typing, scrolling, form filling, form submission, login, cookies/session reuse, downloads, payment flows, CAPTCHA/anti-bot bypass, user-profile reuse, visible-screen verification, truth verification, workflow replay, and arbitrary public-site clicking
+- typing/action execution in the live diagnostic profile, scrolling, form filling, form submission, login, cookies/session reuse, downloads, payment flows, CAPTCHA/anti-bot bypass, user-profile reuse, visible-screen verification, truth verification, workflow replay, and arbitrary public-site clicking/typing
 
 ## Environment Gates
 
@@ -359,7 +359,7 @@ On the April 30, 2026 local Playwright Addition 5 validation run:
 - Click/focus action gates were enabled only inside the explicit smoke harness, not in the live browser diagnostic profile.
 - The click target was the fixture `Continue` button. Trust approval used a once grant, the Playwright click command was issued, the warning disappeared, and semantic before/after comparison returned `verified_supported`.
 - The focus target was the fixture `Email` field. Trust approval used a once grant, the Playwright focus command was issued, no typing occurred, and the result was `completed_unverified` because the semantic snapshots did not provide enough focus-state evidence.
-- Cleanup status was `closed`, `user_profile_used = false`, and forbidden capabilities for typing, scrolling, form submit, login, cookies, and user profiles stayed false.
+- Cleanup status was `closed`, `user_profile_used = false`, and forbidden capabilities for typing, scrolling, form submit, login, cookies, and user profiles stayed false in the live diagnostic profile.
 
 Report file from this run:
 
@@ -369,12 +369,50 @@ On the April 30, 2026 Playwright Addition 5.1 hardening pass:
 
 - The click/focus execution path was hardened in fake-backed normal-CI tests for stale plans, target-fingerprint drift, denied approvals, expired grants, consumed once grants, cross-action approval mismatch, locator ambiguity, role/selector disagreement, after-observation failure classification, cleanup status, and bounded event sequence.
 - No new live public-site action path was added. Live action smoke remains fixture-only and opt-in when run manually.
+
+On the Addition 6 safe-field typing pass:
+
+- The live browser diagnostic profile still keeps action execution disabled; it does not enable `browser.input.type_text`.
+- Safe-field typing is covered by the Screen Awareness action execution path and fake-backed fixture tests unless a future dedicated fixture live smoke is run.
+- Any live typing smoke must use an isolated fixture/local page, explicit type gates, exact trust approval, redacted text handling, and no form submission, login, cookies, profiles, payment, CAPTCHA, or public-site typing.
 - Playwright command return is not treated as success; semantic before/after evidence must support the expected outcome or the result remains partial, unsupported, ambiguous, or `completed_unverified`.
 - A live fixture rerun closed contexts and browsers before the Playwright manager exited, eliminating the previous `Event loop is closed! Is Playwright already stopped?` cleanup warning.
 
 Report file from this run:
 
 - `reports/live_browser_integration/addition-playwright-5.1-live-click-focus-hardening.json`
+- `reports/live_browser_integration/addition-playwright-6-live-type-safe-field.json`
+
+On the Addition 6.1 safe-field typing hardening pass:
+
+- A local `127.0.0.1` fixture smoke used explicit type gates and a temporary isolated Playwright context.
+- Safe-field replace typing returned `verified_supported`, with only `[redacted text, 31 chars]` in the report.
+- Readonly and disabled fields blocked with `target_readonly` and `target_disabled`; password/sensitive typing blocked before browser launch with `sensitive_text_blocked`.
+- The fixture submit counter stayed `0`; no Enter/form-submit path was used.
+- The report declares only `browser.input.type_text` for the gated smoke and keeps scroll, form submit, login, cookies, profiles, payment, visible-screen verification, truth verification, and workflow replay forbidden.
+
+Report file from this run:
+
+- `reports/live_browser_integration/addition-playwright-6.1-live-type-hardening.json`
+
+On the Addition 7/7.1 safe choice-control pass:
+
+- The normal live browser diagnostic profile still keeps choice action execution disabled; it does not enable `browser.input.check`, `browser.input.uncheck`, or `browser.input.select_option`.
+- Safe choice-control execution is covered by the Screen Awareness action execution path and fake-backed fixture tests unless a dedicated fixture live smoke is run.
+- Any live choice smoke must use an isolated fixture/local page, explicit choice gates, exact TrustService approval, bounded/redacted option summaries, no form submission, no login/cookies/profiles/payment/CAPTCHA, and no public-site automation.
+- Checkbox/radio/dropdown command return is not treated as success; semantic before/after evidence must support the expected checked or selected state, and unexpected submit/navigation is not success.
+- Addition 7.1 specifically requires target and option revalidation immediately before execution. Missing, disabled, hidden, type-changed, sensitive, duplicate, drifted, or stale-ordinal targets/options block before Playwright changes a control.
+- Already-correct checkbox/dropdown states are reported as no-op evidence with `action_attempted = false`. Unexpected warning/dialog additions downgrade the result instead of becoming `verified_supported`.
+- Optional local fixture smoke `reports/live_browser_integration/addition-playwright-7.1-live-choice-hardening.json` covered safe checkbox check, dropdown select, already-selected no-op, disabled checkbox block, sensitive terms block, option-drift block, cleanup closure, and forbidden capability absence.
+
+On the Addition 8 bounded scroll pass:
+
+- The normal live browser diagnostic profile still keeps scroll action execution disabled; it does not enable `browser.input.scroll` or `browser.input.scroll_to_target`.
+- Safe scroll execution is covered by the Screen Awareness action execution path and fake-backed fixture tests unless a dedicated fixture live smoke is run.
+- Any live scroll smoke must use an isolated fixture/local page, explicit scroll gates, exact TrustService approval, bounded direction/amount/max-attempt metadata, no user profile, no cookies, no public-site automation, and no click/type/select/submit chain after scrolling.
+- `scroll_to_target` stops when the target is already present, found within bounded attempts, not found within the limit, ambiguous, or sensitive. Target-not-found and ambiguous outcomes are not success.
+- Semantic before/after observations and safe scroll-position evidence support `verified_supported`; Playwright wheel command return alone is not verification.
+- Optional local fixture smoke `reports/live_browser_integration/addition-playwright-8-live-scroll.json` covered a below-fold target with `verified_supported`, a bounded target-not-found result, a sensitive/login-payment page block before launch, no forbidden capabilities, no submit side effect, and no lingering browser-like processes.
 
 ## Troubleshooting
 

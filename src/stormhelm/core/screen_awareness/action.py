@@ -933,10 +933,18 @@ class DeterministicActionEngine:
     def result_from_browser_semantic_execution(self, browser_result: Any) -> ActionExecutionResult:
         """Represent provider-specific browser execution in the canonical action-result language."""
         action_kind = _normalize_text(str(getattr(browser_result, "action_kind", "") or "click"))
-        try:
-            intent = ActionIntent(action_kind)
-        except ValueError:
-            intent = ActionIntent.CLICK
+        browser_intent_map = {
+            "check": ActionIntent.SELECT,
+            "uncheck": ActionIntent.SELECT,
+            "select_option": ActionIntent.SELECT,
+        }
+        if action_kind in browser_intent_map:
+            intent = browser_intent_map[action_kind]
+        else:
+            try:
+                intent = ActionIntent(action_kind)
+            except ValueError:
+                intent = ActionIntent.CLICK
         target_summary = dict(getattr(browser_result, "target_summary", {}) or {})
         label = str(target_summary.get("name") or target_summary.get("label") or target_summary.get("candidate_id") or "browser target").strip()
         role = self._browser_target_role(target_summary.get("role"))
@@ -971,6 +979,25 @@ class DeterministicActionEngine:
                 "browser_result_id": str(getattr(browser_result, "result_id", "") or ""),
                 "browser_status": str(getattr(browser_result, "status", "") or ""),
                 "claim_ceiling": str(getattr(browser_result, "claim_ceiling", "") or "browser_semantic_action_execution"),
+                **(
+                    {
+                        "text": str(getattr(browser_result, "text_redacted_summary", "") or "[redacted text]"),
+                        "typed_text_redacted": True,
+                        "text_length": int(getattr(browser_result, "text_length", 0) or 0),
+                    }
+                    if intent == ActionIntent.TYPE_TEXT
+                    else {}
+                ),
+                **(
+                    {
+                        "choice_action_kind": action_kind,
+                        "option_redacted_summary": str(getattr(browser_result, "option_redacted_summary", "") or ""),
+                        "option_ordinal": int(getattr(browser_result, "option_ordinal", 0) or 0),
+                        "expected_checked_state": getattr(browser_result, "expected_checked_state", None),
+                    }
+                    if action_kind in {"check", "uncheck", "select_option"}
+                    else {}
+                ),
             },
             preview_summary=f'Playwright browser {intent.value.replace("_", " ")} target: "{label}".',
             verification_link=ActionVerificationLink(
@@ -982,6 +1009,7 @@ class DeterministicActionEngine:
             grounding_reused=True,
             navigation_reused=False,
             verification_reused=True,
+            text_payload_redacted=intent == ActionIntent.TYPE_TEXT,
         )
         raw_status = str(getattr(browser_result, "status", "") or "").strip()
         raw_status_key = raw_status.lower()
@@ -1030,7 +1058,11 @@ class DeterministicActionEngine:
                     "after_observation_id": str(getattr(browser_result, "after_observation_id", "") or ""),
                     "comparison_result_id": str(getattr(browser_result, "comparison_result_id", "") or ""),
                     "cleanup_status": str(getattr(browser_result, "cleanup_status", "") or ""),
+                    "typed_text_redacted": bool(getattr(browser_result, "typed_text_redacted", False)),
+                    "text_redacted_summary": str(getattr(browser_result, "text_redacted_summary", "") or ""),
+                    "text_length": int(getattr(browser_result, "text_length", 0) or 0),
                 },
+                typed_text_redacted=bool(getattr(browser_result, "typed_text_redacted", False)),
             )
         return self._result(
             request=request,

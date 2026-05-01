@@ -230,14 +230,22 @@ def apply_live_browser_profile(config: AppConfig, gates: LiveBrowserIntegrationG
         playwright.allow_click = False
         playwright.allow_focus = False
         playwright.allow_type_text = False
+        playwright.allow_check = False
+        playwright.allow_uncheck = False
+        playwright.allow_select_option = False
         playwright.allow_scroll = False
+        playwright.allow_scroll_to_target = False
         playwright.allow_form_fill = False
         playwright.allow_form_submit = False
         playwright.allow_login = False
         playwright.allow_cookies = False
         playwright.allow_user_profile = False
+        playwright.allow_payment = False
         playwright.allow_screenshots = False
         playwright.allow_dev_actions = False
+        playwright.allow_dev_type_text = False
+        playwright.allow_dev_choice_controls = False
+        playwright.allow_dev_scroll = False
     return live_config
 
 

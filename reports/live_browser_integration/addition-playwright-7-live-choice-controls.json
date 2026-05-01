@@ -1,0 +1,135 @@
+{
+  "addition": "playwright-7-choice-controls",
+  "cases": {
+    "disabled_checkbox_blocked": {
+      "action_attempted": false,
+      "action_completed": false,
+      "action_phrase": "check Disabled Choice",
+      "claim_ceiling": "browser_semantic_action_execution",
+      "cleanup_status": "closed",
+      "declared_capabilities": [
+        "browser.input.check",
+        "browser.input.uncheck",
+        "browser.input.select_option"
+      ],
+      "error_code": "target_disabled",
+      "expected_checked_state": true,
+      "limitations": [
+        "target_blocked",
+        "target_disabled"
+      ],
+      "option_redacted_summary": "",
+      "plan_state": "preview_only",
+      "status": "blocked",
+      "target": "Disabled Choice checkbox",
+      "verification_status": ""
+    },
+    "dropdown_select_canada": {
+      "action_attempted": true,
+      "action_completed": true,
+      "action_phrase": "select Canada",
+      "claim_ceiling": "browser_semantic_action_execution",
+      "cleanup_status": "closed",
+      "declared_capabilities": [
+        "browser.input.check",
+        "browser.input.uncheck",
+        "browser.input.select_option"
+      ],
+      "error_code": "",
+      "expected_checked_state": null,
+      "limitations": [
+        "isolated_temporary_browser_context",
+        "no_user_profile",
+        "not_visible_screen_verification",
+        "not_truth_verified",
+        "semantic_comparison_only",
+        "not_user_visible_screen",
+        "live_semantic_observation_only"
+      ],
+      "option_redacted_summary": "Canada",
+      "plan_state": "preview_only",
+      "status": "verified_supported",
+      "target": "Country dropdown",
+      "verification_status": "supported"
+    },
+    "safe_checkbox_check": {
+      "action_attempted": true,
+      "action_completed": true,
+      "action_phrase": "check Newsletter",
+      "claim_ceiling": "browser_semantic_action_execution",
+      "cleanup_status": "closed",
+      "declared_capabilities": [
+        "browser.input.check",
+        "browser.input.uncheck",
+        "browser.input.select_option"
+      ],
+      "error_code": "",
+      "expected_checked_state": true,
+      "limitations": [
+        "isolated_temporary_browser_context",
+        "no_user_profile",
+        "not_visible_screen_verification",
+        "not_truth_verified",
+        "semantic_comparison_only",
+        "not_user_visible_screen",
+        "live_semantic_observation_only"
+      ],
+      "option_redacted_summary": "",
+      "plan_state": "preview_only",
+      "status": "verified_supported",
+      "target": "Newsletter checkbox",
+      "verification_status": "supported"
+    },
+    "sensitive_terms_blocked": {
+      "action_attempted": false,
+      "action_completed": false,
+      "action_phrase": "check Terms agreement",
+      "claim_ceiling": "browser_semantic_action_execution",
+      "cleanup_status": "not_started",
+      "declared_capabilities": [
+        "browser.input.check",
+        "browser.input.uncheck",
+        "browser.input.select_option"
+      ],
+      "error_code": "restricted_context_deferred",
+      "expected_checked_state": true,
+      "limitations": [
+        "preview_only",
+        "action_execution_deferred",
+        "no_actions",
+        "sensitive_or_restricted_context",
+        "action_arguments_redacted",
+        "plan_only",
+        "operator_approval_required",
+        "no_action_attempted"
+      ],
+      "option_redacted_summary": "",
+      "plan_state": "blocked",
+      "status": "blocked",
+      "target": "Terms agreement checkbox",
+      "verification_status": ""
+    }
+  },
+  "choice_gates_enabled_for_smoke_only": true,
+  "claim_ceiling": "browser_semantic_action_execution",
+  "cookies_included": false,
+  "declared_action_capabilities": [
+    "browser.input.check",
+    "browser.input.uncheck",
+    "browser.input.select_option"
+  ],
+  "fixture_url": "http://127.0.0.1:53459/choice.html",
+  "forbidden_capabilities_false": {
+    "browser.cookies.read": true,
+    "browser.form.submit": true,
+    "browser.input.scroll": true,
+    "browser.input.type_text": true,
+    "browser.login": true,
+    "browser.payment": true,
+    "browser.user_profile.attach": true
+  },
+  "isolated_context_used": true,
+  "raw_dom_included": false,
+  "submit_counter_expected_unchanged": true,
+  "user_profile_used": false
+}

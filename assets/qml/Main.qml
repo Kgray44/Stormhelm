@@ -10,6 +10,7 @@ ApplicationWindow {
 
     readonly property var bridge: stormhelmBridge
     readonly property string uiVisualVariant: bridge ? bridge.uiVisualVariant : "classic"
+    readonly property bool stormforgeVisualVariant: uiVisualVariant === "stormforge"
     function mix(a, b, t) { return a + (b - a) * t }
     function normalizedRect(rectValue) {
         if (!rectValue || width <= 0 || height <= 0) {
@@ -46,6 +47,7 @@ ApplicationWindow {
     readonly property real deckStripWidth: Math.min(root.width * 0.52, 820)
     readonly property var ghostAdaptiveStyle: bridge ? bridge.ghostAdaptiveStyle : ({})
     readonly property var ghostPlacement: bridge ? bridge.ghostPlacement : ({})
+    readonly property var stormforgeFogConfig: bridge ? bridge.uiStormforgeFog : ({})
     readonly property real ghostOffsetX: root.ghostMode ? root.ghostPlacementNumber("offsetX", 0) : 0
     readonly property real ghostOffsetY: root.ghostMode ? root.ghostPlacementNumber("offsetY", 0) : 0
     property real typingDarkProgress: bridge && bridge.ghostCaptureActive && root.ghostMode ? 1.0 : 0.0
@@ -357,6 +359,7 @@ ApplicationWindow {
         adaptiveSecondaryTextContrast: root.ghostStyleNumber("secondaryTextContrast", 0.05)
         adaptiveShadowOpacity: root.ghostStyleNumber("shadowOpacity", 0.1)
         adaptiveBackdropOpacity: root.ghostStyleNumber("backdropOpacity", 0.04)
+        stormforgeFogConfig: root.stormforgeFogConfig
         visible: opacity > 0.02
         opacity: (1 - root.deckProgress) * root.ghostRevealProgress
         scale: (1 - root.deckProgress * 0.018) * root.mix(0.986, 1.0, root.ghostRevealProgress)
@@ -453,7 +456,9 @@ ApplicationWindow {
 
     Item {
         id: ghostCenterCluster
+        objectName: "sharedGhostCenterCluster"
         anchors.fill: parent
+        visible: !root.stormforgeVisualVariant
         z: 34
 
         transform: Translate {

@@ -489,6 +489,7 @@ class BrowserSemanticControl:
     readonly: bool | None = None
     value_summary: str = ""
     risk_hint: str = ""
+    options: list[dict[str, Any]] = field(default_factory=list)
     confidence: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
@@ -614,6 +615,7 @@ class BrowserSemanticActionPreview:
     target_role: str = ""
     target_name: str = ""
     target_label: str = ""
+    target_options: list[dict[str, Any]] = field(default_factory=list)
     action_kind: str = "unsupported"
     preview_state: str = "preview_only"
     action_supported_now: bool = False
@@ -641,6 +643,7 @@ class BrowserSemanticActionPlan:
     target_candidate: dict[str, Any] = field(default_factory=dict)
     action_kind: str = "unsupported"
     action_arguments_redacted: dict[str, Any] = field(default_factory=dict)
+    action_arguments_private: dict[str, Any] = field(default_factory=dict, repr=False)
     preconditions: list[str] = field(default_factory=lambda: ["fresh_semantic_observation_required", "operator_approval_required"])
     approval_request_hint: str = "Future execution would require approval."
     adapter_capability_required: str = ""
@@ -654,7 +657,9 @@ class BrowserSemanticActionPlan:
     limitations: list[str] = field(default_factory=lambda: ["preview_only", "action_execution_deferred", "no_actions"])
 
     def to_dict(self) -> dict[str, Any]:
-        return _serialize(self)
+        payload = _serialize(self)
+        payload.pop("action_arguments_private", None)
+        return payload
 
 
 @dataclass(slots=True)
@@ -672,6 +677,20 @@ class BrowserSemanticActionExecutionRequest:
     task_id: str = ""
     source_provider: str = "playwright"
     expected_outcome: list[str] = field(default_factory=list)
+    typed_text_redacted: bool = False
+    text_fingerprint: str = ""
+    text_length: int = 0
+    text_classification: str = ""
+    text_redacted_summary: str = ""
+    option_redacted_summary: str = ""
+    option_fingerprint: str = ""
+    option_ordinal: int = 0
+    expected_checked_state: bool | None = None
+    scroll_direction: str = ""
+    scroll_amount_pixels: int = 0
+    scroll_max_attempts: int = 0
+    scroll_target_phrase: str = ""
+    scroll_fingerprint: str = ""
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     def to_dict(self) -> dict[str, Any]:
@@ -701,6 +720,21 @@ class BrowserSemanticActionExecutionResult:
     approval_grant_id: str = ""
     provider: str = "playwright"
     claim_ceiling: str = CLAIM_CEILING_BROWSER_SEMANTIC_ACTION_EXECUTION
+    typed_text_redacted: bool = False
+    text_fingerprint: str = ""
+    text_length: int = 0
+    text_classification: str = ""
+    text_redacted_summary: str = ""
+    option_redacted_summary: str = ""
+    option_fingerprint: str = ""
+    option_ordinal: int = 0
+    expected_checked_state: bool | None = None
+    scroll_direction: str = ""
+    scroll_amount_pixels: int = 0
+    scroll_max_attempts: int = 0
+    scroll_target_phrase: str = ""
+    scroll_target_found: bool = False
+    scroll_fingerprint: str = ""
     limitations: list[str] = field(default_factory=list)
     error_code: str = ""
     bounded_error_message: str = ""

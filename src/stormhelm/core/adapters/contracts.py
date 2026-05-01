@@ -943,8 +943,8 @@ def default_adapter_contract_registry() -> AdapterContractRegistry:
             family="screen_awareness",
             description=(
                 "Provides Playwright-backed browser semantic observation, grounding, "
-                "comparison, and runtime-gated click/focus execution for Screen Awareness "
-                "without typing, login context, cookies, truth verification, or visible-screen claims."
+                "comparison, and runtime-gated click/focus/safe-field typing/choice-control/bounded-scroll execution for Screen Awareness "
+                "without form submission, login context, cookies, truth verification, or visible-screen claims."
             ),
             observation_modes=[
                 "browser.semantic_observe",
@@ -957,7 +957,13 @@ def default_adapter_contract_registry() -> AdapterContractRegistry:
                 "browser.report_title",
                 "browser.report_visible_controls",
             ],
-            action_modes=["semantic_observation", "click_focus_execution_runtime_gated"],
+            action_modes=[
+                "semantic_observation",
+                "click_focus_execution_runtime_gated",
+                "safe_type_text_execution_runtime_gated",
+                "safe_choice_controls_execution_runtime_gated",
+                "bounded_scroll_execution_runtime_gated",
+            ],
             artifact_modes=[
                 "browser_semantic_observation",
                 "accessibility_snapshot_summary",
@@ -973,11 +979,19 @@ def default_adapter_contract_registry() -> AdapterContractRegistry:
                 "backend_owned",
                 "disabled_by_default",
                 "click_focus_disabled_by_default",
-                "trust_required_for_click_focus",
+                "type_text_disabled_by_default",
+                "choice_controls_disabled_by_default",
+                "scroll_disabled_by_default",
+                "trust_required_for_click_focus_type_text_choice_controls_scroll",
+                "raw_typed_text_redacted",
                 "isolated_context_only",
+                "bounded_scroll_only",
+                "no_scroll_side_effect_actions",
                 "no_form_fill",
+                "no_form_submit",
                 "no_login",
                 "no_cookies",
+                "no_payment",
                 "no_user_profile",
                 "no_browser_launch_by_default",
                 "no_visible_screen_claim",
@@ -989,7 +1003,12 @@ def default_adapter_contract_registry() -> AdapterContractRegistry:
                 "dependency_missing_explicit",
                 "semantic_snapshot_unavailable",
                 "ambiguous_grounding_explicit",
-                "approval_required_for_click_focus",
+                "approval_required_for_click_focus_type_text_choice_controls",
+                "approval_required_for_scroll",
+                "sensitive_text_blocked",
+                "sensitive_choice_blocked",
+                "sensitive_scroll_page_blocked",
+                "scroll_target_not_found_bounded",
                 "action_result_requires_semantic_comparison",
             ],
             trust_tier=TrustTier.LOCAL_BROWSER_SEMANTIC_ADAPTER,
@@ -998,7 +1017,7 @@ def default_adapter_contract_registry() -> AdapterContractRegistry:
                 preview_allowed=True,
                 suggested_scope="once",
                 available_scopes=["once", "session", "task"],
-                note="Click/focus execution is available only when runtime config gates declare it and trust approval is granted.",
+                note="Click/focus/safe-field typing/safe choice-control/bounded-scroll execution is available only when runtime config gates declare it and trust approval is granted.",
             ),
             verification=VerificationDescriptor(
                 posture="browser_semantic_observation_only",
