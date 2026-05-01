@@ -2043,6 +2043,23 @@ class PlannerV2:
                 active_request_state=active_request_state,
                 recent_tool_results=recent_tool_results,
             )
+        if self._browser_semantic_control_signal(text):
+            action_like = bool(
+                re.search(r"\b(?:click|press|focus|type|enter|submit|check|uncheck|select)\b", text)
+            )
+            frame.operation = "execute" if action_like else "inspect"
+            frame.target_type = "visible_ui"
+            frame.target_text = self._strip_known_verbs(frame.raw_text) or "browser semantic target"
+            frame.context_reference = "visible_target"
+            frame.context_status = "missing"
+            frame.risk_class = "direct_ui_action" if action_like else "read_only"
+            frame.native_owner_hint = "screen_awareness"
+            frame.candidate_route_families = ["screen_awareness"]
+            frame.generic_provider_allowed = False
+            frame.generic_provider_reason = "native_route_candidate_present"
+            frame.clarification_needed = False
+            frame.clarification_reason = ""
+            frame.extracted_entities["source_case"] = "browser_semantic_control"
         if self._ambiguous_deictic_clarification_signal(frame, active_request_state):
             self._set_context_clarification(
                 frame,
@@ -2217,8 +2234,6 @@ class PlannerV2:
         stage = str(parameters.get("request_stage") or "").strip().lower()
         pending_preview = parameters.get("pending_preview") if isinstance(parameters.get("pending_preview"), dict) else {}
         pending_source = str(pending_preview.get("source_case") or "").strip().lower()
-        if frame.native_owner_hint == "context_clarification":
-            return ""
         if not self._active_state_is_reusable(active_request_state):
             return ""
         if self._explicit_confirmation_signal(frame.normalized_text) and pending_source == "routine_save":
@@ -3075,6 +3090,8 @@ class PlannerV2:
             return True
         if self._camera_comparison_signal(text):
             return True
+        if self._camera_guidance_signal(text):
+            return True
         return False
 
     def _camera_comparison_signal(self, text: str) -> bool:
@@ -3096,18 +3113,41 @@ class PlannerV2:
             return True
         return False
 
+    def _camera_guidance_signal(self, text: str) -> bool:
+        if re.search(r"\b(?:in\s+general|shutter\s+speed|aperture|iso|how\s+do\s+cameras\s+focus|how\s+does\s+a\s+camera\s+focus)\b", text):
+            return False
+        guidance_action = re.search(
+            r"\b(?:retake|capture\s+better|better\s+(?:picture|photo|image|shot|still)|clearer\s+(?:picture|photo|image|shot|still)|see\s+better|read\s+it|why\s+can(?:'|â€™)??t\s+you\s+read|move\s+closer|what\s+angle|what\s+do\s+you\s+need\s+to\s+see|guide\s+me\s+to\s+capture)\b",
+            text,
+        )
+        if not guidance_action:
+            return False
+        if re.search(r"\b(?:why\s+can(?:'|â€™)??t\s+you\s+read|read\s+it|see\s+better)\b", text) and not re.search(
+            r"\b(?:camera|photo|picture|image|shot|still|capture|part|label|marking|connector|resistor|solder|pcb|board)\b",
+            text,
+        ):
+            return False
+        return bool(
+            re.search(
+                r"\b(?:this|that|it|camera|photo|picture|image|shot|still|capture|part|label|marking|connector|resistor|solder|pcb|board)\b",
+                text,
+            )
+        )
+
     def _camera_conceptual_or_settings_near_miss(self, text: str) -> bool:
-        if re.search(r"\b(?:open|find|search|install|update|driver|drivers|settings|privacy settings)\b.{0,24}\bcamera\b", text):
+        if re.search(r"\b(?:open|find|search|install|update|driver|drivers|settings|privacy settings)\b.{0,24}\b(?:camera|webcam)\b", text):
             return True
-        if re.search(r"\bcamera\b.{0,24}\b(?:settings|drivers|driver|online)\b", text):
+        if re.search(r"\b(?:camera|webcam)\b.{0,24}\b(?:settings|drivers|driver|online)\b", text):
             return True
-        if re.search(r"\b(?:what\s+is\s+a|how\s+do|how\s+does|explain|examples?|show\s+me\s+examples?)\b.{0,48}\b(?:camera|cameras|connector|connectors|resistor|resistors|solder\s+joint|color\s+codes?)\b", text):
+        if re.search(r"\b(?:what\s+is\s+a|how\s+do|how\s+does|how\s+do\s+i\s+use|explain|examples?|show\s+me\s+examples?)\b.{0,48}\b(?:camera|cameras|webcam|webcams|connector|connectors|resistor|resistors|solder\s+joint|color\s+codes?)\b", text):
             return True
-        if re.search(r"\bwhat\s+is\s+a\s+[a-z0-9 -]{0,32}\b(?:connector|resistor|camera)\b", text):
+        if re.search(r"\bwhat\s+is\s+a\s+[a-z0-9 -]{0,32}\b(?:connector|resistor|camera|webcam)\b", text):
             return True
         return False
 
     def _camera_analysis_mode(self, text: str) -> str:
+        if self._camera_guidance_signal(text):
+            return "guidance"
         if self._camera_comparison_signal(text):
             return "compare"
         if re.search(r"\b(?:read|label|text|say)\b", text):
@@ -3138,6 +3178,29 @@ class PlannerV2:
             re.search(r"\b(?:looking\s+at|on\s+(?:my\s+)?screen|visible|in\s+front\s+of\s+me|current\s+view)\b", text)
         )
         return has_question and has_visual_target
+
+    def _browser_semantic_control_signal(self, text: str) -> bool:
+        if re.search(r"\b(?:open|launch|go to|navigate|summarize|summary|extract|fetch|render|download)\b", text):
+            return False
+        has_control_target = bool(
+            re.search(
+                r"\b(?:button|field|fields|input|textbox|text\s+box|checkbox|radio|dropdown|select|combobox|link|dialog|popup|warning|alert|form)\b",
+                text,
+            )
+        )
+        if not has_control_target:
+            return False
+        action_like = bool(
+            re.search(r"\b(?:click|press|focus|type|enter|submit|check|uncheck|select)\b", text)
+        )
+        question_like = bool(re.search(r"\b(?:what|which|where|find|locate|show)\b", text))
+        page_context = bool(
+            re.search(r"\b(?:this|current|page|screen|visible|browser|web\s*page|site)\b", text)
+        )
+        where_is_target = bool(
+            re.search(r"\bwhere\s+is\b.{0,60}\b(?:button|field|link|dialog|popup|warning|alert|form)\b", text)
+        )
+        return action_like or where_is_target or (question_like and page_context)
 
     def _workspace_signal(self, text: str) -> bool:
         if _workspace_conceptual_text(text):

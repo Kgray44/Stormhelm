@@ -129,7 +129,9 @@ def _dispose_qt_objects(app: QtWidgets.QApplication, *objects: QtCore.QObject | 
     _drain_qt_cleanup(app, wait_ms=20)
 
 
-def _load_main_qml_scene() -> tuple[
+def _load_main_qml_scene(
+    env: dict[str, str] | None = None,
+) -> tuple[
     QtWidgets.QApplication,
     object,
     UiBridge,
@@ -138,7 +140,7 @@ def _load_main_qml_scene() -> tuple[
 ]:
     app = _ensure_app()
     QQuickStyle.setStyle("Basic")
-    workspace_config = load_config(project_root=Path.cwd(), env={})
+    workspace_config = load_config(project_root=Path.cwd(), env=env or {})
     bridge = UiBridge(workspace_config)
     engine = QtQml.QQmlApplicationEngine()
     engine.rootContext().setContextProperty("stormhelmBridge", bridge)
@@ -149,6 +151,243 @@ def _load_main_qml_scene() -> tuple[
 
     assert engine.rootObjects()
     return app, workspace_config, bridge, engine, engine.rootObjects()[0]
+
+
+def test_main_qml_loads_classic_variant_surfaces_by_default() -> None:
+    app, _, bridge, engine, root = _load_main_qml_scene()
+    try:
+        assert bridge.uiVisualVariant == "classic"
+        assert root.findChild(QtCore.QObject, "ghostShell") is not None
+        assert root.findChild(QtCore.QObject, "deckShell") is not None
+        assert root.findChild(QtCore.QObject, "classicGhostShell") is not None
+        assert root.findChild(QtCore.QObject, "classicDeckShell") is not None
+        assert root.findChild(QtCore.QObject, "stormforgeGhostShell") is None
+        assert root.findChild(QtCore.QObject, "stormforgeDeckShell") is None
+    finally:
+        _dispose_qt_objects(app, engine, root)
+
+
+def test_main_qml_loads_stormforge_variant_surfaces_from_env() -> None:
+    app, _, bridge, engine, root = _load_main_qml_scene(
+        {"STORMHELM_UI_VARIANT": "stormforge"}
+    )
+    try:
+        assert bridge.uiVisualVariant == "stormforge"
+        assert root.findChild(QtCore.QObject, "ghostShell") is not None
+        assert root.findChild(QtCore.QObject, "deckShell") is not None
+        assert root.findChild(QtCore.QObject, "stormforgeGhostShell") is not None
+        assert root.findChild(QtCore.QObject, "stormforgeDeckShell") is not None
+        assert root.findChild(QtCore.QObject, "classicGhostShell") is None
+        assert root.findChild(QtCore.QObject, "classicDeckShell") is None
+    finally:
+        _dispose_qt_objects(app, engine, root)
+
+
+def test_stormforge_foundation_components_construct_and_style_states() -> None:
+    app = _ensure_app()
+    QQuickStyle.setStyle("Basic")
+    workspace_config = load_config(project_root=Path.cwd(), env={})
+    engine = QtQml.QQmlEngine()
+    engine.addImportPath(str(workspace_config.runtime.assets_dir / "qml"))
+    component = QtQml.QQmlComponent(engine)
+
+    harness_qml = """
+import QtQuick 2.15
+import "variants/stormforge"
+
+Item {
+    width: 760
+    height: 520
+
+    StormforgeTokens {
+        id: stormforgeTokens
+        objectName: "stormforgeTokens"
+    }
+
+    StormforgeGlassPanel {
+        objectName: "stormforgePanel"
+        width: 320
+        height: 96
+        elevation: 2
+    }
+
+    StormforgeCard {
+        objectName: "stormforgeCard"
+        y: 110
+        width: 320
+        height: 96
+        stateTone: "verified"
+    }
+
+    StormforgeStatusChip {
+        objectName: "stormforgeStatusChip"
+        y: 218
+        label: "Signal steady"
+        stateTone: "listening"
+    }
+
+    StormforgeResultBadge {
+        objectName: "stormforgeResultBadge"
+        y: 260
+        label: "Blocked"
+        resultState: "blocked"
+    }
+
+    StormforgeButton {
+        objectName: "stormforgeButton"
+        y: 304
+        text: "Open"
+        stateTone: "active"
+    }
+
+    StormforgeIconButton {
+        objectName: "stormforgeIconButton"
+        x: 110
+        y: 304
+        iconText: "?"
+        accessibleName: "Help"
+    }
+
+    StormforgeSectionHeader {
+        objectName: "stormforgeSectionHeader"
+        x: 360
+        title: "Watch"
+        subtitle: "Runtime signal"
+    }
+
+    StormforgeEmptyState {
+        objectName: "stormforgeEmptyState"
+        x: 360
+        y: 70
+        title: "No signal"
+        body: "Nothing is surfaced yet."
+    }
+
+    StormforgeLoadingState {
+        objectName: "stormforgeLoadingState"
+        x: 360
+        y: 150
+        label: "Reading"
+    }
+
+    StormforgeErrorState {
+        objectName: "stormforgeErrorState"
+        x: 360
+        y: 220
+        title: "Blocked"
+        body: "Permission is required."
+    }
+
+    StormforgeDivider {
+        objectName: "stormforgeDivider"
+        y: 350
+        width: 320
+    }
+
+    StormforgeRail {
+        objectName: "stormforgeRail"
+        x: 360
+        y: 310
+        width: 150
+        height: 110
+    }
+
+    StormforgeListRow {
+        objectName: "stormforgeListRow"
+        x: 520
+        y: 310
+        width: 210
+        title: "Route"
+        subtitle: "Planner"
+        stateTone: "running"
+    }
+
+    StormforgeMetricLabel {
+        objectName: "stormforgeMetricLabel"
+        x: 520
+        y: 380
+        label: "Latency"
+        value: "42 ms"
+    }
+
+    StormforgeActionStrip {
+        objectName: "stormforgeActionStrip"
+        x: 360
+        y: 440
+        width: 360
+        actions: [
+            {"label": "Inspect", "state": "planned"},
+            {"label": "Approve", "state": "approval_required"}
+        ]
+    }
+}
+""".strip()
+
+    root = None
+    try:
+        with _capture_qt_messages() as messages:
+            component.setData(
+                harness_qml.encode("utf-8"),
+                QtCore.QUrl.fromLocalFile(
+                    str(
+                        workspace_config.runtime.assets_dir
+                        / "qml"
+                        / "StormforgeFoundationHarness.qml"
+                    )
+                ),
+            )
+            root = component.create()
+            app.processEvents()
+            QtTest.QTest.qWait(40)
+            app.processEvents()
+
+        assert component.isReady(), component.errors()
+        assert root is not None
+        import_errors = [message for message in messages if "Stormforge" in message]
+        assert import_errors == []
+
+        tokens = root.findChild(QtCore.QObject, "stormforgeTokens")
+        panel = root.findChild(QtCore.QObject, "stormforgePanel")
+        status_chip = root.findChild(QtCore.QObject, "stormforgeStatusChip")
+        result_badge = root.findChild(QtCore.QObject, "stormforgeResultBadge")
+        action_strip = root.findChild(QtCore.QObject, "stormforgeActionStrip")
+
+        assert tokens is not None
+        assert panel is not None
+        assert status_chip is not None
+        assert result_badge is not None
+        assert action_strip is not None
+        assert tokens.property("foundationVersion") == "UI-P1"
+        assert int(tokens.property("space3")) > 0
+        assert panel.property("surfaceRole") == "glass_panel"
+        assert status_chip.property("resolvedTone") == "listening"
+        assert result_badge.property("resolvedTone") == "blocked"
+        assert int(action_strip.property("actionCount")) == 2
+    finally:
+        _dispose_qt_objects(app, root, engine)
+
+
+def test_main_qml_stormforge_variant_uses_foundation_shells_without_replacing_classic() -> None:
+    app, _, bridge, engine, root = _load_main_qml_scene(
+        {"STORMHELM_UI_VARIANT": "stormforge"}
+    )
+    try:
+        assert bridge.uiVisualVariant == "stormforge"
+        stormforge_ghost = root.findChild(QtCore.QObject, "stormforgeGhostShell")
+        stormforge_deck = root.findChild(QtCore.QObject, "stormforgeDeckShell")
+        classic_ghost = root.findChild(QtCore.QObject, "classicGhostShell")
+        classic_deck = root.findChild(QtCore.QObject, "classicDeckShell")
+
+        assert stormforge_ghost is not None
+        assert stormforge_deck is not None
+        assert classic_ghost is None
+        assert classic_deck is None
+        assert stormforge_ghost.property("stormforgeFoundationReady") is True
+        assert stormforge_deck.property("stormforgeFoundationReady") is True
+        assert root.findChild(QtCore.QObject, "stormforgeGhostFoundationPanel") is not None
+        assert root.findChild(QtCore.QObject, "stormforgeDeckFoundationPanel") is not None
+    finally:
+        _dispose_qt_objects(app, engine, root)
 
 
 def _wait_for_render_confirmation(

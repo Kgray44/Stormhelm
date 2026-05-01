@@ -41,6 +41,7 @@ class UIConfig:
     poll_interval_ms: int
     hide_to_tray_on_close: bool
     ghost_shortcut: str
+    visual_variant: str = "classic"
 
 
 @dataclass(slots=True)

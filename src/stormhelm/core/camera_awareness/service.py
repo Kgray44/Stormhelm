@@ -15,11 +15,21 @@ from stormhelm.core.camera_awareness.comparison import (
     default_slot_ids_for_mode,
     infer_comparison_mode,
 )
+from stormhelm.core.camera_awareness.guidance import (
+    blocked_guidance_result,
+    build_guidance_result,
+    build_quality_issues_from_signals,
+    issue_kinds as guidance_issue_kinds,
+    next_slot_guidance_result,
+    severity_max as guidance_severity_max,
+)
 from stormhelm.core.camera_awareness.helpers import build_default_camera_helper_registry
 from stormhelm.core.camera_awareness.models import (
     CAMERA_SOURCE_PROVENANCE_UNAVAILABLE,
     ROUTE_FAMILY_CAMERA_AWARENESS,
     CameraArtifactCleanupResult,
+    CameraArtifactPersistenceResult,
+    CameraArtifactPersistenceStatus,
     CameraArtifactReadiness,
     CameraAnalysisMode,
     CameraAwarenessFlowResult,
@@ -27,6 +37,8 @@ from stormhelm.core.camera_awareness.models import (
     CameraAwarenessResultState,
     CameraCaptureRequest,
     CameraCaptureResult,
+    CameraCaptureGuidanceResult,
+    CameraCaptureGuidanceStatus,
     CameraCaptureSlot,
     CameraCaptureSlotStatus,
     CameraCaptureSource,
@@ -109,6 +121,8 @@ class CameraAwarenessSubsystem:
         self._last_multi_capture_session: CameraMultiCaptureSession | None = None
         self._last_comparison_request: CameraComparisonRequest | None = None
         self._last_comparison_result: CameraComparisonResult | None = None
+        self._last_capture_guidance: CameraCaptureGuidanceResult | None = None
+        self._last_persistence_result: CameraArtifactPersistenceResult | None = None
         self._warnings: list[str] = []
 
     def answer_mock_question(
@@ -826,6 +840,55 @@ class CameraAwarenessSubsystem:
         )
         return cleanup
 
+    def save_artifact_to_library(
+        self,
+        *,
+        image_artifact_id: str | None = None,
+        user_request_id: str,
+        user_confirmed: bool | None = None,
+        label: str = "",
+        session_id: str | None = None,
+        at: datetime | None = None,
+    ) -> CameraArtifactPersistenceResult:
+        artifact_id = image_artifact_id or self.artifacts.latest_artifact_id
+        policy = self.policy.evaluate_artifact_save_request(user_confirmed=user_confirmed)
+        self.telemetry.emit(
+            "camera.artifact_save_policy_checked",
+            "Camera artifact save policy checked.",
+            session_id=session_id,
+            payload={
+                **policy.to_dict(),
+                "user_request_id": user_request_id,
+                "image_artifact_id": artifact_id,
+                "save_performed": False,
+                "cloud_upload_performed": False,
+                "raw_image_included": False,
+            },
+        )
+        if not policy.allowed:
+            result = CameraArtifactPersistenceResult(
+                image_artifact_id=str(artifact_id or "missing-artifact"),
+                status=CameraArtifactPersistenceStatus.BLOCKED,
+                result_state=policy.result_state
+                or CameraAwarenessResultState.CAMERA_ARTIFACT_SAVE_BLOCKED,
+                storage_mode=CameraStorageMode.EPHEMERAL,
+                save_performed=False,
+                permission_scope_required=policy.permission_scope_required,
+                error_code=policy.blocked_reason,
+                message=f"Camera artifact save blocked: {policy.blocked_reason}.",
+            )
+            self._remember_persistence_result(result, session_id=session_id)
+            return result
+
+        result = self.artifacts.save_to_library(
+            str(artifact_id or ""),
+            label=label,
+            at=at,
+            max_size_bytes=_max_artifact_bytes(self.config),
+        )
+        self._remember_persistence_result(result, session_id=session_id)
+        return result
+
     def resolve_artifact_for_followup(
         self,
         image_artifact_id: str | None = None,
@@ -1293,6 +1356,275 @@ class CameraAwarenessSubsystem:
             session.error_code = result.error_code
             self._last_multi_capture_session = session
 
+    def create_capture_guidance(
+        self,
+        *,
+        image_artifact_id: str | None = None,
+        user_question: str = "",
+        helper_family: str | None = None,
+        vision_answer: CameraVisionAnswer | None = None,
+        helper_result: CameraEngineeringHelperResult | None = None,
+        comparison_result: CameraComparisonResult | None = None,
+        session_id: str | None = None,
+        at: datetime | None = None,
+    ) -> CameraCaptureGuidanceResult:
+        del user_question
+        artifact_id = (
+            image_artifact_id
+            or (vision_answer.image_artifact_id if vision_answer is not None else None)
+            or self.artifacts.latest_artifact_id
+        )
+        artifact = self.artifacts.peek(artifact_id)
+        if artifact is None:
+            result = blocked_guidance_result(
+                error_code="capture_guidance_artifact_missing",
+                artifact_id=artifact_id,
+                helper_family=helper_family,
+            )
+            self._remember_capture_guidance(result, session_id=session_id)
+            return result
+
+        readiness = reject_artifact_if_expired_or_missing(
+            artifact,
+            image_artifact_id=artifact_id,
+            at=at,
+            max_size_bytes=_max_artifact_bytes(self.config),
+        )
+        self._last_artifact_readiness = readiness
+        if readiness.artifact_expired:
+            result = blocked_guidance_result(
+                error_code="capture_guidance_artifact_expired",
+                artifact_id=artifact.image_artifact_id,
+                helper_family=helper_family,
+                source_provenance=artifact.source_provenance,
+                storage_mode=artifact.storage_mode,
+            )
+            self._remember_capture_guidance(result, session_id=session_id)
+            return result
+        if not readiness.artifact_exists:
+            result = blocked_guidance_result(
+                error_code="capture_guidance_artifact_missing",
+                artifact_id=artifact.image_artifact_id,
+                helper_family=helper_family,
+                source_provenance=artifact.source_provenance,
+                storage_mode=artifact.storage_mode,
+            )
+            self._remember_capture_guidance(result, session_id=session_id)
+            return result
+
+        resolved_helper = helper_family or (
+            helper_result.helper_family.value if helper_result is not None else None
+        )
+        issues = build_quality_issues_from_signals(
+            artifact=artifact,
+            vision_answer=vision_answer,
+            helper_result=helper_result,
+            comparison_result=comparison_result,
+            helper_family=resolved_helper,
+        )
+        result = build_guidance_result(
+            artifact_id=artifact.image_artifact_id,
+            issues=issues,
+            source_provenance=artifact.source_provenance,
+            storage_mode=artifact.storage_mode,
+            helper_family=resolved_helper,
+            comparison_request_id=comparison_result.comparison_request_id
+            if comparison_result is not None
+            else None,
+        )
+        self._remember_capture_guidance(result, session_id=session_id)
+        return result
+
+    def create_comparison_capture_guidance(
+        self,
+        *,
+        multi_capture_session_id: str | None = None,
+        comparison_request_id: str | None = None,
+        comparison_result: CameraComparisonResult | None = None,
+        at: datetime | None = None,
+    ) -> CameraCaptureGuidanceResult:
+        if comparison_result is not None:
+            issues = build_quality_issues_from_signals(comparison_result=comparison_result)
+            first_summary = (
+                comparison_result.artifact_summaries[0]
+                if comparison_result.artifact_summaries
+                else None
+            )
+            result = build_guidance_result(
+                artifact_id=first_summary.artifact_id if first_summary else None,
+                issues=issues,
+                source_provenance=first_summary.source_provenance
+                if first_summary
+                else CAMERA_SOURCE_PROVENANCE_UNAVAILABLE,
+                storage_mode=first_summary.storage_mode
+                if first_summary
+                else CameraStorageMode.EPHEMERAL,
+                helper_family=comparison_result.helper_family,
+                multi_capture_session_id=None,
+                comparison_request_id=comparison_result.comparison_request_id,
+                concise_guidance=comparison_result.suggested_next_capture
+                if issues and comparison_result.suggested_next_capture
+                else None,
+            )
+            self._remember_capture_guidance(result, session_id=None)
+            return result
+
+        session = self.get_multi_capture_session(multi_capture_session_id, at=at)
+        if session is None:
+            result = blocked_guidance_result(
+                error_code="capture_guidance_no_artifact",
+                multi_capture_session_id=multi_capture_session_id,
+                comparison_request_id=comparison_request_id,
+            )
+            self._remember_capture_guidance(result, session_id=None)
+            return result
+        if session.status == CameraMultiCaptureSessionStatus.EXPIRED or session.is_expired(at=at):
+            session.status = CameraMultiCaptureSessionStatus.EXPIRED
+            result = blocked_guidance_result(
+                error_code="capture_guidance_session_expired",
+                multi_capture_session_id=session.multi_capture_session_id,
+                comparison_request_id=comparison_request_id,
+                helper_family=session.helper_family,
+            )
+            self._last_multi_capture_session = session
+            self._remember_capture_guidance(result, session_id=session.session_id)
+            return result
+
+        pending = next(
+            (slot for slot in session.expected_slots if slot.status == CameraCaptureSlotStatus.PENDING),
+            None,
+        )
+        if pending is not None:
+            result = next_slot_guidance_result(
+                multi_capture_session_id=session.multi_capture_session_id,
+                slot_id=pending.slot_id,
+                slot_label=pending.label,
+                comparison_mode=session.comparison_mode.value,
+                helper_family=session.helper_family,
+            )
+            self._remember_capture_guidance(result, session_id=session.session_id)
+            return result
+
+        result = build_guidance_result(
+            artifact_id=session.artifact_ids[-1] if session.artifact_ids else None,
+            issues=[],
+            source_provenance="camera_session",
+            storage_mode=session.storage_mode_default,
+            helper_family=session.helper_family,
+            multi_capture_session_id=session.multi_capture_session_id,
+            comparison_request_id=comparison_request_id,
+            title="Capture Guidance Limited",
+        )
+        self._remember_capture_guidance(result, session_id=session.session_id)
+        return result
+
+    def get_latest_capture_guidance(
+        self,
+        image_artifact_id: str | None = None,
+    ) -> CameraCaptureGuidanceResult | None:
+        if image_artifact_id is None:
+            return self._last_capture_guidance
+        if (
+            self._last_capture_guidance is not None
+            and self._last_capture_guidance.artifact_id == image_artifact_id
+        ):
+            return self._last_capture_guidance
+        return None
+
+    def _remember_capture_guidance(
+        self,
+        result: CameraCaptureGuidanceResult,
+        *,
+        session_id: str | None,
+    ) -> None:
+        self._last_capture_guidance = result
+        event_type = (
+            "camera.capture_guidance_failed"
+            if result.status in {CameraCaptureGuidanceStatus.BLOCKED, CameraCaptureGuidanceStatus.FAILED}
+            else "camera.capture_guidance_created"
+        )
+        self.telemetry.emit(
+            "camera.capture_quality_evaluated",
+            "Camera capture quality evaluated from existing state.",
+            session_id=session_id,
+            payload={
+                "guidance_result_id": result.guidance_result_id,
+                "artifact_id": result.artifact_id,
+                "multi_capture_session_id": result.multi_capture_session_id,
+                "comparison_request_id": result.comparison_request_id,
+                "helper_family": result.helper_family,
+                "issue_kinds": guidance_issue_kinds(result.quality_issues),
+                "severity_max": guidance_severity_max(result.quality_issues),
+                "confidence_kind": result.confidence_kind.value,
+                "capture_triggered": False,
+                "analysis_triggered": False,
+                "upload_triggered": False,
+                "save_triggered": False,
+                "raw_image_included": False,
+            },
+        )
+        self.telemetry.emit(
+            event_type,
+            "Camera capture guidance created."
+            if event_type.endswith("created")
+            else "Camera capture guidance blocked or failed.",
+            session_id=session_id,
+            payload={
+                **result.to_dict(),
+                "issue_kinds": guidance_issue_kinds(result.quality_issues),
+                "severity_max": guidance_severity_max(result.quality_issues),
+                "capture_triggered": False,
+                "analysis_triggered": False,
+                "upload_triggered": False,
+                "save_triggered": False,
+                "raw_image_included": False,
+                "verified_measurement": False,
+                "verified_outcome": False,
+                "action_executed": False,
+            },
+        )
+
+    def _remember_persistence_result(
+        self,
+        result: CameraArtifactPersistenceResult,
+        *,
+        session_id: str | None,
+    ) -> None:
+        self._last_persistence_result = result
+        self._last_result_state = result.result_state
+        self._last_artifact_expired = bool(result.artifact_expired)
+        self._last_artifact_storage_mode = result.storage_mode.value
+        self._last_source_provenance = result.artifact_source_provenance
+        if result.status in {
+            CameraArtifactPersistenceStatus.SAVED,
+            CameraArtifactPersistenceStatus.ALREADY_SAVED,
+        }:
+            self._last_artifact_expired = False
+        event_type = (
+            "camera.artifact_saved"
+            if result.status
+            in {
+                CameraArtifactPersistenceStatus.SAVED,
+                CameraArtifactPersistenceStatus.ALREADY_SAVED,
+            }
+            else "camera.artifact_save_blocked"
+        )
+        self.telemetry.emit(
+            event_type,
+            "Camera artifact saved by explicit user request."
+            if event_type.endswith("saved")
+            else "Camera artifact save blocked.",
+            session_id=session_id,
+            payload={
+                **result.to_dict(),
+                "save_performed": bool(result.save_performed),
+                "cloud_upload_performed": False,
+                "raw_image_included": False,
+                "task_mutation_performed": False,
+                "memory_write_performed": False,
+            },
+        )
+
     def status_snapshot(self) -> dict[str, object]:
         provider_kind = self.capture_provider.provider_kind
         vision_provider_kind = self.vision_provider.provider_kind
@@ -1329,6 +1661,11 @@ class CameraAwarenessSubsystem:
         helper = self._last_helper_result
         multi_session = self._last_multi_capture_session
         comparison = self._last_comparison_result
+        guidance = self._last_capture_guidance
+        persistence = self._last_persistence_result
+        saved_entry = self.artifacts.library_entry(latest_artifact_id)
+        artifact_saved = bool(saved_entry is not None)
+        safe_library_ref = saved_entry.safe_library_ref if saved_entry is not None else ""
         return {
             "enabled": bool(self.config.enabled),
             "route_family": ROUTE_FAMILY_CAMERA_AWARENESS,
@@ -1434,6 +1771,88 @@ class CameraAwarenessSubsystem:
             "last_comparison_action_executed": bool(comparison.action_executed)
             if comparison is not None
             else False,
+            "lastCaptureGuidanceStatus": guidance.status.value
+            if guidance is not None
+            else None,
+            "last_capture_guidance_status": guidance.status.value
+            if guidance is not None
+            else None,
+            "lastCaptureGuidanceIssueKinds": guidance_issue_kinds(guidance.quality_issues)
+            if guidance is not None
+            else [],
+            "last_capture_guidance_issue_kinds": guidance_issue_kinds(guidance.quality_issues)
+            if guidance is not None
+            else [],
+            "lastCaptureGuidanceSuggestedCaptureLabel": guidance.suggested_capture_label
+            if guidance is not None
+            else None,
+            "last_capture_guidance_suggested_capture_label": guidance.suggested_capture_label
+            if guidance is not None
+            else None,
+            "lastCaptureGuidanceVisualEvidenceOnly": bool(guidance.visual_evidence_only)
+            if guidance is not None
+            else False,
+            "last_capture_guidance_visual_evidence_only": bool(guidance.visual_evidence_only)
+            if guidance is not None
+            else False,
+            "lastCaptureGuidanceCaptureTriggered": bool(guidance.capture_triggered)
+            if guidance is not None
+            else False,
+            "last_capture_guidance_capture_triggered": bool(guidance.capture_triggered)
+            if guidance is not None
+            else False,
+            "lastCaptureGuidanceAnalysisTriggered": bool(guidance.analysis_triggered)
+            if guidance is not None
+            else False,
+            "last_capture_guidance_analysis_triggered": bool(guidance.analysis_triggered)
+            if guidance is not None
+            else False,
+            "lastCaptureGuidanceUploadTriggered": bool(guidance.upload_triggered)
+            if guidance is not None
+            else False,
+            "last_capture_guidance_upload_triggered": bool(guidance.upload_triggered)
+            if guidance is not None
+            else False,
+            "lastCaptureGuidanceVerifiedOutcome": bool(guidance.verified_outcome)
+            if guidance is not None
+            else False,
+            "last_capture_guidance_verified_outcome": bool(guidance.verified_outcome)
+            if guidance is not None
+            else False,
+            "lastArtifactPersistenceStatus": persistence.status.value
+            if persistence is not None
+            else None,
+            "last_artifact_persistence_status": persistence.status.value
+            if persistence is not None
+            else None,
+            "lastArtifactSaved": artifact_saved,
+            "last_artifact_saved": artifact_saved,
+            "lastArtifactSavedRef": safe_library_ref,
+            "last_artifact_saved_ref": safe_library_ref,
+            "lastArtifactSaveErrorCode": persistence.error_code
+            if persistence is not None
+            else None,
+            "last_artifact_save_error_code": persistence.error_code
+            if persistence is not None
+            else None,
+            "imagePersistedByUserRequest": bool(
+                artifact_saved
+                or (persistence and persistence.image_persisted_by_user_request)
+            ),
+            "image_persisted_by_user_request": bool(
+                artifact_saved
+                or (persistence and persistence.image_persisted_by_user_request)
+            ),
+            "saveActionAvailable": bool(
+                self.config.allow_task_artifact_save
+                and artifact_fresh
+                and not artifact_saved
+            ),
+            "save_action_available": bool(
+                self.config.allow_task_artifact_save
+                and artifact_fresh
+                and not artifact_saved
+            ),
             "mockMode": provider_kind == "mock"
             and vision_provider_kind == "mock",
             "mock_mode": provider_kind == "mock"
@@ -2048,6 +2467,8 @@ def _normalize_question(question: str) -> str:
 
 def _analysis_mode(question: str) -> CameraAnalysisMode:
     text = _normalize_question(question)
+    if re.search(r"\b(?:retake|capture better|better photo|better picture|better image|clearer photo|see better|move closer|what angle|guide me to capture)\b", text):
+        return CameraAnalysisMode.GUIDANCE
     if re.search(r"\b(?:read|label|text|say)\b", text):
         return CameraAnalysisMode.READ_TEXT
     if re.search(r"\b(?:bad|broken|damage|solder|joint|wrong)\b", text):

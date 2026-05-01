@@ -29,6 +29,7 @@ history_limit = 500
 poll_interval_ms = 1500
 hide_to_tray_on_close = true
 ghost_shortcut = "Ctrl+Space"
+visual_variant = "classic"
 
 [event_stream]
 enabled = true

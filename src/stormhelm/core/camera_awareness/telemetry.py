@@ -22,7 +22,11 @@ _RAW_IMAGE_PAYLOAD_KEYS = frozenset(
         "data_url",
         "provider_request",
         "provider_request_body",
+        "provider_response",
+        "provider_raw_response",
+        "raw_provider_response",
         "request_body",
+        "unbounded_provider_response",
         "encoded_image",
     }
 )

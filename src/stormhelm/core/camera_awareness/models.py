@@ -77,12 +77,20 @@ class CameraStorageMode(StrEnum):
     SAVED = "saved"
 
 
+class CameraArtifactPersistenceStatus(StrEnum):
+    SAVED = "saved"
+    ALREADY_SAVED = "already_saved"
+    BLOCKED = "blocked"
+    FAILED = "failed"
+
+
 class CameraAnalysisMode(StrEnum):
     IDENTIFY = "identify"
     READ_TEXT = "read_text"
     INSPECT = "inspect"
     TROUBLESHOOT = "troubleshoot"
     EXPLAIN = "explain"
+    GUIDANCE = "guidance"
     UNKNOWN = "unknown"
 
 
@@ -153,6 +161,46 @@ class CameraComparisonStatus(StrEnum):
     NOT_APPLICABLE = "not_applicable"
 
 
+class CameraCaptureQualityIssueKind(StrEnum):
+    BLUR = "blur"
+    MOTION_BLUR = "motion_blur"
+    LOW_LIGHT = "low_light"
+    GLARE = "glare"
+    OVEREXPOSED = "overexposed"
+    UNDEREXPOSED = "underexposed"
+    OBJECT_OUT_OF_FRAME = "object_out_of_frame"
+    OBJECT_TOO_SMALL = "object_too_small"
+    OBJECT_TOO_CLOSE = "object_too_close"
+    TEXT_TOO_SMALL = "text_too_small"
+    TEXT_BLURRY = "text_blurry"
+    LABEL_NOT_CENTERED = "label_not_centered"
+    ANGLE_TOO_OBLIQUE = "angle_too_oblique"
+    MISSING_SCALE_REFERENCE = "missing_scale_reference"
+    MISSING_CONTEXT = "missing_context"
+    MISSING_CLOSEUP = "missing_closeup"
+    OCCLUDED = "occluded"
+    WRONG_SIDE = "wrong_side"
+    COMPARISON_ANGLE_MISMATCH = "comparison_angle_mismatch"
+    COMPARISON_LIGHTING_MISMATCH = "comparison_lighting_mismatch"
+    COMPARISON_SCALE_MISMATCH = "comparison_scale_mismatch"
+    UNSUPPORTED_QUALITY_ASSESSMENT = "unsupported_quality_assessment"
+
+
+class CameraCaptureQualitySeverity(StrEnum):
+    INFO = "info"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+class CameraCaptureGuidanceStatus(StrEnum):
+    GUIDANCE_READY = "guidance_ready"
+    NOT_NEEDED = "not_needed"
+    INSUFFICIENT_EVIDENCE = "insufficient_evidence"
+    BLOCKED = "blocked"
+    FAILED = "failed"
+
+
 class CameraAwarenessResultState(StrEnum):
     CAMERA_ANSWER_READY = "camera_answer_ready"
     CAMERA_PERMISSION_REQUIRED = "camera_permission_required"
@@ -179,6 +227,10 @@ class CameraAwarenessResultState(StrEnum):
     CAMERA_NEEDS_RETAKE = "camera_needs_retake"
     CAMERA_CANCELLED = "camera_cancelled"
     CAMERA_ARTIFACT_EXPIRED = "camera_artifact_expired"
+    CAMERA_ARTIFACT_SAVED = "camera_artifact_saved"
+    CAMERA_ARTIFACT_SAVE_PERMISSION_REQUIRED = "camera_artifact_save_permission_required"
+    CAMERA_ARTIFACT_SAVE_BLOCKED = "camera_artifact_save_blocked"
+    CAMERA_ARTIFACT_SAVE_FAILED = "camera_artifact_save_failed"
     CAMERA_SAVED_TO_TASK = "camera_saved_to_task"
 
 
@@ -252,6 +304,7 @@ class CameraFrameArtifact:
     mock_artifact: bool = False
     fixture_name: str = "resistor"
     source_provenance: str = CAMERA_SOURCE_PROVENANCE_MOCK
+    quality_warnings: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.storage_mode = CameraStorageMode(self.storage_mode)
@@ -303,6 +356,68 @@ class CameraArtifactCleanupResult:
     error_code: str | None = None
     error_message: str | None = None
     checked_at: datetime = field(default_factory=utc_now)
+
+    def to_dict(self) -> dict[str, Any]:
+        return serialize_camera_value(self)
+
+
+@dataclass(slots=True)
+class CameraArtifactLibraryEntry:
+    image_artifact_id: str
+    safe_library_ref: str
+    label: str = ""
+    storage_mode: CameraStorageMode = CameraStorageMode.SAVED
+    artifact_format: str = "unknown"
+    artifact_size_bytes: int | None = None
+    source_provenance: str = CAMERA_SOURCE_PROVENANCE_UNAVAILABLE
+    persisted_by_user_request: bool = True
+    raw_image_included: bool = False
+    cloud_upload_performed: bool = False
+    saved_at: datetime = field(default_factory=utc_now)
+
+    def __post_init__(self) -> None:
+        self.storage_mode = CameraStorageMode(self.storage_mode)
+        self.persisted_by_user_request = True
+        self.raw_image_included = False
+        self.cloud_upload_performed = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return serialize_camera_value(self)
+
+
+@dataclass(slots=True)
+class CameraArtifactPersistenceResult:
+    image_artifact_id: str
+    status: CameraArtifactPersistenceStatus
+    result_state: CameraAwarenessResultState
+    safe_library_ref: str = ""
+    label: str = ""
+    storage_mode: CameraStorageMode = CameraStorageMode.EPHEMERAL
+    artifact_exists: bool = False
+    artifact_readable: bool = False
+    artifact_expired: bool = False
+    artifact_size_bytes: int | None = None
+    artifact_format: str = "unknown"
+    artifact_source_provenance: str = CAMERA_SOURCE_PROVENANCE_UNAVAILABLE
+    save_performed: bool = False
+    image_persisted_by_user_request: bool = False
+    raw_image_included: bool = False
+    cloud_upload_performed: bool = False
+    task_mutation_performed: bool = False
+    memory_write_performed: bool = False
+    permission_scope_required: str | None = None
+    error_code: str | None = None
+    message: str = ""
+    created_at: datetime = field(default_factory=utc_now)
+
+    def __post_init__(self) -> None:
+        self.status = CameraArtifactPersistenceStatus(self.status)
+        self.result_state = CameraAwarenessResultState(self.result_state)
+        self.storage_mode = CameraStorageMode(self.storage_mode)
+        self.raw_image_included = False
+        self.cloud_upload_performed = False
+        self.task_mutation_performed = False
+        self.memory_write_performed = False
 
     def to_dict(self) -> dict[str, Any]:
         return serialize_camera_value(self)
@@ -468,6 +583,83 @@ class CameraEngineeringHelperResult:
         self.trust_approved = False
         self.task_mutation_performed = False
         self.raw_image_included = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return serialize_camera_value(self)
+
+
+@dataclass(slots=True)
+class CameraCaptureQualityIssue:
+    issue_kind: CameraCaptureQualityIssueKind
+    artifact_id: str | None = None
+    severity: CameraCaptureQualitySeverity = CameraCaptureQualitySeverity.MEDIUM
+    confidence_kind: CameraConfidenceLevel = CameraConfidenceLevel.MEDIUM
+    evidence: str = ""
+    affected_region_label: str | None = None
+    helper_family: str | None = None
+    issue_id: str = field(default_factory=lambda: camera_id("camera-quality-issue"))
+    created_at: datetime = field(default_factory=utc_now)
+
+    def __post_init__(self) -> None:
+        self.issue_kind = CameraCaptureQualityIssueKind(self.issue_kind)
+        self.severity = CameraCaptureQualitySeverity(self.severity)
+        self.confidence_kind = CameraConfidenceLevel(self.confidence_kind)
+
+    def to_dict(self) -> dict[str, Any]:
+        return serialize_camera_value(self)
+
+
+@dataclass(slots=True)
+class CameraCaptureGuidanceResult:
+    status: CameraCaptureGuidanceStatus
+    title: str
+    concise_guidance: str
+    artifact_id: str | None = None
+    multi_capture_session_id: str | None = None
+    comparison_request_id: str | None = None
+    helper_family: str | None = None
+    guidance_result_id: str = field(default_factory=lambda: camera_id("camera-guidance"))
+    detailed_guidance: str | None = None
+    quality_issues: list[CameraCaptureQualityIssue] = field(default_factory=list)
+    suggested_next_capture: str | None = None
+    suggested_capture_label: str | None = None
+    suggested_user_actions: list[str] = field(default_factory=list)
+    confidence_kind: CameraConfidenceLevel = CameraConfidenceLevel.MEDIUM
+    source_provenance: str = CAMERA_SOURCE_PROVENANCE_UNAVAILABLE
+    storage_mode: CameraStorageMode = CameraStorageMode.EPHEMERAL
+    visual_evidence_only: bool = True
+    capture_triggered: bool = False
+    analysis_triggered: bool = False
+    upload_triggered: bool = False
+    save_triggered: bool = False
+    cleanup_triggered: bool = False
+    memory_write_triggered: bool = False
+    raw_image_included: bool = False
+    verified_measurement: bool = False
+    verified_outcome: bool = False
+    action_executed: bool = False
+    trust_approved: bool = False
+    task_mutation_performed: bool = False
+    error_code: str | None = None
+    created_at: datetime = field(default_factory=utc_now)
+
+    def __post_init__(self) -> None:
+        self.status = CameraCaptureGuidanceStatus(self.status)
+        self.confidence_kind = CameraConfidenceLevel(self.confidence_kind)
+        self.storage_mode = CameraStorageMode(self.storage_mode)
+        self.visual_evidence_only = True
+        self.capture_triggered = False
+        self.analysis_triggered = False
+        self.upload_triggered = False
+        self.save_triggered = False
+        self.cleanup_triggered = False
+        self.memory_write_triggered = False
+        self.raw_image_included = False
+        self.verified_measurement = False
+        self.verified_outcome = False
+        self.action_executed = False
+        self.trust_approved = False
+        self.task_mutation_performed = False
 
     def to_dict(self) -> dict[str, Any]:
         return serialize_camera_value(self)

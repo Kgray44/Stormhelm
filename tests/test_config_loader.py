@@ -20,6 +20,7 @@ def test_load_config_applies_environment_overrides(temp_project_root: Path) -> N
             "STORMHELM_OPENAI_MODEL": "gpt-5.4-mini",
             "STORMHELM_OPENAI_PLANNER_MODEL": "gpt-5.4-mini",
             "STORMHELM_OPENAI_REASONING_MODEL": "gpt-5.4",
+            "STORMHELM_UI_VARIANT": "stormforge",
             "STORMHELM_HOME_LABEL": "Brooklyn Home",
             "STORMHELM_HOME_LATITUDE": "40.6782",
             "STORMHELM_HOME_LONGITUDE": "-73.9442",
@@ -39,6 +40,7 @@ def test_load_config_applies_environment_overrides(temp_project_root: Path) -> N
     assert config.openai.planner_model == "gpt-5.4-mini"
     assert config.openai.reasoning_model == "gpt-5.4"
     assert config.openai.api_key == "test-key"
+    assert config.ui.visual_variant == "stormforge"
     assert config.location.home_label == "Brooklyn Home"
     assert config.location.home_latitude == pytest.approx(40.6782)
     assert config.location.home_longitude == pytest.approx(-73.9442)
@@ -56,6 +58,7 @@ def test_load_config_defaults_to_nano_planner_and_full_reasoner(temp_project_roo
 
     assert config.openai.planner_model == "gpt-5.4-nano"
     assert config.openai.reasoning_model == "gpt-5.4"
+    assert config.ui.visual_variant == "classic"
     assert config.hardware_telemetry.enabled is True
     assert config.hardware_telemetry.helper_timeout_seconds == pytest.approx(12.0)
     assert config.hardware_telemetry.provider_timeout_seconds == pytest.approx(5.0)
@@ -64,6 +67,21 @@ def test_load_config_defaults_to_nano_planner_and_full_reasoner(temp_project_roo
     assert config.hardware_telemetry.elevated_helper_enabled is False
     assert config.hardware_telemetry.elevated_helper_timeout_seconds == pytest.approx(20.0)
     assert config.hardware_telemetry.elevated_helper_cooldown_seconds == pytest.approx(120.0)
+
+
+def test_load_config_invalid_ui_visual_variant_falls_back_to_classic(
+    temp_project_root: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("WARNING", logger="stormhelm.config.loader")
+
+    config = load_config(
+        project_root=temp_project_root,
+        env={"STORMHELM_UI_VARIANT": "fogbank"},
+    )
+
+    assert config.ui.visual_variant == "classic"
+    assert "Unknown Stormhelm UI visual variant 'fogbank'" in caplog.text
 
 
 def test_load_config_applies_hardware_telemetry_environment_overrides(temp_project_root: Path) -> None:

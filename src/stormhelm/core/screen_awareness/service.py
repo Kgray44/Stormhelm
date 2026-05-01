@@ -36,9 +36,11 @@ from stormhelm.core.screen_awareness.models import BrowserSemanticActionPreview
 from stormhelm.core.screen_awareness.models import BrowserSemanticObservation
 from stormhelm.core.screen_awareness.models import BrowserSemanticVerificationRequest
 from stormhelm.core.screen_awareness.models import BrowserSemanticVerificationResult
+from stormhelm.core.screen_awareness.models import CurrentScreenContext
 from stormhelm.core.screen_awareness.models import ScreenAnalysisResult
 from stormhelm.core.screen_awareness.models import ScreenAuditFinding
 from stormhelm.core.screen_awareness.models import ScreenAuditSeverity
+from stormhelm.core.screen_awareness.models import AppAdapterId
 from stormhelm.core.screen_awareness.models import AppAdapterResolution
 from stormhelm.core.screen_awareness.models import ChangeClassification
 from stormhelm.core.screen_awareness.models import ScreenConfidence
@@ -54,6 +56,8 @@ from stormhelm.core.screen_awareness.models import ScreenLimitationCode
 from stormhelm.core.screen_awareness.models import ScreenPolicyState
 from stormhelm.core.screen_awareness.models import ScreenRecoveryState
 from stormhelm.core.screen_awareness.models import ScreenRecoveryStatus
+from stormhelm.core.screen_awareness.models import ScreenObservation
+from stormhelm.core.screen_awareness.models import ScreenObservationScope
 from stormhelm.core.screen_awareness.models import ScreenResponse
 from stormhelm.core.screen_awareness.models import ScreenSourceType
 from stormhelm.core.screen_awareness.models import ScreenStageTiming
@@ -129,6 +133,7 @@ class ScreenAwarenessSubsystem:
     playwright_browser_adapter: PlaywrightBrowserSemanticAdapter = field(init=False)
     visual_grounder: ScreenVisualGrounder = field(init=False)
     _recent_trace_summaries: deque[dict[str, Any]] = field(init=False, repr=False)
+    _latest_playwright_canonical_action_summary: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.planner_seam = ScreenAwarenessPlannerSeam(self.config)
@@ -158,10 +163,30 @@ class ScreenAwarenessSubsystem:
         self.workflow_learning_engine = DeterministicWorkflowLearningEngine(config=self.config)
         self.brain_integration_engine = DeterministicBrainIntegrationEngine(config=self.config)
         self._recent_trace_summaries = deque(maxlen=24)
+        self._latest_playwright_canonical_action_summary = {}
 
     def status_snapshot(self) -> dict[str, Any]:
         policy_state = self._policy_state()
         playwright_readiness = self.playwright_browser_adapter.status_snapshot()
+        if self._latest_playwright_canonical_action_summary:
+            canonical_summary = dict(self._latest_playwright_canonical_action_summary)
+            playwright_readiness["latest_canonical_action_summary"] = canonical_summary
+            latest_execution = dict(playwright_readiness.get("last_action_execution_summary") or {})
+            if not latest_execution:
+                latest_execution = {
+                    "status": canonical_summary.get("provider_status") or canonical_summary.get("status") or "",
+                    "action_kind": canonical_summary.get("action_intent") or "",
+                    "target_summary": {
+                        "candidate_id": canonical_summary.get("target_candidate_id") or "",
+                        "name": canonical_summary.get("target_label") or "",
+                    },
+                    "verification_status": canonical_summary.get("verification_status") or "",
+                    "claim_ceiling": canonical_summary.get("claim_ceiling") or "browser_semantic_action_execution",
+                }
+            latest_execution["canonical_status"] = canonical_summary.get("status")
+            latest_execution["canonical_action_intent"] = canonical_summary.get("action_intent")
+            latest_execution["canonical_target_label"] = canonical_summary.get("target_label")
+            playwright_readiness["last_action_execution_summary"] = latest_execution
         return {
             "phase": self.config.phase,
             "enabled": self.config.enabled,
@@ -231,6 +256,73 @@ class ScreenAwarenessSubsystem:
             fixture_mode=fixture_mode,
             context_options=context_options,
         )
+
+    def screen_observation_from_playwright_browser_observation(
+        self,
+        observation: BrowserSemanticObservation,
+    ) -> ScreenObservation:
+        return ScreenObservation(
+            captured_at=observation.observed_at,
+            scope=ScreenObservationScope.ACTIVE_WINDOW,
+            source_types_used=[ScreenSourceType.APP_ADAPTER],
+            window_metadata={
+                "window_title": observation.page_title,
+                "page_url": observation.page_url,
+                "browser_context_kind": observation.browser_context_kind,
+            },
+            app_identity="chrome",
+            visual_text=observation.page_title,
+            focus_metadata={
+                "process_name": "chrome",
+                "window_title": observation.page_title,
+                "source_provider": observation.provider,
+                "source_observation_id": observation.observation_id,
+            },
+            visual_metadata={
+                "playwright_adapter_id": observation.adapter_id,
+                "playwright_provider": observation.provider,
+                "playwright_observation_id": observation.observation_id,
+                "claim_ceiling": observation.claim_ceiling,
+                "limitations": list(observation.limitations)[:8],
+            },
+        )
+
+    def resolve_playwright_browser_semantics(
+        self,
+        observation: BrowserSemanticObservation,
+        *,
+        screen_observation: ScreenObservation | None = None,
+    ) -> AppAdapterResolution:
+        basis = screen_observation or self.screen_observation_from_playwright_browser_observation(observation)
+        resolution = self.adapter_registry.resolve(
+            observation=basis,
+            active_context={
+                "adapter_semantics": {
+                    "browser": self.playwright_browser_adapter.adapter_semantics_payload(observation),
+                }
+            },
+        )
+        if resolution is None:
+            return AppAdapterResolution(
+                adapter_id=AppAdapterId.BROWSER,
+                available=False,
+                provenance_note="Playwright browser observation could not be resolved through the semantic adapter registry.",
+            )
+        return resolution
+
+    def build_playwright_canonical_context(
+        self,
+        observation: BrowserSemanticObservation,
+        *,
+        screen_observation: ScreenObservation | None = None,
+    ) -> CurrentScreenContext:
+        basis = screen_observation or self.screen_observation_from_playwright_browser_observation(observation)
+        context = CurrentScreenContext(
+            context_id=f"playwright-browser-{observation.observation_id}",
+            summary=f'Playwright browser semantic observation for "{observation.page_title or "browser page"}".',
+        )
+        resolution = self.resolve_playwright_browser_semantics(observation, screen_observation=basis)
+        return self.adapter_registry.enrich_context(current_context=context, resolution=resolution)
 
     def ground_playwright_mock_target(
         self,
@@ -336,7 +428,7 @@ class ScreenAwarenessSubsystem:
         fixture_mode: bool = False,
         context_options: dict[str, Any] | None = None,
     ) -> BrowserSemanticActionExecutionResult:
-        return self.playwright_browser_adapter.request_semantic_action_execution(
+        result = self.playwright_browser_adapter.request_semantic_action_execution(
             plan,
             url=url,
             trust_service=trust_service,
@@ -345,6 +437,8 @@ class ScreenAwarenessSubsystem:
             fixture_mode=fixture_mode,
             context_options=context_options,
         )
+        self.map_playwright_browser_action_execution_result(result)
+        return result
 
     def execute_playwright_browser_action(
         self,
@@ -357,7 +451,7 @@ class ScreenAwarenessSubsystem:
         fixture_mode: bool = False,
         context_options: dict[str, Any] | None = None,
     ) -> BrowserSemanticActionExecutionResult:
-        return self.playwright_browser_adapter.execute_semantic_action(
+        result = self.playwright_browser_adapter.execute_semantic_action(
             plan,
             url=url,
             trust_service=trust_service,
@@ -366,9 +460,25 @@ class ScreenAwarenessSubsystem:
             fixture_mode=fixture_mode,
             context_options=context_options,
         )
+        self.map_playwright_browser_action_execution_result(result)
+        return result
+
+    def map_playwright_browser_action_execution_result(
+        self,
+        result: BrowserSemanticActionExecutionResult,
+    ) -> ActionExecutionResult:
+        canonical = self.action_engine.result_from_browser_semantic_execution(result)
+        self._latest_playwright_canonical_action_summary = _canonical_action_summary(canonical, result)
+        return canonical
 
     def get_latest_playwright_action_execution_summary(self) -> dict[str, Any]:
-        return self.playwright_browser_adapter.last_action_execution_summary
+        summary = self.playwright_browser_adapter.last_action_execution_summary
+        if self._latest_playwright_canonical_action_summary:
+            summary = dict(summary)
+            summary["canonical_status"] = self._latest_playwright_canonical_action_summary.get("status")
+            summary["canonical_action_intent"] = self._latest_playwright_canonical_action_summary.get("action_intent")
+            summary["canonical_target_label"] = self._latest_playwright_canonical_action_summary.get("target_label")
+        return summary
 
     def verify_playwright_browser_action(
         self,
@@ -1256,6 +1366,27 @@ class ScreenAwarenessSubsystem:
         if not best_visible_text(observation):
             return {"attempted": False, "used": False, "reason": "sync_phase1_visual_augmentation_deferred"}
         return {"attempted": False, "used": False, "reason": "native_signal_sufficient"}
+
+
+def _canonical_action_summary(
+    canonical: ActionExecutionResult,
+    browser_result: BrowserSemanticActionExecutionResult,
+) -> dict[str, Any]:
+    target = canonical.plan.target
+    return {
+        "status": canonical.status.value,
+        "action_intent": canonical.plan.action_intent.value,
+        "target_candidate_id": target.candidate_id if target is not None else "",
+        "target_label": target.label if target is not None else "",
+        "risk_level": canonical.gate.risk_level.value,
+        "confirmation_required": canonical.gate.confirmation_required,
+        "attempted": canonical.attempt is not None,
+        "provider_status": browser_result.status,
+        "provider": browser_result.provider,
+        "verification_status": browser_result.verification_status,
+        "claim_ceiling": browser_result.claim_ceiling,
+        "planner_resolved": canonical.planner_result.resolved if canonical.planner_result is not None else False,
+    }
 
 
 def build_screen_awareness_subsystem(

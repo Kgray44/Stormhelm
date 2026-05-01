@@ -9,6 +9,7 @@ ApplicationWindow {
     id: root
 
     readonly property var bridge: stormhelmBridge
+    readonly property string uiVisualVariant: bridge ? bridge.uiVisualVariant : "classic"
     function mix(a, b, t) { return a + (b - a) * t }
     function normalizedRect(rectValue) {
         if (!rectValue || width <= 0 || height <= 0) {
@@ -333,10 +334,11 @@ ApplicationWindow {
         }
     }
 
-    GhostShell {
+    VariantGhostShell {
         id: ghostShell
         objectName: "ghostShell"
         anchors.fill: parent
+        visualVariant: root.uiVisualVariant
         coreBottom: fieldStrip.y + fieldStrip.height
         deckProgress: root.deckProgress
         messages: bridge ? bridge.ghostMessages : []
@@ -376,10 +378,11 @@ ApplicationWindow {
         }
     }
 
-    CommandDeckShell {
+    VariantCommandDeckShell {
         id: deckShell
         objectName: "deckShell"
         anchors.fill: parent
+        visualVariant: root.uiVisualVariant
         coreBottom: fieldStrip.y + fieldStrip.height
         deckProgress: root.deckProgress
         messages: bridge ? bridge.messages : []

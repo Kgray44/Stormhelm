@@ -9,6 +9,12 @@ from stormhelm.core.adapters import default_adapter_contract_registry
 from stormhelm.core.container import build_container
 from stormhelm.core.events import EventBuffer
 from stormhelm.core.screen_awareness import BrowserGroundingCandidate
+from stormhelm.core.screen_awareness import BrowserSemanticActionExecutionResult
+from stormhelm.core.screen_awareness import ActionExecutionStatus
+from stormhelm.core.screen_awareness import GroundingEvidenceChannel
+from stormhelm.core.screen_awareness import ScreenIntentType
+from stormhelm.core.screen_awareness import ScreenInterpretation
+from stormhelm.core.screen_awareness import ScreenSourceType
 from stormhelm.core.screen_awareness import build_screen_awareness_subsystem
 from stormhelm.ui.command_surface_v2 import build_command_surface_model
 
@@ -298,6 +304,116 @@ def test_deck_payload_uses_service_status_with_latest_playwright_summaries() -> 
     assert "typed" not in station_text
     assert "submitted" not in station_text
     assert "verified" not in station_text
+
+
+def test_playwright_observation_resolves_through_canonical_semantic_adapter_registry() -> None:
+    subsystem = build_screen_awareness_subsystem(_enabled_screen_config())
+    observation = subsystem.observe_playwright_mock_browser_page(_checkout_fixture())
+
+    resolution = subsystem.resolve_playwright_browser_semantics(observation)
+    context = subsystem.build_playwright_canonical_context(observation)
+
+    assert resolution.adapter_id.value == "browser"
+    assert resolution.available is True
+    assert resolution.used_for_context is True
+    assert any(target.label == "Continue" for target in resolution.semantic_targets)
+    assert any(target.label == "Email" for target in resolution.semantic_targets)
+    continue_target = next(target for target in resolution.semantic_targets if target.label == "Continue")
+    assert continue_target.role.value == "button"
+    assert continue_target.semantic_metadata["source_provider"] == "playwright_mock"
+    assert continue_target.semantic_metadata["source_observation_id"] == observation.observation_id
+    assert continue_target.semantic_metadata["claim_ceiling"] == "browser_semantic_observation"
+    assert context.adapter_resolution is not None
+    assert context.adapter_resolution.adapter_id == resolution.adapter_id
+    assert context.active_environment == "browser"
+    assert "browser" in subsystem.adapter_registry.supported_adapter_ids()
+
+
+def test_canonical_grounding_engine_uses_playwright_semantic_targets() -> None:
+    subsystem = build_screen_awareness_subsystem(_enabled_screen_config())
+    observation = subsystem.observe_playwright_mock_browser_page(_checkout_fixture())
+    context = subsystem.build_playwright_canonical_context(observation)
+    screen_observation = subsystem.screen_observation_from_playwright_browser_observation(observation)
+
+    outcome = subsystem.grounding_engine.resolve(
+        operator_text="click the Continue button",
+        intent=ScreenIntentType.EXECUTE_UI_ACTION,
+        observation=screen_observation,
+        interpretation=ScreenInterpretation(likely_environment="browser"),
+        current_context=context,
+    )
+
+    assert outcome is not None
+    assert outcome.winning_target is not None
+    assert outcome.winning_target.label == "Continue"
+    assert outcome.winning_target.source_channel == GroundingEvidenceChannel.ADAPTER_SEMANTICS
+    assert outcome.winning_target.source_type == ScreenSourceType.APP_ADAPTER
+    assert outcome.winning_target.semantic_metadata["source_provider"] == "playwright_mock"
+
+
+def test_playwright_execution_result_maps_into_canonical_action_summary() -> None:
+    subsystem = build_screen_awareness_subsystem(_enabled_screen_config())
+    browser_result = subsystem.playwright_browser_adapter._finalize_action_execution(
+        BrowserSemanticActionExecutionResult(
+            request_id="exec-1",
+            plan_id="plan-1",
+            preview_id="preview-1",
+            action_kind="click",
+            status="verified_supported",
+            action_attempted=True,
+            action_completed=True,
+            verification_attempted=True,
+            verification_status="supported",
+            before_observation_id="before-1",
+            after_observation_id="after-1",
+            target_summary={"candidate_id": "button-continue", "role": "button", "name": "Continue", "confidence": 0.91},
+            risk_level="low",
+            provider="playwright_live_semantic",
+            user_message="The semantic snapshots support the expected result of the click.",
+        ),
+        event_type="",
+    )
+
+    canonical_result = subsystem.map_playwright_browser_action_execution_result(browser_result)
+    status = subsystem.status_snapshot()["browser_adapters"]["playwright"]
+    surface = build_command_surface_model(
+        active_request_state={
+            "family": "screen_awareness",
+            "subject": "checkout page",
+            "parameters": {"request_stage": "execute", "result_state": "attempted"},
+        },
+        active_task=None,
+        recent_context_resolutions=[],
+        latest_message={"content": "Click verified by semantic comparison.", "metadata": {}},
+        status={"screen_awareness": subsystem.status_snapshot()},
+        workspace_focus={},
+    )
+    station = next(item for item in surface["deckStations"] if item["stationFamily"] == "screen_awareness")
+    station_text = str(station).lower()
+
+    assert canonical_result.status == ActionExecutionStatus.VERIFIED_SUCCESS
+    assert canonical_result.plan.target is not None
+    assert canonical_result.plan.target.label == "Continue"
+    assert canonical_result.attempt is not None
+    assert canonical_result.attempt.executor_name == "playwright_browser_adapter"
+    assert status["latest_canonical_action_summary"]["status"] == "verified_success"
+    assert status["last_action_execution_summary"]["canonical_status"] == "verified_success"
+    assert "canonical: verified success" in station_text
+    assert "i saw your screen" not in station_text
+
+
+def test_planner_does_not_execute_playwright_directly() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    planner_paths = [
+        repo_root / "src" / "stormhelm" / "core" / "orchestrator" / "planner.py",
+        repo_root / "src" / "stormhelm" / "core" / "orchestrator" / "planner_v2.py",
+        repo_root / "src" / "stormhelm" / "core" / "orchestrator" / "assistant.py",
+    ]
+    combined = "\n".join(path.read_text(encoding="utf-8") for path in planner_paths if path.exists())
+
+    assert "PlaywrightBrowserSemanticAdapter" not in combined
+    assert "browser_playwright" not in combined
+    assert "execute_playwright_browser_action" not in combined
 
 
 def test_adapter_contract_registry_keeps_playwright_observation_only() -> None:

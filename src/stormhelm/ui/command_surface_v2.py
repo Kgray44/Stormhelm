@@ -664,16 +664,18 @@ def _playwright_browser_adapter_entries(screen: dict[str, Any]) -> list[dict[str
             )
     if action_execution:
         execution_status = _title(_text(action_execution.get("status")) or "Unknown")
+        canonical_status = _title(_text(action_execution.get("canonical_status")) or "")
         action_kind = _title(_text(action_execution.get("action_kind")) or "Action")
         verification_status = _title(_text(action_execution.get("verification_status")) or "Not Conclusive")
         cleanup_status = _title(_text(action_execution.get("cleanup_status")) or "Not Started")
         target = _mapping(action_execution.get("target_summary"))
         target_name = _text(target.get("name")) or _text(target.get("label")) or _text(action_execution.get("target_name")) or "browser target"
+        canonical_detail = f" Canonical: {canonical_status}." if canonical_status else ""
         entries.append(
             _entry(
                 "Action Execution",
                 execution_status,
-                f"{action_kind} target: {target_name}. Verification: {verification_status}. Cleanup: {cleanup_status}.",
+                f"{action_kind} target: {target_name}. Verification: {verification_status}. Cleanup: {cleanup_status}.{canonical_detail}",
             )
         )
         if _text(action_execution.get("before_observation_id")) or _text(action_execution.get("after_observation_id")):

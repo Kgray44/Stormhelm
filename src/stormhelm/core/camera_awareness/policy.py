@@ -139,3 +139,50 @@ class CameraAwarenessPolicy:
             cloud_analysis_allowed=cloud_allowed,
             background_capture_allowed=bool(self.config.allow_background_capture),
         )
+
+    def evaluate_artifact_save_request(
+        self,
+        *,
+        user_confirmed: bool | None = None,
+    ) -> CameraAwarenessPolicyResult:
+        if not self.config.enabled:
+            return CameraAwarenessPolicyResult(
+                allowed=False,
+                requires_user_confirmation=False,
+                blocked_reason="camera_awareness_disabled",
+                permission_scope_required="camera.artifact_save",
+                cloud_analysis_allowed=False,
+                storage_allowed=False,
+                background_capture_allowed=False,
+                result_state=CameraAwarenessResultState.CAMERA_ARTIFACT_SAVE_BLOCKED,
+            )
+        if not self.config.allow_task_artifact_save:
+            return CameraAwarenessPolicyResult(
+                allowed=False,
+                requires_user_confirmation=False,
+                blocked_reason="image_persistence_not_allowed",
+                permission_scope_required="camera.artifact_save",
+                cloud_analysis_allowed=False,
+                storage_allowed=False,
+                background_capture_allowed=bool(self.config.allow_background_capture),
+                result_state=CameraAwarenessResultState.CAMERA_ARTIFACT_SAVE_BLOCKED,
+            )
+        if user_confirmed is not True:
+            return CameraAwarenessPolicyResult(
+                allowed=False,
+                requires_user_confirmation=True,
+                blocked_reason="camera_artifact_save_confirmation_required",
+                permission_scope_required="camera.artifact_save",
+                cloud_analysis_allowed=False,
+                storage_allowed=False,
+                background_capture_allowed=bool(self.config.allow_background_capture),
+                result_state=CameraAwarenessResultState.CAMERA_ARTIFACT_SAVE_PERMISSION_REQUIRED,
+            )
+        return CameraAwarenessPolicyResult(
+            allowed=True,
+            requires_user_confirmation=False,
+            permission_scope_required="camera.artifact_save",
+            cloud_analysis_allowed=False,
+            storage_allowed=True,
+            background_capture_allowed=bool(self.config.allow_background_capture),
+        )

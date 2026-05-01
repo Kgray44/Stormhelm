@@ -76,8 +76,10 @@ def _role_from_label(role_hint: str | None, label: str, default: GroundingCandid
         return GroundingCandidateRole.BUTTON
     if any(token in lowered for token in {"checkbox", "toggle"}):
         return GroundingCandidateRole.CHECKBOX
-    if any(token in lowered for token in {"field", "input", "textbox"}):
+    if any(token in lowered for token in {"field", "input", "textbox", "combobox", "select", "dropdown", "radio"}):
         return GroundingCandidateRole.FIELD
+    if "link" in lowered:
+        return GroundingCandidateRole.ITEM
     if "tab" in lowered:
         return GroundingCandidateRole.TAB
     if any(token in lowered for token in {"warning", "alert", "banner"}):
@@ -155,6 +157,12 @@ class BrowserSemanticAdapter(SemanticAdapter):
 
         page = dict(payload.get("page") or {}) if isinstance(payload.get("page"), dict) else {}
         tab = dict(payload.get("tab") or {}) if isinstance(payload.get("tab"), dict) else {}
+        payload_metadata = dict(payload.get("metadata") or {}) if isinstance(payload.get("metadata"), dict) else {}
+        provenance_metadata = {
+            key: payload_metadata[key]
+            for key in ("source_provider", "source_observation_id", "browser_context_kind", "claim_ceiling")
+            if payload_metadata.get(key)
+        }
         page_title = _clean_text(page.get("title")) or _clean_text(tab.get("title")) or _clean_text(_window_title(observation))
         url = _clean_text(page.get("url")) or _clean_text(tab.get("url"))
         loading_state = _clean_text(payload.get("loading_state")) or "unknown"
@@ -164,11 +172,24 @@ class BrowserSemanticAdapter(SemanticAdapter):
         semantic_targets: list[AppSemanticTarget] = []
         form_fields: list[BrowserFormSemantic] = []
         hidden_fields = 0
-        for raw_field in payload.get("form_fields") or []:
+        raw_fields: list[dict[str, Any]] = []
+        seen_field_keys: set[str] = set()
+        for source_name in ("form_fields", "controls"):
+            for raw_item in payload.get(source_name) or []:
+                if not isinstance(raw_item, dict):
+                    continue
+                field_key = str(raw_item.get("field_id") or raw_item.get("control_id") or raw_item.get("id") or raw_item.get("label") or raw_item.get("name") or "").strip()
+                role_key = str(raw_item.get("role") or raw_item.get("kind") or "").strip()
+                dedupe_key = f"{field_key}:{role_key}"
+                if dedupe_key in seen_field_keys:
+                    continue
+                seen_field_keys.add(dedupe_key)
+                raw_fields.append({**raw_item, "_semantic_source": source_name})
+        for raw_field in raw_fields:
             if not isinstance(raw_field, dict):
                 continue
             label = _clean_text(raw_field.get("label")) or _clean_text(raw_field.get("name")) or _clean_text(raw_field.get("field_id"))
-            field_id = _clean_text(raw_field.get("field_id")) or label
+            field_id = _clean_text(raw_field.get("field_id")) or _clean_text(raw_field.get("control_id")) or _clean_text(raw_field.get("id")) or label
             if not label or not field_id:
                 continue
             visible = bool(raw_field.get("visible", True))
@@ -183,7 +204,7 @@ class BrowserSemanticAdapter(SemanticAdapter):
                 kind=_clean_text(raw_field.get("kind")),
                 semantic_type=_clean_text(raw_field.get("semantic_type")),
                 bounds=dict(raw_field.get("bounds") or {}) if isinstance(raw_field.get("bounds"), dict) else {},
-                metadata={key: value for key, value in raw_field.items() if key not in {"field_id", "label", "role", "visible", "enabled", "kind", "semantic_type", "bounds"}},
+                metadata={key: value for key, value in raw_field.items() if key not in {"field_id", "control_id", "id", "label", "role", "visible", "enabled", "kind", "semantic_type", "bounds"}},
             )
             form_fields.append(browser_field)
             if not visible:
@@ -199,8 +220,9 @@ class BrowserSemanticAdapter(SemanticAdapter):
                     bounds=dict(raw_field.get("bounds") or {}) if isinstance(raw_field.get("bounds"), dict) else {},
                     metadata={
                         "adapter_id": self.adapter_id.value,
-                        "semantic_kind": "form_field",
+                        "semantic_kind": "browser_control" if raw_field.get("_semantic_source") == "controls" else "form_field",
                         "visible": True,
+                        **provenance_metadata,
                         **browser_field.metadata,
                     },
                 )
@@ -214,7 +236,7 @@ class BrowserSemanticAdapter(SemanticAdapter):
                     label=page_title,
                     role=GroundingCandidateRole.DOCUMENT,
                     parent_container="browser_page",
-                    metadata={"adapter_id": self.adapter_id.value, "semantic_kind": "page", "url": url},
+                    metadata={"adapter_id": self.adapter_id.value, "semantic_kind": "page", "url": url, **provenance_metadata},
                 ),
             )
 
@@ -260,7 +282,7 @@ class BrowserSemanticAdapter(SemanticAdapter):
                 validation_messages=list(validation_messages),
                 form_fields=form_fields,
             ),
-            metadata={"adapter_surface": "browser"},
+            metadata={"adapter_surface": "browser", **provenance_metadata},
         )
         return AppAdapterResolution(
             adapter_id=self.adapter_id,

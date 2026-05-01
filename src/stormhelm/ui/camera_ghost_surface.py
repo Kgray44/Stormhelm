@@ -17,10 +17,14 @@ _FORBIDDEN_KEYS = {
     "path",
     "provider_request",
     "provider_request_body",
+    "provider_response",
+    "provider_raw_response",
     "raw_bytes",
     "raw_image",
+    "raw_provider_response",
     "request_body",
     "temp_path",
+    "unbounded_provider_response",
 }
 _FORBIDDEN_TEXT_TOKENS = ("data:image", "base64,", "sk-")
 _CAMERA_FAMILY = "camera_awareness"
@@ -54,6 +58,7 @@ def build_camera_ghost_surface_model(
     helper_result = _camera_helper_result(metadata, answer)
     comparison_result = _camera_comparison_result(metadata)
     multi_capture_session = _camera_multi_capture_session(metadata)
+    capture_guidance = _camera_capture_guidance(metadata)
     source_kind = _source_kind(camera_status, answer)
     source_label = _source_label(source_kind)
     confidence = _text(
@@ -145,6 +150,12 @@ def build_camera_ghost_surface_model(
         state = "camera_comparison_ready"
         status_label = "Comparison Ready"
         result_state = "attempted"
+    if capture_guidance:
+        title = _safe_text(capture_guidance.get("title") or "Retake Recommended")
+        body = _safe_text(capture_guidance.get("concise_guidance") or body)
+        state = _guidance_state(capture_guidance)
+        status_label = _guidance_status_label(capture_guidance)
+        result_state = _guidance_result_state(capture_guidance)
 
     provenance = _provenance(
         source_label=source_label,
@@ -272,6 +283,28 @@ def build_camera_ghost_surface_model(
         ),
         "comparisonSimilarities": _text_list(comparison_result.get("similarities")),
         "comparisonDifferences": _text_list(comparison_result.get("differences")),
+        "captureGuidanceStatus": _safe_text(
+            capture_guidance.get("status")
+            or camera_status.get("lastCaptureGuidanceStatus")
+            or camera_status.get("last_capture_guidance_status")
+        ),
+        "captureGuidanceTitle": _safe_text(capture_guidance.get("title")),
+        "captureGuidance": _safe_text(capture_guidance.get("concise_guidance")),
+        "captureGuidanceDetail": _safe_text(capture_guidance.get("detailed_guidance")),
+        "guidanceIssueKinds": _guidance_issue_kinds(capture_guidance, camera_status),
+        "guidanceSuggestedNextCapture": _safe_text(capture_guidance.get("suggested_next_capture")),
+        "guidanceSuggestedCaptureLabel": _safe_text(
+            capture_guidance.get("suggested_capture_label")
+            or camera_status.get("lastCaptureGuidanceSuggestedCaptureLabel")
+            or camera_status.get("last_capture_guidance_suggested_capture_label")
+        ),
+        "guidanceHelperFamily": _safe_text(capture_guidance.get("helper_family")),
+        "guidanceCaptureTriggered": _bool(capture_guidance.get("capture_triggered")),
+        "guidanceAnalysisTriggered": _bool(capture_guidance.get("analysis_triggered")),
+        "guidanceUploadTriggered": _bool(capture_guidance.get("upload_triggered")),
+        "guidanceVerifiedOutcome": _bool(capture_guidance.get("verified_outcome")),
+        "guidanceVerifiedMeasurement": _bool(capture_guidance.get("verified_measurement")),
+        "guidanceRawImageIncluded": False,
     }
     card = {
         "title": title,
@@ -294,6 +327,7 @@ def build_camera_ghost_surface_model(
         answer=answer,
         helper_result=helper_result,
         comparison_result=comparison_result,
+        capture_guidance=capture_guidance,
         multi_capture_session=multi_capture_session,
         visual_artifact=visual_artifact,
         source_label=source_label,
@@ -400,6 +434,17 @@ def _camera_multi_capture_session(metadata: dict[str, Any]) -> dict[str, Any]:
     return _redact(session) if session else {}
 
 
+def _camera_capture_guidance(metadata: dict[str, Any]) -> dict[str, Any]:
+    camera = _mapping(metadata.get("camera_awareness")) or _mapping(metadata.get("cameraAwareness"))
+    guidance = (
+        _mapping(camera.get("capture_guidance"))
+        or _mapping(camera.get("captureGuidance"))
+        or _mapping(camera.get("retake_guidance"))
+        or _mapping(camera.get("retakeGuidance"))
+    )
+    return _redact(guidance) if guidance else {}
+
+
 def _artifact_id(status: dict[str, Any], answer: dict[str, Any]) -> str:
     provenance = _mapping(answer.get("provenance"))
     return _safe_identifier(
@@ -481,6 +526,7 @@ def _deck_station(
     answer: dict[str, Any],
     helper_result: dict[str, Any],
     comparison_result: dict[str, Any],
+    capture_guidance: dict[str, Any],
     multi_capture_session: dict[str, Any],
     visual_artifact: dict[str, Any],
     source_label: str,
@@ -556,6 +602,7 @@ def _deck_station(
         ),
         *_helper_sections(helper_result),
         *_comparison_sections(comparison_result, multi_capture_session),
+        *_capture_guidance_sections(capture_guidance),
         _section(
             "Provenance And Policy",
             [
@@ -665,9 +712,20 @@ def _camera_state(status: dict[str, Any], parameters: dict[str, Any]) -> str:
         "comparison_blocked": "camera_comparison_blocked",
         "comparison_failed": "camera_comparison_failed",
         "session_expired": "camera_session_expired",
+        "capture_guidance_ready": "camera_guidance_ready",
+        "camera_guidance_ready": "camera_guidance_ready",
+        "capture_guidance_limited": "camera_guidance_limited",
+        "capture_guidance_insufficient_evidence": "camera_guidance_limited",
+        "capture_guidance_blocked": "camera_guidance_blocked",
+        "capture_guidance_failed": "camera_guidance_failed",
     }
     if raw_state in mapping:
         return mapping[raw_state]
+    guidance_status = _text(
+        status.get("lastCaptureGuidanceStatus") or status.get("last_capture_guidance_status")
+    ).lower()
+    if guidance_status:
+        return _guidance_state({"status": guidance_status})
     permission = _text(status.get("permissionState") or status.get("permission_state")).lower()
     if raw_state in {"camera_permission_required", "permission_required"} or permission == "required":
         return "camera_permission_required"
@@ -676,6 +734,62 @@ def _camera_state(status: dict[str, Any], parameters: dict[str, Any]) -> str:
     if _bool(status.get("visionProviderAvailable"), default=True) is False:
         return "camera_provider_unavailable"
     return "camera_ready"
+
+
+def _guidance_state(capture_guidance: dict[str, Any]) -> str:
+    status = _safe_text(capture_guidance.get("status")).lower()
+    if status == "guidance_ready":
+        return "camera_guidance_ready"
+    if status in {"insufficient_evidence", "not_needed"}:
+        return "camera_guidance_limited"
+    if status == "failed":
+        return "camera_guidance_failed"
+    if status == "blocked":
+        return "camera_guidance_blocked"
+    return "camera_guidance_ready"
+
+
+def _guidance_status_label(capture_guidance: dict[str, Any]) -> str:
+    status = _safe_text(capture_guidance.get("status")).lower()
+    if status == "guidance_ready":
+        return "Retake Guidance"
+    if status == "insufficient_evidence":
+        return "Guidance Limited"
+    if status == "not_needed":
+        return "No Retake Needed"
+    if status == "blocked":
+        return "Guidance Blocked"
+    if status == "failed":
+        return "Guidance Failed"
+    return "Capture Guidance"
+
+
+def _guidance_result_state(capture_guidance: dict[str, Any]) -> str:
+    status = _safe_text(capture_guidance.get("status")).lower()
+    if status == "guidance_ready":
+        return "partial"
+    if status in {"blocked", "failed"}:
+        return "blocked" if status == "blocked" else "failed"
+    if status in {"insufficient_evidence", "not_needed"}:
+        return "partial"
+    return "partial"
+
+
+def _guidance_issue_kinds(
+    capture_guidance: dict[str, Any],
+    camera_status: dict[str, Any],
+) -> list[str]:
+    issues = [
+        _safe_text(issue.get("issue_kind"))
+        for issue in capture_guidance.get("quality_issues", [])
+        if isinstance(issue, Mapping) and _safe_text(issue.get("issue_kind"))
+    ]
+    if issues:
+        return issues
+    return _text_list(
+        camera_status.get("lastCaptureGuidanceIssueKinds")
+        or camera_status.get("last_capture_guidance_issue_kinds")
+    )
 
 
 def _card_copy(
@@ -720,6 +834,10 @@ def _card_copy(
         "camera_comparison_blocked": ("Camera Comparison Blocked", "The comparison was blocked before provider use.", "Blocked", "blocked"),
         "camera_comparison_failed": ("Camera Comparison Failed", "Camera comparison failed truthfully without fake verification.", "Failed", "failed"),
         "camera_session_expired": ("Multi-Capture Session Expired", "That bounded multi-capture session is expired. Fresh stills are needed.", "Expired", "stale"),
+        "camera_guidance_ready": ("Retake Recommended", "Stormhelm has capture-quality guidance from existing camera state.", "Retake Guidance", "partial"),
+        "camera_guidance_limited": ("Capture Guidance Limited", "There is not enough quality evidence for a specific retake; a closer, better-lit still is the safe next step.", "Guidance Limited", "partial"),
+        "camera_guidance_blocked": ("Capture Guidance Blocked", "Capture guidance was blocked before any camera or provider action.", "Guidance Blocked", "blocked"),
+        "camera_guidance_failed": ("Capture Guidance Failed", "Capture guidance failed truthfully without fake retake or analysis.", "Guidance Failed", "failed"),
         "camera_ready": ("Camera Awareness Ready", "Camera awareness is ready for an explicit single-still request.", "Ready", "prepared"),
     }
     title, body, status, result = copy.get(state, copy["camera_ready"])
@@ -762,6 +880,10 @@ def _actions(*, state: str, enabled: bool, provider_kind: str, artifact_fresh: b
             "camera_comparison_failed",
             "camera_ready_to_compare",
             "camera_session_expired",
+            "camera_guidance_ready",
+            "camera_guidance_limited",
+            "camera_guidance_blocked",
+            "camera_guidance_failed",
         }
         and enabled
         and provider_kind not in {"unavailable", "none"}
@@ -790,6 +912,10 @@ def _actions(*, state: str, enabled: bool, provider_kind: str, artifact_fresh: b
         "camera_ready_to_compare",
         "camera_comparison_blocked",
         "camera_comparison_failed",
+        "camera_guidance_ready",
+        "camera_guidance_limited",
+        "camera_guidance_blocked",
+        "camera_guidance_failed",
     }:
         actions.append(
             {
@@ -982,6 +1108,51 @@ def _artifact_summary_label(summary: Mapping[str, Any]) -> str:
     if safe_ref:
         parts.append(safe_ref)
     return " | ".join(parts)
+
+
+def _capture_guidance_sections(capture_guidance: dict[str, Any]) -> list[dict[str, Any]]:
+    if not capture_guidance:
+        return []
+    issues = [
+        item for item in capture_guidance.get("quality_issues", [])
+        if isinstance(item, Mapping)
+    ]
+    issue_labels = [
+        _title(_safe_text(issue.get("issue_kind"))) for issue in issues
+        if _safe_text(issue.get("issue_kind"))
+    ]
+    severity_labels = [
+        _title(_safe_text(issue.get("severity"))) for issue in issues
+        if _safe_text(issue.get("severity"))
+    ]
+    evidence = [
+        _safe_text(issue.get("evidence")) for issue in issues
+        if _safe_text(issue.get("evidence"))
+    ]
+    return [
+        _section(
+            "Capture Quality",
+            [
+                _entry("Status", _title(_safe_text(capture_guidance.get("status"))) or "Not Reported"),
+                _entry("Issues", "; ".join(issue_labels) or "No typed issue reported."),
+                _entry("Severity", "; ".join(severity_labels[:4]) or "Not Reported"),
+                _entry("Evidence", "; ".join(evidence[:3]) or "Existing backend guidance state."),
+                _entry("Raw Payload", "No"),
+            ],
+        ),
+        _section(
+            "Retake Guidance",
+            [
+                _entry("Guidance", _safe_text(capture_guidance.get("concise_guidance")) or "No guidance reported."),
+                _entry("Detail", _safe_text(capture_guidance.get("detailed_guidance")) or "No detail reported."),
+                _entry("Suggested Next Capture", _safe_text(capture_guidance.get("suggested_next_capture")) or "No next capture suggested."),
+                _entry("Suggested Capture Label", _safe_text(capture_guidance.get("suggested_capture_label")) or "Not Reported"),
+                _entry("Helper Family", _helper_family_label(capture_guidance.get("helper_family"))),
+                _entry("Verified Outcome", _yes_no(_bool(capture_guidance.get("verified_outcome")))),
+                _entry("Action Executed", _yes_no(_bool(capture_guidance.get("action_executed")))),
+            ],
+        ),
+    ]
 
 
 def _helper_family_label(value: Any) -> str:

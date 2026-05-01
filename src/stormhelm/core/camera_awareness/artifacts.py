@@ -5,10 +5,14 @@ from pathlib import Path
 
 from stormhelm.core.camera_awareness.models import (
     CameraArtifactCleanupResult,
+    CameraArtifactLibraryEntry,
+    CameraArtifactPersistenceResult,
+    CameraArtifactPersistenceStatus,
     CameraArtifactReadiness,
     CameraArtifactResolution,
     CameraAwarenessResultState,
     CameraFrameArtifact,
+    CameraStorageMode,
 )
 
 
@@ -25,6 +29,7 @@ class CameraArtifactStore:
     def __init__(self) -> None:
         self._artifacts: dict[str, CameraFrameArtifact] = {}
         self._pending_cleanup_artifacts: dict[str, CameraFrameArtifact] = {}
+        self._library_entries: dict[str, CameraArtifactLibraryEntry] = {}
         self._latest_artifact_id: str | None = None
         self.last_cleanup_result: CameraArtifactCleanupResult | None = None
 
@@ -81,6 +86,109 @@ class CameraArtifactStore:
         self.last_cleanup_result = _delete_ephemeral_file(artifact)
         self._remember_pending_cleanup(artifact, self.last_cleanup_result)
         return self.last_cleanup_result
+
+    def save_to_library(
+        self,
+        artifact_id: str,
+        *,
+        label: str = "",
+        at: datetime | None = None,
+        max_size_bytes: int | None = None,
+        allowed_formats: set[str] | frozenset[str] | None = None,
+    ) -> CameraArtifactPersistenceResult:
+        key = str(artifact_id or "").strip()
+        artifact = self.peek(key)
+        readiness = get_artifact_readiness(
+            artifact,
+            image_artifact_id=key,
+            at=at,
+            max_size_bytes=max_size_bytes,
+            allowed_formats=allowed_formats,
+        )
+        if not readiness.ready:
+            return CameraArtifactPersistenceResult(
+                image_artifact_id=readiness.image_artifact_id,
+                status=CameraArtifactPersistenceStatus.BLOCKED,
+                result_state=CameraAwarenessResultState.CAMERA_ARTIFACT_SAVE_BLOCKED,
+                storage_mode=readiness.storage_mode,
+                artifact_exists=readiness.artifact_exists,
+                artifact_readable=readiness.artifact_readable,
+                artifact_expired=readiness.artifact_expired,
+                artifact_size_bytes=readiness.artifact_size_bytes,
+                artifact_format=readiness.artifact_format,
+                artifact_source_provenance=readiness.artifact_source_provenance,
+                error_code=readiness.reason_code,
+                message=readiness.message,
+            )
+
+        if artifact is None:
+            return CameraArtifactPersistenceResult(
+                image_artifact_id=key or "missing-artifact",
+                status=CameraArtifactPersistenceStatus.BLOCKED,
+                result_state=CameraAwarenessResultState.CAMERA_ARTIFACT_SAVE_BLOCKED,
+                error_code="camera_artifact_missing_metadata",
+                message="Camera artifact metadata is missing.",
+            )
+
+        existing = self._library_entries.get(key)
+        if existing is not None:
+            return CameraArtifactPersistenceResult(
+                image_artifact_id=artifact.image_artifact_id,
+                status=CameraArtifactPersistenceStatus.ALREADY_SAVED,
+                result_state=CameraAwarenessResultState.CAMERA_ARTIFACT_SAVED,
+                safe_library_ref=existing.safe_library_ref,
+                label=existing.label,
+                storage_mode=existing.storage_mode,
+                artifact_exists=readiness.artifact_exists,
+                artifact_readable=readiness.artifact_readable,
+                artifact_expired=False,
+                artifact_size_bytes=readiness.artifact_size_bytes,
+                artifact_format=readiness.artifact_format,
+                artifact_source_provenance=readiness.artifact_source_provenance,
+                save_performed=False,
+                image_persisted_by_user_request=True,
+                message="Camera artifact was already saved by explicit user request.",
+            )
+
+        artifact.storage_mode = CameraStorageMode.SAVED
+        artifact.persisted_by_user_request = True
+        artifact.retention_policy = "saved_by_user_request"
+        artifact.expires_at = None
+        safe_ref = f"camera-library:{artifact.image_artifact_id}"
+        entry = CameraArtifactLibraryEntry(
+            image_artifact_id=artifact.image_artifact_id,
+            safe_library_ref=safe_ref,
+            label=str(label or "").strip(),
+            storage_mode=CameraStorageMode.SAVED,
+            artifact_format=readiness.artifact_format,
+            artifact_size_bytes=readiness.artifact_size_bytes,
+            source_provenance=readiness.artifact_source_provenance,
+        )
+        self._library_entries[artifact.image_artifact_id] = entry
+        self._latest_artifact_id = artifact.image_artifact_id
+        return CameraArtifactPersistenceResult(
+            image_artifact_id=artifact.image_artifact_id,
+            status=CameraArtifactPersistenceStatus.SAVED,
+            result_state=CameraAwarenessResultState.CAMERA_ARTIFACT_SAVED,
+            safe_library_ref=safe_ref,
+            label=entry.label,
+            storage_mode=CameraStorageMode.SAVED,
+            artifact_exists=True,
+            artifact_readable=True,
+            artifact_expired=False,
+            artifact_size_bytes=readiness.artifact_size_bytes,
+            artifact_format=readiness.artifact_format,
+            artifact_source_provenance=readiness.artifact_source_provenance,
+            save_performed=True,
+            image_persisted_by_user_request=True,
+            message="Camera artifact saved to the explicit user artifact library.",
+        )
+
+    def library_entry(self, artifact_id: str | None) -> CameraArtifactLibraryEntry | None:
+        return self._library_entries.get(str(artifact_id or "").strip())
+
+    def library_entries(self) -> list[CameraArtifactLibraryEntry]:
+        return list(self._library_entries.values())
 
     def resolve_for_followup(
         self,

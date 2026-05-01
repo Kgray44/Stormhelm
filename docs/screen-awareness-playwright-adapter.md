@@ -1,6 +1,6 @@
 # Screen Awareness Playwright Browser Adapter
 
-This page defines the Playwright-backed browser semantic adapter for Stormhelm. Addition 1 turns the scaffold into runtime readiness plus mock semantic observation for backend/UI plumbing. Addition 1.1 audits and hardens that behavior through the runtime config, container, Screen Awareness service, bounded events, status snapshots, and Command Deck payload path. Addition 2.2 adds opt-in live semantic smoke diagnostics. Playwright Addition 2 adds real, bounded semantic snapshot extraction from isolated temporary Playwright browser contexts when explicit dev/runtime gates and local dependencies are present. Playwright Addition 3 deepens semantic target grounding, candidate ranking, ambiguity handling, form/dialog summaries, and guidance text while remaining observation/guidance-only. Playwright Addition 3.1 hardens observation and grounding for messy real-world page structures without adding browser actions. Playwright Addition 4 adds verification-only before/after semantic comparison without executing browser actions. Playwright Addition 4.1 adds backend-owned browser action previews and trust-gated plan scaffolds. Playwright Addition 5 adds the first execution path for trust-gated click and focus only, still inside isolated temporary Playwright contexts and still followed by semantic before/after comparison. Playwright Addition 5.1 hardens that path against stale plans, target drift, exact trust-binding mistakes, locator ambiguity, cleanup failures, and verification ambiguity.
+This page defines the Playwright-backed browser semantic adapter for Stormhelm. Addition 1 turns the scaffold into runtime readiness plus mock semantic observation for backend/UI plumbing. Addition 1.1 audits and hardens that behavior through the runtime config, container, Screen Awareness service, bounded events, status snapshots, and Command Deck payload path. Addition 2.2 adds opt-in live semantic smoke diagnostics. Playwright Addition 2 adds real, bounded semantic snapshot extraction from isolated temporary Playwright browser contexts when explicit dev/runtime gates and local dependencies are present. Playwright Addition 3 deepens semantic target grounding, candidate ranking, ambiguity handling, form/dialog summaries, and guidance text while remaining observation/guidance-only. Playwright Addition 3.1 hardens observation and grounding for messy real-world page structures without adding browser actions. Playwright Addition 4 adds verification-only before/after semantic comparison without executing browser actions. Playwright Addition 4.1 adds backend-owned browser action previews and trust-gated plan scaffolds. Playwright Addition 5 adds the first execution path for trust-gated click and focus only, still inside isolated temporary Playwright contexts and still followed by semantic before/after comparison. Playwright Addition 5.1 hardens that path against stale plans, target drift, exact trust-binding mistakes, locator ambiguity, cleanup failures, and verification ambiguity. Playwright Addition 5.2 unifies the implementation with the canonical Screen Awareness pipeline so Playwright is a provider/adapter/executor seam, not a second Screen Awareness authority.
 
 ## Purpose
 
@@ -58,6 +58,40 @@ Screen Awareness remains the owning subsystem for:
 
 The Playwright adapter is an optional semantic input. It returns observations and grounding candidates to Screen Awareness. The planner and UI must not call Playwright directly.
 
+## Addition 5.2 Canonical Path
+
+Addition 5.2 makes the ownership map explicit:
+
+| Concern | Canonical owner | Playwright role |
+|---|---|---|
+| Top-level request handling/status | `ScreenAwarenessSubsystem` | Exposes bounded readiness and latest provider summaries through subsystem status. |
+| Adapter resolution | `SemanticAdapterRegistry` and `BrowserSemanticAdapter` | Converts `BrowserSemanticObservation` into the canonical `adapter_semantics["browser"]` payload. |
+| Grounding | `DeterministicGroundingEngine` | Supplies browser controls as `AppSemanticTarget` / adapter-semantic candidates. |
+| Guidance/navigation | `DeterministicNavigationEngine` plus response composition | Supplies provider detail and provenance, but does not own user-facing route authority. |
+| Action planning/gating/result language | `DeterministicActionEngine` and Screen Awareness service | Executes scoped click/focus through the provider seam and maps results into canonical `ActionExecutionResult` summaries. |
+| Approval/grants/audit | `TrustService` | Requests/evaluates exact grants; Playwright does not create a parallel approval path. |
+| Verification | Screen Awareness semantic comparison/verification | Supplies before/after observations; comparison remains bounded semantic evidence only. |
+| UI | Command surface from backend status | Renders canonical state plus Playwright provenance; UI does not infer execution state. |
+
+`ScreenAwarenessSubsystem.resolve_playwright_browser_semantics(...)` and `build_playwright_canonical_context(...)` are the bridge methods. They turn a Playwright semantic observation into the same browser adapter resolution and semantic targets used by other screen-aware flows. `map_playwright_browser_action_execution_result(...)` turns a browser-specific execution result into canonical action status such as `verified_success`, `attempted_unverified`, `planned`, `blocked`, `ambiguous`, or `failed`.
+
+What remains Playwright-specific:
+
+- isolated browser launch and cleanup
+- bounded semantic snapshot extraction
+- browser-specific locator resolution for click/focus
+- browser-specific target fingerprint/drift checks
+- browser-specific before/after observation capture
+
+What is not Playwright-specific:
+
+- planner route authority
+- semantic adapter registry ownership
+- canonical grounding language
+- trust approval and grant consumption
+- canonical action-result vocabulary
+- status/Deck/Ghost authority
+
 The scaffold seam is `PlaywrightBrowserSemanticAdapter` with these operations:
 
 - `get_readiness()`
@@ -65,6 +99,7 @@ The scaffold seam is `PlaywrightBrowserSemanticAdapter` with these operations:
 - `observe_live_browser_page(url, fixture_mode=False, context_options=None)`
 - `observe_browser_page(context)`
 - `get_semantic_snapshot(context)`
+- `adapter_semantics_payload(observation)` to feed canonical `adapter_semantics["browser"]`
 - `ground_target(target_phrase, observation)`
 - `produce_guidance_step(candidate)`
 - `compare_semantic_observations(before, after, expected=None)`
@@ -317,8 +352,10 @@ Deck must not expose cookies, credentials, hidden form values, sensitive field c
 6. Playwright Addition 4.1: action preview and trust-gated action plan scaffold.
 7. Playwright Addition 5: trust-gated click/focus execution with semantic before/after comparison.
 8. Playwright Addition 5.1: click/focus hardening for stale plans, target drift, trust binding, locator ambiguity, cleanup, and verification ambiguity.
-9. Playwright Addition 6: trust-gated typing/form assistance.
-10. Playwright Addition 7: workflow replay with task and trust binding.
+9. Playwright Addition 5.2: canonical Screen Awareness path unification.
+10. Playwright Addition 5.3: adversarial canonical-path regression tests for routing, provenance, trust, action-result mapping, UI state, and duplicate-path audits.
+11. Playwright Addition 6: trust-gated typing/form assistance.
+12. Playwright Addition 7: workflow replay with task and trust binding.
 
 ## Explicit Non-Goals
 
@@ -348,7 +385,7 @@ Deck must not expose cookies, credentials, hidden form values, sensitive field c
 Normal CI uses config, contract, model, fake readiness, mock observation, mock grounding, guidance, status, Deck model, fake-backed live semantic extraction, and event tests only. No live Playwright dependency is required. Addition 2.2 adds `tests/test_live_browser_provider_smoke.py`, which is marked `live_browser` and skipped unless the explicit environment gate is set. Playwright Addition 2 adds `tests/test_screen_awareness_playwright_live_semantic.py` for isolated-context policy, semantic normalization, sensitive-value redaction, grounding/guidance, events, status, and Deck payloads without requiring the real Playwright package in normal CI. Playwright Addition 3 adds `tests/test_screen_awareness_playwright_grounding_guidance.py` for richer target grounding, ranking, ambiguity, closest-match behavior, stale observation downgrades, form/dialog summaries, and Deck candidate evidence. Playwright Addition 3.1 adds `tests/test_screen_awareness_playwright_grounding_robustness.py` for messy labels/states, embedded-context limitations, dynamic stabilization, synonyms/negation, form-like summaries, live-event evidence bounding, and Deck limitation payloads.
 Playwright Addition 4 adds `tests/test_screen_awareness_playwright_semantic_verification.py` for typed comparison models, URL/title/control/dialog/link/form/limitation change detection, expected-outcome statuses, stale/partial/ambiguous basis handling, bounded events, status propagation, Deck payloads, sensitive redaction, and action-disabled preservation.
 Playwright Addition 4.1 adds `tests/test_screen_awareness_playwright_action_preview.py` for typed action previews/plans, action-kind classification, redaction, risk/trust posture, expected outcome templates, bounded events, Deck payloads, preview-only adapter contract declarations, and proof that execution capabilities remain absent.
-Playwright Addition 5 adds `tests/test_screen_awareness_playwright_click_focus_execution.py` for typed execution models, config gates, approval-required behavior, approved fixture click/focus execution through the Screen Awareness service path, isolated context cleanup, semantic before/after verification, bounded events, Deck payloads, and proof that type/scroll/form/login/cookie/profile actions remain unsupported. Playwright Addition 5.1 extends that same file with stale-plan blocking, target-fingerprint binding, denied/expired/consumed approval handling, cross-action grant isolation, locator ambiguity and role/selector disagreement blockers, after-observation failure classification, cleanup status, and event sequence checks.
+Playwright Addition 5 adds `tests/test_screen_awareness_playwright_click_focus_execution.py` for typed execution models, config gates, approval-required behavior, approved fixture click/focus execution through the Screen Awareness service path, isolated context cleanup, semantic before/after verification, bounded events, Deck payloads, and proof that type/scroll/form/login/cookie/profile actions remain unsupported. Playwright Addition 5.1 extends that same file with stale-plan blocking, target-fingerprint binding, denied/expired/consumed approval handling, cross-action grant isolation, locator ambiguity and role/selector disagreement blockers, after-observation failure classification, cleanup status, and event sequence checks. Playwright Addition 5.3 adds `tests/test_screen_awareness_playwright_canonical_kraken.py` to keep Playwright inside canonical Screen Awareness: Playwright observations must resolve through `BrowserSemanticAdapter`, browser controls must become canonical adapter-semantic targets, generic grounding must consume those targets, planner/UI code must not call Playwright execution directly, route boundaries must keep web retrieval/browser-open/Discord relay separate, canonical action status must lead Deck/Ghost summaries, and Playwright must use injected `TrustService` plus provider-local cleanup rather than a parallel trust authority.
 
 Focused scaffold tests:
 
@@ -372,6 +409,7 @@ Focused scaffold tests:
 - semantic comparison tests for supported, unsupported, partial, ambiguous, stale, insufficient-basis, and redacted before/after outcomes
 - action preview tests for non-executable click/type/select/check/submit planning, blocked sensitive contexts, ambiguous targets, unsupported requests, redaction, and bounded Deck/events
 - click/focus execution tests for approval gates, isolated context policy, stale plans, target drift, trust-binding exactness, locator ambiguity, disabled/sensitive target blockers, after-observation capture/failure handling, semantic comparison, trust audit use, cleanup status, bounded events, and Deck status
+- canonical-path regression tests for Playwright-to-`BrowserSemanticAdapter` resolution, canonical target provenance, generic grounding, planner/UI no-direct-execution audits, Screen Awareness route ownership for browser-control requests, web retrieval/browser destination/Discord route preservation, provider-to-canonical action-result mapping, and injected trust/cleanup proof
 - static contract keeps observation/preview/comparison posture while runtime status declares click/focus only when gates are enabled
 - click/focus action execution capabilities are declared only by runtime-gated status, disabled by default, and absent for type/scroll/form/login/cookie/profile/payment/CAPTCHA/screen/truth capabilities
 - claim ceiling is `browser_semantic_observation`

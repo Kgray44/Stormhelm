@@ -930,6 +930,172 @@ class DeterministicActionEngine:
             channels.extend(channel for channel in navigation_result.provenance.channels_used if channel not in channels)
         return channels
 
+    def result_from_browser_semantic_execution(self, browser_result: Any) -> ActionExecutionResult:
+        """Represent provider-specific browser execution in the canonical action-result language."""
+        action_kind = _normalize_text(str(getattr(browser_result, "action_kind", "") or "click"))
+        try:
+            intent = ActionIntent(action_kind)
+        except ValueError:
+            intent = ActionIntent.CLICK
+        target_summary = dict(getattr(browser_result, "target_summary", {}) or {})
+        label = str(target_summary.get("name") or target_summary.get("label") or target_summary.get("candidate_id") or "browser target").strip()
+        role = self._browser_target_role(target_summary.get("role"))
+        status = self._browser_execution_status(getattr(browser_result, "status", "blocked"))
+        request = ActionExecutionRequest(
+            utterance=f"playwright {intent.value.replace('_', ' ')} {label}".strip(),
+            intent=intent,
+            target_tokens=_tokenize(label),
+            mode_flags=["playwright_browser_semantic_execution"],
+        )
+        target = ActionTarget(
+            candidate_id=str(target_summary.get("candidate_id") or "").strip() or None,
+            label=label,
+            role=role,
+            source_channel=GroundingEvidenceChannel.ADAPTER_SEMANTICS,
+            source_type=ScreenSourceType.APP_ADAPTER,
+            enabled=target_summary.get("enabled") if isinstance(target_summary.get("enabled"), bool) else None,
+            semantic_metadata={
+                "provider": str(getattr(browser_result, "provider", "") or "playwright"),
+                "claim_ceiling": str(getattr(browser_result, "claim_ceiling", "") or "browser_semantic_action_execution"),
+                "browser_result_id": str(getattr(browser_result, "result_id", "") or ""),
+                "browser_status": str(getattr(browser_result, "status", "") or ""),
+                "verification_status": str(getattr(browser_result, "verification_status", "") or ""),
+            },
+        )
+        plan = ActionPlan(
+            request=request,
+            action_intent=intent,
+            target=target,
+            parameters={
+                "provider": str(getattr(browser_result, "provider", "") or "playwright"),
+                "browser_result_id": str(getattr(browser_result, "result_id", "") or ""),
+                "browser_status": str(getattr(browser_result, "status", "") or ""),
+                "claim_ceiling": str(getattr(browser_result, "claim_ceiling", "") or "browser_semantic_action_execution"),
+            },
+            preview_summary=f'Playwright browser {intent.value.replace("_", " ")} target: "{label}".',
+            verification_link=ActionVerificationLink(
+                verification_ready=bool(getattr(browser_result, "verification_attempted", False)),
+                expectation_summary="Compare bounded Playwright browser semantic observations before and after execution.",
+                comparison_basis="playwright_browser_semantic_observation",
+                prior_bearing_injected=bool(getattr(browser_result, "before_observation_id", "") and getattr(browser_result, "after_observation_id", "")),
+            ),
+            grounding_reused=True,
+            navigation_reused=False,
+            verification_reused=True,
+        )
+        raw_status = str(getattr(browser_result, "status", "") or "").strip()
+        raw_status_key = raw_status.lower()
+        raw_error_code = str(getattr(browser_result, "error_code", "") or "").strip()
+        blocker_present = (
+            raw_status_key
+            in {
+                "blocked",
+                "unsupported",
+                "approval_required",
+                "approval_invalid",
+                "approval_denied",
+                "denied",
+            }
+            or raw_status_key.startswith("blocked_")
+        )
+        gate = ActionGateDecision(
+            allowed=bool(getattr(browser_result, "action_attempted", False)),
+            outcome=self._browser_gate_outcome(raw_status),
+            reason=str(
+                getattr(browser_result, "user_message", "")
+                or getattr(browser_result, "bounded_error_message", "")
+                or raw_error_code
+                or raw_status
+                or "Playwright browser execution returned a bounded result."
+            ),
+            policy_mode=self._policy_mode(),
+            risk_level=self._browser_risk_level(getattr(browser_result, "risk_level", "")),
+            confirmation_required=raw_status_key == "approval_required",
+            ambiguity_present=raw_status_key == "ambiguous",
+            blocker_present=blocker_present,
+            verification_ready=bool(getattr(browser_result, "verification_attempted", False)),
+        )
+        attempt = None
+        if getattr(browser_result, "action_attempted", False):
+            attempt = ActionExecutionAttempt(
+                action_intent=intent,
+                target_candidate_id=target.candidate_id,
+                success=bool(getattr(browser_result, "action_completed", False)),
+                executor_name="playwright_browser_adapter",
+                details={
+                    "provider": str(getattr(browser_result, "provider", "") or "playwright"),
+                    "browser_status": raw_status,
+                    "verification_status": str(getattr(browser_result, "verification_status", "") or ""),
+                    "before_observation_id": str(getattr(browser_result, "before_observation_id", "") or ""),
+                    "after_observation_id": str(getattr(browser_result, "after_observation_id", "") or ""),
+                    "comparison_result_id": str(getattr(browser_result, "comparison_result_id", "") or ""),
+                    "cleanup_status": str(getattr(browser_result, "cleanup_status", "") or ""),
+                },
+            )
+        return self._result(
+            request=request,
+            plan=plan,
+            gate=gate,
+            attempt=attempt,
+            status=status,
+            explanation_summary=str(getattr(browser_result, "user_message", "") or "Playwright browser execution was mapped into the canonical Screen Awareness action result."),
+            provenance_channels=[GroundingEvidenceChannel.ADAPTER_SEMANTICS],
+        )
+
+    def _browser_execution_status(self, value: Any) -> ActionExecutionStatus:
+        raw = str(value or "").strip().lower()
+        if raw == "verified_supported":
+            return ActionExecutionStatus.VERIFIED_SUCCESS
+        if raw in {"completed_unverified", "attempted", "verified_unsupported", "partial"}:
+            return ActionExecutionStatus.ATTEMPTED_UNVERIFIED
+        if raw == "ambiguous":
+            return ActionExecutionStatus.AMBIGUOUS
+        if raw == "failed":
+            return ActionExecutionStatus.FAILED
+        if raw in {"approval_required", "approved"}:
+            return ActionExecutionStatus.PLANNED
+        if raw in {"blocked", "unsupported", "approval_invalid", "approval_denied", "denied"} or raw.startswith("blocked_"):
+            return ActionExecutionStatus.BLOCKED
+        return ActionExecutionStatus.GATED
+
+    def _browser_gate_outcome(self, value: str) -> str:
+        raw = str(value or "").strip().lower()
+        if raw == "ambiguous":
+            return "ambiguous"
+        if raw in {"blocked", "unsupported", "approval_invalid", "approval_denied", "denied"} or raw.startswith("blocked_"):
+            return "blocked"
+        if raw == "approval_required":
+            return "planned"
+        if raw in {"verified_supported", "completed_unverified", "verified_unsupported", "partial", "failed"}:
+            return "allowed"
+        return raw or "gated"
+
+    def _browser_target_role(self, value: Any) -> GroundingCandidateRole:
+        raw = _normalize_text(str(value or ""))
+        if raw == "button":
+            return GroundingCandidateRole.BUTTON
+        if raw in {"textbox", "field", "input", "combobox", "select", "radio"}:
+            return GroundingCandidateRole.FIELD
+        if raw == "checkbox":
+            return GroundingCandidateRole.CHECKBOX
+        if raw in {"alert", "warning"}:
+            return GroundingCandidateRole.WARNING
+        if raw in {"dialog", "popup"}:
+            return GroundingCandidateRole.POPUP
+        if raw == "link":
+            return GroundingCandidateRole.ITEM
+        return GroundingCandidateRole.UNKNOWN
+
+    def _browser_risk_level(self, value: Any) -> ActionRiskLevel:
+        raw = str(value or "").strip().lower()
+        if raw == ActionRiskLevel.RESTRICTED.value:
+            return ActionRiskLevel.RESTRICTED
+        if raw == ActionRiskLevel.HIGH.value:
+            return ActionRiskLevel.HIGH
+        if raw in {ActionRiskLevel.MODERATE.value, "medium"}:
+            return ActionRiskLevel.MODERATE
+        return ActionRiskLevel.LOW
+
     def _result(
         self,
         *,

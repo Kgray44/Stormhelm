@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import tomllib
 from pathlib import Path
@@ -64,6 +65,9 @@ from stormhelm.version import (
 
 
 ConfigDict = dict[str, Any]
+DEFAULT_UI_VISUAL_VARIANT = "classic"
+VALID_UI_VISUAL_VARIANTS = frozenset({"classic", "stormforge"})
+_LOGGER = logging.getLogger(__name__)
 
 
 def load_config(
@@ -159,6 +163,9 @@ def _build_app_config(
         poll_interval_ms=int(ui_data.get("poll_interval_ms", 1500)),
         hide_to_tray_on_close=bool(ui_data.get("hide_to_tray_on_close", True)),
         ghost_shortcut=str(ui_data.get("ghost_shortcut", "Ctrl+Space")),
+        visual_variant=_normalize_ui_visual_variant(
+            ui_data.get("visual_variant", DEFAULT_UI_VISUAL_VARIANT)
+        ),
     )
 
     lifecycle_data = data.get("lifecycle", {})
@@ -1288,6 +1295,7 @@ def _apply_env_overrides(data: ConfigDict, env: Mapping[str, str]) -> ConfigDict
         "STORMHELM_CORE_HOST": ("network.host", str),
         "STORMHELM_CORE_PORT": ("network.port", int),
         "STORMHELM_DATA_DIR": ("storage.data_dir", str),
+        "STORMHELM_UI_VARIANT": ("ui.visual_variant", str),
         "STORMHELM_MAX_CONCURRENT_JOBS": ("concurrency.max_workers", int),
         "STORMHELM_DEFAULT_JOB_TIMEOUT_SECONDS": (
             "concurrency.default_job_timeout_seconds",
@@ -2126,6 +2134,19 @@ def _expand_path(raw: str | None, root: Path, data_dir: Path | None) -> Path | N
     if data_dir is not None:
         expanded = expanded.replace("${DATA_DIR}", str(data_dir))
     return Path(expanded).expanduser().resolve()
+
+
+def _normalize_ui_visual_variant(raw: Any) -> str:
+    requested = str(raw or DEFAULT_UI_VISUAL_VARIANT).strip().lower()
+    if requested in VALID_UI_VISUAL_VARIANTS:
+        return requested
+    _LOGGER.warning(
+        "Unknown Stormhelm UI visual variant '%s'; falling back to '%s'. Valid variants: %s.",
+        raw,
+        DEFAULT_UI_VISUAL_VARIANT,
+        ", ".join(sorted(VALID_UI_VISUAL_VARIANTS)),
+    )
+    return DEFAULT_UI_VISUAL_VARIANT
 
 
 def _parse_bool(raw: str) -> bool:

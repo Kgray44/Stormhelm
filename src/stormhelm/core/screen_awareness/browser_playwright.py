@@ -242,6 +242,10 @@ class PlaywrightBrowserSemanticAdapter:
     def last_action_execution_summary(self) -> dict[str, Any]:
         return dict(self._last_action_execution_summary)
 
+    def adapter_semantics_payload(self, observation: BrowserSemanticObservation) -> dict[str, Any]:
+        """Convert a Playwright semantic observation into the canonical browser adapter payload."""
+        return _adapter_semantics_payload(observation)
+
     def status_snapshot(self) -> dict[str, Any]:
         readiness = self.get_readiness(emit_event=False).to_dict()
         declared_action_capabilities = _declared_action_capabilities(self.config, readiness)
@@ -2154,6 +2158,76 @@ def _observation_summary(observation: BrowserSemanticObservation) -> dict[str, A
             }
         )
     return summary
+
+
+def _adapter_semantics_payload(observation: BrowserSemanticObservation) -> dict[str, Any]:
+    page_url = _safe_display_url(observation.page_url)
+    controls: list[dict[str, Any]] = []
+    for control in observation.controls[:_LIST_LIMIT]:
+        label = _bounded_text(control.label or control.name or control.text or control.control_id, 120)
+        control_id = _bounded_text(control.control_id or label, 100)
+        if not label or not control_id:
+            continue
+        controls.append(
+            {
+                "field_id": control_id,
+                "control_id": control_id,
+                "label": label,
+                "name": _bounded_text(control.name or label, 120),
+                "role": _bounded_text(control.role or "control", 40),
+                "kind": _bounded_text(control.role or "control", 40),
+                "visible": bool(control.visible if control.visible is not None else True),
+                "enabled": control.enabled if isinstance(control.enabled, bool) else None,
+                "bounds": dict(control.bounding_hint or {}),
+                "selector_hint": _bounded_text(control.selector_hint, 120),
+                "checked": control.checked,
+                "expanded": control.expanded,
+                "required": control.required,
+                "readonly": control.readonly,
+                "value_summary": _bounded_text(control.value_summary, 80),
+                "semantic_type": _bounded_text(control.risk_hint, 80),
+                "source_provider": observation.provider,
+                "source_observation_id": observation.observation_id,
+                "claim_ceiling": observation.claim_ceiling,
+            }
+        )
+    validation_messages: list[str] = []
+    for item in (list(observation.dialogs) + list(observation.alerts))[:_LIST_LIMIT]:
+        if not isinstance(item, dict):
+            continue
+        text = _bounded_text(item.get("name") or item.get("text") or item.get("dialog_id") or item.get("alert_id"), 160)
+        if text and text not in validation_messages:
+            validation_messages.append(text)
+    return {
+        "page": {
+            "title": _bounded_text(observation.page_title, 160),
+            "url": page_url,
+        },
+        "tab": {
+            "title": _bounded_text(observation.page_title, 160),
+            "url": page_url,
+            "active": True,
+        },
+        "loading_state": "complete" if observation.controls or observation.page_title or observation.page_url else "unknown",
+        "controls": controls,
+        "validation_messages": validation_messages,
+        "freshness_seconds": _observation_age_seconds(observation),
+        "metadata": {
+            "adapter_id": observation.adapter_id,
+            "source_provider": observation.provider,
+            "source_observation_id": observation.observation_id,
+            "browser_context_kind": observation.browser_context_kind,
+            "claim_ceiling": observation.claim_ceiling,
+            "limitations": list(observation.limitations)[:8],
+        },
+    }
+
+
+def _observation_age_seconds(observation: BrowserSemanticObservation) -> float | None:
+    parsed = _parse_utc_timestamp(observation.observed_at)
+    if parsed is None:
+        return None
+    return max(0.0, (datetime.now(UTC) - parsed).total_seconds())
 
 
 def _grounding_summary(

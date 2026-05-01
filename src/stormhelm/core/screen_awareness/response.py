@@ -178,6 +178,21 @@ def _has_specific_content_power_evidence(analysis: ScreenAnalysisResult) -> bool
     )
 
 
+def _has_available_adapter_content(analysis: ScreenAnalysisResult) -> bool:
+    resolution = analysis.adapter_resolution
+    if resolution is None or not resolution.available or resolution.semantic_context is None:
+        return False
+    semantic_context = resolution.semantic_context
+    return bool(
+        semantic_context.summary
+        or semantic_context.page_title
+        or semantic_context.url
+        or semantic_context.current_path
+        or semantic_context.selected_item_label
+        or resolution.semantic_targets
+    )
+
+
 def _explain_error(error_text: str) -> str:
     lowered = error_text.lower()
     if "nameerror" in lowered:
@@ -708,6 +723,7 @@ class ScreenResponseComposer:
             and _evidence_kind(analysis) in {"window_metadata", "display_metadata"}
             and ScreenLimitationCode.SCREEN_CAPTURE_DISABLED in limitation_codes
             and not _has_specific_content_power_evidence(analysis)
+            and not _has_available_adapter_content(analysis)
         ):
             text = _metadata_only_screen_text(
                 observation,
@@ -724,6 +740,7 @@ class ScreenResponseComposer:
             and _evidence_kind(analysis) in {"window_metadata", "display_metadata"}
             and ScreenLimitationCode.SCREEN_CAPTURE_UNAVAILABLE in limitation_codes
             and not _has_specific_content_power_evidence(analysis)
+            and not _has_available_adapter_content(analysis)
         ):
             text = _metadata_only_screen_text(
                 observation,

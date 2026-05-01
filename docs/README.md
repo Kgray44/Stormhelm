@@ -89,6 +89,7 @@ Tests: `tests/test_launcher.py`, `tests/test_config_loader.py`
 | Voice user guide | [voice.md](voice.md) |
 | Voice C1 release readiness, smoke plan, and commit hygiene | [voice-c1-release-readiness.md](voice-c1-release-readiness.md) |
 | Planner, routing, route state, fuzzy evaluation | [planner-routing.md](planner-routing.md) |
+| Camera Awareness still-image routing, privacy, artifacts, helpers, comparison, and guidance | [camera-awareness.md](camera-awareness.md) |
 | Subsystem responsibilities | [subsystems.md](subsystems.md) |
 | OpenAI, Discord, Qt, Windows, storage, package manager integrations | [integrations.md](integrations.md) |
 | Approval, secrets, local-first behavior, data retention | [security-and-trust.md](security-and-trust.md) |

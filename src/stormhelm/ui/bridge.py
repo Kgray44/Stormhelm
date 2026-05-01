@@ -271,6 +271,10 @@ class UiBridge(QtCore.QObject):
     def mode(self) -> str:
         return self._mode
 
+    @QtCore.Property(str, constant=True)
+    def uiVisualVariant(self) -> str:
+        return self.config.ui.visual_variant
+
     @QtCore.Property(str, notify=assistantStateChanged)
     def assistantState(self) -> str:
         return self._assistant_state
@@ -1382,8 +1386,13 @@ class UiBridge(QtCore.QObject):
         if isinstance(status, dict):
             status_changed = status_changed or dict(status) != self._status
             previous_voice_state = dict(self._voice_state)
+            previous_voice_collection_state = self._voice_collection_signature(
+                previous_voice_state
+            )
             self.apply_status(status)
-            if previous_voice_state != self._voice_state:
+            if previous_voice_collection_state != self._voice_collection_signature(
+                self._voice_state
+            ):
                 collections_changed = True
 
         history = payload.get("history")
@@ -3588,6 +3597,22 @@ class UiBridge(QtCore.QObject):
             return False
         self._voice_state = next_state
         return True
+
+    def _voice_collection_signature(self, value: Any) -> Any:
+        volatile_keys = {
+            "last_update_at",
+            "visualizer_last_update_at",
+            "voice_visualizer_last_update_at",
+        }
+        if isinstance(value, dict):
+            return {
+                key: self._voice_collection_signature(item)
+                for key, item in value.items()
+                if key not in volatile_keys
+            }
+        if isinstance(value, list):
+            return [self._voice_collection_signature(item) for item in value]
+        return value
 
     def _record_visualizer_stream_update(self, voice_payload: dict[str, Any]) -> None:
         now = time.perf_counter()

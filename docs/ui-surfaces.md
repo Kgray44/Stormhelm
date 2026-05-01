@@ -17,13 +17,70 @@ Tests: `tests/test_ui_bridge.py`, `tests/test_main_controller.py`, `tests/test_q
 Sources: `src/stormhelm/ui/bridge.py`, `src/stormhelm/ui/client.py`, `src/stormhelm/core/container.py`, `src/stormhelm/core/safety/policy.py`
 Tests: `tests/test_ui_bridge_authority_contracts.py`, `tests/test_ui_client_streaming.py`
 
+## Visual Variants
+
+Stormhelm UI-P0.5 preserves the current Ghost Mode and Command Deck appearance as the `classic` visual variant and adds a separate `stormforge` lane for future polish. Both variants consume the same `UiBridge` properties and emit the same local QML signals; there is no second backend path, bridge model, planner route, or command-routing contract.
+
+Current shell entry points:
+
+- `assets/qml/Main.qml` is the QML application shell.
+- `assets/qml/components/VariantGhostShell.qml` selects the Ghost visual variant.
+- `assets/qml/components/VariantCommandDeckShell.qml` selects the Command Deck visual variant.
+
+Classic baseline files:
+
+- `assets/qml/variants/classic/ClassicGhostShell.qml`
+- `assets/qml/variants/classic/ClassicCommandDeckShell.qml`
+
+Stormforge files safe for future visual polish:
+
+- `assets/qml/variants/stormforge/StormforgeGhostShell.qml`
+- `assets/qml/variants/stormforge/StormforgeCommandDeckShell.qml`
+
+Stormforge UI-P1 foundation files:
+
+- `assets/qml/variants/stormforge/StormforgeTokens.qml` holds Stormforge color, opacity, spacing, typography, radius, elevation, animation, z-layer, and state-style constants.
+- `assets/qml/variants/stormforge/StormforgeGlassPanel.qml`
+- `assets/qml/variants/stormforge/StormforgeCard.qml`
+- `assets/qml/variants/stormforge/StormforgeButton.qml`
+- `assets/qml/variants/stormforge/StormforgeIconButton.qml`
+- `assets/qml/variants/stormforge/StormforgeStatusChip.qml`
+- `assets/qml/variants/stormforge/StormforgeResultBadge.qml`
+- `assets/qml/variants/stormforge/StormforgeSectionHeader.qml`
+- `assets/qml/variants/stormforge/StormforgeEmptyState.qml`
+- `assets/qml/variants/stormforge/StormforgeLoadingState.qml`
+- `assets/qml/variants/stormforge/StormforgeErrorState.qml`
+- `assets/qml/variants/stormforge/StormforgeDivider.qml`
+- `assets/qml/variants/stormforge/StormforgeRail.qml`
+- `assets/qml/variants/stormforge/StormforgeListRow.qml`
+- `assets/qml/variants/stormforge/StormforgeMetricLabel.qml`
+- `assets/qml/variants/stormforge/StormforgeActionStrip.qml`
+
+Stormforge currently wraps the preserved Classic Ghost and Deck shells and adds only small foundation markers to prove the token/component layer loads. Future UI-P2/UI-P3 polish should prefer changing Stormforge files or adding Stormforge-only helpers before touching shared `assets/qml/components/*` files. Shared components remain appropriate for backend-state rendering, bridge contract support, and visual behavior intentionally shared by both variants.
+
+State styling lives in `StormforgeTokens.qml` through the `normalizeState`, `stateAccent`, `stateFill`, `stateStroke`, `stateGlow`, and `stateText` helpers. Supported state tones include `idle`, `active`, `listening`, `thinking`, `acting`, `speaking`, `planned`, `running`, `blocked`, `failed`, `stale`, `verified`, `unverified`, `approval_required`, `recovery`, `mock/dev`, and `unavailable`.
+
+Known remaining Stormforge polish gaps:
+
+- Ghost still inherits the Classic layout and needs a dedicated Stormforge composition pass.
+- Command Deck still inherits the Classic layout and needs a dedicated Stormforge workspace pass.
+- The component set is construction-smoked, not yet rolled through every panel.
+- Automated visual screenshot baselines remain future work.
+
+Switching:
+
+- Default: `config/default.toml` has `[ui] visual_variant = "classic"`.
+- Config override: set `[ui] visual_variant = "stormforge"` in the active user or portable config.
+- Environment override: set `STORMHELM_UI_VARIANT=stormforge` before launching `scripts/run_ui.ps1`.
+- Invalid values fall back to `classic` and log a warning from `stormhelm.config.loader`.
+
 ## Ghost Mode
 
 - What it shows: Quick command strip, Ghost messages, primary command card, action strip, corner readouts, adaptive placement/style, brief status labels.
 - What state feeds it: `UiBridge.mode`, `ghostMessages`, `ghostPrimaryCard`, `ghostActionStrip`, `ghostCornerReadouts`, `ghostAdaptiveStyle`, `ghostPlacement`, `ghostCaptureActive`, chat/stream/status payloads.
 - What actions it exposes: Begin/cancel capture, draft editing, submit message, local surface actions, mode toggle.
 - What it must not own: Route decisions, trust approvals, action success, persisted state.
-- Source files: `src/stormhelm/ui/bridge.py`, `src/stormhelm/ui/ghost_input.py`, `src/stormhelm/ui/ghost_adaptive.py`, `assets/qml/components/GhostShell.qml`, `assets/qml/components/SignalStrip.qml`, `assets/qml/components/CommandSurfaceCard.qml`
+- Source files: `src/stormhelm/ui/bridge.py`, `src/stormhelm/ui/ghost_input.py`, `src/stormhelm/ui/ghost_adaptive.py`, `assets/qml/components/VariantGhostShell.qml`, `assets/qml/variants/classic/ClassicGhostShell.qml`, `assets/qml/variants/stormforge/StormforgeGhostShell.qml`, `assets/qml/components/SignalStrip.qml`, `assets/qml/components/CommandSurfaceCard.qml`
 - Tests: `tests/test_ghost_input.py`, `tests/test_ghost_adaptive.py`, `tests/test_ui_bridge.py`, `tests/test_qml_shell.py`
 
 ## Command Deck
@@ -32,7 +89,7 @@ Tests: `tests/test_ui_bridge_authority_contracts.py`, `tests/test_ui_client_stre
 - What state feeds it: `deckModules`, `activeDeckModule`, `deckSupportModules`, `deckPanels`, `hiddenDeckPanels`, `deckPanelCatalog`, `workspaceSections`, `workspaceCanvas`, `openedItems`, `routeInspector`, `requestComposer`, `statusStripItems`.
 - What actions it exposes: Send prompt, switch module/section, activate/close opened items, save notes, pin/collapse/hide/restore panels, save/reset/auto-arrange deck layout, perform local surface actions.
 - What it must not own: Backend truth, route scoring, adapter execution, destructive action permission.
-- Source files: `assets/qml/components/CommandDeckShell.qml`, `assets/qml/components/CommandSpine.qml`, `assets/qml/components/CommandRail.qml`, `assets/qml/components/DeckPanelWorkspace.qml`, `assets/qml/components/WorkspaceCanvas.qml`, `src/stormhelm/ui/bridge.py`
+- Source files: `assets/qml/components/VariantCommandDeckShell.qml`, `assets/qml/variants/classic/ClassicCommandDeckShell.qml`, `assets/qml/variants/stormforge/StormforgeCommandDeckShell.qml`, `assets/qml/components/CommandSpine.qml`, `assets/qml/components/CommandRail.qml`, `assets/qml/components/DeckPanelWorkspace.qml`, `assets/qml/components/WorkspaceCanvas.qml`, `src/stormhelm/ui/bridge.py`
 - Tests: `tests/test_main_controller.py`, `tests/test_main_controller_batch2_contracts.py`, `tests/test_ui_bridge_batch2_contracts.py`, `tests/test_qml_shell.py`
 
 ## Bridge Surfaces
