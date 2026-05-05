@@ -19,6 +19,10 @@ from stormhelm.core.screen_awareness.action import WindowsNativeActionExecutor
 from stormhelm.core.screen_awareness.brain_integration import DeterministicBrainIntegrationEngine
 from stormhelm.core.screen_awareness.browser_playwright import PlaywrightBrowserSemanticAdapter
 from stormhelm.core.screen_awareness.continuity import DeterministicContinuityEngine
+from stormhelm.core.screen_awareness.evidence import has_strong_current_evidence
+from stormhelm.core.screen_awareness.evidence import rank_screen_evidence
+from stormhelm.core.screen_awareness.evidence import top_evidence_confidence
+from stormhelm.core.screen_awareness.evidence import top_summary_evidence
 from stormhelm.core.screen_awareness.grounding import DeterministicGroundingEngine
 from stormhelm.core.screen_awareness.interpretation import DeterministicContextSynthesizer
 from stormhelm.core.screen_awareness.interpretation import DeterministicScreenInterpreter
@@ -34,6 +38,8 @@ from stormhelm.core.screen_awareness.models import BrowserSemanticActionExecutio
 from stormhelm.core.screen_awareness.models import BrowserSemanticActionPlan
 from stormhelm.core.screen_awareness.models import BrowserSemanticActionPreview
 from stormhelm.core.screen_awareness.models import BrowserSemanticObservation
+from stormhelm.core.screen_awareness.models import BrowserSemanticTaskExecutionResult
+from stormhelm.core.screen_awareness.models import BrowserSemanticTaskPlan
 from stormhelm.core.screen_awareness.models import BrowserSemanticVerificationRequest
 from stormhelm.core.screen_awareness.models import BrowserSemanticVerificationResult
 from stormhelm.core.screen_awareness.models import CurrentScreenContext
@@ -59,6 +65,7 @@ from stormhelm.core.screen_awareness.models import ScreenRecoveryStatus
 from stormhelm.core.screen_awareness.models import ScreenObservation
 from stormhelm.core.screen_awareness.models import ScreenObservationScope
 from stormhelm.core.screen_awareness.models import ScreenResponse
+from stormhelm.core.screen_awareness.models import ScreenSensitivityLevel
 from stormhelm.core.screen_awareness.models import ScreenSourceType
 from stormhelm.core.screen_awareness.models import ScreenStageTiming
 from stormhelm.core.screen_awareness.models import ScreenTruthState
@@ -75,12 +82,73 @@ from stormhelm.core.screen_awareness.observation import best_live_visible_text
 from stormhelm.core.screen_awareness.observation import best_visible_text
 from stormhelm.core.screen_awareness.observation import has_direct_screen_signal
 from stormhelm.core.screen_awareness.observation import has_focus_only_signal
+from stormhelm.core.screen_awareness.observation import has_screen_capture_signal
 from stormhelm.core.screen_awareness.observation import has_screen_content_signal
 from stormhelm.core.screen_awareness.planner import ScreenAwarenessPlannerSeam
 from stormhelm.core.screen_awareness.response import ScreenResponseComposer
 from stormhelm.core.screen_awareness.verification import DeterministicVerificationEngine
 from stormhelm.core.screen_awareness.visual_capture import ScreenVisualGrounder
 from stormhelm.core.screen_awareness.visual_capture import source_labels_for_observation
+
+
+def _screen_capture_status(observation: ScreenObservation | None) -> dict[str, Any]:
+    if observation is None or not isinstance(observation.visual_metadata, dict):
+        return {}
+    status = observation.visual_metadata.get("screen_capture")
+    return dict(status) if isinstance(status, dict) else {}
+
+
+def _capture_capability(grounder: ScreenVisualGrounder) -> dict[str, Any]:
+    snapshot = grounder.status_snapshot()
+    screen_capture = snapshot.get("screen_capture") if isinstance(snapshot, dict) else {}
+    return dict(screen_capture) if isinstance(screen_capture, dict) else {}
+
+
+def _observation_allowed(config: ScreenAwarenessConfig, observation: ScreenObservation | None) -> bool:
+    if not config.capability_flags().get("screen_capture_enabled", False):
+        return False
+    if observation is not None and observation.sensitivity in {
+        ScreenSensitivityLevel.SENSITIVE,
+        ScreenSensitivityLevel.RESTRICTED,
+    }:
+        return False
+    return True
+
+
+def _observation_blocked_reason(
+    *,
+    observation: ScreenObservation | None,
+    screen_capture_status: dict[str, Any],
+    observation_allowed: bool,
+) -> str | None:
+    reason = str(screen_capture_status.get("reason") or "").strip()
+    if reason:
+        return reason
+    if not observation_allowed and observation is not None and observation.sensitivity in {
+        ScreenSensitivityLevel.SENSITIVE,
+        ScreenSensitivityLevel.RESTRICTED,
+    }:
+        return "sensitive_window_blocked"
+    if not observation_allowed:
+        return "screen_capture_disabled"
+    return None
+
+
+def _evidence_source(entry: dict[str, Any]) -> str | None:
+    source = str(entry.get("source") or "").strip()
+    return source or None
+
+
+def _answered_from_source(observation: ScreenObservation | None, ranking: list[dict[str, Any]]) -> str | None:
+    if observation is not None and observation.visual_text:
+        visual_source = str(observation.visual_metadata.get("visual_text_source") or "").strip()
+        if visual_source:
+            return visual_source
+    evidence = top_summary_evidence(ranking)
+    source = _evidence_source(evidence)
+    if source in {"clipboard_hint", "stale_recent_context"} and not bool(evidence.get("used_for_summary")):
+        return "insufficient_visual_evidence"
+    return source
 
 
 @dataclass(slots=True)
@@ -480,6 +548,80 @@ class ScreenAwarenessSubsystem:
             summary["canonical_target_label"] = self._latest_playwright_canonical_action_summary.get("target_label")
         return summary
 
+    def build_playwright_browser_task_plan(
+        self,
+        observation: BrowserSemanticObservation,
+        *,
+        task_phrase: str = "",
+        steps: Sequence[dict[str, Any]] | None = None,
+        expected_final_state: Sequence[str] | None = None,
+    ) -> BrowserSemanticTaskPlan:
+        return self.playwright_browser_adapter.build_semantic_task_plan(
+            observation,
+            task_phrase=task_phrase,
+            steps=steps,
+            expected_final_state=expected_final_state,
+        )
+
+    def request_playwright_browser_task_execution(
+        self,
+        plan: BrowserSemanticTaskPlan | dict[str, Any],
+        *,
+        url: str,
+        trust_service: Any | None = None,
+        session_id: str = "default",
+        task_id: str = "",
+        fixture_mode: bool = False,
+        context_options: dict[str, Any] | None = None,
+    ) -> BrowserSemanticTaskExecutionResult:
+        result = self.playwright_browser_adapter.request_semantic_task_execution(
+            plan,
+            url=url,
+            trust_service=trust_service,
+            session_id=session_id,
+            task_id=task_id,
+            fixture_mode=fixture_mode,
+            context_options=context_options,
+        )
+        self._map_playwright_task_step_results(result)
+        return result
+
+    def execute_playwright_browser_task_plan(
+        self,
+        plan: BrowserSemanticTaskPlan | dict[str, Any],
+        *,
+        url: str,
+        trust_service: Any | None = None,
+        session_id: str = "default",
+        task_id: str = "",
+        fixture_mode: bool = False,
+        context_options: dict[str, Any] | None = None,
+    ) -> BrowserSemanticTaskExecutionResult:
+        result = self.playwright_browser_adapter.execute_semantic_task_plan(
+            plan,
+            url=url,
+            trust_service=trust_service,
+            session_id=session_id,
+            task_id=task_id,
+            fixture_mode=fixture_mode,
+            context_options=context_options,
+        )
+        self._map_playwright_task_step_results(result)
+        return result
+
+    def get_latest_playwright_task_execution_summary(self) -> dict[str, Any]:
+        return self.playwright_browser_adapter.last_task_execution_summary
+
+    def _map_playwright_task_step_results(self, result: BrowserSemanticTaskExecutionResult) -> None:
+        canonical_steps: list[dict[str, Any]] = []
+        for step_result in result.step_results:
+            canonical = self.map_playwright_browser_action_execution_result(step_result)
+            canonical_steps.append(_canonical_action_summary(canonical, step_result))
+        if canonical_steps:
+            task_summary = dict(self.playwright_browser_adapter.last_task_execution_summary)
+            task_summary["canonical_step_summaries"] = canonical_steps
+            self.playwright_browser_adapter._last_task_execution_summary = task_summary
+
     def verify_playwright_browser_action(
         self,
         *,
@@ -741,6 +883,21 @@ class ScreenAwarenessSubsystem:
                 "total_duration_ms": analysis.latency_trace.total_duration_ms,
                 "slowest_stage": analysis.latency_trace.slowest_stage,
                 "source_labels": source_labels_for_observation(analysis.observation),
+                "evidence_ranking": list(analysis.evidence_ranking),
+                "evidence_confidence": top_evidence_confidence(analysis.evidence_ranking),
+                "observation_attempted": analysis.observation_attempted,
+                "observation_available": analysis.observation_available,
+                "observation_allowed": analysis.observation_allowed,
+                "observation_blocked_reason": analysis.observation_blocked_reason,
+                "observation_source": analysis.observation_source,
+                "observation_freshness": analysis.observation_freshness,
+                "observation_confidence": dict(analysis.observation_confidence),
+                "evidence_before_observation": list(analysis.evidence_before_observation),
+                "evidence_after_observation": list(analysis.evidence_after_observation),
+                "answered_from_source": analysis.answered_from_source,
+                "weak_fallback_used": analysis.weak_fallback_used,
+                "no_visual_evidence_reason": analysis.no_visual_evidence_reason,
+                "visible_context_summary": dict(analysis.visible_context_summary),
                 "audit_passed": analysis.truthfulness_audit.passed if analysis.truthfulness_audit is not None else True,
                 "audit_error_count": analysis.truthfulness_audit.error_count if analysis.truthfulness_audit is not None else 0,
                 "audit_warning_count": analysis.truthfulness_audit.warning_count if analysis.truthfulness_audit is not None else 0,
@@ -792,19 +949,41 @@ class ScreenAwarenessSubsystem:
             workspace_context=workspace_context,
         )
         record_stage("observation", stage_started)
-        stage_started = monotonic()
-        observation = self.visual_grounder.augment(
-            observation=observation,
-            intent=intent,
-            operator_text=operator_text,
+
+        evidence_before_observation = rank_screen_evidence(
+            observation,
+            active_context=active_context,
+            workspace_context=workspace_context,
         )
-        screen_capture_status = observation.visual_metadata.get("screen_capture", {})
-        record_stage(
-            "visual_grounding",
-            stage_started,
-            status="completed" if screen_capture_status.get("captured") else "skipped",
-            note=str(screen_capture_status.get("reason") or "screen_capture_checked"),
-        )
+        current_screen_observation_request = intent == ScreenIntentType.INSPECT_VISIBLE_STATE
+        should_attempt_visual_grounding = True
+        if current_screen_observation_request:
+            should_attempt_visual_grounding = not has_strong_current_evidence(evidence_before_observation)
+
+        capability_status = _capture_capability(self.visual_grounder)
+        observation_available = bool(capability_status.get("available"))
+        observation_allowed = _observation_allowed(self.config, observation)
+        observation_attempted = False
+        if should_attempt_visual_grounding:
+            stage_started = monotonic()
+            observation = self.visual_grounder.augment(
+                observation=observation,
+                intent=intent,
+                operator_text=operator_text,
+            )
+            screen_capture_status = _screen_capture_status(observation)
+            observation_attempted = current_screen_observation_request or bool(screen_capture_status.get("attempted"))
+            if "available" in screen_capture_status:
+                observation_available = bool(screen_capture_status.get("available"))
+            record_stage(
+                "visual_grounding",
+                stage_started,
+                status="completed" if screen_capture_status.get("captured") else "skipped",
+                note=str(screen_capture_status.get("reason") or "screen_capture_checked"),
+            )
+        else:
+            screen_capture_status = _screen_capture_status(observation)
+            skip_stage("visual_grounding", "fresh strong current-screen evidence was already available")
         stage_started = monotonic()
         interpretation = self.interpreter.interpret(observation, operator_text=operator_text)
         record_stage("interpretation", stage_started)
@@ -832,6 +1011,33 @@ class ScreenAwarenessSubsystem:
             record_stage("adapter_resolution", stage_started)
         else:
             skip_stage("adapter_resolution", "adapter semantics are not enabled for the active phase")
+        evidence_ranking = rank_screen_evidence(
+            observation,
+            active_context=active_context,
+            workspace_context=workspace_context,
+        )
+        evidence_after_observation = list(evidence_ranking)
+        top_observation_evidence = top_summary_evidence(evidence_after_observation)
+        observation_source = "screen_capture" if has_screen_capture_signal(observation) else _evidence_source(top_observation_evidence)
+        observation_freshness = str(top_observation_evidence.get("freshness") or "").strip() or None
+        observation_confidence = top_evidence_confidence(evidence_after_observation)
+        observation_blocked_reason = _observation_blocked_reason(
+            observation=observation,
+            screen_capture_status=screen_capture_status,
+            observation_allowed=observation_allowed,
+        )
+        answered_from_source = _answered_from_source(observation, evidence_after_observation)
+        no_visual_evidence_reason = None
+        if not has_screen_content_signal(observation) and not has_screen_capture_signal(observation):
+            no_visual_evidence_reason = observation_blocked_reason or "insufficient_visual_evidence"
+        weak_fallback_used = bool(
+            no_visual_evidence_reason
+            and (
+                current_screen_observation_request
+                or observation_blocked_reason
+                or not has_strong_current_evidence(evidence_after_observation)
+            )
+        )
         grounding_result: GroundingOutcome | None = None
         navigation_result: NavigationOutcome | None = None
         verification_result: VerificationOutcome | None = None
@@ -1312,6 +1518,19 @@ class ScreenAwarenessSubsystem:
                 level=confidence_level_for_score(overall_score),
                 note="Overall screen-awareness confidence blends native observation, interpretation, and context synthesis.",
             ),
+            evidence_ranking=evidence_ranking,
+            observation_attempted=observation_attempted,
+            observation_available=observation_available,
+            observation_allowed=observation_allowed,
+            observation_blocked_reason=observation_blocked_reason,
+            observation_source=observation_source,
+            observation_freshness=observation_freshness,
+            observation_confidence=observation_confidence,
+            evidence_before_observation=list(evidence_before_observation),
+            evidence_after_observation=list(evidence_after_observation),
+            answered_from_source=answered_from_source,
+            weak_fallback_used=weak_fallback_used,
+            no_visual_evidence_reason=no_visual_evidence_reason,
             trace_id=trace_id if hardening_enabled else None,
             policy_state=policy_state,
             recovery_state=recovery_state,
@@ -1347,6 +1566,21 @@ class ScreenAwarenessSubsystem:
                     "phase": self.config.phase,
                     "slowest_stage": analysis.latency_trace.slowest_stage if analysis.latency_trace is not None else None,
                     "source_labels": source_labels_for_observation(analysis.observation),
+                    "evidence_ranking": list(analysis.evidence_ranking),
+                    "evidence_confidence": top_evidence_confidence(analysis.evidence_ranking),
+                    "observation_attempted": analysis.observation_attempted,
+                    "observation_available": analysis.observation_available,
+                    "observation_allowed": analysis.observation_allowed,
+                    "observation_blocked_reason": analysis.observation_blocked_reason,
+                    "observation_source": analysis.observation_source,
+                    "observation_freshness": analysis.observation_freshness,
+                    "observation_confidence": dict(analysis.observation_confidence),
+                    "evidence_before_observation": list(analysis.evidence_before_observation),
+                    "evidence_after_observation": list(analysis.evidence_after_observation),
+                    "answered_from_source": analysis.answered_from_source,
+                    "weak_fallback_used": analysis.weak_fallback_used,
+                    "no_visual_evidence_reason": analysis.no_visual_evidence_reason,
+                    "visible_context_summary": dict(analysis.visible_context_summary),
                 },
                 "timing": analysis.latency_trace.to_dict() if analysis.latency_trace is not None else None,
                 "truthfulness_audit": analysis.truthfulness_audit.to_dict() if analysis.truthfulness_audit is not None else None,

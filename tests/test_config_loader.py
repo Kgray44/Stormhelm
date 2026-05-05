@@ -149,6 +149,96 @@ def test_load_config_applies_stormforge_fog_debug_environment_override(
     assert fog.to_qml_map()["debugVisible"] is True
 
 
+def test_load_config_applies_stormforge_live_voice_isolation_overrides(
+    temp_project_root: Path,
+) -> None:
+    config = load_config(
+        project_root=temp_project_root,
+        env={
+            "STORMHELM_ANCHOR_VISUALIZER_MODE": "constant_test_wave",
+            "STORMHELM_STORMFORGE_FOG": "1",
+            "STORMHELM_STORMFORGE_FOG_DIAGNOSTIC_DISABLE_DURING_SPEECH": "true",
+        },
+    )
+
+    assert config.ui.stormforge_voice_diagnostics.anchor_visualizer_mode == (
+        "constant_test_wave"
+    )
+    assert config.ui.stormforge_voice_diagnostics.to_qml_map() == {
+        "anchorVisualizerMode": "constant_test_wave",
+        "anchorRenderer": "legacy_blob_reference",
+        "liveIsolationVersion": "UI-VOICE-LIVE-ISO",
+    }
+    assert config.ui.stormforge_fog.enabled is True
+    assert config.ui.stormforge_fog.diagnostic_disable_during_speech is True
+    assert (
+        config.ui.stormforge_fog.to_qml_map()["diagnosticDisableDuringSpeech"]
+        is True
+    )
+
+
+def test_load_config_defaults_stormforge_anchor_renderer_to_legacy_blob_reference(
+    temp_project_root: Path,
+) -> None:
+    config = load_config(project_root=temp_project_root, env={})
+
+    diagnostics = config.ui.stormforge_voice_diagnostics
+    assert diagnostics.anchor_renderer == "legacy_blob_reference"
+    assert diagnostics.to_qml_map()["anchorRenderer"] == "legacy_blob_reference"
+
+
+def test_load_config_applies_stormforge_anchor_renderer_environment_override(
+    temp_project_root: Path,
+) -> None:
+    config = load_config(
+        project_root=temp_project_root,
+        env={"STORMHELM_STORMFORGE_ANCHOR_RENDERER": "ar3-split"},
+    )
+
+    diagnostics = config.ui.stormforge_voice_diagnostics
+    assert diagnostics.anchor_renderer == "ar3_split"
+    assert diagnostics.to_qml_map()["anchorRenderer"] == "ar3_split"
+
+
+def test_load_config_applies_stormforge_legacy_blob_fast_candidate_override(
+    temp_project_root: Path,
+) -> None:
+    config = load_config(
+        project_root=temp_project_root,
+        env={"STORMHELM_STORMFORGE_ANCHOR_RENDERER": "legacy-blob-fast-candidate"},
+    )
+
+    diagnostics = config.ui.stormforge_voice_diagnostics
+    assert diagnostics.anchor_renderer == "legacy_blob_fast_candidate"
+    assert diagnostics.to_qml_map()["anchorRenderer"] == "legacy_blob_fast_candidate"
+
+
+def test_load_config_applies_stormforge_legacy_blob_qsg_candidate_override(
+    temp_project_root: Path,
+) -> None:
+    config = load_config(
+        project_root=temp_project_root,
+        env={"STORMHELM_STORMFORGE_ANCHOR_RENDERER": "legacy-blob-qsg-candidate"},
+    )
+
+    diagnostics = config.ui.stormforge_voice_diagnostics
+    assert diagnostics.anchor_renderer == "legacy_blob_qsg_candidate"
+    assert diagnostics.to_qml_map()["anchorRenderer"] == "legacy_blob_qsg_candidate"
+
+
+def test_load_config_keeps_legacy_blob_as_reference_alias(
+    temp_project_root: Path,
+) -> None:
+    config = load_config(
+        project_root=temp_project_root,
+        env={"STORMHELM_STORMFORGE_ANCHOR_RENDERER": "legacy_blob"},
+    )
+
+    assert config.ui.stormforge_voice_diagnostics.anchor_renderer == (
+        "legacy_blob_reference"
+    )
+
+
 def test_load_config_normalizes_invalid_stormforge_fog_values(
     temp_project_root: Path,
 ) -> None:
@@ -321,6 +411,7 @@ def test_load_config_defaults_playwright_click_focus_execution_disabled(temp_pro
     assert playwright.allow_select_option is False
     assert playwright.allow_scroll is False
     assert playwright.allow_scroll_to_target is False
+    assert playwright.allow_task_plans is False
     assert playwright.allow_form_fill is False
     assert playwright.allow_form_submit is False
     assert playwright.allow_login is False
@@ -331,10 +422,16 @@ def test_load_config_defaults_playwright_click_focus_execution_disabled(temp_pro
     assert playwright.allow_dev_type_text is False
     assert playwright.allow_dev_choice_controls is False
     assert playwright.allow_dev_scroll is False
+    assert playwright.allow_dev_task_plans is False
     assert playwright.max_scroll_attempts == 5
     assert playwright.scroll_step_pixels == 700
     assert playwright.scroll_timeout_seconds == 8.0
     assert playwright.max_scroll_distance_pixels == 5000
+    assert playwright.max_task_steps == 5
+    assert playwright.stop_on_unverified_step is True
+    assert playwright.stop_on_partial_step is True
+    assert playwright.stop_on_ambiguous_step is True
+    assert playwright.stop_on_unexpected_navigation is True
 
 
 def test_load_config_applies_playwright_click_focus_execution_environment_overrides(temp_project_root: Path) -> None:
@@ -357,10 +454,17 @@ def test_load_config_applies_playwright_click_focus_execution_environment_overri
             "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_SCROLL": "true",
             "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_SCROLL_TO_TARGET": "true",
             "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_DEV_SCROLL": "true",
+            "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_TASK_PLANS": "true",
+            "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_DEV_TASK_PLANS": "true",
             "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_MAX_SCROLL_ATTEMPTS": "4",
             "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_SCROLL_STEP_PIXELS": "650",
             "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_SCROLL_TIMEOUT_SECONDS": "6.5",
             "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_MAX_SCROLL_DISTANCE_PIXELS": "2600",
+            "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_MAX_TASK_STEPS": "3",
+            "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_STOP_ON_UNVERIFIED_STEP": "false",
+            "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_STOP_ON_PARTIAL_STEP": "false",
+            "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_STOP_ON_AMBIGUOUS_STEP": "false",
+            "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_STOP_ON_UNEXPECTED_NAVIGATION": "false",
             "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_FORM_SUBMIT": "false",
             "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_USER_PROFILE": "false",
             "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_PAYMENT": "false",
@@ -384,10 +488,17 @@ def test_load_config_applies_playwright_click_focus_execution_environment_overri
     assert playwright.allow_scroll is True
     assert playwright.allow_scroll_to_target is True
     assert playwright.allow_dev_scroll is True
+    assert playwright.allow_task_plans is True
+    assert playwright.allow_dev_task_plans is True
     assert playwright.max_scroll_attempts == 4
     assert playwright.scroll_step_pixels == 650
     assert playwright.scroll_timeout_seconds == 6.5
     assert playwright.max_scroll_distance_pixels == 2600
+    assert playwright.max_task_steps == 3
+    assert playwright.stop_on_unverified_step is False
+    assert playwright.stop_on_partial_step is False
+    assert playwright.stop_on_ambiguous_step is False
+    assert playwright.stop_on_unexpected_navigation is False
     assert playwright.allow_form_submit is False
     assert playwright.allow_user_profile is False
     assert playwright.allow_payment is False

@@ -1,0 +1,5 @@
+scenario,visual_time_ms,estimated_output_latency_ms,envelope_visual_offset_ms,applied_offset_ms,sample_time_ms,sampled_energy,passed
+default_latency,300,100,0,-100,200,0.78,True
+advance_visual_negative_offset,300,100,-40,-60,240,0.34,True
+delay_visual_positive_offset,300,100,40,-140,160,0.2,True
+clamped_extreme_offset,700,900,-900,0,700,0.08,True

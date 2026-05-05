@@ -19,9 +19,27 @@ def test_load_config_defaults_voice_to_disabled_foundation(temp_project_root) ->
     assert config.voice.playback.device == "default"
     assert config.voice.playback.volume == 1.0
     assert config.voice.playback.allow_dev_playback is False
+    assert config.voice.playback.streaming_min_preroll_ms == 350
+    assert config.voice.playback.streaming_min_preroll_chunks == 2
+    assert config.voice.playback.streaming_min_preroll_bytes == 0
+    assert config.voice.playback.streaming_max_preroll_wait_ms == 1200
+    assert config.voice.playback.playback_stable_after_ms == 180
     assert config.voice.playback.max_audio_bytes == 10_000_000
     assert config.voice.playback.max_duration_ms == 120_000
     assert config.voice.playback.delete_transient_after_playback is True
+    assert config.voice.visual_sync.enabled is True
+    assert config.voice.visual_sync.envelope_visual_offset_ms == 0
+    assert config.voice.visual_sync.estimated_output_latency_ms == 120
+    assert config.voice.visual_sync.debug_show_sync is False
+    assert config.voice.visual_meter.enabled is True
+    assert config.voice.visual_meter.sample_rate_hz == 60
+    assert config.voice.visual_meter.startup_preroll_ms == 350
+    assert config.voice.visual_meter.attack_ms == 60
+    assert config.voice.visual_meter.release_ms == 160
+    assert config.voice.visual_meter.noise_floor == 0.015
+    assert config.voice.visual_meter.gain == 2.0
+    assert config.voice.visual_meter.max_startup_wait_ms == 800
+    assert config.voice.visual_meter.visual_offset_ms == 0
     assert config.voice.capture.enabled is False
     assert config.voice.capture.provider == "local"
     assert config.voice.capture.mode == "push_to_talk"
@@ -69,9 +87,27 @@ def test_load_config_applies_voice_environment_overrides(temp_project_root) -> N
             "STORMHELM_VOICE_PLAYBACK_DEVICE": "test-device",
             "STORMHELM_VOICE_PLAYBACK_VOLUME": "0.42",
             "STORMHELM_VOICE_PLAYBACK_ALLOW_DEV_PLAYBACK": "true",
+            "STORMHELM_VOICE_PLAYBACK_STREAMING_MIN_PREROLL_MS": "420",
+            "STORMHELM_VOICE_PLAYBACK_STREAMING_MIN_PREROLL_CHUNKS": "3",
+            "STORMHELM_VOICE_PLAYBACK_STREAMING_MIN_PREROLL_BYTES": "2048",
+            "STORMHELM_VOICE_PLAYBACK_STREAMING_MAX_PREROLL_WAIT_MS": "900",
+            "STORMHELM_VOICE_PLAYBACK_STABLE_AFTER_MS": "240",
             "STORMHELM_VOICE_PLAYBACK_MAX_AUDIO_BYTES": "456789",
             "STORMHELM_VOICE_PLAYBACK_MAX_DURATION_MS": "6543",
             "STORMHELM_VOICE_PLAYBACK_DELETE_TRANSIENT_AFTER_PLAYBACK": "false",
+            "STORMHELM_VOICE_VISUAL_SYNC_ENABLED": "false",
+            "STORMHELM_VOICE_VISUAL_OFFSET_MS": "-80",
+            "STORMHELM_VOICE_VISUAL_ESTIMATED_OUTPUT_LATENCY_MS": "140",
+            "STORMHELM_VOICE_VISUAL_SYNC_DEBUG": "true",
+            "STORMHELM_VOICE_VISUAL_METER_ENABLED": "false",
+            "STORMHELM_VOICE_VISUAL_METER_SAMPLE_RATE_HZ": "30",
+            "STORMHELM_VOICE_VISUAL_METER_STARTUP_PREROLL_MS": "420",
+            "STORMHELM_VOICE_VISUAL_METER_ATTACK_MS": "45",
+            "STORMHELM_VOICE_VISUAL_METER_RELEASE_MS": "210",
+            "STORMHELM_VOICE_VISUAL_METER_NOISE_FLOOR": "0.02",
+            "STORMHELM_VOICE_VISUAL_METER_GAIN": "2.4",
+            "STORMHELM_VOICE_VISUAL_METER_MAX_STARTUP_WAIT_MS": "700",
+            "STORMHELM_VOICE_VISUAL_METER_OFFSET_MS": "-120",
             "STORMHELM_VOICE_CAPTURE_ENABLED": "true",
             "STORMHELM_VOICE_CAPTURE_PROVIDER": "mock",
             "STORMHELM_VOICE_CAPTURE_MODE": "push_to_talk",
@@ -116,9 +152,27 @@ def test_load_config_applies_voice_environment_overrides(temp_project_root) -> N
     assert config.voice.playback.device == "test-device"
     assert config.voice.playback.volume == 0.42
     assert config.voice.playback.allow_dev_playback is True
+    assert config.voice.playback.streaming_min_preroll_ms == 420
+    assert config.voice.playback.streaming_min_preroll_chunks == 3
+    assert config.voice.playback.streaming_min_preroll_bytes == 2048
+    assert config.voice.playback.streaming_max_preroll_wait_ms == 900
+    assert config.voice.playback.playback_stable_after_ms == 240
     assert config.voice.playback.max_audio_bytes == 456789
     assert config.voice.playback.max_duration_ms == 6543
     assert config.voice.playback.delete_transient_after_playback is False
+    assert config.voice.visual_sync.enabled is False
+    assert config.voice.visual_sync.envelope_visual_offset_ms == -80
+    assert config.voice.visual_sync.estimated_output_latency_ms == 140
+    assert config.voice.visual_sync.debug_show_sync is True
+    assert config.voice.visual_meter.enabled is False
+    assert config.voice.visual_meter.sample_rate_hz == 30
+    assert config.voice.visual_meter.startup_preroll_ms == 420
+    assert config.voice.visual_meter.attack_ms == 45
+    assert config.voice.visual_meter.release_ms == 210
+    assert config.voice.visual_meter.noise_floor == 0.02
+    assert config.voice.visual_meter.gain == 2.4
+    assert config.voice.visual_meter.max_startup_wait_ms == 700
+    assert config.voice.visual_meter.visual_offset_ms == -120
     assert config.voice.capture.enabled is True
     assert config.voice.capture.provider == "mock"
     assert config.voice.capture.mode == "push_to_talk"
@@ -147,6 +201,28 @@ def test_load_config_applies_voice_environment_overrides(temp_project_root) -> N
     assert config.voice.openai.persist_tts_outputs is True
     assert config.voice.openai.realtime_model == "gpt-realtime-1.5"
     assert config.voice.openai.vad_mode == "semantic_vad"
+
+
+def test_load_config_clamps_voice_visual_sync_values(temp_project_root) -> None:
+    config = load_config(
+        project_root=temp_project_root,
+        env={
+            "STORMHELM_VOICE_VISUAL_OFFSET_MS": "-900",
+            "STORMHELM_VOICE_VISUAL_ESTIMATED_OUTPUT_LATENCY_MS": "900",
+        },
+    )
+
+    assert config.voice.visual_sync.envelope_visual_offset_ms == -500
+    assert config.voice.visual_sync.estimated_output_latency_ms == 500
+
+
+def test_load_config_clamps_voice_visual_meter_offset(temp_project_root) -> None:
+    config = load_config(
+        project_root=temp_project_root,
+        env={"STORMHELM_VOICE_VISUAL_METER_OFFSET_MS": "900"},
+    )
+
+    assert config.voice.visual_meter.visual_offset_ms == 300
 
 
 def test_load_config_reads_local_env_voice_runtime_gates_without_leaking_key(

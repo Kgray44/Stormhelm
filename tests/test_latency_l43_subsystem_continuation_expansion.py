@@ -79,13 +79,13 @@ class _FakeDiscordRelay:
     def handle_request(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(dict(kwargs))
         return {
-            "assistant_response": "The dispatch appears to have started, but delivery is not verified.",
-            "state": "uncertain",
+            "assistant_response": "I attempted to send it through Discord, but I could not verify that it appeared.",
+            "state": "sent_unverified",
             "attempt": {
-                "state": "uncertain",
+                "state": "sent_unverified",
                 "verification_strength": "weak",
                 "verification_evidence": ["local_client_focus"],
-                "send_summary": "Send attempt started.",
+                "send_summary": "Send attempt completed without verification.",
             },
             "debug": {"delivery_claimed": False},
         }
@@ -289,8 +289,9 @@ def test_discord_dispatch_handler_requires_approval_and_does_not_claim_delivery(
 
     assert blocked["result_state"] == "blocked"
     assert blocked["error_code"] == "approval_required_before_dispatch"
-    assert result["result_state"] == "completed_unverified"
+    assert result["result_state"] == "sent_unverified"
     assert result["verification_state"] == "not_verified"
+    assert result["completion_claimed"] is True
     assert result["verification_claimed"] is False
     assert "delivery_not_verified" in result["debug"]["continuation_truth_clamps_applied"]
 

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+
+import pytest
+
 from stormhelm.core.adapters import AdapterContract
 from stormhelm.core.adapters import AdapterContractRegistry
 from stormhelm.core.adapters import ApprovalDescriptor
@@ -461,6 +465,69 @@ def test_planner_does_not_hijack_unsupported_helper_like_prose() -> None:
     assert decision.debug["calculations"]["candidate"] is False
 
 
+def test_planner_routes_captcha_automation_to_unsupported_not_calculations() -> None:
+    planner = DeterministicPlanner()
+
+    decision = planner.plan(
+        "solve the captcha",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.request_type == "unsupported_capability"
+    assert decision.structured_query is not None
+    assert decision.structured_query.domain == "unsupported"
+    assert decision.structured_query.requested_action == "decline_unsupported_browser_automation"
+    assert decision.response_mode == "unsupported"
+    assert decision.debug["calculations"]["candidate"] is False
+    assert decision.tool_requests == []
+    assert "CAPTCHA" in (decision.assistant_message or "")
+
+
+@pytest.mark.parametrize(
+    ("utterance", "expected_domain", "expected_action"),
+    [
+        ("submit this form", "unsupported", "decline_unsupported_browser_automation"),
+        ("log me in", "unsupported", "decline_unsupported_browser_automation"),
+        ("buy this", "unsupported", "decline_unsupported_browser_automation"),
+        ("solve the captcha", "unsupported", "decline_unsupported_browser_automation"),
+        ("summarize this URL https://example.com", "web_retrieval", "summarize_page"),
+        ("open YouTube", "browser", "open_browser_destination"),
+        ("send this page to Baby", "discord_relay", "preview"),
+        ("what am I looking at?", "screen_awareness", "inspect_visible_state"),
+        ("click the button", "screen_awareness", "execute_ui_action"),
+    ],
+)
+def test_planner_task_plan_route_boundary_preservation(
+    temp_config,
+    utterance: str,
+    expected_domain: str,
+    expected_action: str,
+) -> None:
+    planner = DeterministicPlanner()
+
+    decision = planner.plan(
+        utterance,
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.structured_query is not None
+    assert decision.structured_query.domain == expected_domain
+    assert decision.structured_query.requested_action == expected_action
+    assert "task_plan" not in json.dumps(decision.structured_query.to_dict(), sort_keys=True)
+
+
 def test_planner_routes_verification_request_to_builtin_calculation_lane() -> None:
     planner = DeterministicPlanner()
 
@@ -752,6 +819,34 @@ def test_planner_routes_phase4_verification_request_to_screen_awareness_when_ena
     assert decision.capability_plan is not None
     assert "screen_grounding" in decision.capability_plan.required_capabilities
     assert "screen_verification" in decision.capability_plan.required_capabilities
+    assert decision.debug["screen_awareness"]["disposition"] == "phase4_verify"
+
+
+def test_planner_screen_awareness_phase_candidate_can_override_deictic_context_clarification(temp_config) -> None:
+    temp_config.screen_awareness.enabled = True
+    temp_config.screen_awareness.phase = "phase4"
+    temp_config.screen_awareness.planner_routing_enabled = True
+    temp_config.screen_awareness.observation_enabled = True
+    temp_config.screen_awareness.interpretation_enabled = True
+    temp_config.screen_awareness.grounding_enabled = True
+    temp_config.screen_awareness.guidance_enabled = True
+    temp_config.screen_awareness.verification_enabled = True
+    planner = DeterministicPlanner(screen_awareness_config=temp_config.screen_awareness)
+
+    decision = planner.plan(
+        "did that work?",
+        session_id="default",
+        surface_mode="ghost",
+        active_module="chartroom",
+        workspace_context=None,
+        active_posture={},
+        active_request_state={},
+        recent_tool_results=[],
+    )
+
+    assert decision.debug["route_spine"]["winner"]["route_family"] == "context_clarification"
+    assert decision.debug["intent_frame"]["clarification_reason"] == "ambiguous_deictic_no_owner"
+    assert decision.request_type == "screen_awareness_response"
     assert decision.debug["screen_awareness"]["disposition"] == "phase4_verify"
 
 

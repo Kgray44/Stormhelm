@@ -6,14 +6,29 @@ Item {
     objectName: "stormforgeVolumetricFogLayer"
 
     property var config: ({})
+    property real visualClockAnimationTimeSec: -1
+    property real visualClockDeltaMs: 0
+    property int visualClockFrameCounter: 0
+    property real visualClockMeasuredFps: 0
+    property bool speakingActive: false
     property string rendererType: "shader"
+    readonly property string fogVisualClockVersion: "UI-P2R"
+    readonly property string fogTimebaseVersion: "UI-P2R.1"
+    readonly property string fogTimeInputUnit: "seconds"
+    readonly property real fogLegacyPhaseUnitsPerSecond: 10000.0 / 520000.0
+    readonly property real fogSharedClockTimeSec: Math.max(0.0, root.visualClockAnimationTimeSec)
+    readonly property bool fogUsesSharedVisualClock: root.visualClockFrameCounter > 0
+    readonly property bool fallbackPhaseAnimationDisabledBySharedClock: root.fogUsesSharedVisualClock
     readonly property string fogMode: normalizedString("mode", "volumetric")
     readonly property string quality: normalizedQuality(normalizedString("quality", "medium"))
     readonly property int configuredQualitySamples: sampleCountForQuality()
     readonly property bool fogEnabledRequested: boolValue("enabled", false)
     readonly property bool fallbackEnabled: root.fogEnabledRequested && root.fogMode === "fallback"
+    readonly property bool diagnosticDisableDuringSpeech: boolValue("diagnosticDisableDuringSpeech", false)
+    readonly property bool disabledForSpeechDiagnostic: root.diagnosticDisableDuringSpeech && root.speakingActive
     readonly property bool hasRenderableGeometry: root.width > 0 && root.height > 0
     readonly property bool active: root.fogEnabledRequested
+        && !root.disabledForSpeechDiagnostic
         && root.fogMode === "volumetric"
         && root.quality !== "off"
         && root.configuredQualitySamples > 0
@@ -21,7 +36,9 @@ Item {
     readonly property bool fogActive: root.active
     readonly property bool shaderEnabled: root.active
     readonly property bool fogVisible: root.visible && root.opacity > 0.0
-    readonly property bool animationRunning: phaseAnimation.running
+    readonly property bool animationRunning: root.fogUsesSharedVisualClock
+        ? root.active && root.motionEnabled
+        : phaseAnimation.running
     readonly property int qualitySamples: root.active ? root.configuredQualitySamples : 0
     readonly property real intensity: root.active ? clampNumber(numberValue("intensity", 0.35), 0.0, 1.0) : 0.0
     readonly property real density: clampNumber(numberValue("density", 0.62), 0.0, 1.0)
@@ -85,7 +102,12 @@ Item {
         "rollingSpeed": root.rollingSpeed,
         "wispStretch": root.wispStretch
     })
-    property real phase: 0.0
+    property real fallbackPhase: 0.0
+    readonly property real sharedClockPhase: root.fogSharedClockTimeSec * root.fogLegacyPhaseUnitsPerSecond
+    readonly property real fogEffectiveDriftSpeed: root.driftSpeed
+    readonly property bool fogFallbackAnimationActive: phaseAnimation.running
+    readonly property bool fogDoubleDriven: root.fogUsesSharedVisualClock && root.fogFallbackAnimationActive
+    readonly property real phase: root.fogUsesSharedVisualClock ? root.sharedClockPhase : root.fallbackPhase
 
     visible: root.active
     opacity: root.active ? 1.0 : 0.0
@@ -180,6 +202,9 @@ Item {
         if (!root.fogEnabledRequested) {
             return "disabled_by_config"
         }
+        if (root.disabledForSpeechDiagnostic) {
+            return "disabled_during_speech_diagnostic"
+        }
         if (root.fallbackEnabled) {
             return "fallback_mode"
         }
@@ -197,7 +222,7 @@ Item {
 
     onActiveChanged: {
         if (!root.active) {
-            root.phase = 0.0
+            root.fallbackPhase = 0.0
         }
     }
 
@@ -208,12 +233,12 @@ Item {
     NumberAnimation {
         id: phaseAnimation
         target: root
-        property: "phase"
+        property: "fallbackPhase"
         from: 0.0
         to: 10000.0
         duration: 520000000
         loops: Animation.Infinite
-        running: root.active && root.motionEnabled
+        running: root.active && root.motionEnabled && !root.fogUsesSharedVisualClock
     }
 
     ShaderEffect {

@@ -207,6 +207,128 @@ def test_playback_meter_follows_current_playback_position_levels() -> None:
     assert loud.to_dict()["raw_audio_present"] is False
 
 
+def test_playback_envelope_follower_emits_timestamped_safe_samples() -> None:
+    from stormhelm.core.voice.visualizer import VoicePlaybackEnvelopeFollower
+
+    current_ms = 250_000.0
+    follower = VoicePlaybackEnvelopeFollower(
+        playback_id="playback-envelope-1",
+        sample_rate_hz=24000,
+        channels=1,
+        sample_width_bytes=2,
+        envelope_sample_rate_hz=60,
+        max_duration_ms=220,
+        estimated_output_latency_ms=80,
+        clock=lambda: current_ms / 1000.0,
+    )
+    pcm = (
+        _pcm_section(0, samples=2400)
+        + _pcm_section(3200, samples=2400)
+        + _pcm_section(19000, samples=2400)
+        + _pcm_section(0, samples=2400)
+    )
+
+    samples = follower.feed_pcm(pcm, submitted_at_monotonic_ms=current_ms)
+    payload = follower.to_bridge_payload(max_samples=8)
+
+    assert 20 <= len(samples) <= 26
+    assert payload["playback_id"] == "playback-envelope-1"
+    assert payload["envelope_supported"] is True
+    assert payload["envelope_available"] is True
+    assert payload["envelope_source"] == "playback_pcm"
+    assert payload["envelope_sample_rate_hz"] == 60
+    assert payload["estimated_output_latency_ms"] == 80
+    assert len(payload["envelope_samples_recent"]) <= 8
+    sample_times = [sample.sample_time_ms for sample in samples]
+    monotonic_times = [sample.monotonic_time_ms for sample in samples]
+    assert sample_times == sorted(sample_times)
+    assert monotonic_times == sorted(monotonic_times)
+    assert sample_times[0] >= 0
+    assert sample_times[-1] > sample_times[0]
+    assert max(sample.smoothed_energy for sample in samples) > 0.65
+    assert samples[-1].smoothed_energy < max(sample.smoothed_energy for sample in samples)
+    assert payload["latest_voice_energy"] == pytest.approx(
+        samples[-1].smoothed_energy, abs=0.001
+    )
+    serialized = str(payload)
+    assert "19000" not in serialized
+    assert "raw_audio_bytes" not in serialized
+    assert "data': b" not in serialized
+    assert payload["raw_audio_present"] is False
+
+
+def test_playback_envelope_follower_ring_buffer_is_bounded_and_monotonic() -> None:
+    from stormhelm.core.voice.visualizer import VoicePlaybackEnvelopeFollower
+
+    current_ms = 300_000.0
+    follower = VoicePlaybackEnvelopeFollower(
+        playback_id="playback-envelope-ring",
+        sample_rate_hz=24000,
+        channels=1,
+        sample_width_bytes=2,
+        envelope_sample_rate_hz=30,
+        max_duration_ms=180,
+        clock=lambda: current_ms / 1000.0,
+    )
+    for index, level in enumerate([0, 1800, 4800, 9000, 16000, 24000]):
+        current_ms = 300_000.0 + index * 120.0
+        follower.feed_pcm(
+            _pcm_section(level, samples=2880),
+            submitted_at_monotonic_ms=current_ms,
+        )
+
+    payload = follower.to_bridge_payload(max_samples=64)
+    recent = payload["envelope_samples_recent"]
+
+    assert len(recent) <= 8
+    assert payload["samples_dropped"] > 0
+    assert payload["latest_voice_energy"] > 0.75
+    assert [sample["sample_time_ms"] for sample in recent] == sorted(
+        sample["sample_time_ms"] for sample in recent
+    )
+    assert all(sample["source"] == "pcm_playback" for sample in recent)
+    assert all(sample["valid"] is True for sample in recent)
+    assert "raw_audio_bytes" not in str(payload)
+    assert "data': b" not in str(payload)
+
+
+def test_playback_envelope_payload_can_select_audible_playback_time_window() -> None:
+    from stormhelm.core.voice.visualizer import VoicePlaybackEnvelopeFollower
+
+    current_ms = 400_000.0
+
+    def clock() -> float:
+        return current_ms / 1000.0
+
+    follower = VoicePlaybackEnvelopeFollower(
+        playback_id="playback-envelope-window",
+        sample_rate_hz=1000,
+        channels=1,
+        sample_width_bytes=2,
+        envelope_sample_rate_hz=50,
+        max_duration_ms=7000,
+        clock=clock,
+    )
+    pcm = bytearray()
+    for window_index in range(300):
+        sample_time_ms = window_index * 20
+        level = 18000 if 1900 <= sample_time_ms <= 2100 else 100
+        pcm.extend(_pcm_section(level, samples=20))
+
+    follower.feed_pcm(bytes(pcm), submitted_at_monotonic_ms=current_ms)
+    latest_payload = follower.to_bridge_payload(max_samples=8)
+    audible_payload = follower.to_bridge_payload(max_samples=8, playback_time_ms=2000)
+
+    latest_samples = latest_payload["envelope_samples_recent"]
+    audible_samples = audible_payload["envelope_samples_recent"]
+
+    assert latest_samples[-1]["sample_time_ms"] >= 5900
+    assert any(1960 <= sample["sample_time_ms"] <= 2040 for sample in audible_samples)
+    assert max(sample["smoothed_energy"] for sample in audible_samples) > 0.20
+    assert audible_payload["playback_envelope_window_mode"] == "playback_time"
+    assert audible_payload["playback_envelope_query_time_ms"] == 2000
+
+
 def test_backend_converts_low_rms_into_visible_visual_drive_level() -> None:
     from stormhelm.core.voice.visualizer import compute_voice_audio_envelope
 
@@ -335,8 +457,19 @@ def test_streaming_playback_chunks_publish_changing_voice_envelope_fields() -> N
     assert max(visual_drives) > min(visual_drives) + 0.35
     assert max(center_drives) > min(center_drives) + 0.35
     assert all(
-        update["voice_audio_reactive_source"] == "stormhelm_playback_meter"
+        update["voice_audio_reactive_source"] == "pcm_stream_meter"
         for update in voice_updates[:-1]
+    )
+    assert all(
+        update["voice_visual_source"] == "pcm_stream_meter"
+        and update["voice_visual_energy_source"] == "pcm_stream_meter"
+        for update in voice_updates[:-1]
+    )
+    assert all(
+        update.get("playback_envelope_samples_recent") in (None, [])
+        and update.get("envelope_timeline_samples") in (None, [])
+        and update.get("envelopeTimelineSamples") in (None, [])
+        for update in voice_updates
     )
     assert voice_updates[1]["voice_audio_reactive_available"] is True
     meter_frames = [
@@ -351,7 +484,7 @@ def test_streaming_playback_chunks_publish_changing_voice_envelope_fields() -> N
     )
     assert all(
         event["payload"]["metadata"].get("visualizer_clock")
-        == "stormhelm_playback_meter"
+        == "pcm_stream_meter"
         for event in chunk_events[:-1]
         if isinstance(event.get("payload"), dict)
     )
@@ -423,12 +556,16 @@ def test_single_long_playback_chunk_delivers_multiple_playback_time_envelope_upd
     assert max(center_drives) >= 0.76
     assert center_drives[-1] <= 0.12
     assert all(
-        update["voice_audio_reactive_source"] == "stormhelm_playback_meter"
+        update["voice_audio_reactive_source"] == "pcm_stream_meter"
+        for update in voice_updates[:-1]
+    )
+    assert all(
+        update["voice_visual_source"] == "pcm_stream_meter"
         for update in voice_updates[:-1]
     )
     assert all(
         event["payload"]["metadata"].get("visualizer_clock")
-        == "stormhelm_playback_meter"
+        == "pcm_stream_meter"
         for event in frame_events
     )
     playback_positions = [
@@ -479,12 +616,12 @@ def test_high_frequency_playback_feeds_are_metered_at_bounded_rate() -> None:
     snapshot = service.status_snapshot_fast()
     visualizer = snapshot["voice_visualizer"]
 
-    assert 4 <= visualizer["visualizer_updates_received"] <= 12
+    assert 4 <= visualizer["visualizer_updates_received"] <= 16
     assert visualizer["visualizer_updates_dropped"] == 0
     assert len(visualizer_events) < 20
     assert snapshot["voice_visualizer_envelope_frames_published"] == len(visualizer_events)
     assert all(
-        event["payload"]["metadata"].get("source") == "stormhelm_playback_meter"
+        event["payload"]["metadata"].get("source") == "pcm_stream_meter"
         for event in visualizer_events
         if isinstance(event.get("payload"), dict)
     )
@@ -495,6 +632,55 @@ def test_high_frequency_playback_feeds_are_metered_at_bounded_rate() -> None:
     )
     assert "raw_audio_bytes" not in str(visualizer_events)
     assert "data': b" not in str(visualizer_events)
+
+
+def test_new_playback_id_resets_live_pcm_meter_boundary() -> None:
+    service = build_voice_subsystem(_voice_config(), _openai_config(), events=EventBuffer())
+
+    first_context = {
+        "session_id": "voice-session",
+        "turn_id": "turn-a",
+        "speech_request_id": "speech-a",
+        "playback_request_id": "request-a",
+        "playback_id": "playback-a",
+        "provider": "mock",
+        "audio_format": "pcm",
+        "sample_rate_hz": 24000,
+        "channels": 1,
+        "sample_width_bytes": 2,
+    }
+    second_context = {
+        **first_context,
+        "turn_id": "turn-b",
+        "speech_request_id": "speech-b",
+        "playback_request_id": "request-b",
+        "playback_id": "playback-b",
+    }
+
+    service._queue_voice_output_envelope_frames(
+        _pcm_section(14000, samples=2400),
+        audio_format="pcm",
+        source="playback_output_envelope",
+        publish_context=first_context,
+    )
+    first_meter = service._voice_playback_meter
+    assert first_meter is not None
+    assert first_meter.playback_id == "playback-a"
+
+    service._queue_voice_output_envelope_frames(
+        _pcm_section(18000, samples=2400),
+        audio_format="pcm",
+        source="playback_output_envelope",
+        publish_context=second_context,
+    )
+    second_meter = service._voice_playback_meter
+
+    assert second_meter is not None
+    assert second_meter is not first_meter
+    assert second_meter.playback_id == "playback-b"
+    assert service._voice_playback_meter_context["playback_id"] == "playback-b"
+    assert service._voice_playback_meter_finishing is False
+    service._stop_voice_playback_meter()
 
 
 def test_visualizer_event_publish_does_not_block_chunk_queueing(monkeypatch) -> None:

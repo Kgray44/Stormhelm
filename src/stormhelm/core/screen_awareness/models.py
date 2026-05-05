@@ -12,6 +12,8 @@ CLAIM_CEILING_BROWSER_SEMANTIC_OBSERVATION = "browser_semantic_observation"
 CLAIM_CEILING_BROWSER_SEMANTIC_OBSERVATION_COMPARISON = "browser_semantic_observation_comparison"
 CLAIM_CEILING_BROWSER_SEMANTIC_ACTION_PREVIEW = "browser_semantic_action_preview"
 CLAIM_CEILING_BROWSER_SEMANTIC_ACTION_EXECUTION = "browser_semantic_action_execution"
+CLAIM_CEILING_BROWSER_SEMANTIC_TASK_PLAN = "browser_semantic_task_plan"
+CLAIM_CEILING_BROWSER_SEMANTIC_TASK_EXECUTION = "browser_semantic_task_execution"
 
 
 def _serialize(value: Any) -> Any:
@@ -745,6 +747,138 @@ class BrowserSemanticActionExecutionResult:
 
     def to_dict(self) -> dict[str, Any]:
         return _serialize(self)
+
+
+@dataclass(slots=True)
+class BrowserSemanticTaskStep:
+    step_id: str = field(default_factory=lambda: f"browser-semantic-task-step-{uuid4().hex[:12]}")
+    step_index: int = 0
+    action_kind: str = "unsupported"
+    target_phrase: str = ""
+    target_candidate_id: str = ""
+    target_fingerprint: str = ""
+    action_args_redacted: dict[str, Any] = field(default_factory=dict)
+    action_arguments_private: dict[str, Any] = field(default_factory=dict, repr=False)
+    expected_outcome: list[str] = field(default_factory=list)
+    required_capability: str = ""
+    approval_binding_fingerprint: str = ""
+    status: str = "pending"
+    verification_result_id: str = ""
+    limitations: list[str] = field(default_factory=list)
+    action_plan_private: BrowserSemanticActionPlan | None = field(default=None, repr=False)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "step_id": self.step_id,
+            "step_index": self.step_index,
+            "action_kind": self.action_kind,
+            "target_phrase": self.target_phrase,
+            "target_candidate_id": self.target_candidate_id,
+            "target_fingerprint": self.target_fingerprint,
+            "action_args_redacted": _serialize(self.action_args_redacted),
+            "expected_outcome": list(self.expected_outcome),
+            "required_capability": self.required_capability,
+            "approval_binding_fingerprint": self.approval_binding_fingerprint,
+            "status": self.status,
+            "verification_result_id": self.verification_result_id,
+            "limitations": list(self.limitations),
+        }
+
+
+@dataclass(slots=True)
+class BrowserSemanticTaskPlan:
+    plan_id: str = field(default_factory=lambda: f"browser-semantic-task-plan-{uuid4().hex[:12]}")
+    source_observation_id: str = ""
+    provider: str = "playwright_live_semantic"
+    plan_kind: str = "safe_browser_sequence"
+    steps: list[BrowserSemanticTaskStep] = field(default_factory=list)
+    max_steps: int = 5
+    risk_level: str = "medium"
+    approval_required: bool = True
+    approval_request_id: str = ""
+    approval_grant_id: str = ""
+    executable_now: bool = False
+    reason_not_executable: str = ""
+    expected_final_state: list[str] = field(default_factory=list)
+    stop_policy: dict[str, Any] = field(default_factory=dict)
+    claim_ceiling: str = CLAIM_CEILING_BROWSER_SEMANTIC_TASK_PLAN
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    expires_at: str = ""
+    limitations: list[str] = field(default_factory=list)
+    approval_binding_fingerprint: str = ""
+    source_task_phrase: str = ""
+    user_message: str = "Plan ready; approval required."
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "plan_id": self.plan_id,
+            "source_observation_id": self.source_observation_id,
+            "provider": self.provider,
+            "plan_kind": self.plan_kind,
+            "steps": [step.to_dict() for step in self.steps],
+            "max_steps": self.max_steps,
+            "risk_level": self.risk_level,
+            "approval_required": self.approval_required,
+            "approval_request_id": self.approval_request_id,
+            "approval_grant_id": self.approval_grant_id,
+            "executable_now": self.executable_now,
+            "reason_not_executable": self.reason_not_executable,
+            "expected_final_state": list(self.expected_final_state),
+            "stop_policy": _serialize(self.stop_policy),
+            "claim_ceiling": self.claim_ceiling,
+            "created_at": self.created_at,
+            "expires_at": self.expires_at,
+            "limitations": list(self.limitations),
+            "approval_binding_fingerprint": self.approval_binding_fingerprint,
+            "source_task_phrase": self.source_task_phrase,
+            "user_message": self.user_message,
+        }
+
+
+@dataclass(slots=True)
+class BrowserSemanticTaskExecutionResult:
+    result_id: str = field(default_factory=lambda: f"browser-semantic-task-result-{uuid4().hex[:12]}")
+    plan_id: str = ""
+    status: str = "blocked"
+    step_results: list[BrowserSemanticActionExecutionResult] = field(default_factory=list)
+    completed_step_count: int = 0
+    blocked_step_id: str = ""
+    failure_reason: str = ""
+    final_verification_status: str = ""
+    cleanup_status: str = "not_started"
+    action_attempted: bool = False
+    approval_request_id: str = ""
+    approval_grant_id: str = ""
+    trust_request_id: str = ""
+    provider: str = "playwright_live_semantic"
+    claim_ceiling: str = CLAIM_CEILING_BROWSER_SEMANTIC_TASK_EXECUTION
+    limitations: list[str] = field(default_factory=list)
+    user_message: str = ""
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    completed_at: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "result_id": self.result_id,
+            "plan_id": self.plan_id,
+            "status": self.status,
+            "step_results": [step.to_dict() for step in self.step_results],
+            "completed_step_count": self.completed_step_count,
+            "blocked_step_id": self.blocked_step_id,
+            "failure_reason": self.failure_reason,
+            "final_verification_status": self.final_verification_status,
+            "cleanup_status": self.cleanup_status,
+            "action_attempted": self.action_attempted,
+            "approval_request_id": self.approval_request_id,
+            "approval_grant_id": self.approval_grant_id,
+            "trust_request_id": self.trust_request_id,
+            "provider": self.provider,
+            "claim_ceiling": self.claim_ceiling,
+            "limitations": list(self.limitations),
+            "user_message": self.user_message,
+            "created_at": self.created_at,
+            "completed_at": self.completed_at,
+        }
 
 
 @dataclass(slots=True)
@@ -2722,6 +2856,20 @@ class ScreenAnalysisResult:
             note="No live screen analysis is available.",
         )
     )
+    evidence_ranking: list[dict[str, Any]] = field(default_factory=list)
+    observation_attempted: bool = False
+    observation_available: bool = False
+    observation_allowed: bool = False
+    observation_blocked_reason: str | None = None
+    observation_source: str | None = None
+    observation_freshness: str | None = None
+    observation_confidence: dict[str, Any] = field(default_factory=dict)
+    evidence_before_observation: list[dict[str, Any]] = field(default_factory=list)
+    evidence_after_observation: list[dict[str, Any]] = field(default_factory=list)
+    answered_from_source: str | None = None
+    weak_fallback_used: bool = False
+    no_visual_evidence_reason: str | None = None
+    visible_context_summary: dict[str, Any] = field(default_factory=dict)
     trace_id: str | None = None
     latency_trace: ScreenLatencyTrace | None = None
     truthfulness_audit: ScreenTruthfulnessAudit | None = None

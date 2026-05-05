@@ -52,6 +52,7 @@ from stormhelm.core.voice.models import VoiceStreamingTTSResult
 from stormhelm.core.voice.models import VoiceTranscriptionResult
 from stormhelm.core.voice.models import VoiceVADSession
 from stormhelm.core.voice.models import VoiceWakeEvent
+from stormhelm.core.voice.visualizer import VoicePlaybackEnvelopeFollower
 from stormhelm.shared.time import utc_now_iso
 
 
@@ -1930,18 +1931,27 @@ class MockPlaybackProvider:
                 error_message=f"Mock playback stream unavailable: {reason}.",
                 metadata={"mock": True, "raw_audio_present": False},
             )
+        initial_status = (
+            "prerolling"
+            if bool(request.metadata.get("startup_preroll_active"))
+            else "started"
+        )
         session = VoiceLivePlaybackSession(
             playback_stream_id=request.playback_stream_id,
             playback_request_id=request.playback_request_id,
             provider=self.provider_name,
             device=request.device,
             audio_format=request.audio_format,
-            status="started",
+            status=initial_status,
             session_id=request.session_id,
             turn_id=request.turn_id,
             tts_stream_id=request.tts_stream_id,
             speech_request_id=request.speech_request_id,
-            metadata={"mock": True, "raw_audio_present": False},
+            metadata={
+                "mock": True,
+                "playback_preroll_active": initial_status == "prerolling",
+                "raw_audio_present": False,
+            },
         )
         self._active_stream = session
         return session
@@ -2350,6 +2360,9 @@ class WindowsMCIPlaybackBackend:
                 "status": "failed",
                 "error_code": "audio_file_missing",
                 "error_message": "Playback audio file was missing.",
+                "playback_envelope": self._unsupported_playback_envelope_payload(
+                    playback_id, "audio_file_missing"
+                ),
             }
         availability = self._request_availability(request)
         if not bool(availability.get("available")):
@@ -2360,6 +2373,9 @@ class WindowsMCIPlaybackBackend:
                 "status": "unavailable",
                 "error_code": reason,
                 "error_message": f"Local playback unavailable: {reason}.",
+                "playback_envelope": self._unsupported_playback_envelope_payload(
+                    playback_id, reason
+                ),
             }
         started = time.perf_counter()
         alias = "stormhelm_voice_" + "".join(
@@ -2380,6 +2396,9 @@ class WindowsMCIPlaybackBackend:
                 "status": "completed",
                 "elapsed_ms": int((time.perf_counter() - started) * 1000),
                 "played_locally": True,
+                "playback_envelope": self._unsupported_playback_envelope_payload(
+                    playback_id, "pcm_unavailable_for_mci_file"
+                ),
             }
         except Exception as error:
             return {
@@ -2387,6 +2406,9 @@ class WindowsMCIPlaybackBackend:
                 "elapsed_ms": int((time.perf_counter() - started) * 1000),
                 "error_code": "local_playback_failed",
                 "error_message": str(error),
+                "playback_envelope": self._unsupported_playback_envelope_payload(
+                    playback_id, "pcm_unavailable_for_mci_file"
+                ),
             }
         finally:
             try:
@@ -2422,6 +2444,9 @@ class WindowsMCIPlaybackBackend:
                 "status": "unsupported",
                 "error_code": "unsupported_live_format",
                 "error_message": "Windows speaker streaming currently requires PCM audio.",
+                "playback_envelope": self._unsupported_playback_envelope_payload(
+                    request.playback_stream_id, "unsupported_live_format"
+                ),
                 "raw_audio_present": False,
             }
         availability = self._stream_request_availability(request)
@@ -2433,6 +2458,9 @@ class WindowsMCIPlaybackBackend:
                 "status": "unavailable",
                 "error_code": reason,
                 "error_message": f"Local speaker streaming unavailable: {reason}.",
+                "playback_envelope": self._unsupported_playback_envelope_payload(
+                    request.playback_stream_id, reason
+                ),
                 "raw_audio_present": False,
             }
         sample_rate = self._stream_int_metadata(request, "sample_rate", 24000)
@@ -2454,8 +2482,22 @@ class WindowsMCIPlaybackBackend:
                 "status": "failed",
                 "error_code": "local_speaker_stream_start_failed",
                 "error_message": str(error),
+                "playback_envelope": self._unsupported_playback_envelope_payload(
+                    request.playback_stream_id, "local_speaker_stream_start_failed"
+                ),
                 "raw_audio_present": False,
             }
+        envelope_follower = VoicePlaybackEnvelopeFollower(
+            playback_id=request.playback_stream_id,
+            sample_rate_hz=sample_rate,
+            channels=channels,
+            sample_width_bytes=sample_width,
+            envelope_sample_rate_hz=60,
+            max_duration_ms=5000,
+            estimated_output_latency_ms=self._stream_int_metadata(
+                request, "estimated_output_latency_ms", 80
+            ),
+        )
         handle = {
             "wave_out": wave_out,
             "buffers": [],
@@ -2463,6 +2505,7 @@ class WindowsMCIPlaybackBackend:
             "sample_rate": sample_rate,
             "channels": channels,
             "sample_width_bytes": sample_width,
+            "playback_envelope_follower": envelope_follower,
             "chunk_count": 0,
             "bytes_received": 0,
             "first_chunk_received_at": None,
@@ -2471,14 +2514,21 @@ class WindowsMCIPlaybackBackend:
         }
         with self._lock:
             self._stream_handles[request.playback_stream_id] = handle
+        initial_status = (
+            "prerolling"
+            if bool(request.metadata.get("startup_preroll_active"))
+            else "started"
+        )
         return {
-            "status": "started",
+            "status": initial_status,
             "backend": "winmm_waveout",
             "streaming_supported": True,
             "sample_rate": sample_rate,
             "channels": channels,
             "sample_width_bytes": sample_width,
+            "playback_envelope": envelope_follower.to_bridge_payload(max_samples=0),
             "audible_playback": False,
+            "playback_preroll_active": initial_status == "prerolling",
             "user_heard_claimed": False,
             "raw_audio_present": False,
         }
@@ -2503,11 +2553,13 @@ class WindowsMCIPlaybackBackend:
                 "raw_audio_present": False,
             }
         if not payload:
+            envelope_payload = self._handle_playback_envelope_payload(handle)
             return {
                 "ok": True,
                 "status": "playing",
                 "chunk_index": chunk_index or int(handle.get("chunk_count") or 0),
                 "playback_started": bool(handle.get("audible_playback")),
+                "playback_envelope": envelope_payload,
                 "raw_audio_present": False,
             }
         try:
@@ -2519,8 +2571,16 @@ class WindowsMCIPlaybackBackend:
                 "chunk_index": chunk_index or int(handle.get("chunk_count") or 0),
                 "error_code": "local_speaker_stream_chunk_failed",
                 "error_message": str(error),
+                "playback_envelope": self._handle_playback_envelope_payload(handle),
                 "raw_audio_present": False,
             }
+        follower = handle.get("playback_envelope_follower")
+        if isinstance(follower, VoicePlaybackEnvelopeFollower):
+            follower.feed_pcm(
+                payload,
+                submitted_at_monotonic_ms=time.perf_counter() * 1000.0,
+            )
+        envelope_payload = self._handle_playback_envelope_payload(handle)
         now = utc_now_iso()
         if handle.get("first_chunk_received_at") is None:
             handle["first_chunk_received_at"] = now
@@ -2540,6 +2600,7 @@ class WindowsMCIPlaybackBackend:
             "playback_started": True,
             "audible_playback": True,
             "user_heard_claimed": True,
+            "playback_envelope": envelope_payload,
             "raw_audio_present": False,
         }
 
@@ -2571,6 +2632,7 @@ class WindowsMCIPlaybackBackend:
             "playback_started_at": handle.get("playback_started_at"),
             "audible_playback": heard,
             "user_heard_claimed": heard,
+            "playback_envelope": self._handle_playback_envelope_payload(handle),
             "raw_audio_present": False,
         }
 
@@ -2601,12 +2663,14 @@ class WindowsMCIPlaybackBackend:
         bytes_received = 0
         first_chunk_received_at = None
         playback_started_at = None
+        envelope_payload: dict[str, Any] | None = None
         for handle in handles.values():
             heard = heard or bool(handle.get("audible_playback") and handle.get("chunk_count"))
             chunk_count += int(handle.get("chunk_count") or 0)
             bytes_received += int(handle.get("bytes_received") or 0)
             first_chunk_received_at = first_chunk_received_at or handle.get("first_chunk_received_at")
             playback_started_at = playback_started_at or handle.get("playback_started_at")
+            envelope_payload = envelope_payload or self._handle_playback_envelope_payload(handle)
             try:
                 self._waveout_reset_and_close(handle)
             except Exception:
@@ -2620,6 +2684,64 @@ class WindowsMCIPlaybackBackend:
             "playback_started_at": playback_started_at,
             "audible_playback": heard,
             "user_heard_claimed": heard,
+            "playback_envelope": envelope_payload,
+            "raw_audio_present": False,
+        }
+
+    def playback_envelope_payload(
+        self,
+        playback_stream_id: str | None = None,
+        *,
+        playback_time_ms: int | float | None = None,
+        max_samples: int = 12,
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            handle = None
+            if playback_stream_id:
+                handle = self._stream_handles.get(playback_stream_id)
+            elif self._stream_handles:
+                handle = next(iter(self._stream_handles.values()))
+        return self._handle_playback_envelope_payload(
+            handle,
+            playback_time_ms=playback_time_ms,
+            max_samples=max_samples,
+        )
+
+    def _handle_playback_envelope_payload(
+        self,
+        handle: dict[str, Any] | None,
+        *,
+        playback_time_ms: int | float | None = None,
+        max_samples: int = 12,
+    ) -> dict[str, Any] | None:
+        if not isinstance(handle, dict):
+            return None
+        follower = handle.get("playback_envelope_follower")
+        if isinstance(follower, VoicePlaybackEnvelopeFollower):
+            return follower.to_bridge_payload(
+                max_samples=max_samples,
+                playback_time_ms=playback_time_ms,
+            )
+        return None
+
+    def _unsupported_playback_envelope_payload(
+        self,
+        playback_id: str | None,
+        reason: str,
+    ) -> dict[str, Any]:
+        return {
+            "playback_id": playback_id,
+            "envelope_supported": False,
+            "envelope_available": False,
+            "envelope_source": "unavailable",
+            "envelope_sample_rate_hz": 0,
+            "latest_voice_energy": 0.0,
+            "latest_voice_energy_time_ms": None,
+            "estimated_output_latency_ms": 0,
+            "envelope_samples_recent": [],
+            "samples_dropped": 0,
+            "envelope_samples_dropped": 0,
+            "envelope_disabled_reason": str(reason or "playback_envelope_unsupported"),
             "raw_audio_present": False,
         }
 
@@ -3142,14 +3264,23 @@ class LocalPlaybackProvider:
                 error_code="local_stream_start_failed",
                 error_message=str(error),
             )
+        backend_status = str(payload.get("status") or "started")
+        initial_status = (
+            "prerolling"
+            if backend_status == "started"
+            and bool(request.metadata.get("startup_preroll_active"))
+            else backend_status
+        )
         session = self._stream_session(
             request,
-            status=str(payload.get("status") or "started"),
+            status=initial_status,
             metadata={
                 "availability": availability,
                 "backend": payload.get("backend") or availability.get("backend"),
                 "streaming_supported": bool(payload.get("streaming_supported")),
+                "playback_envelope": payload.get("playback_envelope"),
                 "audible_playback": bool(payload.get("audible_playback")),
+                "playback_preroll_active": initial_status == "prerolling",
                 "user_heard_claimed": False,
                 "raw_audio_present": False,
             },
@@ -3162,7 +3293,7 @@ class LocalPlaybackProvider:
                 audio_output_id=None,
                 provider=self.provider_name,
                 device=request.device,
-                status="started",
+                status=initial_status,
                 playback_id=request.playback_stream_id,
                 session_id=request.session_id,
                 turn_id=request.turn_id,
@@ -3220,6 +3351,7 @@ class LocalPlaybackProvider:
                 "raw_audio_present": False,
                 "audible_playback": bool(result.get("audible_playback")),
                 "user_heard_claimed": bool(result.get("user_heard_claimed")),
+                "playback_envelope": result.get("playback_envelope"),
             },
         )
         with self._lock:
@@ -3240,6 +3372,9 @@ class LocalPlaybackProvider:
                             active_stream.metadata.get("audible_playback")
                             or result.get("audible_playback")
                         ),
+                        "playback_envelope": result.get("playback_envelope")
+                        or active_stream.metadata.get("playback_envelope"),
+                        "playback_preroll_active": False,
                         "user_heard_claimed": bool(
                             active_stream.metadata.get("user_heard_claimed")
                             or result.get("user_heard_claimed")
@@ -3250,6 +3385,7 @@ class LocalPlaybackProvider:
                 if self._active_playback is not None:
                     self._active_playback = replace(
                         self._active_playback,
+                        status=chunk_result.status,
                         played_locally=bool(
                             self._active_playback.played_locally
                             or result.get("audible_playback")
@@ -3261,6 +3397,11 @@ class LocalPlaybackProvider:
                         output_metadata={
                             **dict(self._active_playback.output_metadata),
                             "audible_playback": bool(result.get("audible_playback")),
+                            "playback_envelope": result.get("playback_envelope")
+                            or dict(self._active_playback.output_metadata).get(
+                                "playback_envelope"
+                            ),
+                            "playback_preroll_active": False,
                             "user_heard_claimed": bool(result.get("user_heard_claimed")),
                             "raw_audio_present": False,
                         },
@@ -3359,6 +3500,35 @@ class LocalPlaybackProvider:
     def get_active_playback_stream(self) -> VoiceLivePlaybackSession | None:
         with self._lock:
             return self._active_stream
+
+    def playback_envelope_payload(
+        self,
+        playback_stream_id: str | None = None,
+        *,
+        playback_time_ms: int | float | None = None,
+        max_samples: int = 12,
+    ) -> dict[str, Any] | None:
+        stream_id = playback_stream_id
+        with self._lock:
+            active_stream = self._active_stream
+            if stream_id is None and active_stream is not None:
+                stream_id = active_stream.playback_stream_id
+        if (
+            self.backend is not None
+            and hasattr(self.backend, "playback_envelope_payload")
+            and stream_id
+        ):
+            try:
+                payload = self.backend.playback_envelope_payload(  # type: ignore[attr-defined]
+                    stream_id,
+                    playback_time_ms=playback_time_ms,
+                    max_samples=max_samples,
+                )
+                if isinstance(payload, dict):
+                    return payload
+            except Exception:
+                return None
+        return None
 
     def _stream_session(
         self,

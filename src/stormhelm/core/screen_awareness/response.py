@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from stormhelm.core.screen_awareness.models import ActionExecutionStatus
@@ -12,6 +13,8 @@ from stormhelm.core.screen_awareness.models import ScreenAnalysisResult
 from stormhelm.core.screen_awareness.models import ScreenIntentType
 from stormhelm.core.screen_awareness.models import ScreenLimitationCode
 from stormhelm.core.screen_awareness.models import ScreenResponse
+from stormhelm.core.screen_awareness.evidence import focus_evidence_verified
+from stormhelm.core.screen_awareness.evidence import top_evidence_confidence
 from stormhelm.core.screen_awareness.observation import best_live_visible_text
 from stormhelm.core.screen_awareness.observation import best_visible_text
 from stormhelm.core.screen_awareness.observation import has_clipboard_only_signal
@@ -23,6 +26,25 @@ from stormhelm.core.screen_awareness.visual_capture import source_labels_for_obs
 
 
 _CONTENT_POWER_REQUEST_TYPES = {"translation_request", "entity_query", "overlay_request", "notification_query"}
+_OCR_PREFIX_NOISE = {
+    "home",
+    "search",
+    "settings",
+    "profile",
+    "menu",
+    "help",
+    "back",
+    "forward",
+    "reload",
+}
+_OCR_TRAILING_MARKERS = (
+    " footer ",
+    " cookie notice ",
+    " sidebar ",
+    " related articles ",
+    " subscribe newsletter",
+)
+_FILE_PATTERN = r"\b[\w.-]+\.(?:pdf|docx?|xlsx?|pptx?|txt|md|png|jpe?g|gif|zip|exe|msi|py|js|ts|tsx|json|toml|log)\b"
 
 
 def _preview(text: str | None, *, limit: int = 120) -> str:
@@ -113,26 +135,50 @@ def _focused_metadata_label(observation: Any) -> str:
     return str(focus_metadata.get("window_title") or getattr(observation, "app_identity", "") or "").strip()
 
 
+def _window_title_list(observation: Any) -> list[str]:
+    if observation is None:
+        return []
+    window_metadata = getattr(observation, "window_metadata", {})
+    windows = window_metadata.get("windows") if isinstance(window_metadata, dict) else []
+    if not isinstance(windows, list):
+        return []
+    titles: list[str] = []
+    for item in windows:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("window_title") or item.get("title") or "").strip()
+        if title and title not in titles:
+            titles.append(title)
+    return titles[:5]
+
+
 def _metadata_context_sentence(observation: Any) -> str:
     display = _active_display_label(observation)
-    focused = _focused_metadata_label(observation)
+    title = _focused_metadata_label(observation)
+    focus_verified = focus_evidence_verified(observation)
+    window_titles = _window_title_list(observation)
     parts: list[str] = []
-    if display:
-        parts.append(f"I can see that the active window is on {display}.")
-    if focused:
-        parts.append(f"Focused window metadata says {focused}.")
+    if len(window_titles) > 1:
+        parts.append(f"Window stack metadata lists: {'; '.join(window_titles[:3])}.")
+    elif title and focus_verified:
+        parts.append(f"Focused window metadata says {title}.")
+    elif title:
+        parts.append(f"Window title metadata says {title} appears to be involved.")
+    if display and not title:
+        parts.append(f"Display metadata points to {display}.")
     return " ".join(parts)
 
 
 def _metadata_only_screen_text(observation: Any, *, capture_state: str) -> str:
     context = _metadata_context_sentence(observation)
-    if context:
-        context = f" {context}"
+    context_clause = f" {context}" if context else ""
+    next_step = "I can capture/inspect the current view when visual capture, OCR, or a trusted UI tree is available."
     return (
-        "Observed: I only have window/display metadata right now."
-        f"{context} {capture_state} "
+        "Observed: I only have weak window metadata right now; I only have window/display metadata, not visual content."
+        f"{context_clause} {capture_state} "
         "This is a low-confidence bearing. "
-        "Inference: I cannot honestly describe the screen contents until visual capture is available."
+        "Inference: I do not have enough visual detail, so I cannot honestly describe the screen contents yet. "
+        f"{next_step}"
     )
 
 
@@ -190,6 +236,295 @@ def _has_available_adapter_content(analysis: ScreenAnalysisResult) -> bool:
         or semantic_context.current_path
         or semantic_context.selected_item_label
         or resolution.semantic_targets
+    )
+
+
+def _clipping_tool_involved(observation: Any) -> bool:
+    if observation is None:
+        return False
+    focus_metadata = getattr(observation, "focus_metadata", {})
+    title = ""
+    process = ""
+    if isinstance(focus_metadata, dict):
+        title = str(focus_metadata.get("window_title") or "").strip().lower()
+        process = str(focus_metadata.get("process_name") or "").strip().lower()
+    app_identity = str(getattr(observation, "app_identity", "") or "").strip().lower()
+    return any(marker in f"{title} {process} {app_identity}" for marker in {"clipping tool", "snippingtool", "snipping tool"})
+
+
+def _supporting_app_label(observation: Any) -> str:
+    if observation is None:
+        return ""
+    if _clipping_tool_involved(observation):
+        return "Clipping Tool"
+    focus_metadata = getattr(observation, "focus_metadata", {})
+    process = ""
+    title = ""
+    if isinstance(focus_metadata, dict):
+        process = str(focus_metadata.get("process_name") or "").strip()
+        title = str(focus_metadata.get("window_title") or "").strip()
+    if process:
+        return process.replace(".exe", "").title()
+    if title and ".png" not in title.lower() and "screenshot" not in title.lower():
+        return title
+    return ""
+
+
+def _process_label(observation: Any) -> str:
+    if observation is None:
+        return ""
+    focus_metadata = getattr(observation, "focus_metadata", {})
+    process = ""
+    if isinstance(focus_metadata, dict):
+        process = str(focus_metadata.get("process_name") or "").strip()
+    if not process:
+        process = str(getattr(observation, "app_identity", "") or "").strip()
+    return process.replace(".exe", "").strip()
+
+
+def _primary_window_title(observation: Any) -> str:
+    title = _focused_metadata_label(observation)
+    if _clipping_tool_involved(observation):
+        return "Clipping Tool"
+    return title
+
+
+def _secondary_window_titles(observation: Any) -> list[str]:
+    if _clipping_tool_involved(observation):
+        return []
+    primary = _primary_window_title(observation).strip()
+    titles = []
+    for title in _window_title_list(observation):
+        lowered = title.lower()
+        if "screenshot" in lowered and ("clipping tool" in lowered or "snipping tool" in lowered):
+            continue
+        if title and title != primary:
+            titles.append(title)
+    return titles[:3]
+
+
+def _strip_ocr_noise(text: str) -> str:
+    cleaned = " ".join(str(text or "").split()).strip()
+    if not cleaned:
+        return ""
+    for marker in _OCR_TRAILING_MARKERS:
+        index = cleaned.lower().find(marker)
+        if index != -1:
+            cleaned = cleaned[:index].strip()
+    tokens = cleaned.split()
+    while tokens and tokens[0].strip(":,.-").lower() in _OCR_PREFIX_NOISE:
+        tokens.pop(0)
+    return " ".join(tokens).strip()
+
+
+def _sentence_like_units(text: str) -> list[str]:
+    cleaned = _strip_ocr_noise(text)
+    if not cleaned:
+        return []
+    units = []
+    for part in re.split(r"(?<=[.!?])\s+|[\n\r]+| {2,}", cleaned):
+        item = part.strip(" -:;")
+        if item:
+            units.append(item)
+    return units or [cleaned]
+
+
+def _extract_files(text: str) -> list[str]:
+    found = re.findall(_FILE_PATTERN, text or "", flags=re.IGNORECASE)
+    deduped: list[str] = []
+    for item in found:
+        if item not in deduped:
+            deduped.append(item)
+    return deduped[:4]
+
+
+def _extract_error_text(text: str | None, interpretation: Any) -> str:
+    cleaned = _strip_ocr_noise(str(text or ""))
+    if "pytest" in cleaned.lower() and any(token in cleaned.lower() for token in {"failed", "error", "nameerror", "typeerror"}):
+        return _preview(cleaned, limit=120)
+    if interpretation is not None and getattr(interpretation, "visible_errors", None):
+        return _preview(interpretation.visible_errors[0], limit=120)
+    if not cleaned:
+        return ""
+    match = re.search(
+        r"((?:[A-Z][A-Za-z]+Error|Connection Error|Error)[:\s-]+.{0,120}?(?:ECONNREFUSED|failed|missing|required|refused|timeout|exception|$))",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return _preview(match.group(1), limit=120)
+    if any(token in cleaned.lower() for token in {"error", "failed", "exception", "nameerror", "typeerror", "econnrefused"}):
+        return _preview(cleaned, limit=120)
+    return ""
+
+
+def _article_topic(text: str, title: str) -> str:
+    cleaned = _strip_ocr_noise(text)
+    title_clean = title.split(" - ", 1)[0].strip()
+    match = re.search(r"\bArticle\s+(.+?)(?:\s+Researchers\b|\s+By\b|$)", cleaned, flags=re.IGNORECASE)
+    if match:
+        return _preview(match.group(1), limit=86)
+    if cleaned and (
+        not title_clean
+        or "docs" in title_clean.lower()
+        or title_clean.lower() in {"chrome", "microsoft edge", "firefox"}
+    ):
+        return _preview(cleaned, limit=86)
+    if title_clean and not title_clean.lower().endswith(("chrome", "edge", "firefox")):
+        return _preview(title_clean, limit=86)
+    return _preview(cleaned, limit=86)
+
+
+def _is_browser(observation: Any) -> bool:
+    process = _process_label(observation).lower()
+    title = _focused_metadata_label(observation).lower()
+    return process in {"chrome", "msedge", "firefox", "brave", "opera", "vivaldi"} or any(
+        marker in title for marker in {" - chrome", " - microsoft edge", " - firefox"}
+    )
+
+
+def _is_file_explorer(observation: Any, text: str) -> bool:
+    process = _process_label(observation).lower()
+    title = _focused_metadata_label(observation).lower()
+    lowered = str(text or "").lower()
+    return process in {"explorer", "file explorer"} or "file explorer" in title or "file explorer" in lowered
+
+
+def _friendly_file_list(files: list[str]) -> str:
+    if not files:
+        return "visible files"
+    if len(files) == 1:
+        return files[0]
+    if len(files) == 2:
+        return f"{files[0]} and {files[1]}"
+    return f"{', '.join(files[:-1])}, and {files[-1]}"
+
+
+def _visible_context_summary(analysis: ScreenAnalysisResult) -> dict[str, Any]:
+    observation = analysis.observation
+    interpretation = analysis.interpretation
+    text = str(getattr(observation, "visual_text", "") or getattr(observation, "selected_text", "") or "")
+    key_text: list[str] = []
+    entities: list[str] = []
+    title = _primary_window_title(observation)
+    secondary = _secondary_window_titles(observation)
+    source = analysis.answered_from_source or (
+        analysis.evidence_ranking[0].get("source") if analysis.evidence_ranking else None
+    )
+    kind = "visible_content"
+    summary = "Fresh visual evidence is available, but the readable content is still partial."
+    likely_task_label = ""
+    likely_task_confidence = "low"
+    help_options = ["I can help interpret the visible content."]
+
+    if title:
+        entities.append(title)
+    files = _extract_files(text)
+    error_text = _extract_error_text(text, interpretation)
+    cleaned_text = _strip_ocr_noise(text)
+
+    if _clipping_tool_involved(observation):
+        kind = "screenshot_content"
+    if error_text:
+        kind = "error_dialog" if kind != "screenshot_content" else kind
+        key_text.append(error_text)
+        summary = f"A visible error is shown: {error_text}."
+        likely_task_label = "troubleshooting a visible error"
+        likely_task_confidence = "high"
+        help_options = ["I can help troubleshoot the visible error."]
+        if kind == "screenshot_content":
+            screenshot_label = _preview(cleaned_text, limit=100) if cleaned_text else error_text
+            summary = f"The screenshot content appears to show {screenshot_label}."
+            help_options = ["I can help interpret the screenshot content."]
+    elif _is_file_explorer(observation, text):
+        kind = "file_explorer"
+        key_text.extend(files[:3])
+        folder = title.split(" - ", 1)[0] if title else "a folder"
+        file_clause = f" with files such as {_friendly_file_list(files[:3])}" if files else ""
+        summary = f"File Explorer is open to {folder}{file_clause}."
+        likely_task_label = "reviewing files in a folder"
+        likely_task_confidence = "medium"
+        help_options = ["I can help identify, compare, or summarize the visible files."]
+    elif _is_browser(observation):
+        kind = "browser_page"
+        topic = _article_topic(text, title)
+        if topic:
+            key_text.append(topic)
+        summary = f"A browser page or article about {topic or 'the visible topic'} is visible."
+        likely_task_label = "reading a page or article"
+        likely_task_confidence = "medium"
+        help_options = ["I can summarize the page or extract the key points."]
+    else:
+        units = _sentence_like_units(text)
+        if units:
+            key_text.append(_preview(units[0], limit=100))
+            summary = f"The main visible content appears to be {key_text[0]}."
+            likely_task_label = getattr(interpretation, "likely_task", "") if interpretation is not None else ""
+            likely_task_confidence = "medium" if likely_task_label else "low"
+        if "pytest" in cleaned_text.lower() or "terminal" in str(title).lower():
+            kind = "terminal_output"
+            likely_task_label = "checking a test or terminal failure"
+            likely_task_confidence = "medium"
+            help_options = ["I can help interpret the failing output."]
+
+    if kind == "screenshot_content" and not error_text:
+        units = _sentence_like_units(text)
+        if units:
+            key_text = [_preview(units[0], limit=100)]
+            summary = f"The screenshot content appears to show {key_text[0]}."
+        likely_task_label = likely_task_label or "inspecting a captured screenshot"
+        likely_task_confidence = "medium"
+        help_options = ["I can help interpret the screenshot content."]
+
+    if secondary:
+        summary = summary.rstrip(".") + f", with secondary window metadata also listing {', '.join(secondary[:2])}."
+        entities.extend(secondary[:2])
+
+    if not key_text and cleaned_text:
+        key_text.append(_preview(cleaned_text, limit=100))
+    if source:
+        entities.append(str(source))
+    deduped_entities: list[str] = []
+    for item in entities:
+        value = str(item or "").strip()
+        if value and value not in deduped_entities:
+            deduped_entities.append(value)
+
+    return {
+        "summary": summary,
+        "source": source,
+        "primary_content": {"kind": kind, "label": key_text[0] if key_text else title or kind},
+        "key_text": key_text[:3],
+        "entities": deduped_entities[:6],
+        "windows": {"primary": title, "secondary": secondary},
+        "likely_task": {
+            "label": likely_task_label,
+            "confidence": likely_task_confidence,
+        },
+        "help_options": help_options[:2],
+    }
+
+
+def _visual_current_screen_text(analysis: ScreenAnalysisResult) -> str:
+    observation = analysis.observation
+    summary = _visible_context_summary(analysis)
+    analysis.visible_context_summary = summary
+    app_label = _supporting_app_label(observation)
+    source_sentence = _visual_source_sentence(observation).strip()
+    source_clause = f" Source: {source_sentence}" if source_sentence else ""
+    task = summary.get("likely_task", {}) if isinstance(summary.get("likely_task"), dict) else {}
+    task_label = str(task.get("label") or "").strip()
+    task_sentence = f"It looks like you may be {task_label}." if task_label else "The likely task context is still partial."
+    offer = str((summary.get("help_options") or ["I can help interpret the visible context."])[0])
+    if _clipping_tool_involved(observation):
+        return (
+            f"Observed: {summary['summary']}{source_clause} Supporting window metadata points to Clipping Tool. "
+            f"Inference: {task_sentence} {offer}"
+        )
+    app_sentence = f" Supporting app metadata points to {app_label}." if app_label else ""
+    return (
+        f"Observed: {summary['summary']}{app_sentence}{source_clause} "
+        f"Inference: {task_sentence} {offer}"
     )
 
 
@@ -748,6 +1083,14 @@ class ScreenResponseComposer:
             )
             return self._response("Screen Bearings", text, analysis)
 
+        if (
+            intent == ScreenIntentType.INSPECT_VISIBLE_STATE
+            and observation is not None
+            and observation.visual_text
+            and has_screen_capture_signal(observation)
+        ):
+            return self._response("Screen Bearings", _visual_current_screen_text(analysis), analysis)
+
         brain = analysis.brain_integration_result
         if intent == ScreenIntentType.BRAIN_INTEGRATION and brain is not None:
             if brain.status.value == "candidate_created" and brain.long_term_candidate is not None:
@@ -1264,6 +1607,8 @@ class ScreenResponseComposer:
 
     def _response(self, bearing_title: str, text: str, analysis: ScreenAnalysisResult) -> ScreenResponse:
         evidence_kind = _evidence_kind(analysis)
+        if not analysis.visible_context_summary and evidence_kind == "visual_content":
+            analysis.visible_context_summary = _visible_context_summary(analysis)
         return ScreenResponse(
             analysis=analysis,
             assistant_response=text,
@@ -1272,6 +1617,7 @@ class ScreenResponseComposer:
                 "micro_response": _first_sentence(text),
                 "full_response": text,
                 "evidence_kind": evidence_kind,
+                "visible_context_summary": str(analysis.visible_context_summary.get("summary") or ""),
             },
             telemetry={
                 "observation": {
@@ -1311,6 +1657,26 @@ class ScreenResponseComposer:
                         else False
                     ),
                     "screen_capture": _screen_capture_status(analysis.observation),
+                    "evidence_ranking": list(analysis.evidence_ranking),
+                    "evidence_confidence": top_evidence_confidence(analysis.evidence_ranking),
+                    "primary_evidence_source": (
+                        analysis.evidence_ranking[0].get("source")
+                        if analysis.evidence_ranking
+                        else None
+                    ),
+                    "observation_attempted": analysis.observation_attempted,
+                    "observation_available": analysis.observation_available,
+                    "observation_allowed": analysis.observation_allowed,
+                    "observation_blocked_reason": analysis.observation_blocked_reason,
+                    "observation_source": analysis.observation_source,
+                    "observation_freshness": analysis.observation_freshness,
+                    "observation_confidence": dict(analysis.observation_confidence),
+                    "evidence_before_observation": list(analysis.evidence_before_observation),
+                    "evidence_after_observation": list(analysis.evidence_after_observation),
+                    "answered_from_source": analysis.answered_from_source,
+                    "weak_fallback_used": analysis.weak_fallback_used,
+                    "no_visual_evidence_reason": analysis.no_visual_evidence_reason,
+                    "visible_context_summary": dict(analysis.visible_context_summary),
                 },
                 "interpretation": {
                     "likely_environment": analysis.interpretation.likely_environment if analysis.interpretation is not None else None,

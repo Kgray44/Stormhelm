@@ -2,7 +2,7 @@
 
 Stormhelm voice is a bounded input/output surface. It is not an always-listening assistant, and it does not give audio providers authority to run commands. Voice requests enter the same backend-owned core path as typed requests.
 
-Current status: implemented for Windows manual voice conversations and Windows typed-response voice output when explicitly enabled. Typed `/chat/send` responses now leave a safe `VOICE_SPEAK_DECISION` trail, then speak user-facing assistant text through OpenAI streaming TTS and progressive Windows local speaker playback when the voice gates allow it. The main supported input loop is explicit user-triggered listen, default microphone capture, silence endpointing, OpenAI STT, normal Core dispatch, visible response, and spoken response through the existing Windows local speaker playback path. Voice remains disabled by default.
+Current status: implemented for Windows manual voice conversations and Windows typed-response voice output when explicitly enabled. Typed `/chat/send` responses now leave a safe `VOICE_SPEAK_DECISION` trail, then speak user-facing assistant text through OpenAI streaming TTS and progressive Windows local speaker playback when the voice gates allow it. Stormforge Anchor audio-reactive motion uses a backend PCM stream meter with startup preroll and exposes only scalar visual energy. The main supported input loop is explicit user-triggered listen, default microphone capture, silence endpointing, OpenAI STT, normal Core dispatch, visible response, and spoken response through the existing Windows local speaker playback path. Voice remains disabled by default.
 
 For the Voice-C1 phase inventory, config matrix, authority boundary matrix, release notes, live-provider smoke plan, test commands, and commit hygiene guidance, see [voice-c1-release-readiness.md](voice-c1-release-readiness.md).
 
@@ -18,7 +18,7 @@ Tests: `tests/test_voice_config.py`, `tests/test_voice_availability.py`, `tests/
 | Controlled audio STT | Bounded file/blob/fixture-style audio metadata can be transcribed through the configured provider path. | No | `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/voice/service.py` | `tests/test_voice_audio_turn.py`, `tests/test_voice_stt_provider.py` |
 | TTS artifact generation | Core-approved text or explicit safe test text can be rendered into a controlled speech artifact. | No | `src/stormhelm/core/voice/speech_renderer.py`, `src/stormhelm/core/voice/service.py` | `tests/test_voice_tts_provider.py`, `tests/test_voice_tts_from_turn_result.py` |
 | Streaming TTS output | Core-approved spoken text can optionally use a chunked TTS contract with redacted chunk metadata and first-audio timing. L5.1 wires normal `/chat/send` assistant voice output and capture play-response through streaming when streaming TTS and streaming playback are enabled. L5.3 adds a null streaming playback sink for device-independent first-output timing and routes the wake supervised loop through the same approved streaming path when playback is requested. L5.4/L5.5 add Windows local speaker progressive playback for PCM chunks and carry speaker truth into status/UI state. L5.6 records the typed-response speech decision for every `/chat/send` response and keeps the utility/time route speakable through the same path. Streaming never starts from partial transcripts, wake alone, STT final alone, or unapproved filler. | No | `src/stormhelm/core/api/app.py`, `src/stormhelm/core/voice/models.py`, `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/voice/service.py` | `tests/test_voice_chat_output_integration.py`, `tests/test_latency_l5_voice_streaming_first_audio.py`, `tests/test_latency_l51_voice_streaming_reality.py`, `tests/test_latency_l53_live_voice_benchmark.py`, `tests/test_latency_l55_windows_voice_runtime.py`, `tests/test_voice_playback_provider.py` |
-| Voice anchor visual state | Backend status exposes a `voice_anchor` payload for Ghost motion: dormant, idle, wake detected, listening, transcribing, thinking, confirmation required, preparing speech, speaking, interrupted, muted, continuing task, blocked, and error. Audio-reactive motion is labeled by source and never carries raw audio. | No | `src/stormhelm/core/voice/visualizer.py`, `src/stormhelm/core/voice/service.py`, `src/stormhelm/ui/voice_surface.py`, `assets/qml/components/VoiceCore.qml` | `tests/test_latency_l52_voice_anchor_motion.py`, `tests/test_qml_shell.py` |
+| Voice anchor visual state | Backend status exposes a `voice_anchor` payload for Ghost motion: dormant, idle, wake detected, listening, transcribing, thinking, confirmation required, preparing speech, speaking, interrupted, muted, continuing task, blocked, and error. Stormforge production audio-reactive motion uses the scalar `pcm_stream_meter` visual payload and never carries raw audio. AR4 names the approved renderer `legacy_blob_reference`, keeps `legacy_blob` as a compatibility alias, adds an opt-in `legacy_blob_fast_candidate` parity mode, and preserves the rejected AR3 split renderer behind an explicit experiment flag. AR5 adds the opt-in `legacy_blob_qsg_candidate` scene-graph/Shape clone for performance review; it is not default until human visual parity review accepts it. | No | `src/stormhelm/core/voice/voice_visual_meter.py`, `src/stormhelm/core/voice/visualizer.py`, `src/stormhelm/core/voice/service.py`, `src/stormhelm/ui/voice_surface.py`, `assets/qml/components/VoiceCore.qml`, `assets/qml/variants/stormforge/StormforgeAnchorCore.qml`, `assets/qml/variants/stormforge/StormforgeAnchorFrame.qml`, `assets/qml/variants/stormforge/StormforgeAnchorDynamicCore.qml`, `assets/qml/variants/stormforge/StormforgeAnchorLegacyBlobQsgCore.qml` | `tests/test_voice_visual_meter.py`, `tests/test_latency_l52_voice_anchor_motion.py`, `tests/test_voice_ui_state_payload.py`, `tests/test_stormforge_voice_visual_meter_contract.py`, `tests/test_qml_shell.py` |
 | Push-to-talk capture boundary | Explicit start/stop/cancel/submit actions exist. L6 adds one-shot `listen-turn`, which uses the same capture provider and endpointing path instead of requiring a manual stop before STT/Core dispatch. Local capture is separately gated. | No | `src/stormhelm/core/api/app.py`, `src/stormhelm/core/voice/service.py` | `tests/test_voice_capture_service.py`, `tests/test_voice_bridge_controls.py`, `tests/test_voice_l6_manual_conversation.py` |
 | Playback boundary | Playback requests and stop controls exist behind provider/config gates. Voice-LP1 adds a real Windows local playback provider for MP3/WAV output while preserving mock/unavailable paths. L5 adds live stream/chunk contracts and prewarm status while keeping artifact persistence separate from live playback truth. L5.3 adds `null_stream`, a silent streaming sink that measures first accepted output without claiming audible playback. L5.4/L5.5 wire the Windows local provider to progressive PCM streaming through the system speaker output, expose `speaker_backend_available`, and set `user_heard_claimed=true` only after the local speaker sink starts. | No | `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/voice/service.py` | `tests/test_voice_playback_service.py`, `tests/test_voice_playback_provider.py`, `tests/test_latency_l5_voice_streaming_first_audio.py`, `tests/test_latency_l53_live_voice_benchmark.py`, `tests/test_latency_l55_windows_voice_runtime.py` |
 | Interruption and barge-in hardening | Active playback can be stopped, spoken output muted, capture/listen windows cancelled, pending confirmations rejected, and cancellation/correction phrases routed safely without direct task cancellation. | No; controlled by explicit action or bounded voice context. | `src/stormhelm/core/voice/service.py`, `src/stormhelm/core/api/app.py`, `src/stormhelm/ui/voice_surface.py` | `tests/test_voice_interruption_service.py`, `tests/test_voice_interruption_bridge.py`, `tests/test_voice_barge_in_interruption.py` |
@@ -83,6 +83,7 @@ Useful fields to inspect:
 | transcription | Last STT provider/model/result/error state. |
 | speech synthesis | Last TTS request/result/artifact state, streaming TTS status, live/artifact formats, provider prewarm state, fallback use, and first-audio timing. |
 | playback | Last playback request/result/error state, live stream status, playback prewarm state, partial-playback state, and stop-speaking availability. |
+| voice visual meter | Stormforge audio-reactive scalar fields: `voice_visual_energy`, `voice_visual_active`, `voice_visual_source`, `voice_visual_playback_id`, `voice_visual_available`, `voice_visual_disabled_reason`, `voice_visual_sample_rate_hz`, `voice_visual_started_at_ms`, `voice_visual_latest_age_ms`, and `raw_audio_present=false`. |
 | interruption | Last interruption request/classification/result, affected output/capture/listen/confirmation surfaces, Core-routed cancellation/correction flags, and invariants that voice did not cancel tasks or mutate Core results directly. |
 | wake | Wake config/readiness/provider/backend/device/session/event/Ghost presentation status. Local wake remains disabled unless explicitly configured and available. |
 | wake_ghost | Active/last wake-to-Ghost presentation state, including request/session IDs, phrase, timeout, and presentation-only truth flags. |
@@ -98,6 +99,45 @@ Useful fields to inspect:
 
 Sources: `src/stormhelm/core/container.py`, `src/stormhelm/core/voice/service.py`, `src/stormhelm/core/voice/state.py`
 Tests: `tests/test_voice_state.py`, `tests/test_voice_diagnostics.py`
+
+## Stormforge Voice-Reactive Renderer Probe
+
+The real environment probe exercises the production Core, UI, Stormforge Ghost, local playback fixture, bridge, QML binding path, and Anchor renderer diagnostics. It logs only scalar energy, timing, and visual-drive fields.
+
+```powershell
+python scripts\run_voice_reactive_real_environment_probe.py --stormforge --fog on --clear-cache --spoken-prompt "Testing one, two, three. Anchor sync check." --audible --use-local-pcm-voice-fixture --timeout-seconds 24
+```
+
+AR4 renderer selection:
+
+- Default: `legacy_blob_reference`, with `legacy_blob` kept as a compatibility alias. This is the approved organic blob look and keeps the scalar PCM voice chain.
+- Candidate: `legacy_blob_fast_candidate`, selected with `STORMHELM_STORMFORGE_ANCHOR_RENDERER=legacy_blob_fast_candidate` or `--anchor-renderer legacy_blob_fast_candidate`. It is for visual parity/performance review only and is not promoted until the reference look is manually accepted.
+- Candidate: `legacy_blob_qsg_candidate`, selected with `STORMHELM_STORMFORGE_ANCHOR_RENDERER=legacy_blob_qsg_candidate` or `--anchor-renderer legacy_blob_qsg_candidate`. It uses the cached static frame plus a scene-graph/Shape clone of the official legacy blob aperture. It remains opt-in until the visual parity artifacts are accepted.
+- Experiment: `ar3_split`, selected with `STORMHELM_STORMFORGE_ANCHOR_RENDERER=ar3_split` or `--anchor-renderer ar3_split`, for future performance work only.
+
+Key AR3/AR4 fields:
+
+| Field | Meaning |
+|---|---|
+| `effectiveAnchorRenderer` | Active renderer: `legacy_blob_reference` by default, `legacy_blob_fast_candidate` for AR4 parity review, `legacy_blob_qsg_candidate` for AR5 visual-parity/performance review, or `ar3_split` for explicit experiments. |
+| `anchorRequestPaintFpsDuringSpeaking` | Coalesced dynamic paint requests during speaking. |
+| `anchorPaintFpsDuringSpeaking` / `dynamicCorePaintFpsDuringSpeaking` | Actual dynamic Anchor paint cadence. Target is at least 30 FPS while visible/speaking. |
+| `staticFramePaintFpsDuringSpeaking` | Should stay low; static frame should not repaint on every voice-energy frame. |
+| `blobScaleDrive`, `blobDeformationDrive`, `radianceDrive`, `ringDrive` | Scalar visual drives proving the organic blob/radiance/fragments still respond to voice energy. |
+| `visualAmplitudeCompressionRatio` / `visualAmplitudeLatencyMs` | Bounded expression and timing checks between received voice energy and visual drive. |
+| `pcm_to_finalSpeakingEnergy`, `pcm_to_blobScaleDrive` | Best-lag audible PCM-to-visual alignment estimates. If direct correlation is weak, AR4 falls back to scalar stage latency such as `pcm_to_paint_estimated` instead of guessing from sparse rows. |
+| `perceptual_sync_status` | `aligned`, `visual_late`, `visual_early`, or `inconclusive` for real audible-path sync. |
+| `midSpeechSpeakingVisualFalseRows`, `midSpeechAnchorIdleRows`, `anchorStatusGlitchDetected` | Production-path counters for the anchor dropping back to idle or non-speaking after speaking has already started. |
+
+Visual artifacts can be regenerated without live audio:
+
+```powershell
+python scripts\run_stormforge_anchor_ar3_visual_artifacts.py
+python scripts\run_stormforge_anchor_legacy_blob_visual_artifacts.py
+python scripts\run_stormforge_anchor_ar4_visual_parity_artifacts.py
+```
+
+AR3 split artifacts land under `.artifacts\voice_ar3_visual_equivalence`. AR3-R legacy blob artifacts land under `.artifacts\voice_ar3r_visual_revert`. AR4 parity artifacts land under `.artifacts\voice_ar4_visual_parity` and include side-by-side reference/candidate idle, low/high speaking, state-set, and blob-sequence captures. They do not contain raw audio.
 
 ## Runtime Modes
 
@@ -282,8 +322,45 @@ If the UI shows the text response but you do not hear speech, check `/status` or
 
 Playback start does not mutate Core result state, task completion, trust, or verification. `user_heard_claimed=true` only means the real Windows speaker sink accepted/started output; mock and `null_stream` keep it false.
 
-Sources: `config/default.toml`, `src/stormhelm/config/loader.py`, `src/stormhelm/core/voice/availability.py`, `src/stormhelm/core/voice/providers.py`
-Tests: `tests/test_voice_config.py`, `tests/test_voice_availability.py`, `tests/test_voice_stt_provider.py`, `tests/test_voice_tts_provider.py`, `tests/test_latency_l55_windows_voice_runtime.py`
+## Stormforge Voice Visual Meter
+
+Voice-AR0 resets Stormforge audio-reactive Anchor motion to one backend-owned scalar. `VoiceVisualMeter` consumes PCM chunks from the playback path, computes RMS/peak energy, normalizes it to `0.0..1.0`, smooths it with attack/release, and emits at `[voice.visual_meter].sample_rate_hz` up to 60 Hz. The production source name is `pcm_stream_meter`.
+
+The meter starts during the playback startup preroll. The default `startup_preroll_ms=350` lets the first visual frames be primed before audible playback starts; `max_startup_wait_ms=800` prevents a dead wait if the stream does not provide enough PCM promptly. Stop-speaking still interrupts playback promptly; preroll must not become a second output queue.
+
+`[voice.visual_meter].visual_offset_ms` is available as a bounded AR4 calibration knob and defaults to `0`. Values are clamped to `-300..300`; negative values mean the visual is intentionally led, positive values mean it is intentionally delayed. The default remains zero until real audible-path evidence supports a non-zero offset.
+
+The UI receives only scalar fields: `voice_visual_energy`, `voice_visual_active`, `voice_visual_source`, `voice_visual_playback_id`, `voice_visual_available`, `voice_visual_disabled_reason`, `voice_visual_sample_rate_hz`, `voice_visual_started_at_ms`, `voice_visual_latest_age_ms`, and `raw_audio_present=false`. Raw PCM, raw audio bytes, and large envelope timelines are not serialized, logged, or sent to QML.
+
+Stormforge Anchor production motion uses `voice_visual_energy` when `voice_visual_active=true` and `voice_visual_source="pcm_stream_meter"`. Idle organic motion, shimmer, ring fragments, fog, and the shared animation clock remain separate. Diagnostic visual modes are limited to `off`, `procedural_test`, `pcm_stream_meter`, and optional `constant_test_wave`; the old envelope timeline, playback-envelope warming, alignment gate, and source-switching paths are deprecated for production.
+
+Voice-AR-DIAG adds an end-to-end scalar proof harness for the same path:
+
+```powershell
+python scripts\run_voice_reactive_chain_probe.py --mode closed-loop
+python scripts\run_voice_reactive_chain_probe.py --mode local-playback
+```
+
+The probe uses deterministic synthetic PCM: 0.5 seconds of silence, 1.0 second of low sine, 1.0 second of high sine, 1.0 second of syllable-like pulses, and 0.5 seconds of silence. It records expected scalar energy, backend meter energy, UI payload energy, QML-received energy, `finalSpeakingEnergy`, and paint/frame timing when available. Reports are written to `.artifacts/voice_reactive_chain/voice_reactive_chain_report.json`, `.artifacts/voice_reactive_chain/voice_reactive_chain_report.md`, and `.artifacts/voice_reactive_chain/energy_timeline.csv`.
+
+Interpret the classification this way:
+
+| Classification | Meaning | Next check |
+|---|---|---|
+| `backend_meter_flat` | Expected PCM varies but the backend meter does not. | Inspect `VoiceVisualMeter` PCM feed, RMS/peak windowing, and smoothing. |
+| `payload_handoff_flat` | Backend meter varies but the UI payload does not. | Inspect `voice_surface`/bridge payload mapping. |
+| `qml_receive_flat` | UI payload varies but QML receives a flat value. | Inspect `voiceState` binding into `StormforgeAnchorHost/Core`. |
+| `anchor_mapping_flat` | QML receives varying energy but `finalSpeakingEnergy` is flat. | Inspect Anchor scalar mapping and speaking-active truth gates. |
+| `qml_paint_missing` | `finalSpeakingEnergy` varies but Canvas/frame paint did not update. | Inspect the render host/window path and paint coalescing. |
+| `latency_too_high` | Values correlate but stage latency exceeds the threshold. | Calibrate timing rather than changing visual art. |
+| `sample_drop_detected` | A measured stage missed rows compared with upstream stages. | Inspect event cadence and bridge/QML update frequency. |
+| `correlation_poor` | Values vary but do not correlate well across a stage. | Check clipping, compression, stale values, or timebase mismatch. |
+| `chain_pass` | The scalar signal survived the measured chain with bounded latency. | Use the report numbers before deciding on any tuning pass. |
+
+Recommended thresholds for the diagnostic harness are intentionally conservative: stage correlations should stay above roughly `0.45`, stage latency should stay below roughly `350 ms`, scalar values must remain bounded in `0.0..1.0`, and reports must keep `raw_audio_present=false`. The CSV is scalar-only; it must not contain PCM samples, audio bytes, base64 audio, or raw sample arrays.
+
+Sources: `config/default.toml`, `src/stormhelm/config/loader.py`, `src/stormhelm/core/voice/availability.py`, `src/stormhelm/core/voice/providers.py`, `src/stormhelm/core/voice/voice_visual_meter.py`, `src/stormhelm/core/voice/reactive_chain_probe.py`, `src/stormhelm/core/voice/service.py`, `src/stormhelm/core/voice/visualizer.py`, `src/stormhelm/ui/voice_surface.py`, `scripts/run_voice_reactive_chain_probe.py`
+Tests: `tests/test_voice_config.py`, `tests/test_voice_availability.py`, `tests/test_voice_stt_provider.py`, `tests/test_voice_tts_provider.py`, `tests/test_latency_l55_windows_voice_runtime.py`, `tests/test_voice_visual_meter.py`, `tests/test_voice_reactive_chain_probe.py`, `tests/test_voice_ui_state_payload.py`, `tests/test_stormforge_voice_visual_meter_contract.py`
 
 ## Push-To-Talk Controls
 
@@ -584,6 +661,7 @@ Tests: `tests/test_voice_spoken_confirmation.py`, `tests/test_trust_service.py`
 | Post-wake listen | Opens one bounded request window between wake-Ghost and capture. Expire/cancel paths do not submit STT or route Core. |
 | Wake-driven loop | Runs one bounded post-wake listen/capture request through existing STT/Core/TTS/playback boundaries and then stands down. |
 | VAD | Disabled by default. VAD status/events expose audio activity metadata only and do not include raw audio. |
+| Voice visual meter | Stormforge audio-reactive visuals receive only scalar `voice_visual_energy` and meter status fields. Raw PCM/audio is not exposed to QML, events, logs, or status payloads. |
 | Realtime | Disabled by default. Voice-18 transcription bridge remains available. Voice-19 speech mode is explicit and Core-bridged; direct tools remain disabled and responses are gated by Core result state. |
 | Command authority | Voice providers do not execute tools; speech-derived requests go through the core bridge. |
 | Interruption | Stop-speaking stops output only. Capture/listen cancel stops the bounded audio path only. Confirmation rejection rejects only the pending prompt. Task cancellation/correction phrases are routed through Core. |

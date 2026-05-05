@@ -17,6 +17,7 @@ MIGRATED_ROUTE_FAMILIES = {
     "window_control",
     "file",
     "context_action",
+    "context_clarification",
     "screen_awareness",
     "camera_awareness",
     "watch_runtime",
@@ -38,6 +39,7 @@ MIGRATED_ROUTE_FAMILIES = {
     "terminal",
     "desktop_search",
     "software_recovery",
+    "web_retrieval",
 }
 
 
@@ -248,6 +250,9 @@ class RouteSpine:
                 decline_reasons=tuple(declines),
                 tool_candidates=spec.tool_candidates,
             )
+        if spec.route_family == "context_clarification" and frame.native_owner_hint != "context_clarification":
+            declines.append("requires_ambiguous_deictic_no_owner")
+            return self._declined(spec, declines, {"context_clarification_owner_gate": 0.0})
         if (
             spec.route_family in {"file", "browser_destination", "app_control", "context_action"}
             and frame.target_type not in spec.owned_target_types
@@ -324,6 +329,9 @@ class RouteSpine:
         if spec.route_family == "unsupported" and frame.native_owner_hint != "unsupported":
             declines.append("no_unsupported_external_commitment_signal")
             return self._declined(spec, declines, {"unsupported_signal": 0.0})
+        if spec.route_family == "trust_approvals" and frame.native_owner_hint != "trust_approvals":
+            declines.append("requires_explicit_approval_or_pending_trust_signal")
+            return self._declined(spec, declines, {"trust_approval_signal_gate": 0.0})
 
         if frame.operation in spec.owned_operations:
             factors["operation_match"] = 0.36

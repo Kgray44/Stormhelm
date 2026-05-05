@@ -34,6 +34,7 @@ PLANNER_V2_ROUTE_FAMILIES = {
     "task_continuity",
     "discord_relay",
     "trust_approvals",
+    "voice_control",
     "machine",
     "system_control",
     "terminal",
@@ -501,13 +502,26 @@ class ContextBinder:
         if frame.target_type == "visible_ui":
             visible = active_context.get("visible_ui") if isinstance(active_context.get("visible_ui"), dict) else {}
             if visible:
+                freshness = str(visible.get("freshness") or visible.get("recency") or "").strip().lower()
+                is_stale = freshness in {"stale", "expired", "superseded", "old"}
                 return ContextBinding(
                     context_reference=frame.context_reference,
                     context_type="visible_ui",
                     context_source="screen",
-                    status="available",
+                    status="stale" if is_stale else "available",
                     value=visible,
                     label=str(visible.get("label") or "visible UI"),
+                    freshness=freshness or "current",
+                    missing_preconditions=("current_visible_screen",) if is_stale else (),
+                    candidate_bindings=(
+                        {
+                            "type": "visible_ui",
+                            "source": str(visible.get("source") or "screen"),
+                            "label": str(visible.get("label") or "visible UI"),
+                            "freshness": freshness or "current",
+                            "confidence": 0.72 if is_stale else 0.9,
+                        },
+                    ),
                 )
             return self._missing(frame, "visible_screen")
         if frame.target_type in {"prior_calculation", "prior_result"}:
@@ -936,6 +950,16 @@ class CandidateGenerator:
                 decline_reasons=("requires_explicit_unsupported_external_commitment_signal",),
                 tool_candidates=spec.tool_candidates,
             )
+        if spec.route_family == "trust_approvals" and frame.native_owner_hint != "trust_approvals":
+            return RouteCandidate(
+                route_family=spec.route_family,
+                subsystem=spec.subsystem,
+                score=0.0,
+                accepted=False,
+                score_factors={"trust_approval_signal_gate": 0.0},
+                decline_reasons=("requires_explicit_approval_or_pending_trust_signal",),
+                tool_candidates=spec.tool_candidates,
+            )
         if (
             spec.route_family == "desktop_search"
             and frame.native_owner_hint != "desktop_search"
@@ -1057,6 +1081,8 @@ class CandidateGenerator:
         if re.search(r"\b(?:youtube|google|bing|duckduckgo|tripadvisor|amazon|wikipedia|reddit|github)\b", text):
             return False
         if re.search(r"\b(?:search|look up|lookup|find)\b.{0,40}\b(?:web|internet|online|site|website|youtube|google)\b", text):
+            return False
+        if re.search(r"\b(?:find|locate|show)\b.{0,48}\b(?:button|field|input|link|warning|dialog|popup)\b", text):
             return False
         return bool(
             re.search(r"\b(?:find|search|locate|pull up|open)\b.{0,48}\b(?:file|files|folder|folders|document|documents|downloads|desktop|screenshot|screenshots|readme|pdf|docx|txt)\b", text)
@@ -1200,6 +1226,10 @@ class RouteArbitrator:
         if family == "calculations":
             return "Which prior calculation or number should I use?"
         if family == "screen_awareness":
+            if frame.context_status == "stale" or "current_visible_screen" in missing:
+                return "The last observed screen context is stale. I need a current screen observation before I can say whether that is still visible."
+            if "screenshot current" in frame.normalized_text:
+                return "I do not have current screenshot evidence. I can treat any prior screenshot as not current until a fresh observation is available."
             return "Which visible screen target should I use? I need grounded UI context before acting."
         if family == "context_action":
             return "Which selected or highlighted text should I use?"
@@ -1348,6 +1378,16 @@ class PlanBuilder:
             if source_case == "browser_context" or str(frame.extracted_entities.get("tool_name") or "").strip().lower() == "browser_context":
                 return PlanDraft(family, "context", "inspect", "current_page", subject=subject or "browser page", tool_name="browser_context", tool_arguments={"operation": "current_page"}, request_type_hint="browser_context", execution_type="retrieve_browser_context")
             return PlanDraft(family, "operations", "status", "system_resource", subject="runtime", tool_name="activity_summary", tool_arguments={}, request_type_hint="activity_summary", execution_type="summarize_activity")
+        if family == "voice_control":
+            return PlanDraft(
+                family,
+                "voice",
+                frame.operation,
+                frame.target_type,
+                subject=subject or frame.target_type or "voice",
+                request_type_hint="voice_control",
+                execution_type=f"voice_control_{frame.operation}",
+            )
         if family == "machine":
             source_case = str(frame.extracted_entities.get("source_case") or "").strip().lower()
             tool_name = "system_info" if source_case == "system_info" or str(frame.raw_text).strip().lower().startswith("/system") else "machine_status"
@@ -1769,6 +1809,52 @@ class PlannerV2:
             frame.clarification_needed = False
             frame.clarification_reason = ""
             return frame
+        unsupported_browser_reason = self._unsupported_browser_automation_reason(text)
+        if unsupported_browser_reason:
+            frame.operation = "execute"
+            frame.target_type = "browser_automation"
+            frame.target_text = unsupported_browser_reason
+            frame.context_reference = "none"
+            frame.context_status = "available"
+            frame.risk_class = "restricted_browser_action"
+            frame.native_owner_hint = "unsupported"
+            frame.candidate_route_families = ["unsupported"]
+            frame.extracted_entities["unsupported_browser_automation_reason"] = unsupported_browser_reason
+            frame.generic_provider_allowed = False
+            frame.generic_provider_reason = "native_route_candidate_present"
+            frame.clarification_needed = False
+            frame.clarification_reason = ""
+            return frame
+        if self._voice_control_signal(text):
+            frame.operation = self._voice_control_operation(text)
+            frame.target_type = "voice_capture" if "capture" in text or "submit voice" in text else "voice_output"
+            frame.target_text = frame.target_type
+            frame.context_reference = "none"
+            frame.context_status = "available"
+            frame.risk_class = "read_only"
+            frame.native_owner_hint = "voice_control"
+            frame.candidate_route_families = ["voice_control"]
+            frame.extracted_entities["source_case"] = "voice_control"
+            frame.extracted_entities["operation"] = frame.operation
+            frame.generic_provider_allowed = False
+            frame.generic_provider_reason = "native_route_candidate_present"
+            frame.clarification_needed = False
+            frame.clarification_reason = ""
+            return frame
+        if self._trust_approval_status_signal(text):
+            frame.operation = "verify"
+            frame.target_type = "prior_result"
+            frame.target_text = "approval request"
+            frame.context_reference = "previous_result"
+            frame.context_status = "missing"
+            frame.risk_class = "read_only"
+            frame.native_owner_hint = "trust_approvals"
+            frame.candidate_route_families = ["trust_approvals"]
+            frame.generic_provider_allowed = False
+            frame.generic_provider_reason = "native_route_candidate_present"
+            frame.clarification_needed = True
+            frame.clarification_reason = "approval_object"
+            return frame
         if self._saved_locations_list_signal(text):
             frame.operation = "status"
             frame.target_type = "system_resource"
@@ -2004,6 +2090,42 @@ class PlannerV2:
             frame.generic_provider_reason = "native_route_candidate_present"
             frame.clarification_needed = False
             frame.clarification_reason = ""
+        elif self._browser_history_navigation_signal(text):
+            frame.operation = "open"
+            frame.target_type = "current_page"
+            frame.target_text = "previous page"
+            frame.context_reference = "current_page"
+            frame.context_status = "available"
+            frame.risk_class = "external_browser_open"
+            frame.native_owner_hint = "browser_destination"
+            frame.candidate_route_families = ["browser_destination"]
+            frame.extracted_entities["source_case"] = "browser_history_navigation"
+            frame.extracted_entities["tool_name"] = "external_open_url"
+            frame.generic_provider_allowed = False
+            frame.generic_provider_reason = "native_route_candidate_present"
+            frame.clarification_needed = False
+            frame.clarification_reason = ""
+        elif self._deictic_page_summary_without_context(text, active_context, recent_tool_results):
+            self._set_context_clarification(
+                frame,
+                reason="page_context",
+                context_status="missing",
+            )
+        elif self._obscura_browser_observation_active(active_context) and self._browser_context_signal(text):
+            frame.operation = "inspect"
+            frame.target_type = "current_page"
+            frame.target_text = "browser page"
+            frame.context_reference = "current_page"
+            frame.context_status = "available" if self._obscura_browser_session_available(active_context) else "missing"
+            frame.risk_class = "read_only"
+            frame.native_owner_hint = "web_retrieval"
+            frame.candidate_route_families = ["web_retrieval"]
+            frame.extracted_entities["source_case"] = "obscura_browser_observation"
+            frame.extracted_entities["preferred_provider"] = "obscura_cdp"
+            frame.generic_provider_allowed = False
+            frame.generic_provider_reason = "native_route_candidate_present"
+            frame.clarification_needed = not self._obscura_browser_session_available(active_context)
+            frame.clarification_reason = "" if self._obscura_browser_session_available(active_context) else "browser_session"
         elif self._browser_context_signal(text):
             frame.operation = "inspect"
             frame.target_type = "current_page"
@@ -2043,7 +2165,7 @@ class PlannerV2:
                 active_request_state=active_request_state,
                 recent_tool_results=recent_tool_results,
             )
-        if self._browser_semantic_control_signal(text):
+        if self._browser_semantic_control_signal(text) and frame.native_owner_hint != "web_retrieval" and frame.target_type not in {"url", "website"}:
             action_like = bool(
                 re.search(r"\b(?:click|press|focus|type|enter|submit|check|uncheck|select)\b", text)
             )
@@ -2060,6 +2182,12 @@ class PlannerV2:
             frame.clarification_needed = False
             frame.clarification_reason = ""
             frame.extracted_entities["source_case"] = "browser_semantic_control"
+        if self._verification_deictic_without_owner(frame, active_context, active_request_state):
+            self._set_context_clarification(
+                frame,
+                reason="verification_context",
+                context_status="missing",
+            )
         if self._ambiguous_deictic_clarification_signal(frame, active_request_state):
             self._set_context_clarification(
                 frame,
@@ -2119,18 +2247,30 @@ class PlannerV2:
             frame.extracted_entities["source_provenance"] = "camera_request"
             frame.extracted_entities["capture_mode"] = "single_still"
             frame.extracted_entities["analysis_mode"] = self._camera_analysis_mode(text)
-        if self._screen_status_signal(text):
+        if self._screen_status_signal(text) and frame.native_owner_hint != "camera_awareness" and not self._url_backed_web_retrieval_signal(text):
+            visible = active_context.get("visible_ui") if isinstance(active_context.get("visible_ui"), dict) else {}
+            freshness = str(visible.get("freshness") or visible.get("recency") or "").strip().lower()
+            stale_visible = bool(visible and freshness in {"stale", "expired", "superseded", "old"})
             frame.operation = "inspect"
             frame.target_type = "visible_ui"
             frame.target_text = "visible screen"
             frame.context_reference = "visible_target"
-            frame.context_status = "missing"
+            frame.context_status = "stale" if stale_visible else "available" if visible else "missing"
             frame.native_owner_hint = "screen_awareness"
             frame.candidate_route_families = ["screen_awareness"]
             frame.generic_provider_allowed = False
             frame.generic_provider_reason = "native_route_candidate_present"
-            frame.clarification_needed = True
-            frame.clarification_reason = "visible_screen"
+            frame.clarification_needed = not visible or stale_visible
+            frame.clarification_reason = "stale_visible_screen" if stale_visible else "visible_screen" if not visible else ""
+            if visible:
+                frame.extracted_entities["selected_context"] = {
+                    "type": "visible_ui",
+                    "source": str(visible.get("source") or "screen"),
+                    "label": str(visible.get("label") or "visible UI"),
+                    "value": visible,
+                    "freshness": freshness or "current",
+                    "confidence": 0.72 if stale_visible else 0.9,
+                }
         if self._workspace_signal(text):
             frame.operation = self._workspace_operation(text)
             frame.target_type = "workspace"
@@ -2238,8 +2378,12 @@ class PlannerV2:
             return ""
         if self._explicit_confirmation_signal(frame.normalized_text) and pending_source == "routine_save":
             return "routine"
-        if trust and stage == "awaiting_confirmation" and self._followup_signal(frame.normalized_text):
-            return "trust_approvals"
+        if trust and stage == "awaiting_confirmation":
+            if self._explicit_trust_followup_signal(frame.normalized_text):
+                return "trust_approvals"
+            return ""
+        if family == "trust_approvals":
+            return ""
         if family not in PLANNER_V2_ROUTE_FAMILIES:
             return ""
         if family in {"generic_provider", "unsupported", "context_clarification"}:
@@ -2269,6 +2413,16 @@ class PlannerV2:
         return bool(
             normalized in {"yes", "go ahead", "confirm", "continue", "proceed", "approve", "allow", "do it"}
             or normalized.startswith(("yes ", "go ahead", "confirm ", "continue ", "proceed ", "approve ", "allow "))
+        )
+
+    def _explicit_trust_followup_signal(self, text: str) -> bool:
+        normalized = re.sub(r"[\s,]+", " ", text.strip().lower()).strip()
+        return bool(
+            self._explicit_confirmation_signal(normalized)
+            or normalized in {"no", "deny", "reject", "do not allow", "don't allow"}
+            or normalized.startswith(("deny ", "reject ", "do not allow", "don't allow"))
+            or self._trust_approval_status_signal(normalized)
+            or re.search(r"\b(?:why|what)\b.{0,24}\b(?:approval|approve|permission|confirmation|confirm)\b", normalized)
         )
 
     def _ambiguous_deictic_clarification_signal(self, frame: IntentFrame, active_request_state: dict[str, Any]) -> bool:
@@ -2364,6 +2518,37 @@ class PlannerV2:
             or re.search(r"\b(?:bluetooth|wi-?fi|wifi|display|sound|privacy|network|location)\b.{0,24}\bsettings?\b", text)
         )
 
+    def _voice_control_signal(self, text: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(?:stop talking|stop speaking|mute voice|unmute voice|start voice capture|cancel capture|submit voice|repeat that)\b",
+                text,
+            )
+        )
+
+    def _voice_control_operation(self, text: str) -> str:
+        if "mute voice" in text:
+            return "mute"
+        if "unmute voice" in text:
+            return "unmute"
+        if "start voice capture" in text:
+            return "start"
+        if "cancel capture" in text:
+            return "cancel"
+        if "submit voice" in text:
+            return "submit"
+        if "repeat that" in text:
+            return "repeat"
+        return "stop"
+
+    def _trust_approval_status_signal(self, text: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(?:did|has|is|was)\b.{0,24}\b(?:approval|permission|confirmation)\b.{0,24}\b(?:go through|approved|complete|done|accepted|rejected|denied)\b",
+                text,
+            )
+        )
+
     def _direct_status_family(self, text: str, raw_lower: str) -> str:
         if raw_lower.startswith("/echo"):
             return "development"
@@ -2420,7 +2605,6 @@ class PlannerV2:
             return False
         return bool(
             re.fullmatch(r"(?:show\s+|list\s+|display\s+|view\s+|see\s+|open\s+)?(?:my\s+)?(?:recent|latest)\s+(?:files?|documents?)", text.strip())
-            or re.fullmatch(r"what\s+was\s+i\s+working\s+on", text.strip())
         )
 
     def _workspace_list_signal(self, text: str) -> bool:
@@ -2506,6 +2690,33 @@ class PlannerV2:
         external_target = bool(re.search(r"\b(?:flight|hotel|ticket|item|subscription|real\s+world|pay\s+for)\b", text))
         immediate = bool(re.search(r"\b(?:now|for real|actually|immediately)\b", text))
         return transactional and external_target and immediate
+
+    def _unsupported_browser_automation_signal(self, text: str) -> bool:
+        return bool(self._unsupported_browser_automation_reason(text))
+
+    def _unsupported_browser_automation_reason(self, text: str) -> str:
+        normalized = str(text or "")
+        if re.search(r"\b(?:submit|send)\s+this\s+form\b", normalized) or re.search(
+            r"\bsubmit\s+this\b", normalized
+        ):
+            return "form_submit"
+        if re.search(r"\b(?:log|sign)\s+me\s+in\b", normalized) or re.search(
+            r"\b(?:login|sign\s+in)\b.{0,24}\b(?:for|as|with|to)\b",
+            normalized,
+        ):
+            return "login"
+        if re.search(r"\b(?:buy|purchase|order|pay\s+for|charge)\s+(?:this|it|that)\b", normalized):
+            return "transaction_or_payment"
+        return bool(
+            re.search(
+                r"\b(?:solve|bypass|complete|answer|click|check)\b.{0,32}\b(?:captcha|robot|human\s+verification)\b",
+                normalized,
+            )
+            or re.search(
+                r"\b(?:captcha|robot|human\s+verification)\b.{0,32}\b(?:solve|bypass|complete|answer|click|check)\b",
+                normalized,
+            )
+        ) and "captcha_or_human_verification"
 
     def _slash_system_command(self, raw_text: str) -> bool:
         return bool(re.search(r"(?:^|\s)/system(?:\b|$)", str(raw_text or ""), flags=re.IGNORECASE))
@@ -3075,9 +3286,27 @@ class PlannerV2:
     def _camera_awareness_signal(self, text: str) -> bool:
         if self._camera_conceptual_or_settings_near_miss(text):
             return False
+        if re.search(r"\bas\s+the\s+camera\b", text):
+            return True
         if re.search(r"\b(?:screen|window|popup|visible ui|on my screen|desktop)\b", text):
             return False
         if re.search(r"\b(?:camera|webcam)\b", text):
+            return True
+        if re.search(r"\b(?:what\s+can\s+you\s+see|what\s+do\s+you\s+see)\b.{0,32}\b(?:in\s+front\s+of\s+me|through)\b", text):
+            return True
+        if re.search(r"\b(?:are\s+you\s+watching\s+me|watching\s+me\s+right\s+now)\b", text):
+            return True
+        if re.search(r"\bdid\s+you\s+see\s+what\s+happened\b", text):
+            return True
+        if re.search(r"\b(?:identify|recognize)\b.{0,32}\b(?:who|person|face|in\s+frame)\b", text):
+            return True
+        if re.search(r"\b(?:am\s+i|do\s+i\s+look)\b.{0,24}\b(?:smiling|sad|angry|tired)\b", text):
+            return True
+        if re.search(r"\bis\s+anyone\s+behind\s+me\b", text):
+            return True
+        if re.search(r"\bverify\b.{0,32}\b(?:room|area)\b.{0,16}\bsafe\b", text):
+            return True
+        if re.search(r"\b(?:record\s+video|keep\s+watching|watch\s+the\s+camera|take\s+(?:a\s+)?(?:snapshot|photo))\b", text):
             return True
         if re.search(r"\b(?:what\s+am\s+i\s+holding|what\s+is\s+this\s+i(?:'|’)??m\s+holding|thing\s+i(?:'|’)??m\s+holding|in\s+my\s+hand)\b", text):
             return True
@@ -3087,6 +3316,8 @@ class PlannerV2:
         ):
             return True
         if re.search(r"\b(?:resistor\s+value|connector\s+is\s+this|solder\s+joint|label\s+in\s+front\s+of\s+me|component\s+is\s+this|part\s+is\s+this)\b", text):
+            return True
+        if re.search(r"\b(?:this|that|it)\b.{0,32}\b(?:connector|jst|resistor|solder\s+joint|pcb|component|part|markings?)\b", text):
             return True
         if self._camera_comparison_signal(text):
             return True
@@ -3159,7 +3390,7 @@ class PlannerV2:
         return "inspect"
 
     def _camera_target_text(self, raw_text: str) -> str:
-        text = re.sub(r"\b(?:can\s+you|could\s+you|please|look\s+at|take\s+a\s+camera\s+look\s+at|with\s+the\s+camera|using\s+the\s+camera|identify|what\s+is|what\s+am\s+i|does|can|read|inspect|check)\b", "", raw_text, flags=re.IGNORECASE)
+        text = re.sub(r"\b(?:can\s+you|could\s+you|please|look\s+at|take\s+a\s+camera\s+look\s+at|with\s+the\s+camera|through\s+the\s+camera|using\s+the\s+camera|identify|what\s+is|what\s+am\s+i|does|can|read|inspect|check|verify|take|record|keep)\b", "", raw_text, flags=re.IGNORECASE)
         text = " ".join(text.split()).strip(" ?.") or "camera still"
         return text[:96]
 
@@ -3177,7 +3408,20 @@ class PlannerV2:
         has_visual_target = bool(
             re.search(r"\b(?:looking\s+at|on\s+(?:my\s+)?screen|visible|in\s+front\s+of\s+me|current\s+view)\b", text)
         )
-        return has_question and has_visual_target
+        return bool(
+            (has_question and has_visual_target)
+            or re.search(r"\bwhat\s+window\s+am\s+i\s+in\b", text)
+            or re.search(r"\bdescribe\s+(?:the\s+)?current\s+window\b", text)
+            or re.search(r"\bwhat\s+app\s+is\s+focused\b", text)
+            or re.search(r"\bwhat\s+should\s+i\s+click\b", text)
+            or re.search(r"\bwhere\s+should\s+i\s+click\b", text)
+            or re.search(r"\b(?:find|locate|show)\b.{0,48}\b(?:button|field|input|link|warning|dialog|popup)\b", text)
+            or re.search(r"\bwhat\s+field\s+should\s+i\s+fill\s+out\s+next\b", text)
+            or re.search(r"\bverify\b.{0,32}\b(?:warning|popup|dialog|screenshot|page|download)\b", text)
+            or re.search(r"\b(?:is|did)\b.{0,24}\b(?:warning|page|browser\s+page|downloads?|screenshot|login\s+page)\b.{0,32}\b(?:gone|visible|load|loading|loaded|starts?|started|current)\b", text)
+            or re.search(r"\b(?:did\s+the\s+)?page\s+finish\s+loading\b", text)
+            or re.search(r"\bis\s+this\s+the\s+login\s+page\b", text)
+        )
 
     def _browser_semantic_control_signal(self, text: str) -> bool:
         if re.search(r"\b(?:open|launch|go to|navigate|summarize|summary|extract|fetch|render|download)\b", text):
@@ -3201,6 +3445,22 @@ class PlannerV2:
             re.search(r"\bwhere\s+is\b.{0,60}\b(?:button|field|link|dialog|popup|warning|alert|form)\b", text)
         )
         return action_like or where_is_target or (question_like and page_context)
+
+    def _url_backed_web_retrieval_signal(self, text: str) -> bool:
+        if not re.search(r"\b(?:https?://|www\.|[a-z0-9-]+\.[a-z]{2,})\b", text):
+            return False
+        if re.search(r"\b(?:open|launch|go to|navigate|bring up|pull up)\b", text) and not re.search(
+            r"\b(?:read|summarize|inspect|extract|render|compare|text|links?|html|source|content|fetch|title|identity|loading|loaded|page\s+load)\b",
+            text,
+        ):
+            return False
+        return bool(
+            re.search(r"\b(?:read|summarize|inspect|extract|render|compare|parse|fetch|links?|text|html|source|contents?|article|title|dom\s+text|cdp|renderer)\b", text)
+            or re.search(r"\b(?:page\s+identity|what\s+(?:is\s+)?the\s+url|what\s+url|url\s+am\s+i\s+on|what\s+site|which\s+site|site\s+is\s+this|docs\s+page|home\s+page)\b", text)
+            or re.search(r"\b(?:find|where|which|what|does|did|is)\b.{0,80}\b(?:section|heading|links?|button|field|documentation|download|sign\s+in|login|page\s+load|load(?:ed)?|same\s+site|same\s+page|page\s+you\s+saw)\b", text)
+            or re.search(r"\b(?:finish|finished)\s+loading\b", text)
+            or re.search(r"\b(?:where\s+should\s+i\s+click|which\s+link\s+should\s+i\s+click|what\s+field\s+should\s+i\s+use)\b", text)
+        )
 
     def _workspace_signal(self, text: str) -> bool:
         if _workspace_conceptual_text(text):
@@ -3307,6 +3567,8 @@ class PlannerV2:
                     "where were we",
                     "where did we leave off",
                     "where we left off",
+                    "what was i working on",
+                    "what were we working on",
                     "what should i do next",
                     "still left on this task",
                     "continue from there",
@@ -3340,8 +3602,6 @@ class PlannerV2:
                     "collect references from these tabs",
                     "pull in the browser references related to this project",
                     "summarize this article",
-                    "summarize this page",
-                    "summarize the current page",
                     "show me the source i was just reading",
                     "find the page i was just reading",
                     "find the page from earlier",
@@ -3349,14 +3609,62 @@ class PlannerV2:
                     "find the page",
                     "bring up the page",
                     "bring that page forward",
+                    "current browser url",
+                    "browser url",
                 }
             )
             or (" tab " in f" {text} " and text.startswith(("find ", "show ", "bring ")))
             or ("page about" in text and any(text.startswith(prefix) for prefix in {"find ", "show ", "bring "}))
             or re.search(r"\b(?:what|which)\b.{0,24}\b(?:browser\s+)?(?:page|tab)\b.{0,24}\bam i on\b", text)
+            or re.search(r"\b(?:what|which)\b.{0,16}\b(?:browser\s+)?(?:page|tab)\b.{0,16}\b(?:is\s+)?open\b", text)
+            or re.search(r"\b(?:what|which)\b.{0,16}\bopen\s+tabs\b", text)
+            or re.search(r"\b(?:which|what)\b.{0,16}\btab\b.{0,16}\b(?:active|current|open)\b", text)
+            or re.search(r"\bwhat\b.{0,16}\bother\s+tab\b", text)
             or re.search(r"\b(?:what|which)\b.{0,24}\b(?:page|tab)\b.{0,24}\b(?:open|active|current)\b.{0,24}\b(?:browser|tab)\b", text)
             or re.search(r"\bcurrent\b.{0,16}\b(?:browser\s+)?(?:page|tab)\b", text)
+            or re.search(r"\btell\s+me\b.{0,24}\bcurrent\s+browser\s+url\b", text)
         )
+
+    def _obscura_browser_observation_active(self, active_context: dict[str, Any]) -> bool:
+        adapter = active_context.get("browser_observation_adapter") if isinstance(active_context.get("browser_observation_adapter"), dict) else {}
+        return str(adapter.get("adapter") or "").strip().lower() == "obscura" and str(adapter.get("route_family") or "").strip().lower() == "web_retrieval"
+
+    def _obscura_browser_session_available(self, active_context: dict[str, Any]) -> bool:
+        adapter = active_context.get("browser_observation_adapter") if isinstance(active_context.get("browser_observation_adapter"), dict) else {}
+        return bool(adapter.get("session_available") and adapter.get("tab_identity_supported"))
+
+    def _browser_history_navigation_signal(self, text: str) -> bool:
+        return bool(re.search(r"\bgo\s+back\b.{0,32}\b(?:previous|last|prior)\s+page\b", text))
+
+    def _deictic_page_summary_without_context(
+        self,
+        text: str,
+        active_context: dict[str, Any],
+        recent_tool_results: list[dict[str, Any]],
+    ) -> bool:
+        if not re.search(r"\bsummarize\b.{0,24}\b(?:this|current|active)\s+(?:page|article)\b", text):
+            return False
+        return self._recent_website_context(active_context, recent_tool_results) is None
+
+    def _verification_deictic_without_owner(
+        self,
+        frame: IntentFrame,
+        active_context: dict[str, Any],
+        active_request_state: dict[str, Any],
+    ) -> bool:
+        if frame.native_owner_hint:
+            return False
+        text = frame.normalized_text
+        if not re.search(r"\b(?:verify|prove|confirm|check)\b.{0,20}\b(?:it|this|that)\b", text):
+            return False
+        if re.search(r"\b(?:approval|permission|confirmation|warning|screen|screenshot|page|download|install|message|sent|clicked)\b", text):
+            return False
+        active_family = str(active_request_state.get("family") or "").strip().lower()
+        if active_context:
+            return False
+        if active_request_state and active_family != "trust_approvals":
+            return False
+        return True
 
     def _web_retrieval_current_page_context(
         self,

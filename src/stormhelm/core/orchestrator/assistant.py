@@ -2421,6 +2421,28 @@ class AssistantOrchestrator:
             for request in requests
         ]
         routine_requested = any(name in {"routine_execute", "routine_save", "trusted_hook_execute", "trusted_hook_register"} for name in tool_names)
+        mutating_workspace_requested = any(
+            name
+            in {
+                "workspace_restore",
+                "workspace_assemble",
+                "workspace_save",
+                "workspace_clear",
+                "workspace_archive",
+                "workspace_rename",
+                "workspace_tag",
+            }
+            for name in tool_names
+        )
+        if self._command_eval_dry_run_enabled(response_profile) and mutating_workspace_requested:
+            inline_result = self._execute_command_eval_dry_run_inline(
+                requests,
+                session_id=session_id,
+                route_handler_subspans=route_handler_subspans,
+                stage_timings=stage_timings,
+            )
+            if inline_result is not None:
+                return inline_result
         direct_workspace_result = await self._maybe_execute_workspace_requests_directly(
             requests,
             session_id=session_id,

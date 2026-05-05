@@ -48,6 +48,32 @@ _WAKE_LOOP_CARD_STATUSES = {
     "playback_stopped",
     "suppressed_or_muted",
 }
+_AUTHORITATIVE_VOICE_STATE_KEYS = (
+    "authoritativeVoiceStateVersion",
+    "activePlaybackId",
+    "activePlaybackStatus",
+    "authoritativePlaybackId",
+    "authoritativePlaybackStatus",
+    "authoritativeVoiceVisualActive",
+    "authoritativeVoiceVisualEnergy",
+    "authoritativeStateSequence",
+    "authoritativeStateSource",
+    "lastAcceptedUpdateSource",
+    "lastIgnoredUpdateSource",
+    "staleBroadSnapshotIgnored",
+    "staleBroadSnapshotIgnoredCount",
+    "hotPathAcceptedCount",
+    "terminalEventAcceptedCount",
+    "playbackIdSwitchCount",
+    "playbackIdMismatchIgnoredCount",
+    "speakingEnteredReason",
+    "speakingExitedReason",
+    "releaseDeadlineMs",
+    "releaseTailMs",
+    "falseSpeakingWithoutAudioDetected",
+    "stuckSpeakingAfterAudioDetected",
+    "voiceVisualActiveFlapCount",
+)
 
 
 def build_voice_ui_state(status: dict[str, Any] | None) -> dict[str, Any]:
@@ -295,6 +321,58 @@ def build_voice_ui_state(status: dict[str, Any] | None) -> dict[str, Any]:
         "speaking_visual_is_not_verification": True,
     }
     anchor_debug = _voice_anchor_debug_payload(voice_anchor)
+    authoritative_state = _authoritative_voice_state_payload(
+        voice,
+        voice_anchor,
+        playback,
+    )
+    authoritative_is_ar6 = (
+        _text(authoritative_state.get("authoritativeVoiceStateVersion")).upper()
+        == "AR6"
+    )
+    legacy_voice_visual_active = bool(
+        voice_anchor.get("voice_visual_active", False)
+    )
+    legacy_voice_visual_energy = _number(
+        voice_anchor.get("voice_visual_energy"),
+        0.0,
+    )
+    legacy_voice_visual_source = voice_anchor.get(
+        "voice_visual_source", "unavailable"
+    )
+    effective_voice_visual_active = (
+        bool(authoritative_state.get("authoritativeVoiceVisualActive", False))
+        if authoritative_is_ar6
+        else legacy_voice_visual_active
+    )
+    effective_voice_visual_energy = (
+        _number(authoritative_state.get("authoritativeVoiceVisualEnergy"), 0.0)
+        if authoritative_is_ar6
+        else legacy_voice_visual_energy
+    )
+    effective_voice_visual_source = (
+        _text(authoritative_state.get("authoritativeStateSource"))
+        or _text(legacy_voice_visual_source)
+        or "unavailable"
+    )
+    effective_playback_id = (
+        _text(authoritative_state.get("authoritativePlaybackId"))
+        or _text(authoritative_state.get("activePlaybackId"))
+        or _text(voice_anchor.get("voice_visual_playback_id"))
+        or _text(voice_anchor.get("playback_id"))
+        or _text(playback.get("active_playback_id"))
+        or None
+    )
+    effective_active_playback_id = (
+        _text(authoritative_state.get("activePlaybackId"))
+        or _text(authoritative_state.get("authoritativePlaybackId"))
+        or active_playback_id
+    )
+    effective_active_playback_status = (
+        _text(authoritative_state.get("activePlaybackStatus"))
+        or _text(authoritative_state.get("authoritativePlaybackStatus"))
+        or active_playback_status
+    )
 
     return {
         "voice_available": voice_available,
@@ -347,6 +425,289 @@ def build_voice_ui_state(status: dict[str, Any] | None) -> dict[str, Any]:
         ),
         "voice_audio_reactive_source": voice_anchor.get(
             "audio_reactive_source", "unavailable"
+        ),
+        **authoritative_state,
+        "legacy_voice_visual_active": legacy_voice_visual_active,
+        "legacy_voice_visual_energy": legacy_voice_visual_energy,
+        "legacy_voice_visual_source": legacy_voice_visual_source,
+        "voice_visual_active": effective_voice_visual_active,
+        "voice_visual_available": bool(
+            voice_anchor.get("voice_visual_available", False)
+        ),
+        "voice_visual_energy": effective_voice_visual_energy,
+        "voice_visual_source": effective_voice_visual_source,
+        "voice_visual_energy_source": voice_anchor.get(
+            "voice_visual_energy_source",
+            effective_voice_visual_source,
+        ),
+        "voice_visual_playback_id": effective_playback_id,
+        "voice_visual_sample_rate_hz": int(
+            _number(voice_anchor.get("voice_visual_sample_rate_hz"), 0)
+        ),
+        "voice_visual_started_at_ms": voice_anchor.get(
+            "voice_visual_started_at_ms"
+        ),
+        "voice_visual_latest_age_ms": voice_anchor.get(
+            "voice_visual_latest_age_ms"
+        ),
+        "voice_visual_disabled_reason": voice_anchor.get(
+            "voice_visual_disabled_reason"
+        ),
+        "playback_id": effective_playback_id,
+        "active_playback_id": effective_active_playback_id,
+        "active_playback_stream_id": voice_anchor.get("active_playback_stream_id")
+        or playback.get("active_playback_stream_id"),
+        "playback_envelope_supported": bool(
+            voice_anchor.get("playback_envelope_supported", False)
+        ),
+        "playback_envelope_available": bool(
+            voice_anchor.get("playback_envelope_available", False)
+        ),
+        "playback_envelope_usable": bool(
+            voice_anchor.get("playback_envelope_usable", False)
+        ),
+        "playback_envelope_source": voice_anchor.get(
+            "playback_envelope_source", "unavailable"
+        ),
+        "playback_envelope_energy": _number(
+            voice_anchor.get("playback_envelope_energy"), 0.0
+        ),
+        "playback_envelope_sample_rate_hz": int(
+            _number(voice_anchor.get("playback_envelope_sample_rate_hz"), 0)
+        ),
+        "playback_envelope_latency_ms": int(
+            _number(voice_anchor.get("playback_envelope_latency_ms"), 0)
+        ),
+        "estimated_output_latency_ms": int(
+            _number(
+                voice_anchor.get("estimated_output_latency_ms"),
+                voice_anchor.get("playback_envelope_latency_ms", 0),
+            )
+        ),
+        "envelope_visual_offset_ms": int(
+            _number(voice_anchor.get("envelope_visual_offset_ms"), 0)
+        ),
+        "playback_envelope_visual_offset_ms": int(
+            _number(
+                voice_anchor.get("playback_envelope_visual_offset_ms"),
+                voice_anchor.get("envelope_visual_offset_ms", 0),
+            )
+        ),
+        "playback_visual_time_ms": voice_anchor.get("playback_visual_time_ms"),
+        "playback_envelope_time_offset_applied_ms": voice_anchor.get(
+            "playback_envelope_time_offset_applied_ms"
+        ),
+        "playback_envelope_sync_enabled": bool(
+            voice_anchor.get("playback_envelope_sync_enabled", True)
+        ),
+        "envelope_sync_calibration_version": voice_anchor.get(
+            "envelope_sync_calibration_version", "Voice-L0.5"
+        ),
+        "envelope_sync_debug_show_sync": bool(
+            voice_anchor.get("envelope_sync_debug_show_sync", False)
+        ),
+        "playback_envelope_sample_age_ms": voice_anchor.get(
+            "playback_envelope_sample_age_ms"
+        ),
+        "playback_envelope_sample_count": int(
+            _number(
+                voice_anchor.get("playback_envelope_sample_count"),
+                len(voice_anchor.get("playback_envelope_samples_recent") or []),
+            )
+        ),
+        "playback_envelope_window_mode": voice_anchor.get(
+            "playback_envelope_window_mode", "latest"
+        ),
+        "playback_envelope_latest_time_ms": voice_anchor.get(
+            "playback_envelope_latest_time_ms"
+        ),
+        "playback_envelope_query_time_ms": voice_anchor.get(
+            "playback_envelope_query_time_ms"
+        ),
+        "playback_envelope_timebase_aligned": bool(
+            voice_anchor.get("playback_envelope_timebase_aligned", False)
+        ),
+        "playback_envelope_alignment_error_ms": voice_anchor.get(
+            "playback_envelope_alignment_error_ms"
+        ),
+        "playback_envelope_alignment_delta_ms": voice_anchor.get(
+            "playback_envelope_alignment_delta_ms"
+        ),
+        "playback_envelope_alignment_tolerance_ms": voice_anchor.get(
+            "playback_envelope_alignment_tolerance_ms"
+        ),
+        "playback_envelope_alignment_status": voice_anchor.get(
+            "playback_envelope_alignment_status"
+        ),
+        "playback_envelope_usable_reason": voice_anchor.get(
+            "playback_envelope_usable_reason"
+        ),
+        "playback_envelope_samples_recent": _sanitize(
+            voice_anchor.get("playback_envelope_samples_recent") or []
+        ),
+        "envelope_timeline_samples": _sanitize(
+            voice_anchor.get("envelope_timeline_samples")
+            or voice_anchor.get("envelopeTimelineSamples")
+            or []
+        ),
+        "envelopeTimelineSamples": _sanitize(
+            voice_anchor.get("envelopeTimelineSamples")
+            or voice_anchor.get("envelope_timeline_samples")
+            or []
+        ),
+        "envelope_timeline_available": bool(
+            voice_anchor.get("envelope_timeline_available", False)
+        ),
+        "envelopeTimelineAvailable": bool(
+            voice_anchor.get("envelopeTimelineAvailable", False)
+            or voice_anchor.get("envelope_timeline_available", False)
+        ),
+        "envelope_timeline_sample_rate_hz": int(
+            _number(voice_anchor.get("envelope_timeline_sample_rate_hz"), 0)
+        ),
+        "envelope_timeline_sample_count": int(
+            _number(
+                voice_anchor.get("envelope_timeline_sample_count"),
+                len(
+                    voice_anchor.get("envelopeTimelineSamples")
+                    or voice_anchor.get("envelope_timeline_samples")
+                    or []
+                ),
+            )
+        ),
+        "envelope_timeline_ready_at_playback_start": bool(
+            voice_anchor.get(
+                "envelope_timeline_ready_at_playback_start",
+                voice_anchor.get("envelopeTimelineReadyAtPlaybackStart", False),
+            )
+        ),
+        "envelopeTimelineReadyAtPlaybackStart": bool(
+            voice_anchor.get(
+                "envelopeTimelineReadyAtPlaybackStart",
+                voice_anchor.get("envelope_timeline_ready_at_playback_start", False),
+            )
+        ),
+        "playback_envelope_samples_dropped": int(
+            _number(voice_anchor.get("playback_envelope_samples_dropped"), 0)
+        ),
+        "anchor_uses_playback_envelope": bool(
+            voice_anchor.get("anchor_uses_playback_envelope", False)
+        ),
+        "procedural_fallback_active": bool(
+            voice_anchor.get("procedural_fallback_active", False)
+        ),
+        "speaking_visual_sync_mode": voice_anchor.get(
+            "speaking_visual_sync_mode", "idle"
+        ),
+        "visualizer_source_strategy": voice_anchor.get(
+            "visualizer_source_strategy",
+            voice_anchor.get("visualizerSourceStrategy", "idle"),
+        ),
+        "visualizerSourceStrategy": voice_anchor.get(
+            "visualizerSourceStrategy",
+            voice_anchor.get("visualizer_source_strategy", "idle"),
+        ),
+        "visualizer_source_locked": bool(
+            voice_anchor.get(
+                "visualizer_source_locked",
+                voice_anchor.get("visualizerSourceLocked", False),
+            )
+        ),
+        "visualizerSourceLocked": bool(
+            voice_anchor.get(
+                "visualizerSourceLocked",
+                voice_anchor.get("visualizer_source_locked", False),
+            )
+        ),
+        "visualizer_source_playback_id": voice_anchor.get(
+            "visualizer_source_playback_id",
+            voice_anchor.get("visualizerSourcePlaybackId"),
+        ),
+        "visualizerSourcePlaybackId": voice_anchor.get(
+            "visualizerSourcePlaybackId",
+            voice_anchor.get("visualizer_source_playback_id"),
+        ),
+        "visualizer_source_switch_count": int(
+            _number(
+                voice_anchor.get("visualizer_source_switch_count"),
+                voice_anchor.get("visualizerSourceSwitchCount", 0),
+            )
+        ),
+        "visualizerSourceSwitchCount": int(
+            _number(
+                voice_anchor.get("visualizerSourceSwitchCount"),
+                voice_anchor.get("visualizer_source_switch_count", 0),
+            )
+        ),
+        "visualizer_source_switching_disabled": bool(
+            voice_anchor.get(
+                "visualizer_source_switching_disabled",
+                voice_anchor.get("visualizerSourceSwitchingDisabled", True),
+            )
+        ),
+        "visualizerSourceSwitchingDisabled": bool(
+            voice_anchor.get(
+                "visualizerSourceSwitchingDisabled",
+                voice_anchor.get("visualizer_source_switching_disabled", True),
+            )
+        ),
+        "timeline_visualizer_version": voice_anchor.get(
+            "timeline_visualizer_version", "Voice-L0.6"
+        ),
+        "timelineVisualizerVersion": voice_anchor.get(
+            "timelineVisualizerVersion",
+            voice_anchor.get("timeline_visualizer_version", "Voice-L0.6"),
+        ),
+        "requested_anchor_visualizer_mode": voice_anchor.get(
+            "requested_anchor_visualizer_mode",
+            voice_anchor.get("requestedAnchorVisualizerMode", "auto"),
+        ),
+        "requestedAnchorVisualizerMode": voice_anchor.get(
+            "requestedAnchorVisualizerMode",
+            voice_anchor.get("requested_anchor_visualizer_mode", "auto"),
+        ),
+        "effective_anchor_visualizer_mode": voice_anchor.get(
+            "effective_anchor_visualizer_mode",
+            voice_anchor.get("effectiveAnchorVisualizerMode", "auto"),
+        ),
+        "effectiveAnchorVisualizerMode": voice_anchor.get(
+            "effectiveAnchorVisualizerMode",
+            voice_anchor.get("effective_anchor_visualizer_mode", "auto"),
+        ),
+        "forced_visualizer_mode_honored": bool(
+            voice_anchor.get(
+                "forced_visualizer_mode_honored",
+                voice_anchor.get("forcedVisualizerModeHonored", False),
+            )
+        ),
+        "forcedVisualizerModeHonored": bool(
+            voice_anchor.get(
+                "forcedVisualizerModeHonored",
+                voice_anchor.get("forced_visualizer_mode_honored", False),
+            )
+        ),
+        "forced_visualizer_mode_unavailable_reason": voice_anchor.get(
+            "forced_visualizer_mode_unavailable_reason",
+            voice_anchor.get("forcedVisualizerModeUnavailableReason", ""),
+        ),
+        "forcedVisualizerModeUnavailableReason": voice_anchor.get(
+            "forcedVisualizerModeUnavailableReason",
+            voice_anchor.get("forced_visualizer_mode_unavailable_reason", ""),
+        ),
+        "visualizer_strategy_selected_by": voice_anchor.get(
+            "visualizer_strategy_selected_by",
+            voice_anchor.get("visualizerStrategySelectedBy", "service_auto"),
+        ),
+        "visualizerStrategySelectedBy": voice_anchor.get(
+            "visualizerStrategySelectedBy",
+            voice_anchor.get("visualizer_strategy_selected_by", "service_auto"),
+        ),
+        "envelope_interpolation_active": bool(
+            voice_anchor.get("envelope_interpolation_active", False)
+        ),
+        "envelope_fallback_reason": voice_anchor.get("envelope_fallback_reason"),
+        "envelope_to_visual_latency_estimate_ms": int(
+            _number(voice_anchor.get("envelope_to_visual_latency_estimate_ms"), 0)
         ),
         "voice_visualizer_update_hz": voice_anchor.get("visualizer_update_hz", 30),
         "voice_visualizer_last_update_at": voice_anchor.get(
@@ -408,6 +769,48 @@ def build_voice_ui_state(status: dict[str, Any] | None) -> dict[str, Any]:
             voice.get("voice_visualizer_last_update_gap_ms"),
             visualizer.get("visualizer_last_update_gap_ms", 0.0),
         ),
+        "meter_time_ms": _number(
+            voice_anchor.get("meter_time_ms"),
+            voice.get("meter_time_ms", 0.0),
+        ),
+        "meter_wall_time_ms": _number(
+            voice_anchor.get("meter_wall_time_ms"),
+            voice.get("meter_wall_time_ms", 0.0),
+        ),
+        "meter_sample_time_ms": voice_anchor.get(
+            "meter_sample_time_ms",
+            voice.get("meter_sample_time_ms"),
+        ),
+        "payload_time_ms": _number(
+            voice_anchor.get("payload_time_ms"),
+            voice.get("payload_time_ms", 0.0),
+        ),
+        "payload_wall_time_ms": _number(
+            voice_anchor.get("payload_wall_time_ms"),
+            voice.get("payload_wall_time_ms", 0.0),
+        ),
+        "payload_sample_time_ms": voice_anchor.get(
+            "payload_sample_time_ms",
+            voice.get("payload_sample_time_ms"),
+        ),
+        "payload_latency_from_meter_ms": _number(
+            voice_anchor.get("payload_latency_from_meter_ms"),
+            voice.get("payload_latency_from_meter_ms", 0.0),
+        ),
+        "meter_latency_from_pcm_submit_ms": voice_anchor.get(
+            "meter_latency_from_pcm_submit_ms",
+            voice.get("meter_latency_from_pcm_submit_ms"),
+        ),
+        "emit_rate_hz": _number(
+            voice_anchor.get("emit_rate_hz"),
+            voice.get("emit_rate_hz", 0.0),
+        ),
+        "dropped_sample_count": int(
+            _number(
+                voice_anchor.get("dropped_sample_count"),
+                voice.get("dropped_sample_count", 0),
+            )
+        ),
         "voice_visualizer_max_update_gap_ms": _number(
             voice.get("voice_visualizer_max_update_gap_ms"),
             visualizer.get("visualizer_max_update_gap_ms", 0.0),
@@ -464,10 +867,23 @@ def build_voice_ui_state(status: dict[str, Any] | None) -> dict[str, Any]:
         "playback_available": bool(playback.get("available", False)),
         "speaker_backend": speaker_backend,
         "speaker_backend_available": speaker_backend_available,
+        "playback_startup_stable": bool(playback.get("playback_startup_stable")),
+        "playback_preroll_active": bool(playback.get("playback_preroll_active")),
+        "playback_buffered_ms": _number(playback.get("playback_buffered_ms"), 0),
+        "playback_underrun_count_startup": int(
+            _number(playback.get("playback_underrun_count_startup"), 0)
+        ),
+        "speaking_visual_flap_count_startup": int(
+            _number(playback.get("speaking_visual_flap_count_startup"), 0)
+        ),
+        "playback_state_transition_count_startup": int(
+            _number(playback.get("playback_state_transition_count_startup"), 0)
+        ),
+        "playback_startup_trace": _sanitize(playback.get("playback_startup_trace")),
         "currently_speaking": bool(
             playback.get("currently_speaking")
             or playback.get("playback_streaming_active")
-            or active_playback_status in {"started", "playing"}
+            or effective_active_playback_status in {"started", "playing", "stable"}
         ),
         "user_heard_claimed": user_heard_claimed,
         "playback_user_heard_claim_basis": _text(
@@ -654,11 +1070,11 @@ def build_voice_ui_state(status: dict[str, Any] | None) -> dict[str, Any]:
         or None,
         "last_wake_loop_stopped_stage": _text(wake_supervised_loop.get("stopped_stage"))
         or None,
-        "active_playback_id": active_playback_id,
-        "active_playback_status": active_playback_status,
+        "active_playback_id": effective_active_playback_id,
+        "active_playback_status": effective_active_playback_status,
         "active_playback_interruptible": bool(
             playback.get("active_playback_interruptible")
-            or active_playback_status in {"started", "playing"}
+            or effective_active_playback_status in {"started", "playing"}
         ),
         "spoken_output_muted": bool(interruption.get("spoken_output_muted")),
         "muted_scope": _text(interruption.get("muted_scope")) or None,
@@ -814,6 +1230,47 @@ def _first_dict(*values: Any) -> dict[str, Any]:
         if payload:
             return payload
     return {}
+
+
+def _authoritative_voice_state_payload(*sources: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for source in sources:
+        data = _dict(source)
+        if not data:
+            continue
+        for key in _AUTHORITATIVE_VOICE_STATE_KEYS:
+            if key in data and data.get(key) is not None:
+                payload[key] = data.get(key)
+    if not payload:
+        return {}
+    if "authoritativeVoiceVisualActive" in payload:
+        payload["authoritativeVoiceVisualActive"] = bool(
+            payload.get("authoritativeVoiceVisualActive")
+        )
+    if "authoritativeVoiceVisualEnergy" in payload:
+        payload["authoritativeVoiceVisualEnergy"] = _number(
+            payload.get("authoritativeVoiceVisualEnergy"),
+            0.0,
+        )
+    for key in (
+        "authoritativeStateSequence",
+        "staleBroadSnapshotIgnoredCount",
+        "hotPathAcceptedCount",
+        "terminalEventAcceptedCount",
+        "playbackIdSwitchCount",
+        "playbackIdMismatchIgnoredCount",
+        "voiceVisualActiveFlapCount",
+    ):
+        if key in payload:
+            payload[key] = int(_number(payload.get(key), 0))
+    for key in (
+        "staleBroadSnapshotIgnored",
+        "falseSpeakingWithoutAudioDetected",
+        "stuckSpeakingAfterAudioDetected",
+    ):
+        if key in payload:
+            payload[key] = bool(payload.get(key))
+    return _sanitize(payload)
 
 
 def _number(value: Any, default: Any = 0.0) -> float:

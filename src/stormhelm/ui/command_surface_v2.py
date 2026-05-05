@@ -158,11 +158,32 @@ def _screen_awareness_state(value: Any) -> dict[str, Any]:
     if not browser_adapters:
         browser_adapters = _mapping(screen.get("browserAdapters"))
     duration = _number(trace.get("durationMs") if "durationMs" in trace else trace.get("total_duration_ms"))
+    evidence_ranking = _mapping_list(trace.get("evidence_ranking") or trace.get("evidenceRanking"))
+    observation_trace = {
+        "observation_attempted": trace.get("observation_attempted"),
+        "observation_available": trace.get("observation_available"),
+        "observation_allowed": trace.get("observation_allowed"),
+        "observation_blocked_reason": trace.get("observation_blocked_reason"),
+        "observation_source": trace.get("observation_source"),
+        "observation_freshness": trace.get("observation_freshness"),
+        "observation_confidence": _mapping(trace.get("observation_confidence")),
+        "answered_from_source": trace.get("answered_from_source"),
+        "weak_fallback_used": trace.get("weak_fallback_used"),
+        "no_visual_evidence_reason": trace.get("no_visual_evidence_reason"),
+        "evidence_before_observation": _mapping_list(trace.get("evidence_before_observation")),
+        "evidence_after_observation": _mapping_list(trace.get("evidence_after_observation")),
+        "visible_context_summary": _mapping(trace.get("visible_context_summary")),
+    }
     return {
         "present": bool(screen or policy or trace or browser_adapters),
         "phase": _text(screen.get("phase")),
         "policy": {"action_policy_mode": _text(policy.get("action_policy_mode"))},
-        "trace": {"durationMs": duration, "summary": _text(trace.get("summary")) or _text(policy.get("summary"))},
+        "trace": {
+            "durationMs": duration,
+            "summary": _text(trace.get("summary")) or _text(policy.get("summary")),
+            "evidence_ranking": evidence_ranking,
+            **observation_trace,
+        },
         "browser_adapters": browser_adapters,
     }
 
@@ -353,6 +374,9 @@ def _stations(
             _entry("Binding", _text(selected_target.get("label")) or "Current screen target", _text(deictic.get("source_summary")) or "Screen-awareness state is partial."),
             _entry("Trace", trace_value, _text(trace.get("summary")) or "No screen trace summary is available."),
         ]
+        screen_entries.extend(_screen_observation_entries(trace))
+        screen_entries.extend(_screen_evidence_entries(trace))
+        screen_entries.extend(_screen_visible_context_entries(trace))
         screen_entries.extend(_playwright_browser_adapter_entries(screen))
         stations.append(_station("screen_awareness", ctx, chips=[_chip("State", status_label, _tone(result_state)), _chip("Phase", _text(screen.get("phase")) or "Active")], sections=[_section("Screen Route", screen_entries)], invalidations=_filter_invalidations(invalidations, {"Binding"}), actions=_station_actions("screen_awareness", ctx, True)))
     trust_state = _text(trust.get("approval_state")).lower()
@@ -511,6 +535,7 @@ def _playwright_browser_adapter_entries(screen: dict[str, Any]) -> list[dict[str
     verification = _mapping(playwright.get("last_verification_summary"))
     action_preview = _mapping(playwright.get("last_action_preview_summary"))
     action_execution = _mapping(playwright.get("last_action_execution_summary"))
+    task_execution = _mapping(playwright.get("last_task_execution_summary"))
     status = _text(playwright.get("playwright_adapter_status")) or _text(playwright.get("status")) or "unavailable"
     entries = [
         _entry(
@@ -686,10 +711,36 @@ def _playwright_browser_adapter_entries(screen: dict[str, Any]) -> list[dict[str
                     f"Before: {_text(action_execution.get('before_observation_id'))}; after: {_text(action_execution.get('after_observation_id'))}",
                 )
             )
+    if task_execution:
+        task_status = _title(_text(task_execution.get("status")) or "Unknown")
+        final_verification = _title(_text(task_execution.get("final_verification_status")) or "Not Conclusive")
+        cleanup_status = _title(_text(task_execution.get("cleanup_status")) or "Not Started")
+        completed_steps = _text(task_execution.get("completed_step_count")) or "0"
+        entries.append(
+            _entry(
+                "Task Plan",
+                task_status,
+                f"{completed_steps} step(s) reported. Verification: {final_verification}. Cleanup: {cleanup_status}.",
+            )
+        )
+        step_results = task_execution.get("step_results") if isinstance(task_execution.get("step_results"), list) else []
+        if step_results:
+            labels = []
+            for item in step_results[:5]:
+                if isinstance(item, dict):
+                    labels.append(f"{_title(_text(item.get('action_kind')))}: {_title(_text(item.get('status')))}")
+            entries.append(
+                _entry(
+                    "Task Steps",
+                    _title(_text(task_execution.get("claim_ceiling")) or "browser_semantic_task_execution"),
+                    "; ".join(label for label in labels if label),
+                )
+            )
     claim = _text(playwright.get("claim_ceiling")) or _text(observation.get("claim_ceiling"))
     claim = _text(verification.get("claim_ceiling")) or claim
     claim = _text(action_preview.get("claim_ceiling")) or claim
     claim = _text(action_execution.get("claim_ceiling")) or claim
+    claim = _text(task_execution.get("claim_ceiling")) or claim
     if claim:
         entries.append(_entry("Claim Ceiling", _title(claim), "Not visible-screen or source-truth proof."))
     return entries
@@ -867,6 +918,20 @@ def _runtime(status: dict[str, Any]) -> dict[str, Any]:
             "trace": {
                 "durationMs": latest_trace.get("total_duration_ms"),
                 "summary": policy.get("summary"),
+                "evidence_ranking": latest_trace.get("evidence_ranking"),
+                "observation_attempted": latest_trace.get("observation_attempted"),
+                "observation_available": latest_trace.get("observation_available"),
+                "observation_allowed": latest_trace.get("observation_allowed"),
+                "observation_blocked_reason": latest_trace.get("observation_blocked_reason"),
+                "observation_source": latest_trace.get("observation_source"),
+                "observation_freshness": latest_trace.get("observation_freshness"),
+                "observation_confidence": latest_trace.get("observation_confidence"),
+                "answered_from_source": latest_trace.get("answered_from_source"),
+                "weak_fallback_used": latest_trace.get("weak_fallback_used"),
+                "no_visual_evidence_reason": latest_trace.get("no_visual_evidence_reason"),
+                "evidence_before_observation": latest_trace.get("evidence_before_observation"),
+                "evidence_after_observation": latest_trace.get("evidence_after_observation"),
+                "visible_context_summary": latest_trace.get("visible_context_summary"),
             },
             "browser_adapters": screen.get("browser_adapters") if isinstance(screen.get("browser_adapters"), dict) else {},
         }
@@ -1018,6 +1083,87 @@ def _web_limit_label(value: str) -> str:
         "no_user_visible_screen_claim": "No visible-screen claim",
     }
     return labels.get(key, _title(value))
+
+
+def _screen_observation_entries(trace: dict[str, Any]) -> list[dict[str, str]]:
+    if "observation_attempted" not in trace and "answered_from_source" not in trace:
+        return []
+    attempted = bool(trace.get("observation_attempted"))
+    available = trace.get("observation_available")
+    allowed = trace.get("observation_allowed")
+    source = _text(trace.get("observation_source")) or "metadata"
+    freshness = _text(trace.get("observation_freshness")) or "unknown"
+    answered_from = _text(trace.get("answered_from_source")) or source
+    blocked_reason = _text(trace.get("observation_blocked_reason"))
+    no_visual_reason = _text(trace.get("no_visual_evidence_reason"))
+    confidence = _mapping(trace.get("observation_confidence"))
+    confidence_label = _text(confidence.get("level")) or "unknown"
+    secondary = "Attempted" if attempted else "Not Attempted"
+    detail_parts = [
+        f"source: {source}",
+        f"freshness: {freshness}",
+        f"confidence: {confidence_label}",
+        f"answered from {answered_from}",
+    ]
+    if available is not None:
+        detail_parts.append(f"available: {bool(available)}")
+    if allowed is not None:
+        detail_parts.append(f"allowed: {bool(allowed)}")
+    if blocked_reason:
+        detail_parts.append(f"blocked: {blocked_reason}")
+    if no_visual_reason:
+        detail_parts.append(f"no visual evidence: {no_visual_reason}")
+    if bool(trace.get("weak_fallback_used")):
+        detail_parts.append("weak fallback used")
+    return [_entry("Observation", secondary, "; ".join(detail_parts))]
+
+
+def _screen_visible_context_entries(trace: dict[str, Any]) -> list[dict[str, str]]:
+    summary = _mapping(trace.get("visible_context_summary") or trace.get("visibleContextSummary"))
+    if not summary:
+        return []
+    entries = [
+        _entry(
+            "Visible Context",
+            _text(summary.get("summary")) or "Visible context summary unavailable.",
+            _text(summary.get("source")) or "",
+        )
+    ]
+    key_text = [_text(item) for item in (summary.get("key_text") or summary.get("keyText") or []) if _text(item)]
+    if key_text:
+        entries.append(_entry("Key Text", f"{len(key_text)} item(s)", "; ".join(key_text[:4])))
+    entities = [_text(item) for item in (summary.get("entities") or []) if _text(item)]
+    if entities:
+        entries.append(_entry("Entities", f"{len(entities)} item(s)", "; ".join(entities[:6])))
+    likely_task = _mapping(summary.get("likely_task") or summary.get("likelyTask"))
+    if likely_task:
+        entries.append(
+            _entry(
+                "Task Hypothesis",
+                _text(likely_task.get("label")) or "Partial",
+                f"confidence: {_text(likely_task.get('confidence')) or 'unknown'}",
+            )
+        )
+    help_options = [_text(item) for item in (summary.get("help_options") or summary.get("helpOptions") or []) if _text(item)]
+    if help_options:
+        entries.append(_entry("Help Options", f"{len(help_options)} option(s)", "; ".join(help_options[:3])))
+    return entries
+
+
+def _screen_evidence_entries(trace: dict[str, Any]) -> list[dict[str, str]]:
+    ranking = _mapping_list(trace.get("evidence_ranking") or trace.get("evidenceRanking"))
+    if not ranking:
+        return []
+    labels: list[str] = []
+    for item in ranking[:4]:
+        confidence = _mapping(item.get("confidence"))
+        confidence_label = _text(confidence.get("level")) or "unknown"
+        labels.append(
+            f"{_text(item.get('rank')) or '? '}. {_text(item.get('source')) or 'source'}"
+            f" ({_text(item.get('freshness')) or 'unknown'}, {confidence_label})"
+        )
+    first = labels[0].split(" (", 1)[0] if labels else "Ranked evidence"
+    return [_entry("Evidence", first, "; ".join(labels))]
 
 
 def _filter_invalidations(entries: list[dict[str, str]], allowed: set[str]) -> list[dict[str, str]]:

@@ -157,6 +157,37 @@ class PreferencesRepository:
                 (key, json.dumps(value)),
             )
 
+    def get_preference(self, key: str) -> object | None:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT value_json FROM preferences WHERE preference_key = ?",
+                (key,),
+            ).fetchone()
+        if row is None:
+            return None
+        return decode_json_value(
+            row["value_json"],
+            context=f"preferences.value_json[{key}]",
+        )
+
+    def get_many(self, keys: list[str] | tuple[str, ...]) -> dict[str, object]:
+        requested = [str(key) for key in keys if str(key)]
+        if not requested:
+            return {}
+        placeholders = ",".join("?" for _ in requested)
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                f"SELECT preference_key, value_json FROM preferences WHERE preference_key IN ({placeholders})",
+                tuple(requested),
+            ).fetchall()
+        return {
+            row["preference_key"]: decode_json_value(
+                row["value_json"],
+                context=f"preferences.value_json[{row['preference_key']}]",
+            )
+            for row in rows
+        }
+
     def get_all(self) -> dict[str, object]:
         with self.database.connect() as connection:
             rows = connection.execute(

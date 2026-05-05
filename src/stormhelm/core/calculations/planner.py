@@ -66,6 +66,14 @@ class CalculationsPlannerSeam:
         active_context: dict[str, object] | None = None,
     ) -> CalculationPlannerEvaluation:
         del surface_mode, active_module
+        if _unsupported_browser_automation_text(normalized_text):
+            return CalculationPlannerEvaluation(
+                candidate=False,
+                disposition=CalculationRouteDisposition.NOT_REQUESTED,
+                reasons=["unsupported_browser_automation_signal"],
+                feature_enabled=self.config.enabled,
+                planner_routing_enabled=self.config.planner_routing_enabled,
+            )
         candidate = detect_expression_candidate(raw_text, normalized_text)
         requested_mode = detect_requested_output_mode(raw_text, normalized_text)
         if requested_mode == CalculationOutputMode.ANSWER_ONLY:
@@ -333,3 +341,7 @@ class CalculationsPlannerSeam:
                 follow_up_reuse=True,
             )
         return None
+
+
+def _unsupported_browser_automation_text(text: str) -> bool:
+    return bool(re.search(r"\b(?:captcha|robot|human\s+verification)\b", str(text or ""), flags=re.IGNORECASE))

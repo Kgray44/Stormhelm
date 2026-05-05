@@ -72,9 +72,32 @@ QtObject {
     readonly property int durationReveal: 520
     readonly property int durationAnchorPulse: 5000
     readonly property int durationAnchorOrbit: 9800
-    readonly property int durationAnchorIdleBreath: 9200
+    readonly property real anchorOrganicCadenceSpeedupFactor: 1.20
+    readonly property int durationAnchorIdleBreath: 8000
+    readonly property int durationAnchorOrganicSecondary: 12800
+    readonly property int durationAnchorOrganicDrift: 19600
+    readonly property int durationAnchorBlobPrimary: 8000
+    readonly property int durationAnchorBlobSecondary: 12800
+    readonly property int durationAnchorBlobDrift: 19600
+    readonly property int durationAnchorBlobShimmer: 25200
+    readonly property int durationAnchorApertureShimmerDrift: 10000
+    readonly property int durationAnchorApertureShimmerSecondary: 15600
+    readonly property int durationAnchorRingFragmentMin: 18000
+    readonly property int durationAnchorRingFragmentMax: 45000
     readonly property int durationAnchorStateTransition: 420
     readonly property int durationAnchorStateMinimumDwell: 140
+    readonly property int durationAnchorSpeakingOnsetGuard: 1500
+    readonly property int durationAnchorSpeakingAttack: 680
+    readonly property int durationAnchorSpeakingEnvelope: durationAnchorSpeakingAttack
+    readonly property int durationAnchorSpeakingRelease: 780
+    readonly property int durationAnchorSpeakingGrace: 1050
+    readonly property int durationAnchorSpeakingLatch: 1320
+    readonly property int durationAnchorSpeakingRawDropHold: 260
+    readonly property int durationAnchorThinkingLatch: 720
+    readonly property int durationAnchorActingLatch: 850
+    readonly property int durationAnchorCaptureLatch: 720
+    readonly property int durationAnchorWakeLatch: 560
+    readonly property int durationAnchorPromptLatch: 1400
 
     readonly property real anchorStrokeHairline: 0.75
     readonly property real anchorStrokePrimary: 1.15
@@ -93,32 +116,73 @@ QtObject {
     readonly property real anchorSignalPointOpacity: 0.38
     readonly property real anchorCrownAccentOpacity: 0.30
     readonly property real anchorCenterLensRadiusRatio: 0.31
-    readonly property real anchorCenterLensRimOpacity: 0.31
+    readonly property real anchorCenterLensRimOpacity: 0.35
     readonly property real anchorCenterLensShadowOpacity: 0.22
-    readonly property real anchorCenterLensHighlightOpacity: 0.26
+    readonly property real anchorCenterLensHighlightOpacity: 0.30
     readonly property real anchorCenterIrisOpacity: 0.22
     readonly property real anchorCenterPetalOpacity: 0.18
-    readonly property real anchorCenterPearlOpacity: 0.46
+    readonly property real anchorCenterPearlOpacity: 0.52
     readonly property real anchorCenterMotionRestraint: 0.62
-    readonly property real anchorIdleMinimumRingOpacity: 0.16
-    readonly property real anchorIdleMinimumCenterLensOpacity: 0.17
-    readonly property real anchorIdleMinimumBearingTickOpacity: 0.11
-    readonly property real anchorIdleMinimumSignalPointOpacity: 0.18
-    readonly property real anchorIdleMinimumLabelOpacity: 0.74
+    readonly property real anchorIdleMinimumRingOpacity: 0.40
+    readonly property real anchorIdleMinimumCenterLensOpacity: 0.52
+    readonly property real anchorIdleMinimumBearingTickOpacity: 0.28
+    readonly property real anchorIdleMinimumSignalPointOpacity: 0.50
+    readonly property real anchorIdleMinimumLabelOpacity: 0.88
+    readonly property real anchorIdleBlobOpacityFloor: 0.55
+    readonly property real anchorIdleCenterGlowFloor: 0.32
+    readonly property real anchorIdleFragmentOpacityFloor: 0.42
+    readonly property real anchorIdleActiveAlphaFloor: 0.96
     readonly property real anchorIdlePulseMinOpacity: 0.055
-    readonly property real anchorIdlePulseMaxOpacity: 0.16
-    readonly property real anchorIdleLensPulseStrength: 0.060
-    readonly property real anchorIdleApertureShimmerOpacity: 0.045
+    readonly property real anchorIdlePulseMaxOpacity: 0.155
+    readonly property real anchorIdleLensPulseStrength: 0.056
+    readonly property real anchorIdleApertureShimmerOpacity: 0.058
     readonly property real anchorIdleBearingDriftStrength: 0.012
-    readonly property real anchorUnavailableMinimumRingOpacity: 0.055
-    readonly property real anchorUnavailableMinimumCenterLensOpacity: 0.060
-    readonly property real anchorUnavailableMinimumBearingTickOpacity: 0.040
-    readonly property real anchorUnavailableMinimumSignalPointOpacity: 0.055
-    readonly property real anchorUnavailableMinimumLabelOpacity: 0.56
+    readonly property real anchorOrganicDeformStrength: 0.062
+    readonly property real anchorOrganicGlowShift: 0.082
+    readonly property real anchorBlobDeformStrength: 0.071
+    readonly property real anchorBlobIdleDeformStrength: 0.086
+    readonly property real anchorBlobSpeakingDeformStrength: 0.174
+    readonly property real anchorBlobGlowOpacity: 0.56
+    readonly property real anchorBlobRimOpacity: 0.37
+    readonly property real anchorPresenceBoost: 1.16
+    readonly property real anchorSpeakingAudioReactiveStrengthBoost: 2.475
+    readonly property real anchorSpeakingExpressionBoost: 1.92
+    readonly property real anchorShimmerLegibilityBoost: 1.48
+    readonly property real anchorSpeakingOnsetFloor: 0.040
+    readonly property real anchorSpeakingOnsetSpikeCeiling: 0.52
+    readonly property real anchorSpeakingOnsetTargetDeltaLimit: 0.105
+    readonly property real anchorSpeakingOnsetReleaseHold: 0.94
+    readonly property real anchorApertureShimmerOpacityMin: 0.080
+    readonly property real anchorApertureShimmerOpacityMax: 0.220
+    readonly property real anchorApertureShimmerDriftX: 0.216
+    readonly property real anchorApertureShimmerDriftY: 0.134
+    readonly property real anchorApertureShimmerSecondaryX: 0.060
+    readonly property real anchorApertureShimmerSecondaryY: 0.048
+    readonly property real anchorApertureShimmerRadiusRatio: 0.34
+    readonly property int anchorBlobPointCount: 32
+    readonly property real anchorRingFragmentOpacity: 0.240
+    readonly property int anchorRingFragmentCount: 4
+    readonly property real anchorFinalVisibilityFloor: 0.52
+    readonly property real anchorFinalMinimumBlobOpacity: 0.34
+    readonly property real anchorFinalMinimumRingOpacity: 0.24
+    readonly property real anchorFinalMinimumCenterGlowOpacity: 0.16
+    readonly property real anchorFinalMinimumSignalPointOpacity: 0.30
+    readonly property real anchorFinalMinimumBearingTickOpacity: 0.18
+    readonly property real anchorFinalMinimumFragmentOpacity: 0.22
+    readonly property real anchorUnavailableActiveAlphaFloor: 0.54
+    readonly property real anchorUnavailableFinalBlobOpacityFloor: 0.30
+    readonly property real anchorUnavailableCenterGlowFloor: 0.15
+    readonly property real anchorUnavailableFragmentOpacityFloor: 0.20
+    readonly property real anchorUnavailableMinimumRingOpacity: 0.22
+    readonly property real anchorUnavailableMinimumCenterLensOpacity: 0.28
+    readonly property real anchorUnavailableMinimumBearingTickOpacity: 0.18
+    readonly property real anchorUnavailableMinimumSignalPointOpacity: 0.25
+    readonly property real anchorUnavailableMinimumLabelOpacity: 0.72
     readonly property real anchorOrbitalSpeedScale: 0.42
     readonly property real anchorListeningRippleSpeedScale: 0.64
     readonly property real anchorSpeakingRadianceSpeedScale: 0.68
     readonly property real anchorWarningPulseLimit: 0.18
+    readonly property real anchorModeTransitionContinuityFloor: 0.38
     readonly property int anchorCenterLensLayerCount: 7
     readonly property int anchorCenterApertureSegmentCount: 4
     readonly property int anchorDepthLayerCount: 7

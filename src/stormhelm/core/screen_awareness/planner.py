@@ -16,6 +16,8 @@ INSPECTION_PHRASES = {
     "what's on my screen",
     "what is this",
     "what is that",
+    "what do you see",
+    "what can you see",
     "which button are you talking about",
     "which checkbox are you talking about",
     "what page is this",

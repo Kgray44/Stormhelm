@@ -431,6 +431,9 @@ class DeterministicPlanner:
             clarification = ClarificationReason(code="guardrail", message=guardrail_message)
             debug["clarification_reason"] = clarification.to_dict()
             debug["response_mode"] = ResponseMode.CLARIFICATION.value
+            guardrail_family = self._guardrail_route_family(lower)
+            if guardrail_family:
+                debug["guardrail_route_family"] = guardrail_family
             return self._finalize_decision(
                 PlannerDecision(
                     request_type="guardrail_clarify",
@@ -1611,6 +1614,9 @@ class DeterministicPlanner:
             if decision.structured_query.query_shape == QueryShape.TRUST_APPROVAL_REQUEST:
                 return "trust_approvals"
         if decision.request_type == "guardrail_clarify":
+            family = str(decision.debug.get("guardrail_route_family") or "").strip()
+            if family:
+                return self._canonical_route_family(family)
             return "trust_approvals"
         return "generic_provider"
 
@@ -1966,7 +1972,8 @@ class DeterministicPlanner:
                 ScreenRouteDisposition.PHASE10_BRAIN_INTEGRATION,
             }
         if family == "context_clarification":
-            return True
+            reason = str(getattr(decision.intent_frame, "clarification_reason", "") or "")
+            return reason not in {"page_context", "verification_context"}
         return False
 
     def _normalize_command(
@@ -2304,6 +2311,11 @@ class DeterministicPlanner:
                 slots=slots,
                 evidence_note="route_spine preserved screen_awareness authority while restoring planner contract details",
             )
+        if family == "context_clarification" and str(getattr(decision.intent_frame, "clarification_reason", "") or "") in {
+            "page_context",
+            "verification_context",
+        }:
+            return self._route_spine_clarification_proposal(decision, slots=slots)
         if family in {"watch_runtime", "browser_destination", "workspace_operations", "context_clarification"}:
             browser_context = self._browser_context_request(message, lower, active_context=active_context)
             if browser_context is not None:
@@ -2598,19 +2610,38 @@ class DeterministicPlanner:
                 evidence_note="route_spine preserved deterministic resource diagnosis ownership for concrete slowdown phrasing",
             )
         if family == "unsupported":
+            intent_frame = slots.get("route_spine", {}).get("intent_frame", {}) if isinstance(slots.get("route_spine"), dict) else {}
+            unsupported_browser_automation = str(intent_frame.get("target_type") or "").strip().lower() == "browser_automation"
+            unsupported_browser_reason = str(intent_frame.get("target_text") or "").strip().lower()
+            subject = "unsupported_browser_automation" if unsupported_browser_automation else "external_commitment"
+            requested_action = (
+                "decline_unsupported_browser_automation"
+                if unsupported_browser_automation
+                else "decline_unsupported_external_commitment"
+            )
+            evidence = (
+                ["route_spine selected unsupported browser automation guard"]
+                if unsupported_browser_automation
+                else ["route_spine selected unsupported external commitment guard"]
+            )
+            assistant_message = (
+                self._unsupported_browser_automation_message(unsupported_browser_reason)
+                if unsupported_browser_automation
+                else (
+                    "I can't book, purchase, pay for, or commit to real-world transactions from this command surface. "
+                    "I can help you draft a plan or checklist instead."
+                )
+            )
             return self._tool_proposal(
                 query_shape=QueryShape.SUMMARY_REQUEST,
                 domain="unsupported",
                 request_type_hint="unsupported_capability",
                 family="unsupported",
-                subject="external_commitment",
-                requested_action="decline_unsupported_external_commitment",
+                subject=subject,
+                requested_action=requested_action,
                 confidence=decision.winner.score or 0.96,
-                evidence=["route_spine selected unsupported external commitment guard"],
-                assistant_message=(
-                    "I can't book, purchase, pay for, or commit to real-world transactions from this command surface. "
-                    "I can help you draft a plan or checklist instead."
-                ),
+                evidence=evidence,
+                assistant_message=assistant_message,
                 execution_type="decline_unsupported_request",
                 output_mode=ResponseMode.UNSUPPORTED.value,
                 slots=slots,
@@ -3373,8 +3404,6 @@ class DeterministicPlanner:
             return None
         family = str(getattr(plan, "route_family", "") or decision.winner.route_family).strip()
         tool_name = str(getattr(plan, "tool_name", "") or "").strip()
-        if not tool_name:
-            return None
         frame = getattr(trace, "intent_frame", None)
         entities = getattr(frame, "extracted_entities", {}) if frame is not None else {}
         selected_context = entities.get("selected_context") if isinstance(entities, dict) else {}
@@ -3417,8 +3446,11 @@ class DeterministicPlanner:
             "location",
             "weather",
             "notes",
+            "voice_control",
         }
         if family not in planner_v2_passthrough_families:
+            return None
+        if not tool_name and family != "voice_control":
             return None
 
         plan_args = getattr(plan, "tool_arguments", None)
@@ -3567,6 +3599,14 @@ class DeterministicPlanner:
             requested_action = "notes_write"
             request_type_hint = request_type_hint or "notes_write"
             execution_type = execution_type or "execute_control_command"
+        elif family == "voice_control":
+            query_shape = QueryShape.CONTROL_COMMAND
+            domain = "voice"
+            output_mode = ResponseMode.ACTION_RESULT.value
+            output_type = "action"
+            requested_action = str(getattr(plan, "operation", "") or "voice_control")
+            request_type_hint = request_type_hint or "voice_control"
+            execution_type = execution_type or f"voice_control_{requested_action}"
         elif family == "browser_destination":
             query_shape = QueryShape.OPEN_BROWSER_DESTINATION
             domain = "browser"
@@ -8868,6 +8908,24 @@ class DeterministicPlanner:
                 return "Delete scope is too broad without a clearer target."
             return "Destructive deletion isn't available through Stormhelm yet."
         return None
+
+    def _guardrail_route_family(self, lower: str) -> str:
+        if lower.startswith(("delete ", "remove ")):
+            if re.match(r"^remove\s+.+?\s+from\s+(?:this|my|the)\s+(?:machine|computer|pc)$", lower):
+                return ""
+            return "file_operation"
+        return ""
+
+    def _unsupported_browser_automation_message(self, reason: str) -> str:
+        if reason == "form_submit":
+            return "Form submission is unsupported in the Playwright Screen Awareness path."
+        if reason == "login":
+            return "Login automation is unsupported. Stormhelm will not enter credentials or sign in for you."
+        if reason == "transaction_or_payment":
+            return "Purchases, payments, and checkout automation are unsupported."
+        if reason == "captcha_or_human_verification":
+            return "CAPTCHA, robot, and human-verification bypasses are unsupported. Stormhelm will not automate them."
+        return "Arbitrary browser automation is unsupported. Stormhelm only runs explicitly gated safe browser primitives."
 
     def _app_control_request(self, message: str, lower: str) -> dict[str, object] | None:
         if lower.startswith("open up "):

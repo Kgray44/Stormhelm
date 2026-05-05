@@ -20,16 +20,16 @@ from stormhelm.core.screen_awareness.models import ScreenSourceType
 
 
 _SOURCE_PRIORITY: dict[ScreenSourceType, int] = {
-    ScreenSourceType.SELECTION: 10,
-    ScreenSourceType.ACCESSIBILITY: 20,
-    ScreenSourceType.SCREEN_CAPTURE: 30,
-    ScreenSourceType.LOCAL_OCR: 31,
-    ScreenSourceType.PROVIDER_VISION: 32,
-    ScreenSourceType.FOCUS_STATE: 40,
-    ScreenSourceType.WORKSPACE_CONTEXT: 50,
-    ScreenSourceType.CLIPBOARD: 60,
-    ScreenSourceType.APP_ADAPTER: 70,
-    ScreenSourceType.BROWSER_DOM: 80,
+    ScreenSourceType.SCREEN_CAPTURE: 10,
+    ScreenSourceType.LOCAL_OCR: 20,
+    ScreenSourceType.PROVIDER_VISION: 21,
+    ScreenSourceType.SELECTION: 22,
+    ScreenSourceType.ACCESSIBILITY: 30,
+    ScreenSourceType.APP_ADAPTER: 40,
+    ScreenSourceType.BROWSER_DOM: 41,
+    ScreenSourceType.FOCUS_STATE: 50,
+    ScreenSourceType.WORKSPACE_CONTEXT: 60,
+    ScreenSourceType.CLIPBOARD: 80,
     ScreenSourceType.PLACEHOLDER: 90,
 }
 
@@ -117,6 +117,32 @@ def _safe_int(payload: dict[str, Any], key: str, default: int = 0) -> int:
         return default
 
 
+def _pil_imagegrab_available() -> bool:
+    try:
+        from PIL import ImageGrab  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+def _capture_with_pil(bounds: tuple[int, int, int, int], output_path: Path | None) -> None:
+    from PIL import ImageGrab
+
+    x, y, width, height = bounds
+    bbox = (x, y, x + width, y + height)
+    try:
+        image = ImageGrab.grab(bbox=bbox, all_screens=True)
+    except TypeError:
+        image = ImageGrab.grab(bbox=bbox)
+    try:
+        if output_path is not None:
+            image.save(output_path, "PNG")
+    finally:
+        close = getattr(image, "close", None)
+        if callable(close):
+            close()
+
+
 def _bounds_for_capture(
     *,
     scope: str,
@@ -195,10 +221,12 @@ class WindowsScreenCaptureProvider:
     def capability_status(self) -> dict[str, Any]:
         is_windows = platform.system().strip().lower() == "windows"
         powershell = shutil.which("powershell") or shutil.which("pwsh")
+        pil_available = _pil_imagegrab_available()
         return {
-            "available": bool(is_windows and powershell),
+            "available": bool(is_windows and (pil_available or powershell)),
             "platform": platform.system(),
-            "backend": "windows_gdi" if is_windows else "unavailable",
+            "backend": "pil_imagegrab" if is_windows and pil_available else "windows_gdi" if is_windows and powershell else "unavailable",
+            "pil_imagegrab_available": bool(pil_available),
             "powershell_available": bool(powershell),
             "local_ocr_available": bool(shutil.which("tesseract")),
             "provider_vision_available": False,
@@ -238,38 +266,55 @@ class WindowsScreenCaptureProvider:
         provider_vision = {"attempted": False, "used": False, "reason": "provider_vision_disabled"}
 
         try:
-            script = f"""
-            Add-Type -AssemblyName System.Drawing
-            $path = {_ps_string(str(temp_path))}
-            $bitmap = New-Object System.Drawing.Bitmap({width}, {height})
-            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-            try {{
-                $graphics.CopyFromScreen({x}, {y}, 0, 0, $bitmap.Size)
-                $bitmap.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
-                [pscustomobject]@{{ captured = $true; path = $path }} | ConvertTo-Json -Compress
-            }} finally {{
-                $graphics.Dispose()
-                $bitmap.Dispose()
-            }}
-            """
-            powershell = shutil.which("powershell") or shutil.which("pwsh") or "powershell"
-            completed = subprocess.run(
-                [powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
-                capture_output=True,
-                text=True,
-                timeout=self.capture_timeout_seconds,
-                **_hidden_console_subprocess_kwargs(),
+            image_file_needed = bool(
+                retain_image
+                or provider_vision_enabled
+                or (ocr_enabled and bool(shutil.which("tesseract")))
             )
-            if completed.returncode != 0 or not temp_path.exists():
-                reason = "screen_capture_failed"
-                if completed.stderr.strip():
-                    metadata["capture_error"] = completed.stderr.strip()[:240]
-                return ScreenCaptureResult(captured=False, captured_at=captured_at, scope=scope, reason=reason, metadata=metadata)
+            temp_path_created = False
+            if status.get("pil_imagegrab_available"):
+                try:
+                    _capture_with_pil(bounds, temp_path if image_file_needed else None)
+                    temp_path_created = image_file_needed
+                    metadata["backend"] = "pil_imagegrab"
+                except Exception as exc:
+                    metadata["pil_capture_error"] = str(exc)[:240]
+
+            if not status.get("pil_imagegrab_available") or ("pil_capture_error" in metadata and not temp_path_created):
+                script = f"""
+                Add-Type -AssemblyName System.Drawing
+                $path = {_ps_string(str(temp_path))}
+                $bitmap = New-Object System.Drawing.Bitmap({width}, {height})
+                $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+                try {{
+                    $graphics.CopyFromScreen({x}, {y}, 0, 0, $bitmap.Size)
+                    $bitmap.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+                    [pscustomobject]@{{ captured = $true; path = $path }} | ConvertTo-Json -Compress
+                }} finally {{
+                    $graphics.Dispose()
+                    $bitmap.Dispose()
+                }}
+                """
+                powershell = shutil.which("powershell") or shutil.which("pwsh") or "powershell"
+                completed = subprocess.run(
+                    [powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
+                    capture_output=True,
+                    text=True,
+                    timeout=self.capture_timeout_seconds,
+                    **_hidden_console_subprocess_kwargs(),
+                )
+                if completed.returncode != 0 or not temp_path.exists():
+                    reason = "screen_capture_failed"
+                    if completed.stderr.strip():
+                        metadata["capture_error"] = completed.stderr.strip()[:240]
+                    return ScreenCaptureResult(captured=False, captured_at=captured_at, scope=scope, reason=reason, metadata=metadata)
+                metadata["backend"] = "windows_gdi"
+                temp_path_created = True
 
             text: str | None = None
             text_source: str | None = None
             confidence_score = 0.0
-            if ocr_enabled:
+            if ocr_enabled and temp_path_created:
                 tesseract = shutil.which("tesseract")
                 if tesseract:
                     ocr = subprocess.run(
@@ -288,6 +333,8 @@ class WindowsScreenCaptureProvider:
                         metadata["ocr_error"] = ocr.stderr.strip()[:240]
                 else:
                     warnings.append("Local OCR is not available.")
+            elif ocr_enabled:
+                warnings.append("Local OCR is not available.")
 
             provider_vision = self._provider_vision(
                 provider=provider,

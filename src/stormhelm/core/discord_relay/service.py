@@ -27,6 +27,7 @@ from stormhelm.core.discord_relay.models import DiscordPayloadCandidate
 from stormhelm.core.discord_relay.models import DiscordPayloadKind
 from stormhelm.core.discord_relay.models import DiscordPolicyDecision
 from stormhelm.core.discord_relay.models import DiscordPolicyOutcome
+from stormhelm.core.discord_relay.models import DiscordRelayCapability
 from stormhelm.core.discord_relay.models import DiscordRelayResponse
 from stormhelm.core.discord_relay.models import DiscordRelayTrace
 from stormhelm.core.discord_relay.models import DiscordRouteMode
@@ -97,6 +98,66 @@ def _coerce_destination_kind(
         return fallback
 
 
+def _coerce_relay_capability(value: object, *, route_mode: DiscordRouteMode) -> DiscordRelayCapability:
+    if isinstance(value, DiscordRelayCapability):
+        return value
+    if isinstance(value, dict):
+        return DiscordRelayCapability(
+            route_mode=_coerce_route_mode(value.get("route_mode"), fallback=route_mode),
+            preview_supported=bool(value.get("preview_supported", value.get("can_preview", True))),
+            dispatch_supported=bool(value.get("dispatch_supported", value.get("can_dispatch", False))),
+            verification_supported=bool(
+                value.get("verification_supported", value.get("can_verify_sent_message", value.get("can_verify_send", False)))
+            ),
+            requires_trust_approval=bool(value.get("requires_trust_approval", True)),
+            uses_discord_api_user_token=bool(
+                value.get("uses_discord_api_user_token", value.get("uses_discord_user_token", False))
+            ),
+            uses_discord_user_token=bool(
+                value.get("uses_discord_user_token", value.get("uses_discord_api_user_token", False))
+            ),
+            uses_self_bot=bool(value.get("uses_self_bot", False)),
+            uses_local_client=bool(value.get("uses_local_client", False)),
+            adapter_kind=str(value.get("adapter_kind") or "unavailable").strip().lower() or "unavailable",
+            unavailable_reason=_clean_text(value.get("unavailable_reason")),
+            route_constraint=str(value.get("route_constraint") or "unsupported").strip() or "unsupported",
+            can_preview=bool(value.get("can_preview", value.get("preview_supported", True))),
+            can_dispatch=bool(value.get("can_dispatch", value.get("dispatch_supported", False))),
+            can_verify_send=bool(
+                value.get("can_verify_send", value.get("can_verify_sent_message", value.get("verification_supported", False)))
+            ),
+            can_focus_client=bool(value.get("can_focus_client", False)),
+            can_launch_client=bool(value.get("can_launch_client", False)),
+            can_identify_discord_surface=bool(value.get("can_identify_discord_surface", False)),
+            can_navigate_dm=bool(value.get("can_navigate_dm", False)),
+            can_locate_message_input=bool(value.get("can_locate_message_input", False)),
+            can_insert_text=bool(value.get("can_insert_text", False)),
+            can_press_send=bool(value.get("can_press_send", False)),
+            can_verify_sent_message=bool(
+                value.get("can_verify_sent_message", value.get("can_verify_send", value.get("verification_supported", False)))
+            ),
+            can_report_failure=bool(value.get("can_report_failure", True)),
+            rollback_posture=str(value.get("rollback_posture") or "none").strip() or "none",
+            trust_requirements=[
+                str(item)
+                for item in value.get("trust_requirements", ["explicit_approval"])
+                if str(item).strip()
+            ],
+        )
+    return DiscordRelayCapability(
+        route_mode=route_mode,
+        preview_supported=True,
+        dispatch_supported=False,
+        verification_supported=False,
+        requires_trust_approval=True,
+        uses_discord_api_user_token=False,
+        uses_self_bot=False,
+        uses_local_client=False,
+        adapter_kind="stub",
+        unavailable_reason="adapter_does_not_declare_dispatch_capability",
+    )
+
+
 def _payload_source_details(payload: DiscordPayloadCandidate) -> dict[str, str]:
     if payload.provenance == "active_selection":
         if payload.kind == DiscordPayloadKind.PAGE_LINK:
@@ -146,6 +207,9 @@ class DiscordRelaySubsystem:
 
     def status_snapshot(self) -> dict[str, Any]:
         last_trace = self._recent_traces[-1].to_dict() if self._recent_traces else None
+        local_capability = self._capability_for_route(DiscordRouteMode.LOCAL_CLIENT_AUTOMATION)
+        official_capability = self._capability_for_route(DiscordRouteMode.OFFICIAL_BOT_WEBHOOK)
+        local_diagnostic = self.local_automation_diagnostic()
         return {
             "phase": "discord1",
             "enabled": self.config.enabled,
@@ -182,9 +246,210 @@ class DiscordRelaySubsystem:
                 "official_adapter_ready": self.official_adapter is not None,
                 "system_probe_available": self.system_probe is not None,
             },
+            "relay_capabilities": {
+                "local_client_automation": local_capability.to_dict(),
+                "official_bot_webhook": official_capability.to_dict(),
+            },
+            "local_automation_diagnostic": local_diagnostic,
             "recent_trace_count": len(self._recent_traces),
             "last_trace": last_trace,
         }
+
+    def local_automation_diagnostic(self) -> dict[str, Any]:
+        capability = self._capability_for_route(DiscordRouteMode.LOCAL_CLIENT_AUTOMATION)
+        diagnostic_reader = getattr(self.local_adapter, "diagnostic", None)
+        result: dict[str, Any] = {}
+        if callable(diagnostic_reader):
+            try:
+                raw_result = diagnostic_reader(relay_request_id="diagnostic", recipient_alias="")
+                result = raw_result.to_dict() if hasattr(raw_result, "to_dict") else dict(raw_result)
+            except Exception as error:
+                result = {
+                    "adapter_kind": "unavailable",
+                    "route_constraint": "unsupported",
+                    "dispatch_supported": False,
+                    "verification_supported": False,
+                    "steps": [],
+                    "failure_reason": str(error).strip() or "diagnostic_failed",
+                }
+        if not result:
+            result = {
+                "adapter_kind": capability.adapter_kind,
+                "route_constraint": capability.route_constraint,
+                "dispatch_supported": capability.dispatch_supported,
+                "verification_supported": capability.verification_supported,
+                "steps": [],
+                "failure_reason": capability.unavailable_reason,
+            }
+
+        def support(flag: bool) -> str:
+            return "supported" if flag else "unsupported"
+
+        reason = (
+            result.get("failure_reason")
+            or capability.unavailable_reason
+            or self._first_local_diagnostic_gap(capability)
+        )
+        live_dispatch_ready = bool(
+            capability.adapter_kind == "real"
+            and capability.dispatch_supported
+            and capability.can_focus_client
+            and capability.can_identify_discord_surface
+            and capability.can_locate_message_input
+            and capability.can_insert_text
+            and capability.can_press_send
+            and capability.route_constraint in {"can_navigate_to_alias_dm", "current_dm_only"}
+        )
+        return {
+            "adapter_kind": capability.adapter_kind,
+            "route_mode": DiscordRouteMode.LOCAL_CLIENT_AUTOMATION.value,
+            "route_constraint": capability.route_constraint,
+            "discord_surface_found": bool(result.get("target_identity_verified", False)),
+            "focus_client": support(capability.can_focus_client),
+            "launch_client": support(capability.can_launch_client),
+            "identify_surface": support(capability.can_identify_discord_surface),
+            "navigate_dm": support(capability.can_navigate_dm),
+            "locate_message_input": support(capability.can_locate_message_input),
+            "insert_text": support(capability.can_insert_text),
+            "press_send": support(capability.can_press_send),
+            "verify_message": support(capability.can_verify_sent_message),
+            "dispatch_supported": capability.dispatch_supported,
+            "verification_supported": capability.verification_supported,
+            "live_dispatch_ready": live_dispatch_ready,
+            "reason": None if live_dispatch_ready else reason,
+            "steps": list(result.get("steps") or []),
+        }
+
+    def _first_local_diagnostic_gap(self, capability: DiscordRelayCapability) -> str | None:
+        for name, supported in (
+            ("focus_client unsupported", capability.can_focus_client),
+            ("identify_surface unsupported", capability.can_identify_discord_surface),
+            ("navigate_dm unsupported", capability.can_navigate_dm or capability.route_constraint == "current_dm_only"),
+            ("locate_message_input unsupported", capability.can_locate_message_input),
+            ("insert_text unsupported", capability.can_insert_text),
+            ("press_send unsupported", capability.can_press_send),
+        ):
+            if not supported:
+                return name
+        if not capability.can_verify_sent_message:
+            return "verify_message unsupported"
+        return None
+
+    def _capability_for_route(self, route_mode: DiscordRouteMode) -> DiscordRelayCapability:
+        adapter = self.local_adapter if route_mode == DiscordRouteMode.LOCAL_CLIENT_AUTOMATION else self.official_adapter
+        capability_reader = getattr(adapter, "capability", None)
+        if callable(capability_reader):
+            try:
+                return _coerce_relay_capability(capability_reader(), route_mode=route_mode)
+            except Exception:
+                return DiscordRelayCapability(
+                    route_mode=route_mode,
+                    preview_supported=True,
+                    dispatch_supported=False,
+                    verification_supported=False,
+                    requires_trust_approval=True,
+                    adapter_kind="unavailable",
+                    unavailable_reason="capability_probe_failed",
+                )
+        return _coerce_relay_capability(None, route_mode=route_mode)
+
+    def _dispatch_capability_block(
+        self,
+        *,
+        preview: DiscordDispatchPreview,
+        capability: DiscordRelayCapability,
+    ) -> dict[str, Any] | None:
+        if capability.uses_discord_api_user_token or capability.uses_discord_user_token or capability.uses_self_bot:
+            return {
+                "state": DiscordDispatchState.DISPATCH_BLOCKED,
+                "assistant_response": (
+                    "Discord dispatch is blocked because that route would use an unsupported Discord API/user-token path."
+                ),
+                "bearing_title": "Discord Blocked",
+                "micro_response": "Discord dispatch is blocked by policy.",
+                "failure_reason": "discord_policy_blocked",
+                "failure_step": "capability_check",
+            }
+        adapter_kind = str(capability.adapter_kind or "").strip().lower()
+        if adapter_kind in {"mock", "stub"}:
+            return {
+                "state": DiscordDispatchState.DISPATCH_NOT_IMPLEMENTED,
+                "assistant_response": (
+                    "Discord local-client dispatch is not wired yet. I can only prepare the message right now."
+                ),
+                "bearing_title": "Discord Dispatch Unavailable",
+                "micro_response": "Discord dispatch is not wired yet.",
+                "failure_reason": capability.unavailable_reason or f"{adapter_kind}_adapter",
+                "failure_step": "capability_check",
+            }
+        if not capability.dispatch_supported:
+            return {
+                "state": DiscordDispatchState.DISPATCH_UNAVAILABLE,
+                "assistant_response": (
+                    f"I have the message ready for {preview.destination.label}, but I cannot reach Discord/local automation."
+                ),
+                "bearing_title": "Discord Dispatch Unavailable",
+                "micro_response": "Discord local automation is unavailable.",
+                "failure_reason": capability.unavailable_reason or "dispatch_not_supported",
+                "failure_step": "capability_check",
+            }
+        if preview.route_mode == DiscordRouteMode.LOCAL_CLIENT_AUTOMATION:
+            if capability.route_constraint == "current_dm_only" and not capability.can_identify_discord_surface:
+                return {
+                    "state": DiscordDispatchState.DISPATCH_BLOCKED,
+                    "assistant_response": (
+                        f"I held the message for {preview.destination.label} because this adapter can only use the current DM "
+                        "and cannot verify the active Discord recipient."
+                    ),
+                    "bearing_title": "Discord Blocked",
+                    "micro_response": "Discord recipient verification is missing.",
+                    "failure_reason": "current_dm_identity_verification_unsupported",
+                    "failure_step": "navigate_recipient_dm",
+                }
+            required_step_capabilities = (
+                ("focus_client", capability.can_focus_client),
+                ("identify_discord_surface", capability.can_identify_discord_surface),
+                ("locate_message_input", capability.can_locate_message_input),
+                ("insert_payload", capability.can_insert_text),
+                ("perform_send_gesture", capability.can_press_send),
+            )
+            for failure_step, declared in required_step_capabilities:
+                if declared:
+                    continue
+                return {
+                    "state": DiscordDispatchState.DISPATCH_UNAVAILABLE,
+                    "assistant_response": (
+                        f"I have the message ready for {preview.destination.label}, but local Discord automation "
+                        f"cannot perform the {failure_step.replace('_', ' ')} step."
+                    ),
+                    "bearing_title": "Discord Dispatch Unavailable",
+                    "micro_response": "Discord local automation is incomplete.",
+                    "failure_reason": f"{failure_step}_unsupported",
+                    "failure_step": failure_step,
+                }
+            if capability.route_constraint == "unsupported":
+                return {
+                    "state": DiscordDispatchState.DISPATCH_UNAVAILABLE,
+                    "assistant_response": (
+                        f"I have the message ready for {preview.destination.label}, but local Discord routing is unsupported."
+                    ),
+                    "bearing_title": "Discord Dispatch Unavailable",
+                    "micro_response": "Discord local routing is unsupported.",
+                    "failure_reason": "route_constraint_unsupported",
+                    "failure_step": "navigate_recipient_dm",
+                }
+        if preview.route_mode == DiscordRouteMode.LOCAL_CLIENT_AUTOMATION and not capability.uses_local_client:
+            return {
+                "state": DiscordDispatchState.DISPATCH_UNAVAILABLE,
+                "assistant_response": (
+                    f"I have the message ready for {preview.destination.label}, but Discord local-client dispatch is not available."
+                ),
+                "bearing_title": "Discord Dispatch Unavailable",
+                "micro_response": "Discord local-client dispatch is unavailable.",
+                "failure_reason": capability.unavailable_reason or "local_client_capability_missing",
+                "failure_step": "capability_check",
+            }
+        return None
 
     def handle_request(
         self,
@@ -226,7 +491,7 @@ class DiscordRelaySubsystem:
                     utterance=operator_text,
                     stage=stage,
                     destination_alias=destination_alias,
-                    state=DiscordDispatchState.FAILED,
+                    state=DiscordDispatchState.DISPATCH_FAILED,
                     assistant_response="I don't have a confirmed Discord preview to send yet.",
                     bearing_title="Discord Relay Issue",
                     micro_response="No pending Discord preview is available.",
@@ -237,19 +502,55 @@ class DiscordRelaySubsystem:
                 workspace_context=workspace_context,
             )
             if not validation["valid"]:
+                if validation["reason"] == "preview_expired":
+                    renewed_preview = self._renew_preview(preview)
+                    payload_source = _payload_source_details(renewed_preview.payload)
+                    return self._terminal_response(
+                        utterance=operator_text,
+                        stage=stage,
+                        destination_alias=renewed_preview.destination.alias,
+                        state=DiscordDispatchState.APPROVAL_EXPIRED,
+                        assistant_response=(
+                            f"Confirmation expired. I still have the preview for {renewed_preview.destination.label} "
+                            f"using {payload_source['label']}. Send it now?"
+                        ),
+                        bearing_title="Discord Confirmation Expired",
+                        micro_response="Confirmation expired; preview is still ready.",
+                        active_request_state=self._pending_preview_request_state(renewed_preview),
+                        debug={
+                            **self._relay_debug_fields(
+                                preview=renewed_preview,
+                                capability=self._capability_for_route(renewed_preview.route_mode),
+                                result_state=DiscordDispatchState.APPROVAL_EXPIRED,
+                                pending_preview_found=True,
+                                continuation_detected=True,
+                                approval_expired=True,
+                            ),
+                            "request_stage": stage,
+                            "invalidation_reason": validation["reason"],
+                        },
+                        preview=renewed_preview,
+                        preview_fingerprint=str(renewed_preview.fingerprint.get("fingerprint_id") or ""),
+                        invalidation_reason=str(validation["reason"]),
+                    )
                 return self._terminal_response(
                     utterance=operator_text,
                     stage=stage,
                     destination_alias=preview.destination.alias,
-                    state=DiscordDispatchState.FAILED,
+                    state=DiscordDispatchState.DISPATCH_FAILED,
                     assistant_response=self._invalidation_message(preview, str(validation["reason"])),
                     bearing_title="Discord Preview Stale",
                     micro_response="The preview must be refreshed before sending.",
                     active_request_state={},
                     debug={
+                        **self._relay_debug_fields(
+                            preview=preview,
+                            capability=self._capability_for_route(preview.route_mode),
+                            result_state=DiscordDispatchState.DISPATCH_FAILED,
+                            pending_preview_found=True,
+                            continuation_detected=True,
+                        ),
                         "request_stage": stage,
-                        "destination": preview.destination.to_dict(),
-                        "preview": preview.to_dict(),
                         "invalidation_reason": validation["reason"],
                         "preview_fingerprint": dict(preview.fingerprint),
                     },
@@ -263,7 +564,7 @@ class DiscordRelaySubsystem:
                     utterance=operator_text,
                     stage=stage,
                     destination_alias=preview.destination.alias,
-                    state=DiscordDispatchState.FAILED,
+                    state=DiscordDispatchState.DISPATCH_BLOCKED,
                     assistant_response="I blocked a duplicate send attempt. Refresh the preview if you want to send it again.",
                     bearing_title="Discord Duplicate Blocked",
                     micro_response="I blocked a duplicate send attempt.",
@@ -286,7 +587,7 @@ class DiscordRelaySubsystem:
                     utterance=operator_text,
                     stage=stage,
                     destination_alias=preview.destination.alias,
-                    state=DiscordDispatchState.FAILED,
+                    state=DiscordDispatchState.DISPATCH_BLOCKED,
                     assistant_response=(
                         "I can't continue that Discord route because it isn't valid contract-backed adapter work yet."
                     ),
@@ -297,6 +598,35 @@ class DiscordRelaySubsystem:
                         "request_stage": stage,
                         "destination": preview.destination.to_dict(),
                         "preview": preview.to_dict(),
+                        "adapter_contract_status": route_contract_status,
+                    },
+                    preview=preview,
+                )
+            capability = self._capability_for_route(preview.route_mode)
+            capability_block = self._dispatch_capability_block(preview=preview, capability=capability)
+            if capability_block is not None:
+                return self._terminal_response(
+                    utterance=operator_text,
+                    stage=stage,
+                    destination_alias=preview.destination.alias,
+                    state=capability_block["state"],
+                    assistant_response=capability_block["assistant_response"],
+                    bearing_title=capability_block["bearing_title"],
+                    micro_response=capability_block["micro_response"],
+                    active_request_state=self._pending_preview_request_state(preview),
+                    debug={
+                        **self._relay_debug_fields(
+                            preview=preview,
+                            capability=capability,
+                            result_state=capability_block["state"],
+                            pending_preview_found=True,
+                            continuation_detected=True,
+                            failure_reason=capability_block["failure_reason"],
+                            failure_step=capability_block.get("failure_step"),
+                        ),
+                        "request_stage": stage,
+                        "failure_reason": capability_block["failure_reason"],
+                        "failure_step": capability_block.get("failure_step"),
                         "adapter_contract_status": route_contract_status,
                     },
                     preview=preview,
@@ -315,28 +645,38 @@ class DiscordRelaySubsystem:
                 else:
                     trust_decision = self.trust_service.evaluate_action(trust_request)
                 if trust_decision.outcome == "blocked":
+                    denied = approval_outcome in {"deny", "denied", "cancel", "cancelled", "stop"}
                     return self._terminal_response(
                         utterance=operator_text,
                         stage=stage,
                         destination_alias=preview.destination.alias,
-                        state=DiscordDispatchState.FAILED,
+                        state=DiscordDispatchState.CANCELLED if denied else DiscordDispatchState.DISPATCH_BLOCKED,
                         assistant_response=trust_decision.operator_message,
                         bearing_title="Discord Approval Denied",
                         micro_response=trust_decision.operator_message,
                         active_request_state={},
                         debug={
+                            **self._relay_debug_fields(
+                                preview=preview,
+                                capability=capability,
+                                result_state=DiscordDispatchState.CANCELLED
+                                if denied
+                                else DiscordDispatchState.DISPATCH_BLOCKED,
+                                pending_preview_found=True,
+                                continuation_detected=True,
+                                failure_reason="approval_denied" if denied else "approval_blocked",
+                            ),
                             "request_stage": stage,
-                            "destination": preview.destination.to_dict(),
-                            "preview": preview.to_dict(),
                             "trust": trust_decision.to_dict(),
                         },
+                        preview=preview,
                     )
                 if not trust_decision.allowed:
                     return self._terminal_response(
                         utterance=operator_text,
                         stage=stage,
                         destination_alias=preview.destination.alias,
-                        state=DiscordDispatchState.READY,
+                        state=DiscordDispatchState.APPROVAL_REQUIRED,
                         assistant_response=trust_decision.operator_message,
                         bearing_title="Discord Approval Needed",
                         micro_response=trust_decision.operator_message,
@@ -345,21 +685,30 @@ class DiscordRelaySubsystem:
                             decision=trust_decision,
                         ),
                         debug={
+                            **self._relay_debug_fields(
+                                preview=preview,
+                                capability=capability,
+                                result_state=DiscordDispatchState.APPROVAL_REQUIRED,
+                                pending_preview_found=True,
+                                continuation_detected=True,
+                            ),
                             "request_stage": stage,
-                            "destination": preview.destination.to_dict(),
-                            "preview": preview.to_dict(),
                             "trust": trust_decision.to_dict(),
                         },
                         preview=preview,
                     )
-            attempt = self._dispatch_preview(preview)
-            if attempt.state != DiscordDispatchState.FAILED:
+            attempt = self._normalize_attempt_for_capability(
+                preview=preview,
+                attempt=self._dispatch_preview(preview),
+                capability=capability,
+            )
+            if self._attempt_performed_final_send(attempt):
                 self._remember_dispatch(preview)
                 if self.trust_service is not None and trust_decision is not None:
                     self.trust_service.mark_action_executed(
                         action_request=self._trust_request(session_id=session_id, preview=preview),
                         grant=trust_decision.grant,
-                        summary=f"Dispatched Discord relay to {preview.destination.alias}.",
+                        summary=f"Attempted Discord relay to {preview.destination.alias}.",
                         details={"verification_strength": attempt.verification_strength},
                     )
             self.session_state.remember_alias(
@@ -390,9 +739,15 @@ class DiscordRelaySubsystem:
                 attempt=attempt,
                 trace=trace,
                 debug={
+                    **self._relay_debug_fields(
+                        preview=preview,
+                        capability=capability,
+                        result_state=attempt.state,
+                        pending_preview_found=True,
+                        continuation_detected=True,
+                        attempt=attempt,
+                    ),
                     "request_stage": stage,
-                    "destination": preview.destination.to_dict(),
-                    "preview": preview.to_dict(),
                     "attempt": attempt.to_dict(),
                     "payload_source": _payload_source_details(preview.payload),
                     "adapter_contract": dict(contract.get("adapter_contract") or {}) if isinstance(contract, dict) else {},
@@ -423,7 +778,7 @@ class DiscordRelaySubsystem:
                 utterance=operator_text,
                 stage=stage,
                 destination_alias=destination.alias,
-                state=DiscordDispatchState.FAILED,
+                state=DiscordDispatchState.DISPATCH_BLOCKED,
                 assistant_response=(
                     f"I can't use {destination.label}'s Discord route because it isn't valid contract-backed adapter work yet."
                 ),
@@ -452,7 +807,7 @@ class DiscordRelaySubsystem:
             candidate_summaries = list(resolution.get("candidate_summaries") or [])
             ambiguity_reason = _clean_text(resolution.get("ambiguity_reason")) or "I couldn't truthfully resolve what “this” refers to yet."
             choices = list(resolution.get("ambiguity_choices") or [])
-            assistant_response = ambiguity_reason
+            assistant_response = f"What should I send to {destination.label}? {ambiguity_reason}"
             if choices:
                 quoted = ", ".join(f'"{item}"' for item in choices)
                 assistant_response = f"{ambiguity_reason} Reply with {quoted}."
@@ -521,7 +876,7 @@ class DiscordRelaySubsystem:
                     "micro_response": "I won't send that payload.",
                     "full_response": assistant_response,
                 },
-                state=DiscordDispatchState.FAILED,
+                state=DiscordDispatchState.DISPATCH_BLOCKED,
                 preview=preview,
                 trace=trace,
                 debug={
@@ -538,25 +893,34 @@ class DiscordRelaySubsystem:
             destination.alias,
             target=destination.to_alias_target(),
         )
-        assistant_response, contract = self._preview_contract(preview)
+        capability = self._capability_for_route(preview.route_mode)
+        assistant_response, contract = self._preview_contract(preview, capability=capability)
         active_request_state = self._pending_preview_request_state(preview)
         trust_decision = None
+        response_state = DiscordDispatchState.PREVIEW_READY
         if self.trust_service is not None:
             trust_decision = self.trust_service.evaluate_action(self._trust_request(session_id=session_id, preview=preview))
             active_request_state = self.trust_service.attach_request_state(active_request_state, decision=trust_decision)
+            if not trust_decision.allowed:
+                response_state = DiscordDispatchState.APPROVAL_REQUIRED
         return DiscordRelayResponse(
             assistant_response=self._merge_trust_prompt(
                 assistant_response,
                 trust_decision.operator_message if trust_decision is not None else "",
             ),
             response_contract=contract,
-            state=DiscordDispatchState.READY,
+            state=response_state,
             preview=preview,
             trace=trace,
             debug={
+                **self._relay_debug_fields(
+                    preview=preview,
+                    capability=capability,
+                    result_state=response_state,
+                    pending_preview_found=True,
+                    continuation_detected=False,
+                ),
                 "request_stage": stage,
-                "destination": destination.to_dict(),
-                "preview": preview.to_dict(),
                 "screen_awareness_used": preview.screen_awareness_used,
                 "payload_candidates": list(resolution.get("candidate_summaries") or []),
                 "payload_source": _payload_source_details(preview.payload),
@@ -607,6 +971,9 @@ class DiscordRelaySubsystem:
                 "bearing_title": bearing_title,
                 "micro_response": micro_response,
                 "full_response": assistant_response,
+                "result_state": state.value,
+                "sent": state in {DiscordDispatchState.SENT_UNVERIFIED, DiscordDispatchState.SENT_VERIFIED},
+                "verified": state == DiscordDispatchState.SENT_VERIFIED,
             },
             state=state,
             preview=preview,
@@ -1042,7 +1409,9 @@ class DiscordRelaySubsystem:
             route_mode=destination.route_mode,
             note_text=note_text,
             policy=policy,
-            state=DiscordDispatchState.READY if policy.outcome == DiscordPolicyOutcome.ALLOWED else DiscordDispatchState.FAILED,
+            state=DiscordDispatchState.PREVIEW_READY
+            if policy.outcome == DiscordPolicyOutcome.ALLOWED
+            else DiscordDispatchState.DISPATCH_BLOCKED,
             screen_awareness_used=payload.screen_awareness_used,
             candidate_summaries=list(candidate_summaries),
             created_at=created_at,
@@ -1054,6 +1423,246 @@ class DiscordRelaySubsystem:
             workspace_context=workspace_context,
         )
         return preview
+
+    def _renew_preview(self, preview: DiscordDispatchPreview) -> DiscordDispatchPreview:
+        now = float(self.clock())
+        preview.created_at = now
+        preview.expires_at = now + self.preview_ttl_seconds
+        preview.state = DiscordDispatchState.PREVIEW_READY
+        return preview
+
+    def _relay_debug_fields(
+        self,
+        *,
+        preview: DiscordDispatchPreview,
+        capability: DiscordRelayCapability,
+        result_state: DiscordDispatchState,
+        pending_preview_found: bool,
+        continuation_detected: bool,
+        attempt: DiscordDispatchAttempt | None = None,
+        approval_expired: bool = False,
+        failure_reason: str | None = None,
+        failure_step: str | None = None,
+    ) -> dict[str, Any]:
+        payload_hash = str(preview.fingerprint.get("payload_hash") or "") if isinstance(preview.fingerprint, dict) else ""
+        local_result = self._attempt_local_dispatch_result(attempt) if attempt is not None else {}
+        dispatch_attempted = bool(attempt and self._attempt_attempted_dispatch(attempt))
+        final_send_gesture = bool(attempt and self._attempt_performed_final_send(attempt))
+        verification_attempted = bool(attempt and attempt.debug.get("verification_attempted"))
+        message_inserted = bool(local_result.get("message_inserted") or (attempt and attempt.debug.get("message_inserted")))
+        target_identity_verified = bool(
+            local_result.get("target_identity_verified") or (attempt and attempt.debug.get("target_identity_verified"))
+        )
+        verification_evidence_present = bool(
+            local_result.get("verification_evidence_present")
+            or (attempt and attempt.debug.get("verification_evidence_present"))
+        )
+        sent_claimed = result_state in {DiscordDispatchState.SENT_UNVERIFIED, DiscordDispatchState.SENT_VERIFIED}
+        verified_claimed = result_state == DiscordDispatchState.SENT_VERIFIED
+        return {
+            "route_family": "discord_relay",
+            "route_mode": preview.route_mode.value,
+            "route_constraint": local_result.get("route_constraint") or capability.route_constraint,
+            "pending_relay_request_id": str(preview.fingerprint.get("fingerprint_id") or ""),
+            "pending_preview_found": pending_preview_found,
+            "continuation_detected": continuation_detected,
+            "recipient_known": bool(preview.destination.alias),
+            "recipient_alias": preview.destination.alias,
+            "recipient_resolved": bool(preview.destination.trusted),
+            "target_identity_verified": target_identity_verified,
+            "payload_known": bool(preview.payload.preview_text or preview.payload.text or preview.payload.url or preview.payload.path),
+            "payload_source": preview.payload.provenance,
+            "payload_source_details": _payload_source_details(preview.payload),
+            "payload_hash_present": bool(payload_hash),
+            "approval_state": "expired" if approval_expired else "required" if capability.requires_trust_approval else "not_required",
+            "approval_expired": approval_expired,
+            "adapter_kind": capability.adapter_kind,
+            "dispatch_supported": capability.dispatch_supported,
+            "verification_supported": capability.verification_supported,
+            "dispatch_attempted": dispatch_attempted,
+            "message_inserted": message_inserted,
+            "final_send_gesture_performed": final_send_gesture,
+            "verification_attempted": verification_attempted,
+            "verification_evidence_present": verification_evidence_present,
+            "result_state": result_state.value,
+            "sent_claimed": sent_claimed,
+            "verified_claimed": verified_claimed,
+            "openai_required": False,
+            "provider_fallback_attempted": False,
+            "steps": list(local_result.get("steps") or []),
+            "failure_step": failure_step or local_result.get("failure_step") or (attempt.debug.get("failure_step") if attempt is not None else None),
+            "failure_reason": failure_reason
+            or (attempt.failure_reason if attempt is not None else None)
+            or local_result.get("failure_reason"),
+            "discord_relay_capability": capability.to_dict(),
+            "destination": preview.destination.to_dict(),
+            "preview": preview.to_dict(),
+        }
+
+    def _attempt_local_dispatch_result(self, attempt: DiscordDispatchAttempt | None) -> dict[str, Any]:
+        if attempt is None:
+            return {}
+        value = attempt.debug.get("local_dispatch_result") if isinstance(attempt.debug, dict) else None
+        return dict(value) if isinstance(value, dict) else {}
+
+    def _attempt_attempted_dispatch(self, attempt: DiscordDispatchAttempt) -> bool:
+        local_result = self._attempt_local_dispatch_result(attempt)
+        if local_result:
+            if bool(attempt.debug.get("dispatch_attempted")):
+                return True
+            if str(local_result.get("result_state") or "") == DiscordDispatchState.DISPATCH_ATTEMPTED_UNVERIFIED.value:
+                return True
+            if bool(local_result.get("final_send_gesture_performed") or local_result.get("message_inserted")):
+                return True
+            return any(
+                str(step.get("status") or "") in {"succeeded", "failed", "blocked"}
+                and str(step.get("step_name") or "")
+                not in {"capability_check", "focus_client", "identify_discord_surface", "navigate_recipient_dm"}
+                for step in local_result.get("steps") or []
+                if isinstance(step, dict)
+            )
+        return bool(
+            attempt.debug.get("dispatch_attempted")
+            or attempt.debug.get("dispatch_side_effects_emitted")
+            or attempt.debug.get("send_key_issued")
+            or attempt.debug.get("final_send_gesture_performed")
+            or attempt.state
+            in {
+                DiscordDispatchState.DISPATCH_ATTEMPTED_UNVERIFIED,
+                DiscordDispatchState.SENT_UNVERIFIED,
+                DiscordDispatchState.SENT_VERIFIED,
+            }
+        )
+
+    def _attempt_performed_final_send(self, attempt: DiscordDispatchAttempt) -> bool:
+        local_result = self._attempt_local_dispatch_result(attempt)
+        if local_result:
+            return bool(local_result.get("final_send_gesture_performed"))
+        return bool(
+            attempt.debug.get("final_send_gesture_performed")
+            or attempt.debug.get("send_key_issued")
+        )
+
+    def _normalize_attempt_for_capability(
+        self,
+        *,
+        preview: DiscordDispatchPreview,
+        attempt: DiscordDispatchAttempt,
+        capability: DiscordRelayCapability,
+    ) -> DiscordDispatchAttempt:
+        if capability.adapter_kind in {"mock", "stub"} or not capability.dispatch_supported:
+            attempt.state = (
+                DiscordDispatchState.DISPATCH_NOT_IMPLEMENTED
+                if capability.adapter_kind in {"mock", "stub"}
+                else DiscordDispatchState.DISPATCH_UNAVAILABLE
+            )
+            attempt.failure_reason = attempt.failure_reason or capability.unavailable_reason or "dispatch_not_supported"
+            attempt.send_summary = (
+                "Discord local-client dispatch is not wired yet. I can only prepare the message right now."
+                if attempt.state == DiscordDispatchState.DISPATCH_NOT_IMPLEMENTED
+                else f"I have the message ready for {preview.destination.label}, but I cannot reach Discord/local automation."
+            )
+            attempt.debug["dispatch_attempted"] = False
+            attempt.debug["final_send_gesture_performed"] = False
+            attempt.debug["verification_attempted"] = False
+            return attempt
+        local_result = self._attempt_local_dispatch_result(attempt)
+        if local_result:
+            result_state_text = str(local_result.get("result_state") or attempt.state.value).strip()
+            try:
+                result_state = DiscordDispatchState(result_state_text)
+            except ValueError:
+                result_state = attempt.state
+            final_send_gesture = bool(local_result.get("final_send_gesture_performed"))
+            verification_evidence_present = bool(local_result.get("verification_evidence_present"))
+            verification_attempted = bool(local_result.get("verification_attempted"))
+            failure_step = _clean_text(local_result.get("failure_step"))
+            failure_reason = _clean_text(local_result.get("failure_reason"))
+            attempt.debug["route_constraint"] = local_result.get("route_constraint") or capability.route_constraint
+            attempt.debug["message_inserted"] = bool(local_result.get("message_inserted"))
+            attempt.debug["target_identity_verified"] = bool(local_result.get("target_identity_verified"))
+            attempt.debug["final_send_gesture_performed"] = final_send_gesture
+            attempt.debug["dispatch_attempted"] = bool(
+                attempt.debug.get("dispatch_attempted")
+                or local_result.get("message_inserted")
+                or final_send_gesture
+                or result_state == DiscordDispatchState.DISPATCH_ATTEMPTED_UNVERIFIED
+            )
+            attempt.debug["verification_attempted"] = verification_attempted
+            attempt.debug["verification_evidence_present"] = verification_evidence_present
+            if failure_step:
+                attempt.debug["failure_step"] = failure_step
+            if failure_reason:
+                attempt.failure_reason = attempt.failure_reason or failure_reason
+            if result_state in {DiscordDispatchState.SENT_UNVERIFIED, DiscordDispatchState.SENT_VERIFIED}:
+                if not capability.can_press_send:
+                    attempt.state = DiscordDispatchState.DISPATCH_UNAVAILABLE
+                    attempt.failure_reason = attempt.failure_reason or "perform_send_gesture_unsupported"
+                    attempt.debug["final_send_gesture_performed"] = False
+                    attempt.debug["dispatch_attempted"] = False
+                    return attempt
+                if not final_send_gesture:
+                    attempt.state = DiscordDispatchState.DISPATCH_ATTEMPTED_UNVERIFIED
+                    attempt.failure_reason = attempt.failure_reason or "send_gesture_not_performed"
+                    attempt.debug["final_send_gesture_performed"] = False
+                    return attempt
+                if result_state == DiscordDispatchState.SENT_VERIFIED:
+                    if (
+                        capability.verification_supported
+                        and capability.can_verify_sent_message
+                        and verification_attempted
+                        and verification_evidence_present
+                        and attempt.verification_strength == "strong"
+                    ):
+                        attempt.state = DiscordDispatchState.SENT_VERIFIED
+                    else:
+                        attempt.state = DiscordDispatchState.SENT_UNVERIFIED
+                    return attempt
+                attempt.state = DiscordDispatchState.SENT_UNVERIFIED
+                return attempt
+            if result_state == DiscordDispatchState.DISPATCH_FAILED:
+                attempt.state = DiscordDispatchState.DISPATCH_FAILED
+                return attempt
+            if result_state in {
+                DiscordDispatchState.DISPATCH_UNAVAILABLE,
+                DiscordDispatchState.DISPATCH_BLOCKED,
+                DiscordDispatchState.DISPATCH_NOT_IMPLEMENTED,
+                DiscordDispatchState.DISPATCH_ATTEMPTED_UNVERIFIED,
+            }:
+                attempt.state = result_state
+                return attempt
+        if attempt.state == DiscordDispatchState.VERIFIED:
+            attempt.state = (
+                DiscordDispatchState.SENT_VERIFIED
+                if capability.verification_supported
+                and capability.can_verify_sent_message
+                and attempt.verification_strength == "strong"
+                else DiscordDispatchState.SENT_UNVERIFIED
+            )
+        elif attempt.state in {DiscordDispatchState.STARTED, DiscordDispatchState.UNCERTAIN}:
+            attempt.state = (
+                DiscordDispatchState.SENT_UNVERIFIED
+                if self._attempt_performed_final_send(attempt)
+                else DiscordDispatchState.DISPATCH_ATTEMPTED_UNVERIFIED
+            )
+        elif attempt.state == DiscordDispatchState.FAILED:
+            attempt.state = DiscordDispatchState.DISPATCH_FAILED
+        if attempt.state == DiscordDispatchState.SENT_VERIFIED and not capability.verification_supported:
+            attempt.state = DiscordDispatchState.SENT_UNVERIFIED
+            attempt.verification_strength = "none"
+        if attempt.state == DiscordDispatchState.SENT_VERIFIED and attempt.verification_strength != "strong":
+            attempt.state = DiscordDispatchState.SENT_UNVERIFIED
+        if attempt.state in {DiscordDispatchState.SENT_UNVERIFIED, DiscordDispatchState.SENT_VERIFIED} and not capability.can_press_send:
+            attempt.state = DiscordDispatchState.DISPATCH_UNAVAILABLE
+            attempt.failure_reason = attempt.failure_reason or "perform_send_gesture_unsupported"
+            attempt.debug["final_send_gesture_performed"] = False
+        if attempt.state in {DiscordDispatchState.SENT_UNVERIFIED, DiscordDispatchState.SENT_VERIFIED} and not self._attempt_performed_final_send(attempt):
+            attempt.state = DiscordDispatchState.DISPATCH_ATTEMPTED_UNVERIFIED
+            attempt.failure_reason = attempt.failure_reason or "send_gesture_not_performed"
+        attempt.debug.setdefault("dispatch_attempted", self._attempt_attempted_dispatch(attempt))
+        attempt.debug.setdefault("final_send_gesture_performed", self._attempt_performed_final_send(attempt))
+        attempt.debug.setdefault("verification_attempted", bool(capability.verification_supported))
+        return attempt
 
     def _build_preview_fingerprint(
         self,
@@ -1291,17 +1900,26 @@ class DiscordRelaySubsystem:
         if fingerprint_id:
             self._recent_dispatches[fingerprint_id] = float(self.clock())
 
-    def _preview_contract(self, preview: DiscordDispatchPreview) -> tuple[str, dict[str, Any]]:
+    def _preview_contract(
+        self,
+        preview: DiscordDispatchPreview,
+        *,
+        capability: DiscordRelayCapability,
+    ) -> tuple[str, dict[str, Any]]:
         payload_line = self._payload_summary_line(preview.payload)
         payload_source = _payload_source_details(preview.payload)
         warning_text = ""
         if preview.policy.warnings:
             warning_text = " Warning: " + " ".join(preview.policy.warnings)
+        capability_warning = ""
+        capability_block = self._dispatch_capability_block(preview=preview, capability=capability)
+        if capability_block is not None:
+            capability_warning = " Discord local-client dispatch is not available yet; I can only prepare the message right now."
         assistant_response = (
             f"Ready to send {payload_line} to {preview.destination.label}. "
             f"Source: {payload_source['label']}. "
             f"Route: {preview.route_mode.value}. "
-            f"I haven't sent anything yet. Reply \"send it\" to continue.{warning_text}"
+            f"I haven't sent anything yet. Reply \"send it\" to continue.{capability_warning}{warning_text}"
         )
         contract = self._adapter_contract_for_route(preview.route_mode)
         execution = build_execution_report(
@@ -1315,6 +1933,13 @@ class DiscordRelaySubsystem:
                 "bearing_title": "Discord Preview",
                 "micro_response": f"Ready to send to {preview.destination.label}.",
                 "full_response": assistant_response,
+                "result_state": DiscordDispatchState.PREVIEW_READY.value,
+                "sent": False,
+                "verified": False,
+                "dispatch_attempted": False,
+                "adapter_kind": capability.adapter_kind,
+                "dispatch_supported": capability.dispatch_supported,
+                "verification_supported": capability.verification_supported,
             },
             contract=contract,
             execution=execution,
@@ -1328,33 +1953,48 @@ class DiscordRelaySubsystem:
     ) -> tuple[str, dict[str, Any]]:
         evidence = " ".join(attempt.verification_evidence[:2]).strip()
         transport_failure_kind = _clean_text(attempt.debug.get("transport_failure_kind"))
-        if attempt.state == DiscordDispatchState.VERIFIED:
+        if attempt.state == DiscordDispatchState.SENT_VERIFIED:
             assistant_response = (
-                f"I verified that the message appears in {preview.destination.label}'s thread. "
+                f"Sent to {preview.destination.label}. I verified that the message appears in the target Discord thread. "
                 f"Route: {attempt.route_mode.value}. {evidence}".strip()
             )
             title = "Discord Verified"
-            micro = f"Verified the send to {preview.destination.label}."
-        elif attempt.state == DiscordDispatchState.STARTED:
+            micro = f"Sent to {preview.destination.label}."
+        elif attempt.state == DiscordDispatchState.SENT_UNVERIFIED:
             assistant_response = (
-                f"Started the Discord dispatch to {preview.destination.label}. "
+                f"I performed the send action in Discord for {preview.destination.label}, but I could not verify that it appeared. "
                 f"Route: {attempt.route_mode.value}. {evidence}".strip()
             )
-            title = "Discord Dispatch"
-            micro = f"Started the send to {preview.destination.label}."
-        elif attempt.state == DiscordDispatchState.UNCERTAIN:
-            if attempt.verification_strength == "moderate":
-                assistant_response = (
-                    f"The send to {preview.destination.label} appears to have completed, but I cannot verify delivery. "
-                    f"Route: {attempt.route_mode.value}. {evidence}".strip()
-                )
-            else:
-                assistant_response = (
-                    f"That send appears to have started, but I cannot verify delivery yet. "
-                    f"Route: {attempt.route_mode.value}. {evidence}".strip()
-                )
-            title = "Discord Uncertain"
-            micro = f"Send status to {preview.destination.label} is uncertain."
+            title = "Discord Unverified"
+            micro = f"Discord send action performed for {preview.destination.label}; not verified."
+        elif attempt.state == DiscordDispatchState.DISPATCH_ATTEMPTED_UNVERIFIED:
+            assistant_response = (
+                f"I attempted the Discord dispatch to {preview.destination.label}, but I could not verify a final send. "
+                f"Route: {attempt.route_mode.value}. {evidence}".strip()
+            )
+            title = "Discord Attempted"
+            micro = f"Discord dispatch attempt to {preview.destination.label} is unverified."
+        elif attempt.state == DiscordDispatchState.DISPATCH_NOT_IMPLEMENTED:
+            assistant_response = (
+                "Discord local-client dispatch is not wired yet. I can only prepare the message right now. "
+                f"Route: {attempt.route_mode.value}."
+            )
+            title = "Discord Dispatch Unavailable"
+            micro = "Discord dispatch is not wired yet."
+        elif attempt.state == DiscordDispatchState.DISPATCH_UNAVAILABLE:
+            assistant_response = (
+                f"I have the message ready for {preview.destination.label}, but I cannot reach Discord/local automation. "
+                f"Route: {attempt.route_mode.value}."
+            )
+            title = "Discord Dispatch Unavailable"
+            micro = "Discord local automation is unavailable."
+        elif attempt.state == DiscordDispatchState.DISPATCH_BLOCKED:
+            assistant_response = (
+                f"Discord dispatch to {preview.destination.label} is blocked. "
+                f"Route: {attempt.route_mode.value}. {attempt.failure_reason or ''}".strip()
+            )
+            title = "Discord Blocked"
+            micro = f"Discord dispatch to {preview.destination.label} is blocked."
         else:
             if bool(attempt.debug.get("wrong_thread_refusal")):
                 assistant_response = (
@@ -1362,8 +2002,8 @@ class DiscordRelaySubsystem:
                     f"Route: {attempt.route_mode.value}."
                 )
                 title = "Discord Failed"
-                micro = f"Failed to send to {preview.destination.label}."
-            elif attempt.send_summary:
+                micro = f"Discord dispatch to {preview.destination.label} stopped."
+            elif attempt.send_summary and not self._send_summary_overclaims_success(attempt.send_summary):
                 assistant_response = f"{attempt.send_summary} Route: {attempt.route_mode.value}."
                 if transport_failure_kind:
                     assistant_response += f" Transport failure: {transport_failure_kind}."
@@ -1382,19 +2022,16 @@ class DiscordRelaySubsystem:
                 micro = f"Failed to send to {preview.destination.label}."
         contract = self._adapter_contract_for_route(attempt.route_mode)
         observed_outcome = ClaimOutcome.NONE
-        if attempt.state == DiscordDispatchState.VERIFIED:
+        if attempt.state == DiscordDispatchState.SENT_VERIFIED:
             observed_outcome = claim_outcome_from_verification_strength(attempt.verification_strength)
-        elif attempt.state == DiscordDispatchState.STARTED:
+        elif attempt.state in {
+            DiscordDispatchState.SENT_UNVERIFIED,
+            DiscordDispatchState.DISPATCH_ATTEMPTED_UNVERIFIED,
+        }:
             observed_outcome = ClaimOutcome.INITIATED
-        elif attempt.state == DiscordDispatchState.UNCERTAIN:
-            observed_outcome = claim_outcome_from_verification_strength(attempt.verification_strength)
         execution = build_execution_report(
             contract,
-            success=attempt.state in {
-                DiscordDispatchState.VERIFIED,
-                DiscordDispatchState.STARTED,
-                DiscordDispatchState.UNCERTAIN,
-            },
+            success=attempt.state in {DiscordDispatchState.SENT_VERIFIED, DiscordDispatchState.SENT_UNVERIFIED},
             observed_outcome=observed_outcome,
             evidence=list(attempt.verification_evidence[:3]),
             verification_observed=attempt.verification_strength,
@@ -1405,10 +2042,33 @@ class DiscordRelaySubsystem:
                 "bearing_title": title,
                 "micro_response": micro,
                 "full_response": assistant_response,
+                "result_state": attempt.state.value,
+                "sent": attempt.state in {DiscordDispatchState.SENT_UNVERIFIED, DiscordDispatchState.SENT_VERIFIED},
+                "verified": attempt.state == DiscordDispatchState.SENT_VERIFIED,
+                "dispatch_attempted": self._attempt_attempted_dispatch(attempt),
+                "final_send_gesture_performed": self._attempt_performed_final_send(attempt),
             },
             contract=contract,
             execution=execution,
         )
+
+    def _send_summary_overclaims_success(self, summary: str | None) -> bool:
+        text = str(summary or "").strip().lower()
+        if not text:
+            return False
+        blocked_phrases = (
+            "sent to",
+            "message sent",
+            "i sent",
+            "delivered",
+            "delivery verified",
+            "verified delivery",
+            "succeeded",
+            "successfully sent",
+            "completed the send",
+            "completed the dispatch",
+        )
+        return any(phrase in text for phrase in blocked_phrases)
 
     def _adapter_contract_for_route(self, route_mode: DiscordRouteMode) -> Any:
         assessment = self._relay_route_contract_assessment(route_mode)
@@ -1460,6 +2120,8 @@ class DiscordRelaySubsystem:
             return f'the note/artifact "{payload.title or "current note"}"'
         if payload.kind == DiscordPayloadKind.SCREENSHOT_CANDIDATE:
             return "the requested screenshot payload"
+        if payload.kind == DiscordPayloadKind.CLIPBOARD_TEXT:
+            return "the clipboard text"
         return "the selected text"
 
     def _pending_preview_request_state(self, preview: DiscordDispatchPreview) -> dict[str, object]:
@@ -1479,6 +2141,8 @@ class DiscordRelaySubsystem:
                 "note_text": preview.note_text,
                 "request_stage": "preview",
                 "pending_preview": preview.to_dict(),
+                "pending_relay_request_id": str(preview.fingerprint.get("fingerprint_id") or ""),
+                "result_state": DiscordDispatchState.PREVIEW_READY.value,
             },
         }
 

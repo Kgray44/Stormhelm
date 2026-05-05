@@ -1,0 +1,125 @@
+{
+  "claim_ceiling": "browser_semantic_task_execution",
+  "cleanup_closed": true,
+  "cleanup_note": "Started isolated contexts closed; tampered plan blocked before browser launch.",
+  "cleanup_statuses": {
+    "drift_plan": "closed",
+    "safe_plan": "closed",
+    "tampered_plan_prelaunch_block": "not_started"
+  },
+  "declared_action_capabilities": [
+    "browser.input.check",
+    "browser.input.click",
+    "browser.input.focus",
+    "browser.input.scroll",
+    "browser.input.scroll_to_target",
+    "browser.input.select_option",
+    "browser.input.type_text",
+    "browser.input.uncheck",
+    "browser.task.safe_sequence"
+  ],
+  "drift_plan": {
+    "action_attempted": true,
+    "cleanup_status": "closed",
+    "completed_step_count": 2,
+    "failure_reason": "target_missing",
+    "final_verification_status": "blocked",
+    "limitations": [
+      "isolated_temporary_browser_context",
+      "no_user_profile",
+      "no_cookies_persisted",
+      "no_form_submit",
+      "not_visible_screen_verification",
+      "not_truth_verified",
+      "semantic_comparison_only",
+      "not_user_visible_screen",
+      "target_blocked",
+      "target_missing",
+      "safe_browser_sequence"
+    ],
+    "status": "stopped_on_blocked",
+    "step_action_attempted": [
+      true,
+      false
+    ],
+    "step_error_codes": [
+      "",
+      "target_missing"
+    ],
+    "step_statuses": [
+      "verified_supported",
+      "blocked"
+    ]
+  },
+  "forbidden_capabilities_checked": [
+    "browser.captcha",
+    "browser.cookies.read",
+    "browser.cookies.write",
+    "browser.download",
+    "browser.form.submit",
+    "browser.login",
+    "browser.payment",
+    "browser.truth_verify",
+    "browser.user_profile.attach",
+    "browser.visible_screen_verify",
+    "browser.workflow_replay"
+  ],
+  "forbidden_capabilities_false": true,
+  "raw_text_absent": true,
+  "safe_plan": {
+    "action_attempted": true,
+    "cleanup_status": "closed",
+    "completed_step_count": 3,
+    "failure_reason": "",
+    "final_verification_status": "supported",
+    "limitations": [
+      "isolated_temporary_browser_context",
+      "no_user_profile",
+      "no_cookies_persisted",
+      "no_form_submit",
+      "not_visible_screen_verification",
+      "not_truth_verified",
+      "semantic_comparison_only",
+      "not_user_visible_screen",
+      "safe_browser_sequence"
+    ],
+    "status": "completed_verified",
+    "step_action_attempted": [
+      true,
+      true,
+      true
+    ],
+    "step_error_codes": [
+      "",
+      "",
+      ""
+    ],
+    "step_statuses": [
+      "verified_supported",
+      "verified_supported",
+      "verified_supported"
+    ]
+  },
+  "scenario": "addition-playwright-9.1-live-task-plan-hardening",
+  "status": "passed",
+  "submit_counter_remained_zero": true,
+  "tampered_plan": {
+    "action_attempted": false,
+    "cleanup_status": "not_started",
+    "completed_step_count": 0,
+    "failure_reason": "step_order_changed",
+    "final_verification_status": "",
+    "limitations": [
+      "approval_binding_mismatch",
+      "step_order_changed",
+      "approval_invalid",
+      "no_action_attempted"
+    ],
+    "status": "blocked",
+    "step_action_attempted": [],
+    "step_error_codes": [],
+    "step_statuses": []
+  },
+  "tampered_plan_blocked": true,
+  "target_drift_stopped": true
+}

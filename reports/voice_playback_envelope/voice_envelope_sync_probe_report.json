@@ -1,0 +1,61 @@
+{
+  "probe": "voice_envelope_sync",
+  "version": "Voice-L0.5",
+  "generated_at": "2026-05-03T13:19:10.699774+00:00",
+  "formula": "sample_time_ms = playback_visual_time_ms - estimated_output_latency_ms - envelope_visual_offset_ms",
+  "sign_convention": {
+    "negative_envelope_visual_offset_ms": "advance visual reaction",
+    "positive_envelope_visual_offset_ms": "delay visual reaction"
+  },
+  "raw_audio_present": false,
+  "raw_audio_logged": false,
+  "scenario_count": 4,
+  "failures": [],
+  "passed": true,
+  "rows": [
+    {
+      "scenario": "default_latency",
+      "visual_time_ms": 300,
+      "estimated_output_latency_ms": 100,
+      "envelope_visual_offset_ms": 0,
+      "applied_offset_ms": -100,
+      "sample_time_ms": 200,
+      "sampled_energy": 0.78,
+      "passed": true
+    },
+    {
+      "scenario": "advance_visual_negative_offset",
+      "visual_time_ms": 300,
+      "estimated_output_latency_ms": 100,
+      "envelope_visual_offset_ms": -40,
+      "applied_offset_ms": -60,
+      "sample_time_ms": 240,
+      "sampled_energy": 0.34,
+      "passed": true
+    },
+    {
+      "scenario": "delay_visual_positive_offset",
+      "visual_time_ms": 300,
+      "estimated_output_latency_ms": 100,
+      "envelope_visual_offset_ms": 40,
+      "applied_offset_ms": -140,
+      "sample_time_ms": 160,
+      "sampled_energy": 0.2,
+      "passed": true
+    },
+    {
+      "scenario": "clamped_extreme_offset",
+      "visual_time_ms": 700,
+      "estimated_output_latency_ms": 900,
+      "envelope_visual_offset_ms": -900,
+      "applied_offset_ms": 0,
+      "sample_time_ms": 700,
+      "sampled_energy": 0.08,
+      "passed": true
+    }
+  ],
+  "artifacts": {
+    "samples_csv": "reports\\voice_playback_envelope\\envelope_sync_samples.csv",
+    "report_json": "reports\\voice_playback_envelope\\voice_envelope_sync_probe_report.json"
+  }
+}

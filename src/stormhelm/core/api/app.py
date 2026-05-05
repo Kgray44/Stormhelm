@@ -1514,6 +1514,28 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         )
         return _voice_action_response("voice.stopPlayback", result, current)
 
+    @app.post("/voice/diagnostics/local-pcm-fixture")
+    async def play_voice_local_pcm_fixture(
+        payload: dict[str, object], request: Request
+    ) -> dict[str, object]:
+        if str(os.environ.get("STORMHELM_VOICE_AR1_LIVE_DIAG", "")).lower() not in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            raise HTTPException(
+                status_code=403,
+                detail="Voice AR1 live diagnostics are disabled.",
+            )
+        current = _current_container(request)
+        result = current.voice.run_local_pcm_voice_fixture(
+            session_id=str(payload.get("session_id") or "voice-ar1-local-fixture"),
+            turn_id=str(payload.get("turn_id") or "") or None,
+            prompt=str(payload.get("prompt") or ""),
+        )
+        return dict(result)
+
     @app.post("/voice/output/stop-speaking")
     async def stop_voice_speaking(
         payload: VoiceInterruptionControlRequest, request: Request

@@ -17,6 +17,12 @@ EXPLICIT_REQUEST_PATTERN = re.compile(
     re.IGNORECASE,
 )
 SOLVE_REQUEST_PATTERN = re.compile(r"^\s*solve\s+(?P<expr>.+?)\s*[?.!]*\s*$", re.IGNORECASE)
+ENGINEERING_LITERAL_CONVERSION_PATTERN = re.compile(
+    r"^\s*(?:please\s+)?(?:convert|show|give)\s+"
+    r"(?P<expr>\d+(?:\.\d+)?\s*(?:[GMkmunp\u00b5])?(?:\s*(?:ohms?|[aAvVwWfFhH]|hz|Hz|\u03a9))?)"
+    r"\s+(?:to|in|as)\s+(?:ohms?|\u03a9|volts?|amps?|watts?|farads?|henrys?|hertz|hz|seconds?)\s*[?.!]*\s*$",
+    re.IGNORECASE,
+)
 EMBEDDED_EXPLICIT_REQUEST_PATTERN = re.compile(
     r"\b(?:calculate|compute|evaluate|calc|solve|what(?:'s| is| does))\s+(?P<expr>[0-9A-Za-z+\-*/^().,\s\u2212\u2012\u2013\u2014\u00d7\u00f7]+)",
     re.IGNORECASE,
@@ -208,6 +214,19 @@ def detect_expression_candidate(raw_text: str, normalized_text: str) -> Expressi
                 requested_mode=CalculationOutputMode.SHORT_EXPRESSION,
                 reasons=["solve phrase matched"],
                 route_confidence=0.88,
+            )
+
+    conversion_match = ENGINEERING_LITERAL_CONVERSION_PATTERN.match(raw)
+    if conversion_match:
+        expression = re.sub(r"\s+", "", _strip_terminal_punctuation(conversion_match.group("expr")))
+        if expression and _looks_like_direct_expression(expression):
+            return ExpressionCandidate(
+                candidate=True,
+                explicit_request=True,
+                extracted_expression=expression,
+                requested_mode=CalculationOutputMode.ANSWER_ONLY,
+                reasons=["engineering literal conversion phrase matched"],
+                route_confidence=0.95,
             )
 
     embedded = _embedded_expression_candidate(raw)

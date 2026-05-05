@@ -48,6 +48,7 @@ ApplicationWindow {
     readonly property var ghostAdaptiveStyle: bridge ? bridge.ghostAdaptiveStyle : ({})
     readonly property var ghostPlacement: bridge ? bridge.ghostPlacement : ({})
     readonly property var stormforgeFogConfig: bridge ? bridge.uiStormforgeFog : ({})
+    readonly property var stormforgeVoiceDiagnosticsConfig: bridge ? bridge.uiStormforgeVoiceDiagnostics : ({})
     readonly property real ghostOffsetX: root.ghostMode ? root.ghostPlacementNumber("offsetX", 0) : 0
     readonly property real ghostOffsetY: root.ghostMode ? root.ghostPlacementNumber("offsetY", 0) : 0
     property real typingDarkProgress: bridge && bridge.ghostCaptureActive && root.ghostMode ? 1.0 : 0.0
@@ -349,6 +350,12 @@ ApplicationWindow {
         actionStrip: bridge ? bridge.ghostActionStrip : []
         cornerReadouts: bridge ? bridge.ghostCornerReadouts : []
         voiceState: bridge ? bridge.voiceState : ({})
+        voiceVisualState: bridge ? bridge.voiceVisualState : ({})
+        captureActive: bridge ? bridge.ghostCaptureActive : false
+        draftText: bridge ? bridge.ghostDraftText : ""
+        hintText: bridge ? bridge.ghostInputHint : ""
+        assistantState: bridge ? bridge.assistantState : "idle"
+        routeInspector: bridge ? bridge.routeInspector : ({})
         statusLine: bridge ? bridge.statusLine : ""
         connectionLabel: bridge ? bridge.connectionLabel : ""
         timeLabel: bridge ? bridge.localTimeLabel : ""
@@ -360,6 +367,7 @@ ApplicationWindow {
         adaptiveShadowOpacity: root.ghostStyleNumber("shadowOpacity", 0.1)
         adaptiveBackdropOpacity: root.ghostStyleNumber("backdropOpacity", 0.04)
         stormforgeFogConfig: root.stormforgeFogConfig
+        stormforgeVoiceDiagnosticsConfig: root.stormforgeVoiceDiagnosticsConfig
         visible: opacity > 0.02
         opacity: (1 - root.deckProgress) * root.ghostRevealProgress
         scale: (1 - root.deckProgress * 0.018) * root.mix(0.986, 1.0, root.ghostRevealProgress)

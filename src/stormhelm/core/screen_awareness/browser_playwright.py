@@ -6,6 +6,7 @@ from datetime import datetime
 from importlib.util import find_spec
 import hashlib
 import ipaddress
+import json
 from typing import Any, Callable, Iterable, Sequence
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
@@ -25,6 +26,9 @@ from stormhelm.core.screen_awareness.models import (
     BrowserSemanticChange,
     BrowserSemanticControl,
     BrowserSemanticObservation,
+    BrowserSemanticTaskExecutionResult,
+    BrowserSemanticTaskPlan,
+    BrowserSemanticTaskStep,
     BrowserSemanticVerificationRequest,
     BrowserSemanticVerificationResult,
     PlaywrightAdapterReadiness,
@@ -44,6 +48,8 @@ _CLAIM_CEILING = "browser_semantic_observation"
 _COMPARISON_CLAIM_CEILING = "browser_semantic_observation_comparison"
 _ACTION_PREVIEW_CLAIM_CEILING = "browser_semantic_action_preview"
 _ACTION_EXECUTION_CLAIM_CEILING = "browser_semantic_action_execution"
+_TASK_PLAN_CLAIM_CEILING = "browser_semantic_task_plan"
+_TASK_EXECUTION_CLAIM_CEILING = "browser_semantic_task_execution"
 _MOCK_LIMITATIONS = [
     "mock_semantic_observation",
     "no_live_browser_connection",
@@ -231,6 +237,7 @@ class PlaywrightBrowserSemanticAdapter:
     _last_verification_summary: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
     _last_action_preview_summary: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
     _last_action_execution_summary: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
+    _last_task_execution_summary: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
 
     @property
     def last_observation_summary(self) -> dict[str, Any]:
@@ -251,6 +258,10 @@ class PlaywrightBrowserSemanticAdapter:
     @property
     def last_action_execution_summary(self) -> dict[str, Any]:
         return dict(self._last_action_execution_summary)
+
+    @property
+    def last_task_execution_summary(self) -> dict[str, Any]:
+        return dict(self._last_task_execution_summary)
 
     def adapter_semantics_payload(self, observation: BrowserSemanticObservation) -> dict[str, Any]:
         """Convert a Playwright semantic observation into the canonical browser adapter payload."""
@@ -302,6 +313,7 @@ class PlaywrightBrowserSemanticAdapter:
                 "select_option_enabled": "browser.input.select_option" in declared_action_capabilities,
                 "scroll_enabled": "browser.input.scroll" in declared_action_capabilities,
                 "scroll_to_target_enabled": "browser.input.scroll_to_target" in declared_action_capabilities,
+                "task_plans_enabled": "browser.task.safe_sequence" in declared_action_capabilities,
                 "declared_action_capabilities": declared_action_capabilities,
                 "forbidden_action_capabilities": forbidden_action_capabilities,
                 "last_observation_summary": self.last_observation_summary,
@@ -309,6 +321,7 @@ class PlaywrightBrowserSemanticAdapter:
                 "last_verification_summary": self.last_verification_summary,
                 "last_action_preview_summary": self.last_action_preview_summary,
                 "last_action_execution_summary": self.last_action_execution_summary,
+                "last_task_execution_summary": self.last_task_execution_summary,
             }
         )
         return readiness
@@ -969,6 +982,406 @@ class PlaywrightBrowserSemanticAdapter:
         )
         return plan
 
+    def build_semantic_task_plan(
+        self,
+        observation: BrowserSemanticObservation,
+        *,
+        task_phrase: str = "",
+        steps: Sequence[dict[str, Any]] | None = None,
+        expected_final_state: Sequence[str] | None = None,
+    ) -> BrowserSemanticTaskPlan:
+        max_steps = max(1, int(getattr(self.config, "max_task_steps", 5) or 5))
+        stop_policy = _task_stop_policy_from_config(self.config)
+        task_plan = BrowserSemanticTaskPlan(
+            source_observation_id=observation.observation_id,
+            provider="playwright_live_semantic",
+            max_steps=max_steps,
+            expected_final_state=[_bounded_text(item, 160) for item in list(expected_final_state or [])[:8]],
+            stop_policy=stop_policy,
+            source_task_phrase=_bounded_text(task_phrase, 240),
+            limitations=[
+                "approval_required",
+                "isolated_temporary_browser_context",
+                "safe_primitives_only",
+                "no_form_submit",
+                "no_user_profile",
+                "not_visible_screen_verification",
+                "not_truth_verified",
+            ],
+        )
+        raw_steps = list(steps or [])
+        if not raw_steps:
+            task_plan.reason_not_executable = "explicit_steps_required"
+            task_plan.limitations = list(dict.fromkeys(task_plan.limitations + ["explicit_steps_required"]))
+            task_plan.user_message = "A safe browser task plan needs explicit supported steps."
+            self._last_task_execution_summary = _task_plan_summary(task_plan)
+            self._publish("screen_awareness.playwright_task_plan_created", "Playwright safe browser task plan created.", _task_plan_event_payload(task_plan))
+            return task_plan
+        if len(raw_steps) > max_steps:
+            raw_steps = raw_steps[:max_steps]
+            task_plan.reason_not_executable = "max_steps_exceeded"
+            task_plan.limitations = list(dict.fromkeys(task_plan.limitations + ["max_steps_exceeded"]))
+        built_steps: list[BrowserSemanticTaskStep] = []
+        for index, spec in enumerate(raw_steps, start=1):
+            action_kind = _bounded_text(spec.get("action_kind") or "", 40)
+            target_phrase = _bounded_text(spec.get("target_phrase") or spec.get("target") or "", 120)
+            action_phrase = _bounded_text(spec.get("action_phrase") or action_kind.replace("_", " "), 160)
+            action_arguments = dict(spec.get("action_arguments") or {})
+            expected_outcome = [
+                _bounded_text(item, 80)
+                for item in list(spec.get("expected_outcome") or _expected_outcomes_for_action(action_kind))[:8]
+                if _bounded_text(item, 80)
+            ]
+            step_limitations: list[str] = []
+            if action_kind not in _SAFE_TASK_ACTION_KINDS:
+                step = BrowserSemanticTaskStep(
+                    step_index=index,
+                    action_kind=action_kind or "unsupported",
+                    target_phrase=target_phrase,
+                    action_args_redacted=_redacted_task_step_args(action_kind, action_arguments),
+                    expected_outcome=expected_outcome,
+                    required_capability=_action_capability_required(action_kind),
+                    status="blocked",
+                    limitations=["unsupported_step", "no_action_attempted"],
+                )
+                step.approval_binding_fingerprint = _task_step_binding_fingerprint(step)
+                built_steps.append(step)
+                task_plan.reason_not_executable = task_plan.reason_not_executable or "unsupported_step"
+                continue
+            preview = self.preview_semantic_action(
+                observation,
+                target_phrase=target_phrase,
+                action_phrase=action_phrase,
+                action_arguments=action_arguments,
+            )
+            action_plan = self.build_semantic_action_plan(preview, action_arguments=action_arguments)
+            if action_plan.action_kind != action_kind:
+                step_limitations.append("action_kind_mismatch")
+            if action_plan.result_state in {"blocked", "unsupported", "ambiguous"}:
+                step_limitations.extend(list(action_plan.limitations)[:4])
+            target = dict(action_plan.target_candidate or {})
+            step_status = "blocked" if step_limitations or action_plan.result_state in {"blocked", "unsupported", "ambiguous"} else "pending"
+            step = BrowserSemanticTaskStep(
+                step_index=index,
+                action_kind=action_plan.action_kind,
+                target_phrase=target_phrase,
+                target_candidate_id=_bounded_text(target.get("candidate_id") or "", 80),
+                target_fingerprint=_target_fingerprint(target),
+                action_args_redacted=dict(action_plan.action_arguments_redacted or {}),
+                action_arguments_private=dict(action_plan.action_arguments_private or {}),
+                expected_outcome=expected_outcome or _expected_outcomes_for_action(action_plan.action_kind),
+                required_capability=action_plan.adapter_capability_required,
+                status=step_status,
+                limitations=list(dict.fromkeys(step_limitations)),
+                action_plan_private=action_plan,
+            )
+            step.approval_binding_fingerprint = _task_step_binding_fingerprint(step)
+            built_steps.append(step)
+            if step_status == "blocked":
+                task_plan.reason_not_executable = task_plan.reason_not_executable or "unsafe_task_step"
+        task_plan.steps = built_steps
+        task_plan.risk_level = _task_risk_level(built_steps)
+        task_plan.stop_policy = _task_stop_policy_with_approval_bindings(task_plan.stop_policy, built_steps)
+        task_plan.approval_binding_fingerprint = _task_plan_binding_fingerprint(task_plan)
+        if any(step.status == "blocked" for step in built_steps):
+            task_plan.executable_now = False
+            task_plan.reason_not_executable = task_plan.reason_not_executable or "unsafe_task_step"
+            task_plan.user_message = "This safe browser task plan contains a blocked or unsupported step."
+        else:
+            task_plan.executable_now = False
+            task_plan.reason_not_executable = "approval_required"
+            task_plan.user_message = "Plan ready; approval required."
+        self._last_task_execution_summary = _task_plan_summary(task_plan)
+        self._publish(
+            "screen_awareness.playwright_task_plan_created",
+            "Playwright safe browser task plan created.",
+            _task_plan_event_payload(task_plan),
+        )
+        return task_plan
+
+    def request_semantic_task_execution(
+        self,
+        plan: BrowserSemanticTaskPlan | dict[str, Any],
+        *,
+        url: str,
+        trust_service: Any | None = None,
+        session_id: str = "default",
+        task_id: str = "",
+        fixture_mode: bool = False,
+        context_options: dict[str, Any] | None = None,
+    ) -> BrowserSemanticTaskExecutionResult:
+        return self.execute_semantic_task_plan(
+            plan,
+            url=url,
+            trust_service=trust_service,
+            session_id=session_id,
+            task_id=task_id,
+            fixture_mode=fixture_mode,
+            context_options=context_options,
+            require_only=True,
+        )
+
+    def execute_semantic_task_plan(
+        self,
+        plan: BrowserSemanticTaskPlan | dict[str, Any],
+        *,
+        url: str,
+        trust_service: Any | None = None,
+        session_id: str = "default",
+        task_id: str = "",
+        fixture_mode: bool = False,
+        context_options: dict[str, Any] | None = None,
+        require_only: bool = False,
+    ) -> BrowserSemanticTaskExecutionResult:
+        plan_model = _coerce_task_plan(plan)
+        self._publish(
+            "screen_awareness.playwright_task_execution_started" if not require_only else "screen_awareness.playwright_task_plan_approval_required",
+            "Playwright safe browser task execution requested.",
+            _task_plan_event_payload(plan_model, status="requested"),
+        )
+        gate_result = self._task_plan_gate_result(plan_model)
+        if gate_result is not None:
+            return self._finalize_task_execution(
+                gate_result,
+                event_type="screen_awareness.playwright_task_step_blocked",
+                severity=EventSeverity.WARNING,
+            )
+        action_request = _trust_task_plan_request(plan_model, session_id=session_id, task_id=task_id)
+        if trust_service is None:
+            result = _task_execution_result(
+                plan_model,
+                status="approval_required",
+                trust_request_id=action_request.request_id,
+                user_message="Approval is required before this safe browser task plan can run.",
+                limitations=["approval_required", "trust_service_required", "no_action_attempted"],
+            )
+            return self._finalize_task_execution(result, event_type="screen_awareness.playwright_task_plan_approval_required")
+        trust_decision = trust_service.evaluate_action(action_request)
+        if trust_decision.outcome != TrustDecisionOutcome.ALLOWED:
+            approval_request = trust_decision.approval_request
+            blocked_by_operator = trust_decision.outcome == TrustDecisionOutcome.BLOCKED
+            result = _task_execution_result(
+                plan_model,
+                status="blocked" if blocked_by_operator else "approval_required",
+                trust_request_id=action_request.request_id,
+                approval_request_id=approval_request.approval_request_id if approval_request is not None else "",
+                failure_reason="approval_denied" if blocked_by_operator else "",
+                user_message=trust_decision.operator_message or "Approval is required before this safe browser task plan can run.",
+                limitations=[("approval_denied" if blocked_by_operator else "approval_required"), "no_action_attempted"],
+            )
+            return self._finalize_task_execution(
+                result,
+                event_type=(
+                    "screen_awareness.playwright_task_step_blocked"
+                    if blocked_by_operator
+                    else "screen_awareness.playwright_task_plan_approval_required"
+                ),
+                severity=EventSeverity.WARNING if blocked_by_operator else EventSeverity.INFO,
+            )
+        if require_only:
+            result = _task_execution_result(
+                plan_model,
+                status="running",
+                trust_request_id=action_request.request_id,
+                approval_grant_id=trust_decision.grant.grant_id if trust_decision.grant is not None else "",
+                user_message="Approval is available for this safe browser task plan.",
+                limitations=["approval_available", "task_not_attempted"],
+            )
+            return self._finalize_task_execution(result, event_type="")
+
+        browser = None
+        context = None
+        cleanup_status = "not_started"
+        cleanup_error: Exception | None = None
+        step_results: list[BrowserSemanticActionExecutionResult] = []
+        final_status = "failed"
+        final_verification_status = ""
+        blocked_step_id = ""
+        failure_reason = ""
+        final_result: BrowserSemanticTaskExecutionResult | None = None
+        try:
+            readiness = self.get_readiness(emit_event=False)
+            launch_blocker = _live_launch_blocker(self.config, readiness)
+            url_blocker = _live_url_blocker(url, fixture_mode=fixture_mode)
+            if launch_blocker or url_blocker:
+                result = _task_execution_result(
+                    plan_model,
+                    status="blocked",
+                    trust_request_id=action_request.request_id,
+                    approval_grant_id=trust_decision.grant.grant_id if trust_decision.grant is not None else "",
+                    failure_reason=launch_blocker or url_blocker,
+                    user_message="That safe browser task plan is not available under the current Playwright gates.",
+                    limitations=["launch_or_url_blocked", launch_blocker or url_blocker, "no_action_attempted"],
+                )
+                final_result = self._finalize_task_execution(result, event_type="screen_awareness.playwright_task_step_blocked")
+                return final_result
+            self._publish(
+                "screen_awareness.playwright_task_execution_started",
+                "Trust-gated Playwright safe browser task execution started.",
+                _task_plan_event_payload(plan_model, status="running"),
+            )
+            factory = self.sync_playwright_factory or _load_sync_playwright_factory()
+            with factory() as playwright:
+                browser = playwright.chromium.launch(headless=True)
+                try:
+                    safe_context_options = _safe_context_options(context_options)
+                    context = browser.new_context(storage_state=None, **safe_context_options)
+                    page = context.new_page()
+                    page.goto(
+                        str(url),
+                        wait_until="domcontentloaded",
+                        timeout=int(self.config.navigation_timeout_seconds or 12000),
+                    )
+                    _wait_for_semantic_stabilization(page)
+                    for step_position, step in enumerate(plan_model.steps):
+                        self._publish(
+                            "screen_awareness.playwright_task_step_started",
+                            "Playwright safe browser task step started.",
+                            _task_step_event_payload(plan_model, step, status="executing"),
+                        )
+                        before = _live_observation_from_page(
+                            page,
+                            adapter_id=self.adapter_id,
+                            session_id=f"playwright-task-before-{uuid4().hex[:10]}",
+                        )
+                        step_result = self._execute_task_step_on_page(
+                            step,
+                            page=page,
+                            before=before,
+                            session_id=session_id,
+                            task_id=task_id,
+                            trust_request_id=action_request.request_id,
+                            approval_grant_id=trust_decision.grant.grant_id if trust_decision.grant is not None else "",
+                            trust_scope=trust_decision.grant.scope.value if trust_decision.grant is not None else action_request.suggested_scope.value,
+                        )
+                        step.status = step_result.status
+                        step.verification_result_id = step_result.comparison_result_id
+                        step_results.append(step_result)
+                        event_type = (
+                            "screen_awareness.playwright_task_step_failed"
+                            if step_result.status == "failed"
+                            else "screen_awareness.playwright_task_step_blocked"
+                            if step_result.status in {"blocked", "unsupported", "ambiguous"}
+                            else "screen_awareness.playwright_task_step_completed"
+                        )
+                        self._publish(
+                            event_type,
+                            "Playwright safe browser task step completed.",
+                            _task_step_event_payload(plan_model, step, result=step_result, status=step_result.status),
+                            severity=EventSeverity.WARNING if event_type != "screen_awareness.playwright_task_step_completed" else EventSeverity.INFO,
+                        )
+                        stop_status = _task_stop_status(step_result, self.config)
+                        if stop_status:
+                            final_status = stop_status
+                            final_verification_status = step_result.verification_status or step_result.status
+                            blocked_step_id = step.step_id
+                            failure_reason = step_result.error_code or step_result.status
+                            self._publish(
+                                "screen_awareness.playwright_task_stopped",
+                                "Playwright safe browser task plan stopped before later steps.",
+                                _task_step_event_payload(plan_model, step, result=step_result, status=final_status),
+                                severity=EventSeverity.WARNING,
+                            )
+                            for skipped_step in _mark_task_steps_skipped(plan_model, start_index=step_position + 1):
+                                self._publish(
+                                    "screen_awareness.playwright_task_step_skipped",
+                                    "Playwright safe browser task step skipped after prior stop.",
+                                    _task_step_event_payload(plan_model, skipped_step, status="skipped"),
+                                    severity=EventSeverity.INFO,
+                                )
+                            break
+                    if not final_verification_status:
+                        final_verification_status = "supported" if all(item.status == "verified_supported" for item in step_results) else "partial"
+                    if final_status == "failed":
+                        final_status = "completed_verified" if final_verification_status == "supported" else "completed_partial"
+                    if step_results:
+                        trust_service.mark_action_executed(
+                            action_request=action_request,
+                            grant=trust_decision.grant,
+                            summary=f"Executed Playwright safe browser task plan with {len(step_results)} attempted step(s).",
+                            details={
+                                "plan_id": plan_model.plan_id,
+                                "step_count": len(plan_model.steps),
+                                "completed_step_count": len(step_results),
+                                "final_status": final_status,
+                                "claim_ceiling": _TASK_EXECUTION_CLAIM_CEILING,
+                                "steps": [_task_step_audit_summary(step, result) for step, result in zip(plan_model.steps, step_results)],
+                            },
+                        )
+                    final_result = _task_execution_result(
+                        plan_model,
+                        status=final_status,
+                        step_results=step_results,
+                        completed_step_count=len(step_results),
+                        blocked_step_id=blocked_step_id,
+                        failure_reason=failure_reason,
+                        final_verification_status=final_verification_status,
+                        action_attempted=any(item.action_attempted for item in step_results),
+                        trust_request_id=action_request.request_id,
+                        approval_grant_id=trust_decision.grant.grant_id if trust_decision.grant is not None else "",
+                        limitations=_task_execution_limitations(step_results, extra=["safe_browser_sequence", "no_form_submit"]),
+                    )
+                    self._publish(
+                        "screen_awareness.playwright_task_final_verification_completed",
+                        "Playwright safe browser task final verification completed.",
+                        _task_execution_event_payload(final_result),
+                        severity=EventSeverity.WARNING if final_status != "completed_verified" else EventSeverity.INFO,
+                    )
+                    return self._finalize_task_execution(final_result, event_type="")
+                finally:
+                    cleanup_status, cleanup_error = self._cleanup_isolated_browser_resources(
+                        context,
+                        browser,
+                        claim_ceiling=_TASK_EXECUTION_CLAIM_CEILING,
+                        completed_message="Playwright isolated browser task cleanup completed.",
+                        completed_limitations=["no_user_profile", "no_cookies_persisted"],
+                        failed_limitations=["cleanup_failed", "no_user_profile", "no_cookies_persisted"],
+                    )
+                    context = None
+                    browser = None
+        except Exception as exc:
+            result = _task_execution_result(
+                plan_model,
+                status="failed",
+                step_results=step_results,
+                completed_step_count=len(step_results),
+                failure_reason=_live_error_code(exc),
+                final_verification_status="failed",
+                action_attempted=any(item.action_attempted for item in step_results),
+                trust_request_id=action_request.request_id,
+                approval_grant_id=trust_decision.grant.grant_id if trust_decision.grant is not None else "",
+                user_message="The safe browser task plan failed before Stormhelm could produce a bounded verified result.",
+                limitations=["task_execution_failed", "isolated_temporary_browser_context"],
+            )
+            final_result = self._finalize_task_execution(
+                result,
+                event_type="screen_awareness.playwright_task_step_failed",
+                severity=EventSeverity.WARNING,
+            )
+            return final_result
+        finally:
+            if cleanup_status == "not_started" and (context is not None or browser is not None):
+                cleanup_status, cleanup_error = self._cleanup_isolated_browser_resources(
+                    context,
+                    browser,
+                    claim_ceiling=_TASK_EXECUTION_CLAIM_CEILING,
+                    completed_message="Playwright isolated browser task cleanup completed.",
+                    completed_limitations=["no_user_profile", "no_cookies_persisted"],
+                    failed_limitations=["cleanup_failed", "no_user_profile", "no_cookies_persisted"],
+                )
+            if final_result is not None:
+                final_result.cleanup_status = cleanup_status
+                if cleanup_error is not None:
+                    final_result.limitations = list(dict.fromkeys(list(final_result.limitations) + ["cleanup_failed"]))
+                    final_result.failure_reason = final_result.failure_reason or "cleanup_failed"
+                self._last_task_execution_summary = _task_execution_summary(final_result)
+                self._publish(
+                    "screen_awareness.playwright_task_cleanup_completed",
+                    "Playwright safe browser task cleanup completed.",
+                    _task_execution_event_payload(final_result),
+                    severity=EventSeverity.WARNING if cleanup_error is not None else EventSeverity.INFO,
+                )
+
     def request_semantic_action_execution(
         self,
         plan: BrowserSemanticActionPlan | dict[str, Any],
@@ -1152,6 +1565,30 @@ class PlaywrightBrowserSemanticAdapter:
                         adapter_id=self.adapter_id,
                         session_id=f"playwright-action-before-{uuid4().hex[:10]}",
                     )
+                    action_context_blocker = _action_context_blocker(before, plan_model.action_kind)
+                    if action_context_blocker and plan_model.action_kind not in {"scroll", "scroll_to_target"}:
+                        result = _execution_result(
+                            request,
+                            plan_model,
+                            status="blocked",
+                            trust_request_id=action_request.request_id,
+                            approval_grant_id=trust_decision.grant.grant_id if trust_decision.grant is not None else "",
+                            trust_scope=trust_decision.grant.scope.value if trust_decision.grant is not None else action_request.suggested_scope.value,
+                            before_observation_id=before.observation_id,
+                            error_code=action_context_blocker,
+                            user_message="Browser action blocked: page appears sensitive or restricted.",
+                            limitations=["sensitive_page_context", action_context_blocker, "no_action_attempted"],
+                        )
+                        final_result = self._finalize_action_execution(
+                            result,
+                            event_type=_action_event_type(
+                                plan_model.action_kind,
+                                "screen_awareness.playwright_action_execution_blocked",
+                                "screen_awareness.playwright_type_blocked",
+                            ),
+                            severity=EventSeverity.WARNING,
+                        )
+                        return final_result
                     if plan_model.action_kind in {"scroll", "scroll_to_target"}:
                         scroll_context_blocker = _scroll_context_blocker(before)
                         if scroll_context_blocker:
@@ -1948,6 +2385,490 @@ class PlaywrightBrowserSemanticAdapter:
                 _action_execution_event_payload(result),
                 severity=severity,
             )
+        return result
+
+    def _task_plan_gate_result(self, plan: BrowserSemanticTaskPlan) -> BrowserSemanticTaskExecutionResult | None:
+        if plan.plan_kind != "safe_browser_sequence":
+            return _task_execution_result(
+                plan,
+                status="unsupported",
+                failure_reason="unsupported_task_plan_kind",
+                user_message="That browser task plan kind is not supported.",
+                limitations=["unsupported_task_plan_kind", "no_action_attempted"],
+            )
+        if not plan.steps:
+            return _task_execution_result(
+                plan,
+                status="blocked",
+                failure_reason="explicit_steps_required",
+                user_message="A safe browser task plan needs explicit supported steps.",
+                limitations=["explicit_steps_required", "no_action_attempted"],
+            )
+        if len(plan.steps) > max(1, int(getattr(self.config, "max_task_steps", 5) or 5)):
+            return _task_execution_result(
+                plan,
+                status="blocked",
+                failure_reason="max_steps_exceeded",
+                user_message="That browser task plan has too many steps for the current safe bound.",
+                limitations=["max_steps_exceeded", "no_action_attempted"],
+            )
+        freshness_blocker = _task_plan_freshness_blocker(plan)
+        if freshness_blocker:
+            return _task_execution_result(
+                plan,
+                status="blocked",
+                failure_reason=freshness_blocker,
+                user_message="That browser task plan is stale. Refresh the semantic observation before executing.",
+                limitations=["stale_plan", freshness_blocker, "no_action_attempted"],
+            )
+        computed_binding = _task_plan_binding_fingerprint(plan)
+        if plan.approval_binding_fingerprint and computed_binding != plan.approval_binding_fingerprint:
+            tamper_reason = _task_plan_tamper_reason(plan)
+            return _task_execution_result(
+                plan,
+                status="blocked",
+                failure_reason=tamper_reason,
+                user_message="That approval cannot be used because the ordered browser task plan changed.",
+                limitations=["approval_binding_mismatch", tamper_reason, "approval_invalid", "no_action_attempted"],
+            )
+        task_gate = _task_gate_blocker(self.config)
+        if task_gate:
+            return _task_execution_result(
+                plan,
+                status="blocked",
+                failure_reason=task_gate,
+                user_message="Safe browser task plans are not enabled by the current Playwright gates.",
+                limitations=["task_plan_gate_blocked", task_gate, "no_action_attempted"],
+            )
+        for step in plan.steps:
+            if step.action_kind not in _SAFE_TASK_ACTION_KINDS:
+                return _task_execution_result(
+                    plan,
+                    status="unsupported",
+                    blocked_step_id=step.step_id,
+                    failure_reason="unsupported_step",
+                    user_message="That browser task plan includes an unsupported step.",
+                    limitations=["unsupported_step", step.action_kind, "no_action_attempted"],
+                )
+            if step.status == "blocked":
+                return _task_execution_result(
+                    plan,
+                    status="blocked",
+                    blocked_step_id=step.step_id,
+                    failure_reason=next((item for item in step.limitations if item), "blocked_step"),
+                    user_message="That browser task plan contains a blocked step.",
+                    limitations=list(step.limitations) + ["no_action_attempted"],
+                )
+            if _action_gate_blocker(self.config, step.action_kind):
+                return _task_execution_result(
+                    plan,
+                    status="blocked",
+                    blocked_step_id=step.step_id,
+                    failure_reason=_action_gate_blocker(self.config, step.action_kind),
+                    user_message="A step in that browser task plan is not enabled by the current Playwright gates.",
+                    limitations=["step_capability_blocked", _action_gate_blocker(self.config, step.action_kind), "no_action_attempted"],
+                )
+        return None
+
+    def _execute_task_step_on_page(
+        self,
+        step: BrowserSemanticTaskStep,
+        *,
+        page: Any,
+        before: BrowserSemanticObservation,
+        session_id: str,
+        task_id: str,
+        trust_request_id: str,
+        approval_grant_id: str,
+        trust_scope: str,
+    ) -> BrowserSemanticActionExecutionResult:
+        plan = step.action_plan_private
+        if plan is None:
+            request = BrowserSemanticActionExecutionRequest(
+                plan_id=step.step_id,
+                action_kind=step.action_kind,
+                session_id=session_id,
+                task_id=task_id,
+                expected_outcome=list(step.expected_outcome),
+            )
+            return _execution_result(
+                request,
+                BrowserSemanticActionPlan(plan_id=step.step_id, action_kind=step.action_kind),
+                status="blocked",
+                trust_request_id=trust_request_id,
+                approval_grant_id=approval_grant_id,
+                trust_scope=trust_scope,
+                before_observation_id=before.observation_id,
+                error_code="serialized_plan_replay_blocked",
+                user_message="Serialized browser task plans cannot execute without fresh in-memory step payloads.",
+                limitations=["serialized_plan_replay_blocked", "no_action_attempted"],
+            )
+        request = _execution_request_from_plan(plan, session_id=session_id, task_id=task_id)
+        target_context_blocker = _scroll_context_blocker(before) if plan.action_kind in {"scroll", "scroll_to_target"} else _action_context_blocker(before, plan.action_kind)
+        if target_context_blocker:
+            return _execution_result(
+                request,
+                plan,
+                status="blocked",
+                trust_request_id=trust_request_id,
+                approval_grant_id=approval_grant_id,
+                trust_scope=trust_scope,
+                before_observation_id=before.observation_id,
+                error_code=target_context_blocker,
+                user_message="Browser task step blocked: page appears sensitive or restricted.",
+                limitations=["sensitive_page_context", target_context_blocker, "no_action_attempted"],
+            )
+        binding_blocker = _plan_target_binding_blocker(plan) or _plan_argument_binding_blocker(plan)
+        if binding_blocker:
+            return _execution_result(
+                request,
+                plan,
+                status="blocked",
+                trust_request_id=trust_request_id,
+                approval_grant_id=approval_grant_id,
+                trust_scope=trust_scope,
+                before_observation_id=before.observation_id,
+                error_code=binding_blocker,
+                user_message="Browser task step blocked because its approval binding no longer matches.",
+                limitations=["approval_binding_mismatch", binding_blocker, "no_action_attempted"],
+            )
+        if plan.action_kind in {"scroll", "scroll_to_target"}:
+            return self._execute_scroll_task_step(
+                plan,
+                request=request,
+                page=page,
+                before=before,
+                trust_request_id=trust_request_id,
+                approval_grant_id=approval_grant_id,
+                trust_scope=trust_scope,
+            )
+
+        target_candidate = _resolve_execution_candidate(plan, before)
+        candidate_blocker = _candidate_execution_blocker(plan.action_kind, target_candidate)
+        if candidate_blocker:
+            return _execution_result(
+                request,
+                plan,
+                status="blocked",
+                trust_request_id=trust_request_id,
+                approval_grant_id=approval_grant_id,
+                trust_scope=trust_scope,
+                before_observation_id=before.observation_id,
+                error_code=candidate_blocker,
+                user_message="That browser task step target is not safe or specific enough for execution.",
+                limitations=["target_blocked", candidate_blocker],
+            )
+        locator, locator_blocker = _locator_for_execution(page, target_candidate)
+        if locator_blocker:
+            return _execution_result(
+                request,
+                plan,
+                status="blocked",
+                trust_request_id=trust_request_id,
+                approval_grant_id=approval_grant_id,
+                trust_scope=trust_scope,
+                before_observation_id=before.observation_id,
+                error_code=locator_blocker,
+                user_message="The grounded browser task step target was ambiguous or unavailable at execution time.",
+                limitations=["locator_blocked", locator_blocker],
+            )
+        submit_count_before = _safe_submit_counter(page)
+        if plan.action_kind in {"check", "uncheck"} and _choice_already_in_expected_state(plan.action_kind, target_candidate):
+            return _execution_result(
+                request,
+                plan,
+                status="verified_supported",
+                action_attempted=False,
+                action_completed=False,
+                verification_attempted=True,
+                verification_status="supported",
+                before_observation_id=before.observation_id,
+                after_observation_id=before.observation_id,
+                trust_request_id=trust_request_id,
+                approval_grant_id=approval_grant_id,
+                trust_scope=trust_scope,
+                user_message="Choice already had the requested state; no browser action was issued.",
+                limitations=["already_in_expected_state", "no_action_needed", "isolated_temporary_browser_context"],
+            )
+        selected_option, option_blocker = _select_option_for_execution(plan, target_candidate)
+        if option_blocker:
+            return _execution_result(
+                request,
+                plan,
+                status="blocked",
+                trust_request_id=trust_request_id,
+                approval_grant_id=approval_grant_id,
+                trust_scope=trust_scope,
+                before_observation_id=before.observation_id,
+                error_code=option_blocker,
+                user_message="That dropdown option is unavailable, disabled, ambiguous, or unsafe.",
+                limitations=["option_blocked", option_blocker],
+            )
+        if _select_option_already_in_expected_state(plan, selected_option):
+            return _execution_result(
+                request,
+                plan,
+                status="verified_supported",
+                action_attempted=False,
+                action_completed=False,
+                verification_attempted=True,
+                verification_status="supported",
+                before_observation_id=before.observation_id,
+                after_observation_id=before.observation_id,
+                trust_request_id=trust_request_id,
+                approval_grant_id=approval_grant_id,
+                trust_scope=trust_scope,
+                user_message="Choice already had the requested selected option; no browser action was issued.",
+                limitations=["already_in_expected_state", "no_action_needed", "isolated_temporary_browser_context"],
+            )
+        action_completed = False
+        if plan.action_kind == "click":
+            locator.click(timeout=int(self.config.observation_timeout_seconds or 8000))
+        elif plan.action_kind == "focus":
+            locator.focus(timeout=int(self.config.observation_timeout_seconds or 8000))
+        elif plan.action_kind == "type_text":
+            locator.focus(timeout=int(self.config.observation_timeout_seconds or 8000))
+            locator.fill(
+                _typed_text_value(getattr(plan, "action_arguments_private", {}) or {}),
+                timeout=int(self.config.observation_timeout_seconds or 8000),
+            )
+        elif plan.action_kind == "check":
+            locator.check(timeout=int(self.config.observation_timeout_seconds or 8000))
+        elif plan.action_kind == "uncheck":
+            locator.uncheck(timeout=int(self.config.observation_timeout_seconds or 8000))
+        elif plan.action_kind == "select_option":
+            locator.select_option(label=selected_option.get("label"), timeout=int(self.config.observation_timeout_seconds or 8000))
+        else:
+            raise RuntimeError(f"Unsupported task step action kind reached execution: {plan.action_kind}")
+        action_completed = True
+        _wait_for_semantic_stabilization(page)
+        after = _live_observation_from_page(
+            page,
+            adapter_id=self.adapter_id,
+            session_id=f"playwright-task-after-{uuid4().hex[:10]}",
+        )
+        submit_count_after = _safe_submit_counter(page)
+        if _after_observation_unusable(before, after):
+            return _execution_result(
+                request,
+                plan,
+                status="completed_unverified",
+                action_attempted=True,
+                action_completed=action_completed,
+                verification_attempted=False,
+                verification_status="unavailable",
+                before_observation_id=before.observation_id,
+                after_observation_id=after.observation_id,
+                trust_request_id=trust_request_id,
+                approval_grant_id=approval_grant_id,
+                trust_scope=trust_scope,
+                error_code="after_observation_failed",
+                user_message="The task step command returned, but the after-observation was not usable enough to verify the expected change.",
+                limitations=["after_observation_failed", "completed_unverified", "isolated_temporary_browser_context"],
+            )
+        if _submit_counter_changed(submit_count_before, submit_count_after):
+            return _execution_result(
+                request,
+                plan,
+                status="failed",
+                action_attempted=True,
+                action_completed=action_completed,
+                verification_attempted=True,
+                verification_status="failed",
+                before_observation_id=before.observation_id,
+                after_observation_id=after.observation_id,
+                trust_request_id=trust_request_id,
+                approval_grant_id=approval_grant_id,
+                trust_scope=trust_scope,
+                error_code="unexpected_form_submission",
+                user_message="The browser task step changed a fixture submit counter, so Stormhelm stopped the plan.",
+                limitations=["unexpected_form_submission", "submit_prevention_failed", "not_visible_screen_verification", "not_truth_verified"],
+            )
+        comparison = _best_action_comparison(self, before, after, plan)
+        status, verification_status, user_message = _execution_status_from_comparison(plan.action_kind, comparison)
+        error_code = ""
+        comparison_limitations = list(comparison.limitations if comparison is not None else ["comparison_unavailable"])
+        if plan.action_kind in {"check", "uncheck", "select_option"} and _choice_unexpected_navigation(before, after):
+            status = "failed"
+            verification_status = "failed"
+            error_code = "unexpected_navigation"
+            user_message = "Choice action changed the page URL unexpectedly, so Stormhelm stopped the task plan."
+            comparison_limitations.append("unexpected_navigation")
+        elif (
+            plan.action_kind in {"check", "uncheck", "select_option"}
+            and _choice_unexpected_warning_added(before, after)
+            and status == "verified_supported"
+        ):
+            status = "partial"
+            verification_status = "partial"
+            error_code = "unexpected_warning_added"
+            user_message = "Choice state changed, but an unexpected warning appeared, so Stormhelm stopped the task plan."
+            comparison_limitations.append("unexpected_warning_added")
+        return _execution_result(
+            request,
+            plan,
+            status=status,
+            action_attempted=True,
+            action_completed=action_completed,
+            verification_attempted=True,
+            verification_status=verification_status,
+            before_observation_id=before.observation_id,
+            after_observation_id=after.observation_id,
+            comparison_result_id=comparison.result_id if comparison is not None else "",
+            trust_request_id=trust_request_id,
+            approval_grant_id=approval_grant_id,
+            trust_scope=trust_scope,
+            error_code=error_code,
+            user_message=user_message,
+            limitations=_action_execution_limitations(comparison_limitations),
+        )
+
+    def _execute_scroll_task_step(
+        self,
+        plan: BrowserSemanticActionPlan,
+        *,
+        request: BrowserSemanticActionExecutionRequest,
+        page: Any,
+        before: BrowserSemanticObservation,
+        trust_request_id: str,
+        approval_grant_id: str,
+        trust_scope: str,
+    ) -> BrowserSemanticActionExecutionResult:
+        submit_count_before = _safe_submit_counter(page)
+        scroll_before = _safe_scroll_state(page)
+        scroll_details = _scroll_details_from_plan(plan, request)
+        target_phrase = _bounded_text(scroll_details.get("target_phrase") or request.scroll_target_phrase or plan.target_candidate.get("name") or "", 120)
+        target_found = False
+        target_ambiguous = False
+        target_sensitive = False
+        if plan.action_kind == "scroll_to_target":
+            target_match, target_blocker = _scroll_target_match(before, target_phrase)
+            if target_blocker == "target_ambiguous":
+                return _execution_result(
+                    request,
+                    plan,
+                    status="ambiguous",
+                    before_observation_id=before.observation_id,
+                    trust_request_id=trust_request_id,
+                    approval_grant_id=approval_grant_id,
+                    trust_scope=trust_scope,
+                    error_code=target_blocker,
+                    user_message="Scroll task step blocked: the requested target is ambiguous.",
+                    limitations=["target_ambiguous", "no_action_attempted"],
+                )
+            if target_blocker == "target_sensitive":
+                return _execution_result(
+                    request,
+                    plan,
+                    status="blocked",
+                    before_observation_id=before.observation_id,
+                    trust_request_id=trust_request_id,
+                    approval_grant_id=approval_grant_id,
+                    trust_scope=trust_scope,
+                    error_code=target_blocker,
+                    user_message="Scroll task step blocked: target appears sensitive.",
+                    limitations=["target_sensitive", "no_action_attempted"],
+                )
+            if target_match is not None:
+                return _execution_result(
+                    request,
+                    plan,
+                    status="verified_supported",
+                    action_attempted=False,
+                    action_completed=False,
+                    verification_attempted=True,
+                    verification_status="supported",
+                    before_observation_id=before.observation_id,
+                    after_observation_id=before.observation_id,
+                    trust_request_id=trust_request_id,
+                    approval_grant_id=approval_grant_id,
+                    trust_scope=trust_scope,
+                    user_message="Scroll target was already available; no scroll command was issued.",
+                    limitations=["target_already_available", "no_action_needed", "isolated_temporary_browser_context"],
+                )
+        attempts = max(1, min(int(scroll_details.get("max_attempts") or self.config.max_scroll_attempts or 1), int(self.config.max_scroll_attempts or 5)))
+        amount = min(
+            max(1, int(scroll_details.get("amount_pixels") or self.config.scroll_step_pixels or 700)),
+            max(1, int(self.config.max_scroll_distance_pixels or 5000)),
+        )
+        after = before
+        for _index in range(attempts):
+            _perform_scroll(page, str(scroll_details.get("direction") or "down"), amount)
+            _wait_for_semantic_stabilization(page)
+            after = _live_observation_from_page(
+                page,
+                adapter_id=self.adapter_id,
+                session_id=f"playwright-task-scroll-after-{uuid4().hex[:10]}",
+            )
+            if plan.action_kind == "scroll_to_target":
+                target_match, target_blocker = _scroll_target_match(after, target_phrase)
+                target_found = target_match is not None
+                target_ambiguous = target_blocker == "target_ambiguous"
+                target_sensitive = target_blocker == "target_sensitive"
+                if target_found or target_ambiguous or target_sensitive:
+                    break
+            else:
+                break
+        submit_count_after = _safe_submit_counter(page)
+        if _submit_counter_changed(submit_count_before, submit_count_after):
+            return _execution_result(
+                request,
+                plan,
+                status="failed",
+                action_attempted=True,
+                action_completed=True,
+                verification_attempted=True,
+                verification_status="failed",
+                before_observation_id=before.observation_id,
+                after_observation_id=after.observation_id,
+                trust_request_id=trust_request_id,
+                approval_grant_id=approval_grant_id,
+                trust_scope=trust_scope,
+                error_code="unexpected_form_submission",
+                user_message="Scroll changed a fixture submit counter, so Stormhelm stopped the task plan.",
+                limitations=["unexpected_form_submission", "submit_prevention_failed"],
+            )
+        scroll_after = _safe_scroll_state(page)
+        comparison = _best_action_comparison(self, before, after, plan)
+        status, verification_status, user_message = _scroll_execution_status(
+            plan,
+            comparison,
+            scroll_before,
+            scroll_after,
+            target_found=target_found,
+            target_ambiguous=target_ambiguous,
+            target_sensitive=target_sensitive,
+        )
+        return _execution_result(
+            request,
+            plan,
+            status=status,
+            action_attempted=True,
+            action_completed=True,
+            verification_attempted=True,
+            verification_status=verification_status,
+            before_observation_id=before.observation_id,
+            after_observation_id=after.observation_id,
+            comparison_result_id=comparison.result_id if comparison is not None else "",
+            trust_request_id=trust_request_id,
+            approval_grant_id=approval_grant_id,
+            trust_scope=trust_scope,
+            user_message=user_message,
+            limitations=_action_execution_limitations(list(comparison.limitations if comparison is not None else [])),
+        )
+
+    def _finalize_task_execution(
+        self,
+        result: BrowserSemanticTaskExecutionResult,
+        *,
+        event_type: str = "screen_awareness.playwright_task_execution_started",
+        severity: EventSeverity = EventSeverity.INFO,
+    ) -> BrowserSemanticTaskExecutionResult:
+        if not result.completed_at and result.status not in {"approval_required", "running"}:
+            result.completed_at = utc_now_iso()
+        self._last_task_execution_summary = _task_execution_summary(result)
+        if event_type:
+            self._publish(event_type, _task_execution_event_message(result), _task_execution_event_payload(result), severity=severity)
         return result
 
     def verify_after_action(
@@ -4628,6 +5549,8 @@ def _declared_action_capabilities(
             capabilities.append("browser.input.scroll")
         if getattr(config, "allow_scroll_to_target", False):
             capabilities.append("browser.input.scroll_to_target")
+    if getattr(config, "allow_task_plans", False) and getattr(config, "allow_dev_task_plans", False):
+        capabilities.append("browser.task.safe_sequence")
     return capabilities
 
 
@@ -4812,6 +5735,528 @@ def _execution_result(
         cleanup_status=_bounded_text(cleanup_status, 40),
         completed_at=utc_now_iso() if status not in {"approval_required", "approved"} else "",
     )
+
+
+_SAFE_TASK_ACTION_KINDS = {
+    "focus",
+    "click",
+    "type_text",
+    "check",
+    "uncheck",
+    "select_option",
+    "scroll",
+    "scroll_to_target",
+}
+
+
+def _task_execution_result(
+    plan: BrowserSemanticTaskPlan,
+    *,
+    status: str,
+    step_results: Sequence[BrowserSemanticActionExecutionResult] | None = None,
+    completed_step_count: int = 0,
+    blocked_step_id: str = "",
+    failure_reason: str = "",
+    final_verification_status: str = "",
+    cleanup_status: str = "not_started",
+    action_attempted: bool = False,
+    approval_request_id: str = "",
+    approval_grant_id: str = "",
+    trust_request_id: str = "",
+    limitations: Sequence[str] | None = None,
+    user_message: str = "",
+) -> BrowserSemanticTaskExecutionResult:
+    return BrowserSemanticTaskExecutionResult(
+        plan_id=plan.plan_id,
+        status=_bounded_text(status, 80),
+        step_results=list(step_results or []),
+        completed_step_count=int(completed_step_count or 0),
+        blocked_step_id=_bounded_text(blocked_step_id, 80),
+        failure_reason=_bounded_text(failure_reason, 120),
+        final_verification_status=_bounded_text(final_verification_status, 80),
+        cleanup_status=_bounded_text(cleanup_status, 40),
+        action_attempted=bool(action_attempted),
+        approval_request_id=_bounded_text(approval_request_id, 80),
+        approval_grant_id=_bounded_text(approval_grant_id, 80),
+        trust_request_id=_bounded_text(trust_request_id, 80),
+        limitations=list(dict.fromkeys([_bounded_text(item, 120) for item in list(limitations or []) if _bounded_text(item, 120)])),
+        user_message=_bounded_text(user_message or _default_task_execution_user_message(status)),
+        completed_at=utc_now_iso() if status not in {"approval_required", "running"} else "",
+    )
+
+
+def _default_task_execution_user_message(status: str) -> str:
+    if status == "approval_required":
+        return "Plan ready; approval required."
+    if status == "completed_verified":
+        return "The safe form preparation is verified. I did not submit it."
+    if status == "completed_partial":
+        return "The safe browser task plan completed with partial semantic support."
+    if status == "stopped_on_unverified":
+        return "I stopped because a step could not be semantically verified."
+    if status == "stopped_on_ambiguity":
+        return "I stopped because a step became ambiguous."
+    if status == "stopped_on_failure":
+        return "I stopped because a step failed."
+    if status == "stopped_on_unexpected_side_effect":
+        return "I stopped because an unexpected browser side effect was detected."
+    if status in {"blocked", "unsupported"}:
+        return "That safe browser task plan is blocked or unsupported."
+    return "Safe browser task plan state updated."
+
+
+def _task_stop_policy_from_config(config: PlaywrightBrowserAdapterConfig) -> dict[str, Any]:
+    return {
+        "stop_on_blocked": True,
+        "stop_on_failed": True,
+        "stop_on_ambiguous_step": bool(getattr(config, "stop_on_ambiguous_step", True)),
+        "stop_on_unverified_step": bool(getattr(config, "stop_on_unverified_step", True)),
+        "stop_on_partial_step": bool(getattr(config, "stop_on_partial_step", True)),
+        "stop_on_unexpected_navigation": bool(getattr(config, "stop_on_unexpected_navigation", True)),
+        "stop_on_submit_counter_change": True,
+    }
+
+
+def _task_stop_status(result: BrowserSemanticActionExecutionResult, config: PlaywrightBrowserAdapterConfig) -> str:
+    if result.error_code == "unexpected_form_submission":
+        return "stopped_on_unexpected_side_effect"
+    if result.error_code == "unexpected_navigation" and bool(getattr(config, "stop_on_unexpected_navigation", True)):
+        return "stopped_on_unexpected_side_effect"
+    if result.status in {"blocked", "unsupported"}:
+        return "stopped_on_blocked"
+    if result.status == "failed":
+        return "stopped_on_failure"
+    if result.status == "ambiguous" and bool(getattr(config, "stop_on_ambiguous_step", True)):
+        return "stopped_on_ambiguity"
+    if result.status == "partial" and bool(getattr(config, "stop_on_partial_step", True)):
+        return "stopped_on_unverified"
+    if result.status in {"completed_unverified", "verified_unsupported"} and bool(getattr(config, "stop_on_unverified_step", True)):
+        return "stopped_on_unverified"
+    return ""
+
+
+def _task_execution_limitations(
+    step_results: Sequence[BrowserSemanticActionExecutionResult],
+    *,
+    extra: Sequence[str] | None = None,
+) -> list[str]:
+    limitations = [
+        "isolated_temporary_browser_context",
+        "no_user_profile",
+        "no_cookies_persisted",
+        "no_form_submit",
+        "not_visible_screen_verification",
+        "not_truth_verified",
+    ]
+    for result in step_results:
+        limitations.extend(list(result.limitations)[:6])
+    limitations.extend(list(extra or []))
+    return list(dict.fromkeys([_bounded_text(item, 120) for item in limitations if _bounded_text(item, 120)]))
+
+
+def _task_risk_level(steps: Sequence[BrowserSemanticTaskStep]) -> str:
+    if any(step.action_kind == "type_text" for step in steps):
+        return "high"
+    if any(step.action_kind in {"click", "check", "uncheck", "select_option"} for step in steps):
+        return "medium"
+    return "low"
+
+
+def _task_gate_blocker(config: PlaywrightBrowserAdapterConfig) -> str:
+    if not config.enabled:
+        return "playwright_adapter_disabled"
+    if not getattr(config, "allow_dev_adapter", False):
+        return "playwright_dev_adapter_gate_required"
+    if not getattr(config, "allow_browser_launch", False):
+        return "playwright_browser_launch_not_allowed"
+    if not getattr(config, "allow_actions", False):
+        return "actions_disabled"
+    if not getattr(config, "allow_dev_actions", False):
+        return "dev_actions_gate_required"
+    if not getattr(config, "allow_task_plans", False):
+        return "task_plans_disabled"
+    if not getattr(config, "allow_dev_task_plans", False):
+        return "dev_task_plans_gate_required"
+    blockers = _unsupported_flag_blockers(config)
+    return blockers[0] if blockers else ""
+
+
+def _task_plan_freshness_blocker(plan: BrowserSemanticTaskPlan) -> str:
+    created = _parse_utc_timestamp(plan.created_at)
+    if created is None:
+        return ""
+    if (datetime.now(UTC) - created).total_seconds() > _STALE_OBSERVATION_SECONDS:
+        return "stale_plan"
+    expires = _parse_utc_timestamp(plan.expires_at)
+    if expires is not None and expires <= datetime.now(UTC):
+        return "plan_expired"
+    return ""
+
+
+def _task_stop_policy_with_approval_bindings(
+    stop_policy: dict[str, Any],
+    steps: Sequence[BrowserSemanticTaskStep],
+) -> dict[str, Any]:
+    policy = dict(stop_policy or {})
+    policy["approval_step_count"] = len(steps)
+    policy["approval_step_ids"] = [step.step_id for step in steps[:8]]
+    policy["approval_step_bindings"] = {step.step_id: _task_step_binding_payload(step) for step in steps[:8]}
+    return policy
+
+
+def _task_plan_tamper_reason(plan: BrowserSemanticTaskPlan) -> str:
+    policy = dict(plan.stop_policy or {})
+    expected_count = _safe_int(policy.get("approval_step_count"), default=0)
+    expected_ids = [str(item) for item in list(policy.get("approval_step_ids") or [])[:8]]
+    current_ids = [step.step_id for step in plan.steps[:8]]
+    if expected_count and len(plan.steps) != expected_count:
+        return "step_count_changed"
+    if expected_ids:
+        if len(current_ids) != len(expected_ids):
+            return "step_count_changed"
+        if current_ids != expected_ids:
+            if set(current_ids) == set(expected_ids):
+                return "step_order_changed"
+            return "step_count_changed"
+    expected_bindings = {
+        str(step_id): dict(payload)
+        for step_id, payload in dict(policy.get("approval_step_bindings") or {}).items()
+        if isinstance(payload, dict)
+    }
+    for step in plan.steps:
+        expected = expected_bindings.get(step.step_id)
+        current = _task_step_binding_payload(step)
+        if expected is None:
+            if step.approval_binding_fingerprint and _task_step_binding_fingerprint(step) != step.approval_binding_fingerprint:
+                return "plan_fingerprint_mismatch"
+            continue
+        if current == expected:
+            continue
+        if current.get("step_index") != expected.get("step_index"):
+            return "step_order_changed"
+        if current.get("action_kind") != expected.get("action_kind") or current.get("required_capability") != expected.get("required_capability"):
+            return "step_action_changed"
+        if (
+            current.get("target_candidate_id") != expected.get("target_candidate_id")
+            or current.get("target_fingerprint") != expected.get("target_fingerprint")
+            or current.get("target_phrase") != expected.get("target_phrase")
+        ):
+            return "step_target_changed"
+        if current.get("expected_outcome") != expected.get("expected_outcome"):
+            return "step_expected_outcome_changed"
+        if current.get("args") != expected.get("args"):
+            return "step_argument_changed"
+        return "plan_fingerprint_mismatch"
+    return "plan_fingerprint_mismatch"
+
+
+def _mark_task_steps_skipped(
+    plan: BrowserSemanticTaskPlan,
+    *,
+    start_index: int,
+) -> list[BrowserSemanticTaskStep]:
+    skipped: list[BrowserSemanticTaskStep] = []
+    for step in plan.steps[start_index:]:
+        if step.status in {"pending", "approval_required"}:
+            step.status = "skipped"
+            step.limitations = list(dict.fromkeys(list(step.limitations) + ["skipped_after_prior_step_stop", "no_action_attempted"]))
+            skipped.append(step)
+    return skipped
+
+
+def _redacted_task_step_args(action_kind: str, action_arguments: dict[str, Any]) -> dict[str, Any]:
+    if action_kind in _SAFE_TASK_ACTION_KINDS:
+        return _redacted_action_arguments(action_kind, action_arguments)
+    return {}
+
+
+def _task_step_binding_payload(step: BrowserSemanticTaskStep) -> dict[str, Any]:
+    args = dict(step.action_args_redacted or {})
+    binding_args = {
+        key: args.get(key)
+        for key in sorted(args)
+        if key
+        in {
+            "typed_text_redacted",
+            "text_length",
+            "text_fingerprint",
+            "text_classification",
+            "mode",
+            "option_fingerprint",
+            "option_request_fingerprint",
+            "option_ordinal",
+            "expected_checked_state",
+            "direction",
+            "amount_pixels",
+            "max_attempts",
+            "target_phrase",
+            "scroll_fingerprint",
+        }
+    }
+    return {
+        "step_index": step.step_index,
+        "action_kind": step.action_kind,
+        "target_candidate_id": step.target_candidate_id,
+        "target_fingerprint": step.target_fingerprint,
+        "target_phrase": _bounded_text(step.target_phrase, 120),
+        "required_capability": step.required_capability,
+        "expected_outcome": list(step.expected_outcome)[:8],
+        "args": binding_args,
+    }
+
+
+def _task_step_binding_fingerprint(step: BrowserSemanticTaskStep) -> str:
+    payload = json.dumps(_task_step_binding_payload(step), sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8", errors="ignore")).hexdigest()[:20]
+
+
+def _task_plan_binding_fingerprint(plan: BrowserSemanticTaskPlan) -> str:
+    payload = {
+        "plan_id": plan.plan_id,
+        "plan_kind": plan.plan_kind,
+        "steps": [_task_step_binding_payload(step) for step in plan.steps],
+        "expected_final_state": list(plan.expected_final_state)[:8],
+        "claim_ceiling": plan.claim_ceiling,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8", errors="ignore")).hexdigest()[:24]
+
+
+def _coerce_task_step(value: BrowserSemanticTaskStep | dict[str, Any]) -> BrowserSemanticTaskStep:
+    if isinstance(value, BrowserSemanticTaskStep):
+        return value
+    payload = dict(value or {})
+    return BrowserSemanticTaskStep(
+        step_id=_bounded_text(payload.get("step_id") or "", 80) or f"browser-semantic-task-step-{uuid4().hex[:12]}",
+        step_index=_safe_int(payload.get("step_index"), default=0),
+        action_kind=_bounded_text(payload.get("action_kind") or "unsupported", 40),
+        target_phrase=_bounded_text(payload.get("target_phrase") or "", 120),
+        target_candidate_id=_bounded_text(payload.get("target_candidate_id") or "", 80),
+        target_fingerprint=_bounded_text(payload.get("target_fingerprint") or "", 220),
+        action_args_redacted=dict(payload.get("action_args_redacted") or {}),
+        expected_outcome=[_bounded_text(item, 80) for item in list(payload.get("expected_outcome") or [])[:8]],
+        required_capability=_bounded_text(payload.get("required_capability") or "", 80),
+        approval_binding_fingerprint=_bounded_text(payload.get("approval_binding_fingerprint") or "", 80),
+        status=_bounded_text(payload.get("status") or "pending", 40),
+        verification_result_id=_bounded_text(payload.get("verification_result_id") or "", 80),
+        limitations=[_bounded_text(item, 120) for item in list(payload.get("limitations") or [])[:8] if _bounded_text(item, 120)],
+    )
+
+
+def _coerce_task_plan(value: BrowserSemanticTaskPlan | dict[str, Any]) -> BrowserSemanticTaskPlan:
+    if isinstance(value, BrowserSemanticTaskPlan):
+        return value
+    payload = dict(value or {})
+    steps = [_coerce_task_step(item) for item in list(payload.get("steps") or [])]
+    return BrowserSemanticTaskPlan(
+        plan_id=_bounded_text(payload.get("plan_id") or "", 80) or f"browser-semantic-task-plan-{uuid4().hex[:12]}",
+        source_observation_id=_bounded_text(payload.get("source_observation_id") or "", 80),
+        provider=_bounded_text(payload.get("provider") or "playwright_live_semantic", 80),
+        plan_kind=_bounded_text(payload.get("plan_kind") or "safe_browser_sequence", 80),
+        steps=steps,
+        max_steps=_safe_int(payload.get("max_steps"), default=5),
+        risk_level=_bounded_text(payload.get("risk_level") or "medium", 40),
+        approval_required=bool(payload.get("approval_required", True)),
+        approval_request_id=_bounded_text(payload.get("approval_request_id") or "", 80),
+        approval_grant_id=_bounded_text(payload.get("approval_grant_id") or "", 80),
+        executable_now=bool(payload.get("executable_now", False)),
+        reason_not_executable=_bounded_text(payload.get("reason_not_executable") or "", 120),
+        expected_final_state=[_bounded_text(item, 160) for item in list(payload.get("expected_final_state") or [])[:8]],
+        stop_policy=dict(payload.get("stop_policy") or {}),
+        created_at=_bounded_text(payload.get("created_at") or "", 80),
+        expires_at=_bounded_text(payload.get("expires_at") or "", 80),
+        limitations=[_bounded_text(item, 120) for item in list(payload.get("limitations") or [])[:12] if _bounded_text(item, 120)],
+        approval_binding_fingerprint=_bounded_text(payload.get("approval_binding_fingerprint") or "", 80),
+        source_task_phrase=_bounded_text(payload.get("source_task_phrase") or "", 240),
+        user_message=_bounded_text(payload.get("user_message") or "", 240),
+    )
+
+
+def _trust_task_plan_request(plan: BrowserSemanticTaskPlan, *, session_id: str, task_id: str) -> TrustActionRequest:
+    binding = _task_plan_binding_fingerprint(plan)
+    return TrustActionRequest(
+        request_id=f"trust-playwright-task-{uuid4().hex[:12]}",
+        family="screen_awareness",
+        action_key=f"screen_awareness.playwright.task_plan.{plan.plan_id}.{binding}",
+        subject=_bounded_text(f"safe browser task plan with {len(plan.steps)} step(s)", 120),
+        session_id=session_id or "default",
+        task_id=task_id,
+        action_kind=TrustActionKind.TOOL,
+        approval_required=True,
+        preview_allowed=False,
+        suggested_scope=PermissionScope.ONCE,
+        available_scopes=[PermissionScope.ONCE, PermissionScope.SESSION, PermissionScope.TASK],
+        operator_justification="Playwright would execute a short sequence of safe browser primitives inside an isolated temporary browser context.",
+        operator_message="Approval is required before Stormhelm can run this safe browser task plan.",
+        verification_label="Per-step semantic before/after browser comparison",
+        details={
+            "plan_id": plan.plan_id,
+            "plan_kind": plan.plan_kind,
+            "step_count": len(plan.steps),
+            "ordered_step_bindings": [_task_step_binding_payload(step) for step in plan.steps],
+            "approval_binding_fingerprint": binding,
+            "risk_level": plan.risk_level,
+            "provider": plan.provider,
+            "claim_ceiling": _TASK_EXECUTION_CLAIM_CEILING,
+            "expected_final_state": list(plan.expected_final_state)[:8],
+        },
+    )
+
+
+def _task_plan_summary(plan: BrowserSemanticTaskPlan) -> dict[str, Any]:
+    return {
+        "plan_id": plan.plan_id,
+        "status": "plan_created",
+        "plan_kind": plan.plan_kind,
+        "step_count": len(plan.steps),
+        "max_steps": plan.max_steps,
+        "risk_level": plan.risk_level,
+        "approval_required": plan.approval_required,
+        "executable_now": plan.executable_now,
+        "reason_not_executable": plan.reason_not_executable,
+        "claim_ceiling": plan.claim_ceiling,
+        "limitations": list(plan.limitations)[:8],
+        "steps": [step.to_dict() for step in plan.steps[:8]],
+        "user_message": _bounded_text(plan.user_message, 240),
+    }
+
+
+def _task_execution_summary(result: BrowserSemanticTaskExecutionResult) -> dict[str, Any]:
+    return {
+        "result_id": result.result_id,
+        "plan_id": result.plan_id,
+        "status": result.status,
+        "completed_step_count": result.completed_step_count,
+        "blocked_step_id": result.blocked_step_id,
+        "failure_reason": result.failure_reason,
+        "final_verification_status": result.final_verification_status,
+        "cleanup_status": result.cleanup_status,
+        "action_attempted": result.action_attempted,
+        "approval_request_id": result.approval_request_id,
+        "approval_grant_id": result.approval_grant_id,
+        "provider": result.provider,
+        "claim_ceiling": result.claim_ceiling,
+        "limitations": list(result.limitations)[:8],
+        "step_results": [_action_execution_summary(step) for step in result.step_results[:8]],
+        "user_message": _bounded_text(result.user_message, 240),
+    }
+
+
+def _task_plan_event_payload(plan: BrowserSemanticTaskPlan, *, status: str = "plan_created") -> dict[str, Any]:
+    return {
+        "plan_id": plan.plan_id,
+        "status": status,
+        "plan_kind": plan.plan_kind,
+        "step_count": len(plan.steps),
+        "risk_level": plan.risk_level,
+        "approval_required": plan.approval_required,
+        "claim_ceiling": plan.claim_ceiling,
+        "limitations": list(plan.limitations)[:8],
+        "steps": [
+            {
+                "step_id": step.step_id,
+                "step_index": step.step_index,
+                "action_kind": step.action_kind,
+                "target_phrase": _bounded_text(step.target_phrase, 120),
+                "target_candidate_id": step.target_candidate_id,
+                "redacted_args": dict(step.action_args_redacted),
+                "status": step.status,
+            }
+            for step in plan.steps[:8]
+        ],
+    }
+
+
+def _task_step_event_payload(
+    plan: BrowserSemanticTaskPlan,
+    step: BrowserSemanticTaskStep,
+    *,
+    result: BrowserSemanticActionExecutionResult | None = None,
+    status: str = "",
+) -> dict[str, Any]:
+    payload = {
+        "plan_id": plan.plan_id,
+        "step_id": step.step_id,
+        "step_index": step.step_index,
+        "action_kind": step.action_kind,
+        "target_summary": {
+            "target_phrase": _bounded_text(step.target_phrase, 120),
+            "target_candidate_id": step.target_candidate_id,
+        },
+        "redacted_args": dict(step.action_args_redacted),
+        "step_status": status or step.status,
+        "claim_ceiling": _TASK_EXECUTION_CLAIM_CEILING,
+        "limitations": list(step.limitations)[:8],
+    }
+    if result is not None:
+        payload.update(
+            {
+                "execution_status": result.status,
+                "verification_status": result.verification_status,
+                "before_observation_id": result.before_observation_id,
+                "after_observation_id": result.after_observation_id,
+                "error_code": result.error_code,
+                "action_attempted": result.action_attempted,
+            }
+        )
+    return payload
+
+
+def _task_execution_event_payload(result: BrowserSemanticTaskExecutionResult) -> dict[str, Any]:
+    return {
+        "plan_id": result.plan_id,
+        "result_id": result.result_id,
+        "final_status": result.status,
+        "completed_step_count": result.completed_step_count,
+        "blocked_step_id": result.blocked_step_id,
+        "stop_reason": result.failure_reason,
+        "final_verification_status": result.final_verification_status,
+        "cleanup_status": result.cleanup_status,
+        "claim_ceiling": result.claim_ceiling,
+        "limitations": list(result.limitations)[:8],
+        "steps": [
+            {
+                "action_kind": step.action_kind,
+                "status": step.status,
+                "verification_status": step.verification_status,
+                "target": dict(step.target_summary),
+                "text_redacted_summary": step.text_redacted_summary,
+                "option_redacted_summary": step.option_redacted_summary,
+                "scroll_target_phrase": step.scroll_target_phrase,
+            }
+            for step in result.step_results[:8]
+        ],
+    }
+
+
+def _task_execution_event_message(result: BrowserSemanticTaskExecutionResult) -> str:
+    if result.status == "approval_required":
+        return "Playwright safe browser task plan approval is required."
+    if result.status == "completed_verified":
+        return "Playwright safe browser task plan verification completed."
+    if result.status.startswith("stopped_"):
+        return "Playwright safe browser task plan stopped."
+    if result.status in {"blocked", "unsupported"}:
+        return "Playwright safe browser task plan was blocked."
+    if result.status == "failed":
+        return "Playwright safe browser task plan failed."
+    return "Playwright safe browser task plan state updated."
+
+
+def _task_step_audit_summary(step: BrowserSemanticTaskStep, result: BrowserSemanticActionExecutionResult) -> dict[str, Any]:
+    return {
+        "step_id": step.step_id,
+        "step_index": step.step_index,
+        "action_kind": step.action_kind,
+        "target_candidate_id": step.target_candidate_id,
+        "status": result.status,
+        "action_attempted": result.action_attempted,
+        "verification_status": result.verification_status,
+        "typed_text_redacted": result.typed_text_redacted,
+        "text_redacted_summary": result.text_redacted_summary,
+        "option_redacted_summary": result.option_redacted_summary,
+        "scroll_target_phrase": result.scroll_target_phrase,
+        "error_code": result.error_code,
+    }
 
 
 def _risk_level_from_plan(plan: BrowserSemanticActionPlan) -> str:
@@ -5186,10 +6631,44 @@ def _scroll_details_from_plan(
 
 
 def _scroll_context_blocker(observation: BrowserSemanticObservation) -> str:
-    page_haystack = _normalize(" ".join([str(observation.page_url or ""), str(observation.page_title or "")]))
-    if any(term in page_haystack for term in ("captcha", "payment", "checkout", "billing", "login", "sign in", "signin", "security", "profile")):
+    if _page_context_looks_sensitive(observation):
         return "target_sensitive"
     return ""
+
+
+def _action_context_blocker(observation: BrowserSemanticObservation, action_kind: str) -> str:
+    if action_kind in {"scroll", "scroll_to_target"}:
+        return ""
+    if _page_context_looks_sensitive(observation):
+        return "sensitive_page_context"
+    return ""
+
+
+def _page_context_looks_sensitive(observation: BrowserSemanticObservation) -> bool:
+    page_haystack = _normalize(" ".join([str(observation.page_url or ""), str(observation.page_title or "")]))
+    restricted_terms = (
+        "captcha",
+        "robot verification",
+        "human verification",
+        "payment",
+        "checkout",
+        "billing",
+        "credit card",
+        "login",
+        "log in",
+        "sign in",
+        "signin",
+        "security",
+        "profile",
+        "account",
+        "delete",
+        "destructive",
+        "permanent",
+        "legal consent",
+        "terms agreement",
+        "privacy consent",
+    )
+    return any(term in page_haystack for term in restricted_terms)
 
 
 def _safe_scroll_state(page: Any) -> dict[str, Any]:

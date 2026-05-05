@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -51,6 +52,31 @@ def _has_workspace_signal(snapshot: dict[str, Any]) -> bool:
     )
 
 
+def _native_window_probe_enabled() -> bool:
+    for key in (
+        "STORMHELM_SCREEN_AWARENESS_NATIVE_WINDOW_PROBE_ENABLED",
+        "STORMHELM_SCREEN_NATIVE_WINDOW_PROBE_ENABLED",
+    ):
+        value = os.environ.get(key)
+        if value is None:
+            continue
+        return value.strip().lower() not in {"0", "false", "no", "off", "disabled"}
+    return True
+
+
+def _focus_payload_verified(focused_window: dict[str, Any], windows: list[dict[str, Any]]) -> bool:
+    if bool(focused_window.get("is_focused") or focused_window.get("focused")):
+        return True
+    handle = str(focused_window.get("window_handle") or focused_window.get("window_id") or "").strip()
+    if not handle:
+        return False
+    for item in windows:
+        item_handle = str(item.get("window_handle") or item.get("window_id") or "").strip()
+        if item_handle == handle and bool(item.get("is_focused") or item.get("focused")):
+            return True
+    return False
+
+
 @dataclass(slots=True)
 class NativeContextObservationSource:
     system_probe: Any | None = None
@@ -73,7 +99,8 @@ class NativeContextObservationSource:
         clipboard_text = _clean_text(clipboard_descriptor.get("value"))
 
         window_status: dict[str, Any] = {}
-        if self.system_probe is not None:
+        window_probe_enabled = _native_window_probe_enabled()
+        if self.system_probe is not None and window_probe_enabled:
             window_status_reader = getattr(self.system_probe, "window_status", None)
             if callable(window_status_reader):
                 try:
@@ -129,11 +156,18 @@ class NativeContextObservationSource:
         quality_notes: list[str] = []
         warnings: list[str] = []
 
+        focus_verified = _focus_payload_verified(focused_window, windows) if focused_window else False
+
         if focused_window:
             source_types_used.append(ScreenSourceType.FOCUS_STATE)
-            quality_notes.append("Focused window identity came from native system state.")
+            if focus_verified:
+                quality_notes.append("Focused window identity came from current native focus state.")
+            else:
+                quality_notes.append("Window title metadata came from native system state without a verified focus flag.")
         else:
             warnings.append("Focused window identity was unavailable.")
+            if not window_probe_enabled:
+                warnings.append("Native focused-window probing is disabled by policy.")
 
         if selected_text:
             source_types_used.append(ScreenSourceType.SELECTION)
@@ -179,6 +213,11 @@ class NativeContextObservationSource:
                 "accessibility": accessibility_snapshot,
                 "surface_mode": surface_mode,
                 "active_module": active_module,
+                "native_window_probe": {
+                    "enabled": window_probe_enabled,
+                    "reason": None if window_probe_enabled else "native_window_probe_disabled",
+                },
+                "focus_verified": focus_verified,
             },
             app_identity=app_identity,
             selected_text=selected_text,

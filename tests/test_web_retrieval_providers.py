@@ -162,9 +162,11 @@ def test_obscura_provider_reports_disabled_and_missing_binary_readiness() -> Non
 
 def test_obscura_provider_runs_bounded_cli_and_extracts_links() -> None:
     calls: list[list[str]] = []
+    kwargs_seen: list[dict[str, object]] = []
 
     def runner(command, **kwargs):
         calls.append(list(command))
+        kwargs_seen.append(dict(kwargs))
         if "--dump" in command and command[command.index("--dump") + 1] == "links":
             return subprocess.CompletedProcess(command, 0, stdout="https://example.com/a\n/about\n", stderr="")
         return subprocess.CompletedProcess(command, 0, stdout="Rendered headline\n\nRendered body", stderr="")
@@ -182,6 +184,8 @@ def test_obscura_provider_runs_bounded_cli_and_extracts_links() -> None:
     assert page.text.startswith("Rendered headline")
     assert [link.url for link in page.links] == ["https://example.com/a", "https://example.com/about"]
     assert calls[0][:3] == ["obscura", "fetch", "https://example.com"]
+    assert kwargs_seen[0]["encoding"] == "utf-8"
+    assert kwargs_seen[0]["errors"] == "replace"
 
 
 def test_obscura_provider_maps_timeout_nonzero_and_empty_stdout() -> None:

@@ -1,0 +1,20 @@
+{
+  "probe": "Voice-L0.2 playback envelope follower",
+  "playback_id": "voice-envelope-probe",
+  "envelope_supported": true,
+  "envelope_available": true,
+  "envelope_source": "playback_pcm",
+  "sample_rate_hz": 60,
+  "sample_count": 108,
+  "duration_ms": 1783,
+  "min_energy": 0.1506,
+  "max_energy": 0.4201,
+  "latest_voice_energy": 0.3651,
+  "max_sample_interval_ms": 17,
+  "timestamps_monotonic": true,
+  "ring_samples_returned": 24,
+  "samples_dropped": 0,
+  "estimated_output_latency_ms": 80,
+  "raw_audio_present": false,
+  "raw_audio_logged": false
+}

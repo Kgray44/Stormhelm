@@ -86,6 +86,8 @@ from stormhelm.core.camera_awareness.providers import (
     OpenAIVisionAnalysisProvider,
     UnavailableCameraCaptureProvider,
     UnavailableVisionAnalysisProvider,
+    WindowsMediaCaptureStillBackend,
+    default_local_still_backend,
 )
 from stormhelm.core.camera_awareness.service import (
     CameraAwarenessSubsystem,
@@ -153,9 +155,11 @@ __all__ = [
     "OpenAIVisionAnalysisProvider",
     "UnavailableCameraCaptureProvider",
     "UnavailableVisionAnalysisProvider",
+    "WindowsMediaCaptureStillBackend",
     "build_camera_awareness_subsystem",
     "build_camera_comparison_prompt",
     "build_camera_vision_prompt",
+    "default_local_still_backend",
     "build_guidance_result",
     "build_quality_issues_from_signals",
     "blocked_guidance_result",

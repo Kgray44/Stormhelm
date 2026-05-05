@@ -53,6 +53,11 @@ anchor_clear_radius = 0.18
 debug_visible = false
 debug_intensity_multiplier = 3.0
 debug_tint = true
+diagnostic_disable_during_speech = false
+
+[ui.stormforge.voice_diagnostics]
+anchor_visualizer_mode = "auto"
+anchor_renderer = "legacy_blob_reference"
 
 [event_stream]
 enabled = true
@@ -129,6 +134,7 @@ allow_uncheck = false
 allow_select_option = false
 allow_scroll = false
 allow_scroll_to_target = false
+allow_task_plans = false
 allow_form_fill = false
 allow_form_submit = false
 allow_login = false
@@ -141,6 +147,7 @@ allow_dev_actions = false
 allow_dev_type_text = false
 allow_dev_choice_controls = false
 allow_dev_scroll = false
+allow_dev_task_plans = false
 max_session_seconds = 120
 navigation_timeout_seconds = 12000
 observation_timeout_seconds = 8000
@@ -148,6 +155,11 @@ max_scroll_attempts = 5
 scroll_step_pixels = 700
 scroll_timeout_seconds = 8.0
 max_scroll_distance_pixels = 5000
+max_task_steps = 5
+stop_on_unverified_step = true
+stop_on_partial_step = true
+stop_on_ambiguous_step = true
+stop_on_unexpected_navigation = true
 debug_events_enabled = true
 
 [camera_awareness]
@@ -396,9 +408,31 @@ allow_dev_playback = false
 streaming_enabled = false
 streaming_fallback_to_file = true
 prewarm_enabled = true
+streaming_min_preroll_ms = 350
+streaming_min_preroll_chunks = 2
+streaming_min_preroll_bytes = 0
+streaming_max_preroll_wait_ms = 1200
+playback_stable_after_ms = 180
 max_audio_bytes = 10000000
 max_duration_ms = 120000
 delete_transient_after_playback = true
+
+[voice.visual_sync]
+enabled = true
+envelope_visual_offset_ms = 0
+estimated_output_latency_ms = 120
+debug_show_sync = false
+
+[voice.visual_meter]
+enabled = true
+sample_rate_hz = 60
+startup_preroll_ms = 350
+attack_ms = 60
+release_ms = 160
+noise_floor = 0.015
+gain = 2.0
+max_startup_wait_ms = 800
+visual_offset_ms = 0
 
 [voice.capture]
 enabled = false

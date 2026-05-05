@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import os
 from typing import Any
 
 from stormhelm.core.intelligence.language import fuzzy_ratio, normalize_lookup_phrase, normalize_phrase
@@ -8,6 +9,98 @@ from stormhelm.core.memory import SemanticMemoryRepository, SemanticMemoryServic
 from stormhelm.core.memory.models import MemorySourceClass
 from stormhelm.core.memory.repositories import PreferencesRepository
 from stormhelm.shared.time import utc_now_iso
+
+_CONTEXT_RESOLUTION_SCALAR_KEYS = {
+    "kind",
+    "query",
+    "summary",
+    "detail",
+    "state",
+    "source",
+    "freshness",
+    "label",
+    "intent",
+    "captured_at",
+}
+_CONTEXT_RESOLUTION_STRUCTURED_KEYS = {
+    "result",
+    "failure",
+    "trace",
+    "verification",
+    "recovery_plan",
+    "recovery_result",
+    "preview",
+    "attempt",
+    "telemetry",
+}
+_TRACE_KEEP_KEYS = {
+    "operation",
+    "operation_type",
+    "result_state",
+    "verification_state",
+    "fallback_reason",
+    "duration_ms",
+    "total_duration_ms",
+    "slowest_stage",
+}
+_ACTIVE_REQUEST_TOP_KEYS = {
+    "family",
+    "subject",
+    "request_type",
+    "query_shape",
+    "captured_at",
+    "context_source",
+    "context_freshness",
+    "context_reusable",
+    "requested_action",
+}
+_ACTIVE_REQUEST_PARAMETER_KEYS = {
+    "approval_outcome",
+    "approval_scope",
+    "context_freshness",
+    "context_reusable",
+    "destination_alias",
+    "execution_type",
+    "follow_up_reuse",
+    "operation_type",
+    "path",
+    "pending_preview",
+    "pending_relay_request_id",
+    "payload_hint",
+    "query",
+    "query_shape",
+    "recipient",
+    "request_stage",
+    "requested_action",
+    "result_state",
+    "selected_source_route",
+    "target_name",
+    "trust_request_id",
+    "url",
+    "workflow_kind",
+    "ambiguity_choices",
+    "note_text",
+}
+_ACTIVE_REQUEST_TRUST_KEYS = {
+    "approval_scope",
+    "expires_at",
+    "prompt_id",
+    "reason",
+    "request_id",
+    "state",
+    "status",
+    "trust_prompt_id",
+}
+_ACTIVE_REQUEST_STRUCTURED_QUERY_KEYS = {
+    "comparison_target",
+    "current_context_reference",
+    "domain",
+    "execution_type",
+    "output_mode",
+    "output_type",
+    "query_shape",
+    "requested_action",
+}
 
 
 class _NullSemanticMemoryService:
@@ -130,14 +223,16 @@ class ConversationStateStore:
         self.preferences.set_preference(self._posture_key(session_id), {})
 
     def get_active_request_state(self, session_id: str) -> dict[str, object]:
-        state = self.preferences.get_all()
-        value = state.get(self._request_state_key(session_id))
+        value = self._preference_value(self._request_state_key(session_id))
         if isinstance(value, dict):
             return dict(value)
         return {}
 
     def set_active_request_state(self, session_id: str, request_state: dict[str, object] | None) -> None:
-        self.preferences.set_preference(self._request_state_key(session_id), request_state or {})
+        self.preferences.set_preference(
+            self._request_state_key(session_id),
+            _compact_active_request_state(request_state or {}),
+        )
 
     def clear_active_request_state(self, session_id: str) -> None:
         self.preferences.set_preference(self._request_state_key(session_id), {})
@@ -189,7 +284,15 @@ class ConversationStateStore:
         repeated empty semantic-memory queries while preserving the same
         session-scoped state and freshness rules.
         """
-        state = self.preferences.get_all()
+        keys = (
+            self._posture_key(session_id),
+            self._request_state_key(session_id),
+            self._active_context_key(session_id),
+            self._recent_tool_results_key(session_id),
+            self._recent_context_resolutions_key(session_id),
+            self._preference_memory_key(),
+        )
+        state = self._preference_values(keys)
         recent_tool_results: list[dict[str, object]] = []
         if not prefer_local_memory:
             recent_tool_results = self.memory.list_recent_session_tool_results(
@@ -301,7 +404,7 @@ class ConversationStateStore:
         memory_results = self.memory.list_recent_context_resolutions(session_id)
         if memory_results:
             return memory_results
-        state = self.preferences.get_all()
+        state = self._preference_values((self._recent_context_resolutions_key(session_id),))
         return self._recent_context_resolutions_from_state(state, session_id)
 
     def _recent_context_resolutions_from_state(
@@ -315,11 +418,17 @@ class ConversationStateStore:
         return [dict(item) for item in value if isinstance(item, dict)]
 
     def remember_context_resolution(self, session_id: str, resolution: dict[str, object]) -> None:
-        self.memory.remember_context_resolution(session_id, dict(resolution))
-        entry = dict(resolution)
+        command_eval_dry_run = os.environ.get("STORMHELM_COMMAND_EVAL_DRY_RUN", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        entry = _compact_context_resolution(resolution)
+        if not command_eval_dry_run:
+            self.memory.remember_context_resolution(session_id, dict(entry))
         entry.setdefault("captured_at", utc_now_iso())
-        state = self.preferences.get_all()
-        existing = state.get(self._recent_context_resolutions_key(session_id))
+        existing = self._preference_value(self._recent_context_resolutions_key(session_id))
         resolutions = [dict(item) for item in existing if isinstance(item, dict)] if isinstance(existing, list) else []
         self.preferences.set_preference(self._recent_context_resolutions_key(session_id), [entry, *resolutions][:8])
 
@@ -472,6 +581,19 @@ class ConversationStateStore:
     def _recent_context_resolutions_key(self, session_id: str) -> str:
         return f"assistant.session.{session_id}.recent_context_resolutions"
 
+    def _preference_value(self, key: str) -> object | None:
+        reader = getattr(self.preferences, "get_preference", None)
+        if callable(reader):
+            return reader(key)
+        return self.preferences.get_all().get(key)
+
+    def _preference_values(self, keys: tuple[str, ...] | list[str]) -> dict[str, object]:
+        reader = getattr(self.preferences, "get_many", None)
+        if callable(reader):
+            return dict(reader(list(keys)))
+        all_values = self.preferences.get_all()
+        return {key: all_values.get(key) for key in keys}
+
     def _suggestion_state_key(self, session_id: str) -> str:
         return f"assistant.session.{session_id}.suggestion_state"
 
@@ -540,3 +662,251 @@ class ConversationStateStore:
             "external_open_file": "files",
         }
         return families.get(tool_name, tool_name)
+
+
+def _compact_context_resolution(resolution: dict[str, object]) -> dict[str, object]:
+    compact: dict[str, object] = {}
+    for key in _CONTEXT_RESOLUTION_SCALAR_KEYS:
+        if key in resolution:
+            value = resolution.get(key)
+            if value not in (None, "", [], {}):
+                compact[key] = _compact_value(value, depth=1)
+    for key in _CONTEXT_RESOLUTION_STRUCTURED_KEYS:
+        if key in resolution:
+            value = resolution.get(key)
+            if value not in (None, "", [], {}):
+                compact[key] = _compact_value(value, depth=2)
+    analysis = resolution.get("analysis_result")
+    if isinstance(analysis, dict):
+        compact["analysis_result"] = _compact_screen_analysis(analysis)
+    if "kind" not in compact and resolution.get("kind"):
+        compact["kind"] = str(resolution.get("kind"))
+    return compact or {"summary": "Stored recent context resolution."}
+
+
+def _compact_active_request_state(request_state: dict[str, object]) -> dict[str, object]:
+    if not isinstance(request_state, dict) or not request_state:
+        return {}
+    compact: dict[str, object] = {}
+    for key in _ACTIVE_REQUEST_TOP_KEYS:
+        value = request_state.get(key)
+        if value not in (None, "", [], {}):
+            compact[key] = _compact_value(value, depth=1)
+    parameters = request_state.get("parameters")
+    if isinstance(parameters, dict):
+        compact_parameters: dict[str, object] = {}
+        for key in _ACTIVE_REQUEST_PARAMETER_KEYS:
+            value = parameters.get(key)
+            if value in (None, "", [], {}):
+                continue
+            if key == "pending_preview":
+                compact_parameters[key] = _compact_pending_preview(value)
+            else:
+                compact_parameters[key] = _compact_value(value, depth=1)
+        if compact_parameters:
+            compact["parameters"] = compact_parameters
+    trust = request_state.get("trust")
+    if isinstance(trust, dict):
+        compact_trust = {
+            key: _compact_value(trust.get(key), depth=1)
+            for key in _ACTIVE_REQUEST_TRUST_KEYS
+            if trust.get(key) not in (None, "", [], {})
+        }
+        if compact_trust:
+            compact["trust"] = compact_trust
+    route = request_state.get("route")
+    if isinstance(route, dict):
+        compact_route = {
+            key: _compact_value(route.get(key), depth=1)
+            for key in ("response_mode", "tool_name", "route_family", "route_mode", "result_state")
+            if route.get(key) not in (None, "", [], {})
+        }
+        if compact_route:
+            compact["route"] = compact_route
+    structured_query = request_state.get("structured_query")
+    if isinstance(structured_query, dict):
+        compact_query = {
+            key: _compact_value(structured_query.get(key), depth=1)
+            for key in _ACTIVE_REQUEST_STRUCTURED_QUERY_KEYS
+            if structured_query.get(key) not in (None, "", [], {})
+        }
+        slots = structured_query.get("slots")
+        if isinstance(slots, dict):
+            compact_slots = {
+                key: _compact_value(slots.get(key), depth=1)
+                for key in _ACTIVE_REQUEST_PARAMETER_KEYS
+                if slots.get(key) not in (None, "", [], {})
+            }
+            if compact_slots:
+                compact_query["slots"] = compact_slots
+        if compact_query:
+            compact["structured_query"] = compact_query
+    for key in ("pending_approval", "trust_prompt_id", "request_stage"):
+        value = request_state.get(key)
+        if value not in (None, "", [], {}):
+            compact[key] = _compact_value(value, depth=1)
+    return compact
+
+
+def _compact_pending_preview(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+    destination = value.get("destination") if isinstance(value.get("destination"), dict) else {}
+    payload = value.get("payload") if isinstance(value.get("payload"), dict) else {}
+    policy = value.get("policy") if isinstance(value.get("policy"), dict) else {}
+    fingerprint = value.get("fingerprint") if isinstance(value.get("fingerprint"), dict) else {}
+    compact: dict[str, object] = {
+        "route_mode": value.get("route_mode"),
+        "note_text": value.get("note_text"),
+        "state": value.get("state"),
+        "screen_awareness_used": value.get("screen_awareness_used"),
+        "ambiguity_reason": value.get("ambiguity_reason"),
+        "candidate_summaries": list(value.get("candidate_summaries") or [])
+        if isinstance(value.get("candidate_summaries"), list)
+        else [],
+        "created_at": value.get("created_at"),
+        "expires_at": value.get("expires_at"),
+    }
+    if destination:
+        compact["destination"] = {
+            key: destination.get(key)
+            for key in (
+                "alias",
+                "label",
+                "destination_kind",
+                "route_mode",
+                "navigation_mode",
+                "search_query",
+                "thread_uri",
+                "trusted",
+                "matched_alias",
+                "confidence",
+            )
+            if destination.get(key) not in (None, "", [], {})
+        }
+    if payload:
+        compact["payload"] = {
+            key: payload.get(key)
+            for key in (
+                "kind",
+                "summary",
+                "provenance",
+                "confidence",
+                "title",
+                "url",
+                "path",
+                "text",
+                "preview_text",
+                "metadata",
+                "warnings",
+                "screen_awareness_used",
+            )
+            if payload.get(key) not in (None, "", [], {})
+        }
+    if policy:
+        compact["policy"] = {
+            key: policy.get(key)
+            for key in ("outcome", "warnings", "blocks", "requires_confirmation")
+            if policy.get(key) not in (None, "", [], {})
+        }
+    if fingerprint:
+        compact["fingerprint"] = {
+            key: fingerprint.get(key)
+            for key in (
+                "fingerprint_id",
+                "destination_alias",
+                "destination_label",
+                "destination_kind",
+                "route_mode",
+                "payload_kind",
+                "payload_source",
+                "payload_identity",
+                "payload_hash",
+                "note_hash",
+                "source_anchor",
+            )
+            if fingerprint.get(key) not in (None, "", [], {})
+        }
+    return {
+        key: item
+        for key, item in compact.items()
+        if item not in (None, "", [], {})
+    }
+
+
+def _compact_screen_analysis(analysis: dict[str, object]) -> dict[str, object]:
+    compact: dict[str, object] = {}
+    for key in ("verification_state", "fallback_reason", "result_state"):
+        value = analysis.get(key)
+        if value not in (None, ""):
+            compact[key] = _compact_value(value, depth=1)
+    confidence = analysis.get("confidence")
+    if isinstance(confidence, dict):
+        compact["confidence"] = {
+            key: confidence.get(key)
+            for key in ("level", "score")
+            if confidence.get(key) not in (None, "")
+        }
+    limitations = analysis.get("limitations")
+    if isinstance(limitations, list):
+        compact["limitations"] = [
+            _compact_value(item, depth=2)
+            for item in limitations[:4]
+            if isinstance(item, dict)
+        ]
+    observation = analysis.get("observation")
+    if isinstance(observation, dict):
+        observation_payload: dict[str, object] = {}
+        for key in ("captured_at", "source_types_used", "app_identity", "selected_text", "visual_text"):
+            value = observation.get(key)
+            if value not in (None, "", [], {}):
+                observation_payload[key] = _compact_value(value, depth=1)
+        visual_metadata = observation.get("visual_metadata")
+        if isinstance(visual_metadata, dict) and isinstance(visual_metadata.get("screen_capture"), dict):
+            screen_capture = dict(visual_metadata.get("screen_capture") or {})
+            observation_payload["screen_capture"] = {
+                key: screen_capture.get(key)
+                for key in ("enabled", "attempted", "captured", "reason", "scope")
+                if screen_capture.get(key) not in (None, "")
+            }
+        if observation_payload:
+            compact["observation"] = observation_payload
+    latency_trace = analysis.get("latency_trace")
+    if isinstance(latency_trace, dict):
+        compact["latency_trace"] = {
+            key: latency_trace.get(key)
+            for key in ("total_duration_ms", "slowest_stage")
+            if latency_trace.get(key) not in (None, "")
+        }
+    return compact
+
+
+def _compact_value(value: object, *, depth: int) -> object:
+    if isinstance(value, str):
+        return value if len(value) <= 240 else value[:237].rstrip() + "..."
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    if isinstance(value, list):
+        return [_compact_value(item, depth=depth - 1) for item in value[:6]] if depth > 0 else f"list[{len(value)}]"
+    if isinstance(value, dict):
+        if depth <= 0:
+            return {
+                "keys": [str(key) for key in list(value.keys())[:8]],
+                "truncated": True,
+            }
+        keys = list(value.keys())
+        selected_keys = keys[:12]
+        if "trace" in selected_keys:
+            selected_keys = [key for key in selected_keys if key != "trace"]
+        compact = {
+            str(key): _compact_value(value.get(key), depth=depth - 1)
+            for key in selected_keys
+            if value.get(key) not in (None, "", [], {})
+        }
+        if set(value.keys()).issubset(_TRACE_KEEP_KEYS):
+            return compact
+        if len(keys) > len(selected_keys):
+            compact["truncated"] = True
+            compact["omitted_key_count"] = len(keys) - len(selected_keys)
+        return compact
+    return str(value)

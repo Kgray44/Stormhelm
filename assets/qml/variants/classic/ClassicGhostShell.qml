@@ -15,6 +15,10 @@ Item {
     property var actionStrip: []
     property var cornerReadouts: []
     property var voiceState: ({})
+    property var voiceVisualState: ({})
+    property bool captureActive: false
+    property string draftText: ""
+    property string hintText: ""
     property string statusLine: ""
     property string connectionLabel: ""
     property string timeLabel: ""

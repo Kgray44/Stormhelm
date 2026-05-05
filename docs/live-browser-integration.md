@@ -2,7 +2,7 @@
 
 Stormhelm live browser provider checks are explicit local diagnostics for Obscura CLI, Obscura CDP, and Playwright semantic observation. They are disabled by default, skipped in normal CI, and do not change the default production posture.
 
-These checks prove live provider paths can run when a developer intentionally enables them. The live browser diagnostic profile does not enable Addition 5/6 click/focus/type action gates; action execution remains a separate Screen Awareness path requiring explicit config and trust approval.
+These checks prove live provider paths can run when a developer intentionally enables them. The live browser diagnostic profile does not enable click/focus/type/choice/scroll action gates; action execution remains a separate Screen Awareness path requiring explicit config and trust approval.
 
 ## Scope
 
@@ -413,6 +413,25 @@ On the Addition 8 bounded scroll pass:
 - `scroll_to_target` stops when the target is already present, found within bounded attempts, not found within the limit, ambiguous, or sensitive. Target-not-found and ambiguous outcomes are not success.
 - Semantic before/after observations and safe scroll-position evidence support `verified_supported`; Playwright wheel command return alone is not verification.
 - Optional local fixture smoke `reports/live_browser_integration/addition-playwright-8-live-scroll.json` covered a below-fold target with `verified_supported`, a bounded target-not-found result, a sensitive/login-payment page block before launch, no forbidden capabilities, no submit side effect, and no lingering browser-like processes.
+
+On the Addition 8.1 browser interaction regression pass:
+
+- The normal live browser diagnostic profile still keeps every action gate disabled; it does not enable click, focus, type, choice, or scroll execution.
+- Cross-action fake-backed regression tests cover approval isolation, tampered target/action metadata, sensitive page-context blocking, no-submit invariants, redaction sentinels, canonical status mapping, and bounded UI/status payloads across the full implemented interaction ladder.
+- Optional combined fixture smoke `reports/live_browser_integration/addition-playwright-8.1-live-interaction-kraken.json` used only local `127.0.0.1` fixture pages, explicit per-action gates, exact TrustService approval, no user profile/cookies/public-site automation, no form submission, and cleanup closure before reporting success. The local run covered click, safe-field typing, checkbox, dropdown select, scroll-to-target, sensitive-page blocking, forbidden capability absence, and raw typed text absence.
+
+On the Addition 9 safe task-plan pass:
+
+- The normal live browser diagnostic profile still keeps task-plan execution disabled; it does not enable `browser.task.safe_sequence`.
+- Fake-backed tests cover explicit safe sequence construction, whole-plan approval binding, per-step execution through the existing safe primitives, conservative stop policy, final verification, redaction invariants, and no-submit proof.
+- Any optional live task-plan smoke must use a local isolated fixture page, explicit task-plan and primitive gates, exact TrustService approval for the ordered plan, no user profile/cookies/public-site automation, no form submission, cleanup closure, and a report that omits raw typed text and hidden values.
+- Safe task plans are not workflow replay or learned macros; they are bounded one-shot sequences of already-supported primitives.
+
+On the Addition 9.1 safe task-plan hardening pass:
+
+- The normal live browser diagnostic profile still keeps task-plan execution disabled and adds no new live action capability.
+- Fake-backed tests cover tampered ordered plans, primitive-vs-plan approval crossover, consumed/expired/denied grant replay, mid-plan drift stops, skipped later steps, route-boundary preservation, redaction sentinels, and no-submit invariants.
+- Any optional live hardening smoke must remain fixture-only and show a verified safe plan, a blocked tampered plan, a mid-plan drift stop, unchanged submit counter, raw text absence, closed cleanup, and forbidden capability absence.
 
 ## Troubleshooting
 

@@ -184,6 +184,12 @@ class IntentFrameExtractor:
             return "repair"
         if self._trust_approval_signal(normalized):
             return "verify"
+        if self._browser_history_navigation_signal(normalized):
+            return "open"
+        if self._browser_context_status_signal(normalized):
+            return "inspect"
+        if self._web_retrieval_signal(normalized):
+            return "inspect"
         if self._workflow_signal(normalized):
             return "assemble"
         if self._maintenance_signal(normalized):
@@ -273,10 +279,16 @@ class IntentFrameExtractor:
         if domain:
             entities["url"] = domain if domain.startswith(("http://", "https://")) else f"https://{domain}"
             return "website", domain, entities
+        if self._browser_history_navigation_signal(normalized):
+            return "current_page", "previous page", entities
+        if self._browser_context_status_signal(normalized):
+            return "current_page", "browser page", entities
         if self._selected_signal(normalized):
             return "selected_text", "selected text", entities
         if self._visible_ui_signal(normalized):
             return "visible_ui", "visible UI", entities
+        if self._camera_awareness_signal(normalized):
+            return "camera_frame", self._camera_target_text(raw_text), entities
         if self._website_signal(normalized):
             return "website", self._extract_after_open(raw_text), entities
         if self._maintenance_signal(normalized):
@@ -285,6 +297,8 @@ class IntentFrameExtractor:
             return "folder", self._extract_after_open(raw_text) or "working directory", entities
         if self._desktop_search_signal(normalized):
             return "file" if self._file_signal(normalized) else "unknown", self._extract_after_open(raw_text), entities
+        if self._task_continuity_signal(normalized):
+            return "workspace", "task continuity", entities
         if self._workflow_signal(normalized):
             return "workspace", self._extract_after_open(raw_text) or "workflow", entities
         if self._workspace_signal(normalized):
@@ -496,6 +510,8 @@ class IntentFrameExtractor:
             return None
         if self._external_commitment_signal(normalized):
             return "unsupported"
+        if self._camera_awareness_signal(normalized):
+            return "camera_awareness"
         if operation == "calculate" or self._calculation_followup_signal(normalized):
             return "calculations"
         if self._software_recovery_signal(normalized):
@@ -511,6 +527,8 @@ class IntentFrameExtractor:
         if target_type in {"url", "website"}:
             if self._web_retrieval_signal(normalized):
                 return "web_retrieval"
+            return "browser_destination"
+        if target_type == "current_page" and self._browser_history_navigation_signal(normalized):
             return "browser_destination"
         if self._maintenance_signal(normalized):
             return "maintenance"
@@ -530,6 +548,8 @@ class IntentFrameExtractor:
             return "context_action"
         if target_type == "visible_ui":
             return "screen_awareness"
+        if self._generic_verification_deictic_signal(normalized):
+            return "context_clarification"
         if operation == "send" and (target_type == "discord_recipient" or self._discord_signal(normalized)):
             return "discord_relay"
         if operation == "send" and any(term in normalized.split() for term in {"this", "that", "there", "it"}):
@@ -582,6 +602,8 @@ class IntentFrameExtractor:
             return ""
         if owner == "screen_awareness" and context_status != "available":
             return "visible_screen"
+        if owner == "camera_awareness":
+            return "camera_capture_confirmation"
         if owner == "discord_relay" and self._relay_missing_context(normalized):
             return "payload"
         if owner == "routine" and self._looks_like_routine_save(normalized):
@@ -748,6 +770,44 @@ class IntentFrameExtractor:
     def _resource_status_signal(self, normalized: str) -> bool:
         return bool(re.search(r"\b(?:cpu|memory|ram)\b.{0,24}\b(?:usage|use|load)\b", normalized) or "cpu and memory" in normalized)
 
+    def _camera_awareness_signal(self, normalized: str) -> bool:
+        if self._conceptual_camera_near_miss(normalized):
+            return False
+        if re.search(r"\bas\s+the\s+camera\b", normalized):
+            return True
+        if re.search(r"\b(?:screen|window|popup|desktop|visible ui|on my screen)\b", normalized):
+            return False
+        if re.search(r"\b(?:camera|webcam|camera\s+frame|camera\s+snapshot|camera\s+image|camera\s+still)\b", normalized):
+            return True
+        return bool(
+            re.search(r"\b(?:what\s+can\s+you\s+see|what\s+do\s+you\s+see)\b.{0,32}\b(?:in\s+front\s+of\s+me|through)\b", normalized)
+            or re.search(r"\b(?:are\s+you\s+watching\s+me|watching\s+me\s+right\s+now)\b", normalized)
+            or re.search(r"\bdid\s+you\s+see\s+what\s+happened\b", normalized)
+            or re.search(r"\b(?:identify|recognize)\b.{0,32}\b(?:who|person|face|in\s+frame)\b", normalized)
+            or re.search(r"\b(?:am\s+i|do\s+i\s+look)\b.{0,24}\b(?:smiling|sad|angry|tired)\b", normalized)
+            or re.search(r"\bis\s+anyone\s+behind\s+me\b", normalized)
+            or re.search(r"\bverify\b.{0,32}\b(?:room|area)\b.{0,16}\bsafe\b", normalized)
+            or re.search(r"\b(?:record\s+video|keep\s+watching|watch\s+the\s+camera|take\s+(?:a\s+)?(?:snapshot|photo))\b", normalized)
+            or re.search(r"\b(?:what\s+am\s+i\s+holding|what\s+is\s+this\s+i(?:'|’)?m\s+holding|thing\s+i(?:'|’)?m\s+holding|in\s+my\s+hand)\b", normalized)
+            or re.search(r"\b(?:this|that|it)\b.{0,32}\b(?:connector|jst|resistor|solder\s+joint|pcb|component|part|markings?)\b", normalized)
+        )
+
+    def _conceptual_camera_near_miss(self, normalized: str) -> bool:
+        return bool(
+            re.search(r"\b(?:open|find|search|install|update|driver|drivers|settings|privacy settings)\b.{0,24}\b(?:camera|webcam)\b", normalized)
+            or re.search(r"\b(?:camera|webcam)\b.{0,24}\b(?:settings|drivers|driver|online)\b", normalized)
+            or re.search(r"\b(?:what\s+is\s+a|how\s+do|how\s+does|explain|examples?|show\s+me\s+examples?)\b.{0,48}\b(?:camera|cameras|webcam|webcams)\b", normalized)
+        )
+
+    def _camera_target_text(self, raw_text: str) -> str:
+        text = re.sub(
+            r"\b(?:can\s+you|could\s+you|please|look\s+at|with\s+the\s+camera|through\s+the\s+camera|using\s+the\s+camera|identify|what\s+is|what\s+am\s+i|does|can|read|inspect|check|verify|take|record|keep)\b",
+            "",
+            raw_text,
+            flags=re.IGNORECASE,
+        )
+        return " ".join(text.split()).strip(" ?.")[:96] or "camera frame"
+
     def _weather_status_signal(self, normalized: str) -> bool:
         return bool(
             re.search(r"\b(?:weather|forecast)\b", normalized)
@@ -758,6 +818,10 @@ class IntentFrameExtractor:
     def _browser_context_status_signal(self, normalized: str) -> bool:
         return bool(
             re.search(r"\b(?:what|which)\b.{0,24}\b(?:browser\s+)?(?:page|tab)\b.{0,24}\bam i on\b", normalized)
+            or re.search(r"\b(?:what|which)\b.{0,16}\b(?:browser\s+)?(?:page|tab)\b.{0,16}\b(?:is\s+)?open\b", normalized)
+            or re.search(r"\b(?:which|what)\b.{0,16}\btab\b.{0,16}\b(?:active|current|open)\b", normalized)
+            or re.search(r"\bwhat\b.{0,16}\bother\s+tab\b", normalized)
+            or re.search(r"\b(?:what|which)\b.{0,16}\bopen\s+tabs\b", normalized)
             or re.search(r"\bcurrent\b.{0,16}\b(?:browser\s+)?(?:page|tab)\b", normalized)
         )
 
@@ -774,8 +838,6 @@ class IntentFrameExtractor:
                 "collect references from these tabs",
                 "pull in the browser references related to this project",
                 "summarize this article",
-                "summarize this page",
-                "summarize the current page",
                 "show me the source i was just reading",
                 "find the page i was just reading",
                 "find the page from earlier",
@@ -810,9 +872,13 @@ class IntentFrameExtractor:
     def _visible_ui_signal(self, normalized: str) -> bool:
         if any(phrase in normalized for phrase in {"coverage summary", "buttoned up", "press release"}):
             return False
-        has_action = bool(re.search(r"\b(?:click|press|tap|select|focus|scroll|open)\b", normalized))
+        has_action = bool(re.search(r"\b(?:click|press|tap|select|focus|scroll|open|find|locate|show)\b", normalized))
         has_target = any(re.search(rf"\b{re.escape(term)}\b", normalized) for term in UI_TARGET_TERMS)
-        return has_action and has_target
+        screen_truth_check = bool(
+            re.search(r"\b(?:verify|is|did|does|can)\b.{0,32}\b(?:warning|popup|dialog|screenshot|page|download|button|field)\b", normalized)
+            or re.search(r"\b(?:warning|popup|dialog|screenshot|page|download|button|field)\b.{0,32}\b(?:gone|visible|current|loaded|loading|started|starts?|okay)\b", normalized)
+        )
+        return (has_action and has_target) or screen_truth_check
 
     def _website_signal(self, normalized: str) -> bool:
         if any(phrase in normalized for phrase in {"what is a website", "website design ideas", "website design principles", "website app ideas"}):
@@ -827,14 +893,35 @@ class IntentFrameExtractor:
 
     def _web_retrieval_signal(self, normalized: str) -> bool:
         if re.search(r"\b(?:open|launch|go to|navigate|bring up|pull up)\b", normalized) and not re.search(
-            r"\b(?:read|summarize|inspect|extract|render|compare|text|links?|html|source|content)\b",
+            r"\b(?:read|summarize|inspect|extract|render|compare|text|links?|html|source|content|fetch|title|identity|loading|loaded|page\s+load)\b",
             normalized,
         ):
             return False
-        return bool(
-            re.search(r"\b(?:read|summarize|inspect|extract|render|compare|parse)\b", normalized)
-            or re.search(r"\b(?:links?|text|html|source|contents?|article|dom\s+text|network\s+summary|cdp|browser\s+renderer)\b", normalized)
+        has_url = bool(re.search(r"\b(?:https?://|www\.|[a-z0-9-]+\.[a-z]{2,})\b", normalized))
+        page_identity = has_url and bool(
+            re.search(r"\b(?:page\s+identity|what\s+(?:is\s+)?the\s+url|what\s+url|url\s+am\s+i\s+on|what\s+site|which\s+site|site\s+is\s+this|docs\s+page|home\s+page)\b", normalized)
         )
+        page_element_lookup = has_url and bool(
+            re.search(
+                r"\b(?:find|where|which|what|does|did|is)\b.{0,80}\b(?:section|heading|links?|button|field|documentation|download|sign\s+in|login|page\s+load|load(?:ed)?|same\s+site|same\s+page|page\s+you\s+saw)\b",
+                normalized,
+            )
+        )
+        browser_guidance = has_url and bool(
+            re.search(r"\b(?:where\s+should\s+i\s+click|which\s+link\s+should\s+i\s+click|what\s+field\s+should\s+i\s+use)\b", normalized)
+        )
+        return bool(
+            re.search(r"\b(?:read|summarize|inspect|extract|render|compare|parse|fetch)\b", normalized)
+            or re.search(r"\b(?:links?|text|html|source|contents?|article|title|dom\s+text|network\s+summary|cdp|browser\s+renderer)\b", normalized)
+            or re.search(r"\bwhat\b.{0,24}\b(?:https?://|www\.|[a-z0-9-]+\.[a-z]{2,})\b.{0,24}\bsay\b", normalized)
+            or re.search(r"\b(?:finish|finished)\s+loading\b", normalized)
+            or page_identity
+            or page_element_lookup
+            or browser_guidance
+        )
+
+    def _browser_history_navigation_signal(self, normalized: str) -> bool:
+        return bool(re.search(r"\bgo\s+back\b.{0,32}\b(?:previous|last|prior)\s+page\b", normalized))
 
     def _domain_like_destination(self, raw_text: str, normalized: str) -> str:
         if any(phrase in normalized for phrase in {"what is a website", "website design", "app ideas"}):
@@ -900,6 +987,8 @@ class IntentFrameExtractor:
                 "where i left off",
                 "continue where i left off",
                 "resume where i left off",
+                "what was i working on",
+                "what were we working on",
                 "next steps",
                 "do next",
                 "what should i do next",
@@ -933,6 +1022,8 @@ class IntentFrameExtractor:
     def _desktop_search_signal(self, normalized: str) -> bool:
         if any(phrase in normalized for phrase in {"search algorithms", "search theory", "search engine", "search the web", "research online"}):
             return False
+        if self._visible_ui_signal(normalized):
+            return False
         return bool(
             re.search(r"\b(?:find|locate|search|pull up)\b.{0,48}\b(?:file|files|folder|document|doc|readme|pdf|downloads?|desktop|computer|machine)\b", normalized)
             or re.search(r"\b(?:find|locate|search)\b.{0,36}\b(?:on|from|under)\s+(?:this\s+)?(?:computer|machine|pc|desktop)\b", normalized)
@@ -947,11 +1038,22 @@ class IntentFrameExtractor:
 
     def _trust_approval_signal(self, normalized: str) -> bool:
         return bool(
-            re.search(r"\b(?:approve|deny|allow)\b", normalized)
+            re.search(r"\b(?:approve|deny|allow|reject)\b", normalized)
+            or re.search(r"\bconfirm\b.{0,24}\b(?:action|approval|request|it|this|that)\b", normalized)
             or "permission" in normalized
             or "confirmation" in normalized
             or re.search(r"\bwhy\b.{0,24}\b(?:approval|approve|permission|confirm|confirmation)\b", normalized)
             or re.search(r"\bwhat\b.{0,24}\b(?:approving|approval|permission)\b", normalized)
+        )
+
+    def _generic_verification_deictic_signal(self, normalized: str) -> bool:
+        if not re.search(r"\b(?:verify|prove|check)\b.{0,20}\b(?:it|this|that)\b", normalized):
+            return False
+        return not bool(
+            re.search(
+                r"\b(?:approval|permission|confirmation|warning|screen|screenshot|page|download|install|message|sent|clicked)\b",
+                normalized,
+            )
         )
 
     def _external_commitment_signal(self, normalized: str) -> bool:

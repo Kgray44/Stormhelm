@@ -62,8 +62,8 @@ CONTINUATION_OPERATION_KINDS = {
     "network.run_live_diagnosis",
 }
 
-COMPLETED_STATES = {"completed", "completed_unverified", "verified"}
-VERIFIED_STATES = {"verified"}
+COMPLETED_STATES = {"completed", "completed_unverified", "verified", "sent_unverified", "sent_verified"}
+VERIFIED_STATES = {"verified", "sent_verified"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -956,34 +956,54 @@ async def _run_discord_dispatch_approved_preview(
     state = str(response_payload.get("state") or attempt.get("state") or "").lower()
     evidence = _string_list(attempt.get("verification_evidence"), limit=12)
     verification_strength = str(attempt.get("verification_strength") or "").lower()
-    verified = state == "verified" and bool(evidence) and verification_strength not in {"", "none", "weak"}
-    truth_clamps = [] if verified else ["delivery_not_verified"]
+    verified = state == "sent_verified" and bool(evidence) and verification_strength not in {"", "none", "weak"}
+    sent_unverified = state == "sent_unverified"
+    attempted_unverified = state in {"dispatch_attempted_unverified", "dispatch_attempting"}
+    blocked_or_unavailable = state in {
+        "approval_required",
+        "approval_expired",
+        "cancelled",
+        "dispatch_blocked",
+        "dispatch_failed",
+        "dispatch_not_implemented",
+        "dispatch_unavailable",
+    }
+    truth_clamps = []
+    if not verified:
+        truth_clamps.append("delivery_not_verified")
+    if blocked_or_unavailable:
+        truth_clamps.append("dispatch_not_performed")
     _report_progress(request, context, "limited_verification", "Recording bounded Discord delivery evidence.")
     summary = str(
         response_payload.get("assistant_response")
         or attempt.get("send_summary")
         or "Discord dispatch attempted, but delivery is not verified."
     )
+    result_state = state or "dispatch_failed"
+    verification_state = "verified" if verified else "not_verified"
+    completion_claimed = verified or sent_unverified
     return _continuation_result(
         request,
         context=context,
-        stage="verified" if verified else "completed_unverified",
+        stage=result_state,
         status="completed",
-        result_state="verified" if verified else "completed_unverified",
-        verification_state="verified" if verified else "not_verified",
+        result_state=result_state,
+        verification_state=verification_state,
         summary=summary,
         progress_stages=["validating_preview", "focusing_client", "send_attempted", "limited_verification"],
         verification_required=True,
         verification_attempted=True,
         evidence_count=len(evidence),
         truth_clamps=truth_clamps,
-        completion_claimed=True,
+        completion_claimed=completion_claimed,
         verification_claimed=verified,
         result_summary={
             "state": state or "unknown",
             "verification_strength": verification_strength or "none",
             "evidence_count": len(evidence),
             "preview_fingerprint": preview_fingerprint,
+            "sent_unverified": sent_unverified,
+            "attempted_unverified": attempted_unverified,
         },
     )
 

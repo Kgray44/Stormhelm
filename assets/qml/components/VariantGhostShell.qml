@@ -14,6 +14,12 @@ Item {
     property var actionStrip: []
     property var cornerReadouts: []
     property var voiceState: ({})
+    property var voiceVisualState: ({})
+    property bool captureActive: false
+    property string draftText: ""
+    property string hintText: ""
+    property string assistantState: "idle"
+    property var routeInspector: ({})
     property string statusLine: ""
     property string connectionLabel: ""
     property string timeLabel: ""
@@ -25,6 +31,7 @@ Item {
     property real adaptiveShadowOpacity: 0.1
     property real adaptiveBackdropOpacity: 0.04
     property var stormforgeFogConfig: ({})
+    property var stormforgeVoiceDiagnosticsConfig: ({})
     readonly property string effectiveVariant: String(root.visualVariant || "classic").toLowerCase() === "stormforge" ? "stormforge" : "classic"
 
     enabled: false
@@ -50,6 +57,12 @@ Item {
     Binding { target: shellLoader.item; property: "actionStrip"; value: root.actionStrip; when: shellLoader.item !== null }
     Binding { target: shellLoader.item; property: "cornerReadouts"; value: root.cornerReadouts; when: shellLoader.item !== null }
     Binding { target: shellLoader.item; property: "voiceState"; value: root.voiceState; when: shellLoader.item !== null }
+    Binding { target: shellLoader.item; property: "voiceVisualState"; value: root.voiceVisualState; when: shellLoader.item !== null }
+    Binding { target: shellLoader.item; property: "captureActive"; value: root.captureActive; when: shellLoader.item !== null }
+    Binding { target: shellLoader.item; property: "draftText"; value: root.draftText; when: shellLoader.item !== null }
+    Binding { target: shellLoader.item; property: "hintText"; value: root.hintText; when: shellLoader.item !== null }
+    Binding { target: shellLoader.item; property: "assistantState"; value: root.assistantState; when: shellLoader.item !== null && root.effectiveVariant === "stormforge" }
+    Binding { target: shellLoader.item; property: "routeInspector"; value: root.routeInspector; when: shellLoader.item !== null && root.effectiveVariant === "stormforge" }
     Binding { target: shellLoader.item; property: "statusLine"; value: root.statusLine; when: shellLoader.item !== null }
     Binding { target: shellLoader.item; property: "connectionLabel"; value: root.connectionLabel; when: shellLoader.item !== null }
     Binding { target: shellLoader.item; property: "timeLabel"; value: root.timeLabel; when: shellLoader.item !== null }
@@ -61,6 +74,7 @@ Item {
     Binding { target: shellLoader.item; property: "adaptiveShadowOpacity"; value: root.adaptiveShadowOpacity; when: shellLoader.item !== null }
     Binding { target: shellLoader.item; property: "adaptiveBackdropOpacity"; value: root.adaptiveBackdropOpacity; when: shellLoader.item !== null }
     Binding { target: shellLoader.item; property: "stormforgeFogConfig"; value: root.stormforgeFogConfig; when: shellLoader.item !== null && root.effectiveVariant === "stormforge" }
+    Binding { target: shellLoader.item; property: "stormforgeVoiceDiagnosticsConfig"; value: root.stormforgeVoiceDiagnosticsConfig; when: shellLoader.item !== null && root.effectiveVariant === "stormforge" }
 
     Connections {
         target: shellLoader.item

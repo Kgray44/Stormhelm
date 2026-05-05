@@ -18,6 +18,7 @@ from stormhelm.core.voice.models import VoicePlaybackPrewarmRequest
 from stormhelm.core.voice.models import VoiceProviderPrewarmRequest
 from stormhelm.core.voice.models import VoiceSpeechRequest
 from stormhelm.core.voice.models import VoiceStreamingTTSResult
+from stormhelm.core.voice.models import VoiceStreamingTTSChunk
 from stormhelm.core.voice.models import VoiceStreamingTTSRequest
 from stormhelm.core.voice.providers import MockPlaybackProvider
 from stormhelm.core.voice.providers import MockVoiceProvider
@@ -66,6 +67,11 @@ def _voice_config(**overrides: Any) -> VoiceConfig:
             volume=0.5,
             allow_dev_playback=True,
             streaming_enabled=True,
+            streaming_min_preroll_ms=0,
+            streaming_min_preroll_chunks=1,
+            streaming_min_preroll_bytes=1,
+            streaming_max_preroll_wait_ms=1200,
+            playback_stable_after_ms=0,
             max_audio_bytes=128,
             max_duration_ms=5000,
         ),
@@ -140,6 +146,142 @@ class RecordingNullPlaybackProvider(NullStreamingPlaybackProvider):
         )
 
 
+class RecordingPrerollPlaybackProvider(MockPlaybackProvider):
+    def __init__(self) -> None:
+        super().__init__(complete_immediately=False)
+        self.started_statuses: list[str] = []
+        self.feed_chunk_indexes: list[int | None] = []
+        self.cancel_reasons: list[str] = []
+
+    def start_stream(
+        self, request: VoiceLivePlaybackRequest
+    ) -> VoiceLivePlaybackSession:
+        session = super().start_stream(request)
+        self.started_statuses.append(session.status)
+        return session
+
+    def feed_stream_chunk(
+        self,
+        playback_stream_id: str,
+        data: bytes,
+        *,
+        chunk_index: int | None = None,
+    ):
+        self.feed_chunk_indexes.append(chunk_index)
+        return super().feed_stream_chunk(
+            playback_stream_id,
+            data,
+            chunk_index=chunk_index,
+        )
+
+    def cancel_stream(
+        self,
+        playback_stream_id: str | None = None,
+        *,
+        reason: str = "user_requested",
+    ):
+        self.cancel_reasons.append(reason)
+        return super().cancel_stream(playback_stream_id, reason=reason)
+
+
+class ObservingPrerollVoiceProvider(MockVoiceProvider):
+    def __init__(
+        self,
+        playback: RecordingPrerollPlaybackProvider,
+        *,
+        chunks: list[bytes] | None = None,
+        chunk_offsets_ms: list[int] | None = None,
+    ) -> None:
+        super().__init__(tts_audio_bytes=b"".join(chunks or []), tts_stream_chunk_size=4)
+        self.playback = playback
+        self.chunks = chunks or [
+            b"\x00\x01" * 48,
+            b"\x00\x02" * 48,
+            b"\x00\x03" * 48,
+        ]
+        self.chunk_offsets_ms = chunk_offsets_ms or [5, 130, 170]
+        self.feed_counts_after_callbacks: list[int] = []
+        self.first_callback_returned = asyncio.Event()
+        self.release_after_first = asyncio.Event()
+        self.pause_after_first = False
+
+    async def stream_speech_progressive(
+        self,
+        request: VoiceStreamingTTSRequest,
+        on_chunk,
+    ) -> VoiceStreamingTTSResult:
+        chunks: list[VoiceStreamingTTSChunk] = []
+        for index, payload in enumerate(self.chunks):
+            chunk = VoiceStreamingTTSChunk(
+                tts_stream_id=request.tts_stream_id,
+                speech_request_id=request.speech_request.speech_request_id,
+                chunk_index=index,
+                size_bytes=len(payload),
+                live_format=request.live_format,
+                provider=request.speech_request.provider,
+                model=request.speech_request.model,
+                voice=request.speech_request.voice,
+                session_id=request.speech_request.session_id,
+                turn_id=request.speech_request.turn_id,
+                first_chunk=index == 0,
+                final_chunk=index == len(self.chunks) - 1,
+                duration_ms=self.chunk_offsets_ms[min(index, len(self.chunk_offsets_ms) - 1)],
+                data=payload,
+            )
+            chunks.append(chunk)
+            await on_chunk(chunk)
+            self.feed_counts_after_callbacks.append(len(self.playback.feed_chunk_indexes))
+            if index == 0:
+                self.first_callback_returned.set()
+                if self.pause_after_first:
+                    await self.release_after_first.wait()
+        return VoiceStreamingTTSResult(
+            ok=True,
+            tts_stream_id=request.tts_stream_id,
+            speech_request_id=request.speech_request.speech_request_id,
+            provider=request.speech_request.provider,
+            model=request.speech_request.model,
+            voice=request.speech_request.voice,
+            live_format=request.live_format,
+            artifact_format=request.artifact_format,
+            status="completed",
+            chunks=tuple(chunks),
+            first_chunk_at=chunks[0].received_at,
+            final_chunk_at=chunks[-1].received_at,
+            total_chunks=len(chunks),
+            first_audio_byte_ms=chunks[0].duration_ms,
+            streaming_transport_kind="mock_stream",
+            first_chunk_before_complete=True,
+            stream_start_monotonic_ms=0,
+            first_chunk_monotonic_ms=chunks[0].duration_ms,
+            stream_complete_monotonic_ms=chunks[-1].duration_ms,
+            stream_complete_ms=chunks[-1].duration_ms,
+            bytes_total_summary_only=sum(chunk.size_bytes for chunk in chunks),
+            streaming_started=True,
+            streaming_completed=True,
+        )
+
+
+def _preroll_playback_config(**overrides: Any) -> VoicePlaybackConfig:
+    values: dict[str, Any] = {
+        "enabled": True,
+        "provider": "mock",
+        "device": "test-device",
+        "volume": 0.5,
+        "allow_dev_playback": True,
+        "streaming_enabled": True,
+        "streaming_min_preroll_ms": 0,
+        "streaming_min_preroll_chunks": 2,
+        "streaming_min_preroll_bytes": 1,
+        "streaming_max_preroll_wait_ms": 1200,
+        "playback_stable_after_ms": 0,
+        "max_audio_bytes": 4096,
+        "max_duration_ms": 5000,
+    }
+    values.update(overrides)
+    return VoicePlaybackConfig(**values)
+
+
 class DelayedProgressiveMockVoiceProvider(MockVoiceProvider):
     def __init__(self) -> None:
         super().__init__(
@@ -173,6 +315,121 @@ class DelayedProgressiveMockVoiceProvider(MockVoiceProvider):
         )
         self.progressive_completed_at = time.perf_counter()
         return result
+
+
+def test_streaming_preroll_buffers_before_submitting_first_pcm_chunk() -> None:
+    playback = RecordingPrerollPlaybackProvider()
+    provider = ObservingPrerollVoiceProvider(playback)
+    service = build_voice_subsystem(
+        _voice_config(playback=_preroll_playback_config()),
+        _openai_config(),
+    )
+    service.provider = provider
+    service.playback_provider = playback
+
+    result = asyncio.run(
+        service.stream_core_approved_spoken_text(
+            "Core approved preroll speech.",
+            speak_allowed=True,
+            session_id="voice-session",
+            turn_id="voice-turn-preroll",
+            core_result_completed_ms=20,
+            request_started_ms=0,
+        )
+    )
+
+    trace = result.playback_result.metadata["playback_startup_trace"]
+    assert provider.feed_counts_after_callbacks[0] == 0
+    assert provider.feed_counts_after_callbacks[1] >= 2
+    assert playback.feed_chunk_indexes[:2] == [0, 1]
+    assert trace["mode"] == "streaming"
+    assert trace["chunk_count_before_start"] == 2
+    assert trace["bytes_buffered_before_start"] == len(provider.chunks[0]) + len(provider.chunks[1])
+    assert trace["playback_startup_stable"] is True
+    assert trace["playback_stable_emitted_at_ms"] is not None
+
+
+def test_playback_startup_trace_records_gaps_and_visual_flaps() -> None:
+    playback = RecordingPrerollPlaybackProvider()
+    provider = ObservingPrerollVoiceProvider(
+        playback,
+        chunk_offsets_ms=[5, 480, 530],
+    )
+    service = build_voice_subsystem(
+        _voice_config(playback=_preroll_playback_config()),
+        _openai_config(),
+    )
+    service.provider = provider
+    service.playback_provider = playback
+
+    result = asyncio.run(
+        service.stream_core_approved_spoken_text(
+            "Core approved startup trace speech.",
+            speak_allowed=True,
+            session_id="voice-session",
+            turn_id="voice-turn-startup-trace",
+            core_result_completed_ms=20,
+            request_started_ms=0,
+        )
+    )
+    status = service.status_snapshot()
+    trace = status["playback"]["playback_startup_trace"]
+
+    assert trace == result.playback_result.metadata["playback_startup_trace"]
+    assert trace["chunk_gap_max_ms_startup"] >= 400
+    assert trace["playback_state_transition_count_startup"] >= 2
+    assert trace["speaking_visual_flap_count_startup"] == 0
+    assert status["playback"]["playback_startup_stable"] is True
+    assert status["playback"]["playback_preroll_active"] is False
+    assert status["playback"]["playback_buffered_ms"] >= 0
+
+
+def test_stop_speaking_cancels_preroll_before_any_audio_is_submitted() -> None:
+    playback = RecordingPrerollPlaybackProvider()
+    provider = ObservingPrerollVoiceProvider(playback)
+    provider.pause_after_first = True
+    service = build_voice_subsystem(
+        _voice_config(
+            playback=_preroll_playback_config(
+                streaming_min_preroll_chunks=4,
+                streaming_max_preroll_wait_ms=1200,
+            )
+        ),
+        _openai_config(),
+    )
+    service.provider = provider
+    service.playback_provider = playback
+
+    async def scenario():
+        stream_task = asyncio.create_task(
+            service.stream_core_approved_spoken_text(
+                "Core approved cancellable preroll speech.",
+                speak_allowed=True,
+                session_id="voice-session",
+                turn_id="voice-turn-preroll-cancel",
+                core_result_completed_ms=20,
+                request_started_ms=0,
+            )
+        )
+        await asyncio.wait_for(provider.first_callback_returned.wait(), timeout=1)
+        stop_result = await service.stop_speaking(
+            session_id="voice-session",
+            reason="user_requested",
+        )
+        provider.release_after_first.set()
+        return stop_result, await stream_task
+
+    stop_result, stream_result = asyncio.run(scenario())
+
+    assert playback.feed_chunk_indexes == []
+    assert playback.cancel_reasons == ["user_requested"]
+    assert stop_result.status == "completed"
+    assert stream_result.status == "cancelled"
+    assert stream_result.first_audio_available is False
+    assert stream_result.partial_playback is False
+    assert stream_result.playback_result is not None
+    assert stream_result.playback_result.partial_playback is False
+    assert stream_result.playback_result.user_heard_claimed is False
 
 
 def test_service_feeds_null_sink_progressively_before_provider_completion() -> None:
@@ -220,6 +477,11 @@ def test_service_feeds_local_speaker_sink_progressively_and_claims_real_output()
                 volume=0.5,
                 allow_dev_playback=True,
                 streaming_enabled=True,
+                streaming_min_preroll_ms=0,
+                streaming_min_preroll_chunks=1,
+                streaming_min_preroll_bytes=1,
+                streaming_max_preroll_wait_ms=1200,
+                playback_stable_after_ms=0,
             )
         ),
         backend=speaker_backend,

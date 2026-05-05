@@ -88,6 +88,10 @@ _TRUST_APPROVALS = {
     "cancel",
     "deny",
 }
+_TRUST_STATUS_RE = re.compile(
+    r"\b(?:did|has|is|was)\b.{0,24}\b(?:approval|permission|confirmation)\b.{0,24}\b(?:go through|approved|complete|done|accepted|rejected|denied)\b",
+    re.IGNORECASE,
+)
 _VOICE_RE = re.compile(
     r"\b(?:stop talking|stop speaking|mute voice|unmute voice|start voice capture|"
     r"cancel capture|submit voice|repeat that)\b",
@@ -95,11 +99,19 @@ _VOICE_RE = re.compile(
 )
 _SCREEN_RE = re.compile(
     r"\b(?:screen|visible|button|click that|click this|what changed|compare to before|"
-    r"verify it changed|visible error|what should i click|on my screen)\b",
+    r"verify it changed|visible error|what should i click|on my screen|"
+    r"what window am i in|current window|describe the current window|what app is focused|"
+    r"warning gone|warning still visible|page finish loading|browser page load|"
+    r"downloads? starts?|screenshot current|login page|field should i fill out)\b",
     re.IGNORECASE,
 )
 _CAMERA_AWARENESS_RE = re.compile(
     r"\b(?:webcam|camera look|with (?:the )?camera|take a camera look|"
+    r"through (?:the )?camera|camera working|camera snapshot|camera image|camera still|"
+    r"as the camera|"
+    r"are you watching me|watching me right now|did you see what happened|"
+    r"identify who|recognize who|who is in frame|am i smiling|do i look (?:sad|angry|tired)|"
+    r"anyone behind me|room.{0,16}safe|record video|keep watching|watch the camera|"
     r"what am i holding|what is this i'?m holding|identify this thing i'?m holding|"
     r"identify this part i'?m holding|part i'?m holding|"
     r"in front of me|what resistor value is this|what connector is this|"
@@ -113,7 +125,7 @@ _CAMERA_CONCEPTUAL_RE = re.compile(
 )
 _WORKSPACE_RE = re.compile(
     r"\b(?:where did we leave off|continue this|next steps|resume (?:the )?task|"
-    r"what were we doing|restore workspace|assemble workspace|save workspace)\b",
+    r"what were we doing|what was i working on|what were we working on|restore workspace|assemble workspace|save workspace)\b",
     re.IGNORECASE,
 )
 _SYSTEM_RE = re.compile(
@@ -124,7 +136,14 @@ _SYSTEM_RE = re.compile(
 _OPEN_ENDED_RE = re.compile(r"\b(?:explain|brainstorm|write|summarize|research|draft)\b", re.IGNORECASE)
 _DEICTIC_RE = re.compile(r"\b(?:this|that|it|same one|those|these|do that again|send it|open that)\b", re.IGNORECASE)
 _WEB_RETRIEVAL_RE = re.compile(
-    r"\b(?:read|summarize|inspect|extract|render|compare|parse|cdp|renderer)\b.*\b(?:https?://|www\.|[a-z0-9-]+\.[a-z]{2,})",
+    r"\b(?:read|summarize|inspect|extract|render|compare|parse|fetch|title|identity|cdp|renderer)\b.*\b(?:https?://|www\.|[a-z0-9-]+\.[a-z]{2,})",
+    re.IGNORECASE,
+)
+_BROWSER_CONTEXT_RE = re.compile(
+    r"\b(?:current\s+browser\s+url|browser\s+url|current\s+(?:browser\s+)?(?:page|tab)|"
+    r"what\s+(?:page|tab)\s+am\s+i\s+on|which\s+(?:page|tab)\s+am\s+i\s+on|"
+    r"what\s+(?:browser\s+)?(?:page|tab)\s+(?:is\s+)?open|which\s+(?:browser\s+)?(?:page|tab)\s+(?:is\s+)?open|"
+    r"what\s+are\s+the\s+open\s+tabs|which\s+tab\s+is\s+active|what\s+is\s+in\s+the\s+other\s+tab)\b",
     re.IGNORECASE,
 )
 
@@ -215,7 +234,11 @@ class FastRouteClassifier:
         clarification_likely = False
         provider_eligible = False
 
-        trust_phrase = normalized in _TRUST_APPROVALS
+        trust_phrase = (
+            normalized in _TRUST_APPROVALS
+            or bool(_TRUST_STATUS_RE.search(normalized))
+            or bool(re.search(r"\bconfirm\b.{0,24}\b(?:action|approval|request|it|this|that)\b", normalized))
+        )
         if trust_phrase:
             if _has_pending_approval(active_state):
                 likely = ["trust_approvals"]
@@ -224,10 +247,12 @@ class FastRouteClassifier:
                 query_shape_hint = "approval_follow_up"
                 needs_active_state = True
             else:
+                likely = ["trust_approvals"]
                 reason_codes.append("approval_without_pending_state")
                 clarification_likely = True
-                confidence = 0.25
+                confidence = 0.86
                 query_shape_hint = "approval_without_pending_state"
+                needs_active_state = True
 
         if not likely and _VOICE_RE.search(normalized):
             likely = ["voice_control"]
@@ -271,6 +296,13 @@ class FastRouteClassifier:
             confidence = 0.95
             query_shape_hint = "browser_destination"
             route_hints["destination_kind"] = "url_or_domain"
+
+        if not likely and _BROWSER_CONTEXT_RE.search(normalized):
+            likely = ["watch_runtime"]
+            reason_codes.append("browser_context_status")
+            confidence = 0.9
+            query_shape_hint = "browser_context"
+            needs_recent = True
 
         if not likely and _looks_like_software_control(normalized):
             likely = ["software_control"]
@@ -469,13 +501,18 @@ def _is_web_retrieval(raw: str, normalized: str) -> bool:
     if not (_URL_RE.search(raw) or _DOMAIN_RE.search(raw) or _URL_RE.search(normalized) or _DOMAIN_RE.search(normalized)):
         return False
     if re.search(r"\b(?:open|launch|go to|navigate|bring up|pull up)\b", normalized) and not re.search(
-        r"\b(?:read|summarize|inspect|extract|render|compare|text|links?|html|source|content)\b",
+        r"\b(?:read|summarize|inspect|extract|render|compare|text|links?|html|source|content|fetch|title|loading|loaded)\b",
         normalized,
     ):
         return False
     return bool(
         _WEB_RETRIEVAL_RE.search(raw)
-        or re.search(r"\b(?:read|summarize|inspect|extract|render|compare|text|links?|html|source|content|dom\s+text|network\s+summary|cdp|browser\s+renderer)\b", normalized)
+        or re.search(r"\b(?:read|summarize|inspect|extract|render|compare|fetch|text|links?|html|source|content|title|dom\s+text|network\s+summary|cdp|browser\s+renderer)\b", normalized)
+        or re.search(r"\bwhat\b.{0,24}\b(?:https?://|www\.|[a-z0-9-]+\.[a-z]{2,})\b.{0,24}\bsay\b", normalized)
+        or re.search(r"\b(?:finish|finished)\s+loading\b", normalized)
+        or re.search(r"\b(?:page\s+identity|what\s+(?:is\s+)?the\s+url|what\s+url|url\s+am\s+i\s+on|what\s+site|which\s+site|site\s+is\s+this|docs\s+page|home\s+page)\b", normalized)
+        or re.search(r"\b(?:find|where|which|what|does|did|is)\b.{0,80}\b(?:section|heading|links?|button|field|documentation|download|sign\s+in|login|page\s+load|load(?:ed)?|same\s+site|same\s+page|page\s+you\s+saw)\b", normalized)
+        or re.search(r"\b(?:where\s+should\s+i\s+click|which\s+link\s+should\s+i\s+click|what\s+field\s+should\s+i\s+use)\b", normalized)
     )
 
 

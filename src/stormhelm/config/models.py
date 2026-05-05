@@ -59,6 +59,7 @@ class StormforgeFogConfig:
     debug_visible: bool = False
     debug_intensity_multiplier: float = 3.0
     debug_tint: bool = True
+    diagnostic_disable_during_speech: bool = False
 
     def __post_init__(self) -> None:
         mode = str(self.mode or "volumetric").strip().lower()
@@ -144,6 +145,9 @@ class StormforgeFogConfig:
             maximum=0.40,
         )
         self.debug_visible = bool(self.debug_visible)
+        self.diagnostic_disable_during_speech = bool(
+            self.diagnostic_disable_during_speech
+        )
         self.debug_intensity_multiplier = self._clamped_float(
             self.debug_intensity_multiplier,
             default=3.0,
@@ -220,6 +224,48 @@ class StormforgeFogConfig:
             "debugVisible": self.debug_visible,
             "debugIntensityMultiplier": self.debug_intensity_multiplier,
             "debugTint": self.debug_tint,
+            "diagnosticDisableDuringSpeech": self.diagnostic_disable_during_speech,
+        }
+
+
+@dataclass(slots=True)
+class StormforgeVoiceDiagnosticsConfig:
+    anchor_visualizer_mode: str = "auto"
+    anchor_renderer: str = "legacy_blob_reference"
+
+    def __post_init__(self) -> None:
+        mode = str(self.anchor_visualizer_mode or "auto").strip().lower()
+        mode = mode.replace("-", "_").replace(" ", "_")
+        self.anchor_visualizer_mode = (
+            mode
+            if mode
+            in {
+                "auto",
+                "off",
+                "procedural",
+                "envelope_timeline",
+                "constant_test_wave",
+            }
+            else "auto"
+        )
+        renderer = str(self.anchor_renderer or "legacy_blob_reference").strip().lower()
+        renderer = renderer.replace("-", "_").replace(" ", "_")
+        if renderer in {"legacy_blob", "legacy_blob_reference"}:
+            self.anchor_renderer = "legacy_blob_reference"
+        elif renderer in {"legacy_blob_fast", "legacy_blob_fast_candidate"}:
+            self.anchor_renderer = "legacy_blob_fast_candidate"
+        elif renderer in {"legacy_blob_qsg", "legacy_blob_qsg_candidate"}:
+            self.anchor_renderer = "legacy_blob_qsg_candidate"
+        elif renderer == "ar3_split":
+            self.anchor_renderer = "ar3_split"
+        else:
+            self.anchor_renderer = "legacy_blob_reference"
+
+    def to_qml_map(self) -> dict[str, Any]:
+        return {
+            "anchorVisualizerMode": self.anchor_visualizer_mode,
+            "anchorRenderer": self.anchor_renderer,
+            "liveIsolationVersion": "UI-VOICE-LIVE-ISO",
         }
 
 
@@ -230,6 +276,9 @@ class UIConfig:
     ghost_shortcut: str
     visual_variant: str = "classic"
     stormforge_fog: StormforgeFogConfig = field(default_factory=StormforgeFogConfig)
+    stormforge_voice_diagnostics: StormforgeVoiceDiagnosticsConfig = field(
+        default_factory=StormforgeVoiceDiagnosticsConfig
+    )
 
 
 @dataclass(slots=True)
@@ -308,6 +357,7 @@ class PlaywrightBrowserAdapterConfig:
     allow_select_option: bool = False
     allow_scroll: bool = False
     allow_scroll_to_target: bool = False
+    allow_task_plans: bool = False
     allow_form_fill: bool = False
     allow_form_submit: bool = False
     allow_login: bool = False
@@ -320,6 +370,7 @@ class PlaywrightBrowserAdapterConfig:
     allow_dev_type_text: bool = False
     allow_dev_choice_controls: bool = False
     allow_dev_scroll: bool = False
+    allow_dev_task_plans: bool = False
     max_session_seconds: int = 120
     navigation_timeout_seconds: int = 12000
     observation_timeout_seconds: int = 8000
@@ -327,6 +378,11 @@ class PlaywrightBrowserAdapterConfig:
     scroll_step_pixels: int = 700
     scroll_timeout_seconds: float = 8.0
     max_scroll_distance_pixels: int = 5000
+    max_task_steps: int = 5
+    stop_on_unverified_step: bool = True
+    stop_on_partial_step: bool = True
+    stop_on_ambiguous_step: bool = True
+    stop_on_unexpected_navigation: bool = True
     debug_events_enabled: bool = True
 
 
@@ -700,9 +756,76 @@ class VoicePlaybackConfig:
     streaming_enabled: bool = False
     streaming_fallback_to_file: bool = True
     prewarm_enabled: bool = True
+    streaming_min_preroll_ms: int = 350
+    streaming_min_preroll_chunks: int = 2
+    streaming_min_preroll_bytes: int = 0
+    streaming_max_preroll_wait_ms: int = 1200
+    playback_stable_after_ms: int = 180
     max_audio_bytes: int = 10_000_000
     max_duration_ms: int = 120_000
     delete_transient_after_playback: bool = True
+
+
+@dataclass(slots=True)
+class VoiceVisualSyncConfig:
+    enabled: bool = True
+    envelope_visual_offset_ms: int = 0
+    estimated_output_latency_ms: int = 120
+    debug_show_sync: bool = False
+
+    def __post_init__(self) -> None:
+        self.enabled = bool(self.enabled)
+        try:
+            offset = int(round(float(self.envelope_visual_offset_ms)))
+        except (TypeError, ValueError):
+            offset = 0
+        self.envelope_visual_offset_ms = max(-500, min(500, offset))
+        try:
+            latency = int(round(float(self.estimated_output_latency_ms)))
+        except (TypeError, ValueError):
+            latency = 120
+        self.estimated_output_latency_ms = max(0, min(500, latency))
+        self.debug_show_sync = bool(self.debug_show_sync)
+
+
+@dataclass(slots=True)
+class VoiceVisualMeterConfig:
+    enabled: bool = True
+    sample_rate_hz: int = 60
+    startup_preroll_ms: int = 350
+    attack_ms: int = 60
+    release_ms: int = 160
+    noise_floor: float = 0.015
+    gain: float = 2.0
+    max_startup_wait_ms: int = 800
+    visual_offset_ms: int = 0
+
+    def __post_init__(self) -> None:
+        self.enabled = bool(self.enabled)
+        self.sample_rate_hz = max(30, min(60, int(self.sample_rate_hz or 60)))
+        self.startup_preroll_ms = max(
+            0, min(500, int(self.startup_preroll_ms or 350))
+        )
+        self.attack_ms = max(1, min(500, int(self.attack_ms or 60)))
+        self.release_ms = max(1, min(1000, int(self.release_ms or 160)))
+        try:
+            noise_floor = float(self.noise_floor)
+        except (TypeError, ValueError):
+            noise_floor = 0.015
+        self.noise_floor = max(0.0, min(0.5, noise_floor))
+        try:
+            gain = float(self.gain)
+        except (TypeError, ValueError):
+            gain = 2.0
+        self.gain = max(0.01, min(12.0, gain))
+        self.max_startup_wait_ms = max(
+            0, min(5000, int(self.max_startup_wait_ms or 800))
+        )
+        try:
+            visual_offset = int(round(float(self.visual_offset_ms)))
+        except (TypeError, ValueError):
+            visual_offset = 0
+        self.visual_offset_ms = max(-300, min(300, visual_offset))
 
 
 @dataclass(slots=True)
@@ -898,6 +1021,8 @@ class VoiceConfig:
     debug_mock_provider: bool = True
     openai: VoiceOpenAIConfig = field(default_factory=VoiceOpenAIConfig)
     playback: VoicePlaybackConfig = field(default_factory=VoicePlaybackConfig)
+    visual_sync: VoiceVisualSyncConfig = field(default_factory=VoiceVisualSyncConfig)
+    visual_meter: VoiceVisualMeterConfig = field(default_factory=VoiceVisualMeterConfig)
     capture: VoiceCaptureConfig = field(default_factory=VoiceCaptureConfig)
     wake: VoiceWakeConfig = field(default_factory=VoiceWakeConfig)
     post_wake: VoicePostWakeConfig = field(default_factory=VoicePostWakeConfig)

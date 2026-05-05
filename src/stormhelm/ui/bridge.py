@@ -12,6 +12,7 @@ from uuid import uuid4
 from PySide6 import QtCore, QtGui
 
 from stormhelm.config.models import AppConfig
+from stormhelm.core.voice.reactive_real_environment_probe import sanitize_scalar_payload
 from stormhelm.ui.command_surface_v2 import build_command_surface_model
 from stormhelm.ui.ghost_adaptive import (
     GhostAdaptiveManager,
@@ -27,6 +28,7 @@ from stormhelm.ui.latency import ui_monotonic_ms
 from stormhelm.ui.latency import ui_wall_time
 from stormhelm.ui.voice_surface import build_voice_command_station
 from stormhelm.ui.voice_surface import build_voice_ui_state
+from stormhelm.ui.voice_visual_authority import VoiceVisualPlaybackAuthority
 
 
 VISIBLE_MODES = {"ghost", "deck"}
@@ -62,6 +64,7 @@ class UiBridge(QtCore.QObject):
     visibilityChanged = QtCore.Signal()
     ghostAdaptiveChanged = QtCore.Signal()
     voiceStateChanged = QtCore.Signal()
+    voiceVisualStateChanged = QtCore.Signal()
 
     def __init__(self, config: AppConfig, parent: QtCore.QObject | None = None) -> None:
         super().__init__(parent)
@@ -85,6 +88,18 @@ class UiBridge(QtCore.QObject):
         self._health: dict[str, Any] = {}
         self._status: dict[str, Any] = {}
         self._voice_state: dict[str, Any] = build_voice_ui_state({})
+        self._voice_visual_authority = VoiceVisualPlaybackAuthority()
+        self._voice_visual_state: dict[str, Any] = (
+            self._voice_visual_authority.snapshot(now_ms=ui_monotonic_ms())
+        )
+        self._voice_visual_emit_timer = QtCore.QTimer(self)
+        self._voice_visual_emit_timer.setSingleShot(True)
+        self._voice_visual_emit_timer.setInterval(33)
+        self._voice_visual_emit_timer.timeout.connect(
+            self._flush_voice_visual_state_changed
+        )
+        self._voice_visual_last_emit_monotonic = 0.0
+        self._voice_visual_pending_emit = False
         self._visualizer_updates_received = 0
         self._visualizer_updates_coalesced = 0
         self._visualizer_updates_dropped = 0
@@ -94,6 +109,34 @@ class UiBridge(QtCore.QObject):
         self._visualizer_max_receive_gap_ms = 0.0
         self._bridge_collection_rebuilds_during_speech = 0
         self._qml_anchor_updates_during_speech = 0
+        self._voice_ar1_qml_diag_enabled = (
+            str(os.environ.get("STORMHELM_VOICE_AR1_QML_DIAG", ""))
+            .strip()
+            .lower()
+            in {"1", "true", "yes", "on"}
+        )
+        qml_diag_path = str(
+            os.environ.get("STORMHELM_VOICE_AR1_QML_DIAG_PATH", "")
+        ).strip()
+        self._voice_ar1_qml_diag_path = (
+            Path(qml_diag_path).expanduser()
+            if qml_diag_path
+            else Path.cwd()
+            / ".artifacts"
+            / "voice_ar1_real_environment"
+            / "production_ui_diagnostics.jsonl"
+        )
+        self._voice_ar1_qml_diag_count = 0
+        self._voice_ar1_qml_diag_first_monotonic = 0.0
+        self._voice_ar1_qml_diag_last_monotonic = 0.0
+        self._voice_ar1_qml_diag_max_gap_ms = 0.0
+        self._voice_ar1_qml_diag_buffer: list[dict[str, Any]] = []
+        self._voice_ar1_qml_diag_flush_timer = QtCore.QTimer(self)
+        self._voice_ar1_qml_diag_flush_timer.setSingleShot(True)
+        self._voice_ar1_qml_diag_flush_timer.setInterval(100)
+        self._voice_ar1_qml_diag_flush_timer.timeout.connect(
+            self._flush_voice_reactive_qml_diagnostics
+        )
         self._history: list[dict[str, Any]] = []
         self._jobs: list[dict[str, Any]] = []
         self._events: list[dict[str, Any]] = []
@@ -279,6 +322,14 @@ class UiBridge(QtCore.QObject):
     def uiStormforgeFog(self) -> dict[str, Any]:
         return self.config.ui.stormforge_fog.to_qml_map()
 
+    @QtCore.Property("QVariantMap", constant=True)
+    def uiStormforgeVoiceDiagnostics(self) -> dict[str, Any]:
+        return self.config.ui.stormforge_voice_diagnostics.to_qml_map()
+
+    @QtCore.Property(bool, constant=True)
+    def voiceReactiveDiagnosticsEnabled(self) -> bool:
+        return bool(self._voice_ar1_qml_diag_enabled)
+
     @QtCore.Property(str, notify=assistantStateChanged)
     def assistantState(self) -> str:
         return self._assistant_state
@@ -318,6 +369,10 @@ class UiBridge(QtCore.QObject):
     @QtCore.Property("QVariantMap", notify=voiceStateChanged)
     def voiceState(self) -> dict[str, Any]:
         return dict(self._voice_state)
+
+    @QtCore.Property("QVariantMap", notify=voiceVisualStateChanged)
+    def voiceVisualState(self) -> dict[str, Any]:
+        return dict(self._voice_visual_state)
 
     @QtCore.Property("QVariantList", notify=statusChanged)
     def uiLatencyMarks(self) -> list[dict[str, Any]]:
@@ -454,6 +509,142 @@ class UiBridge(QtCore.QObject):
             monotonic_ms=rendered_at,
         )
         self.statusChanged.emit()
+
+    @QtCore.Slot("QVariantMap")
+    def recordVoiceReactiveQmlDiagnostic(self, payload: dict[str, Any]) -> None:
+        if not self._voice_ar1_qml_diag_enabled or not isinstance(payload, dict):
+            return
+        now = ui_monotonic_ms()
+        if self._voice_ar1_qml_diag_first_monotonic <= 0.0:
+            self._voice_ar1_qml_diag_first_monotonic = now
+        if self._voice_ar1_qml_diag_last_monotonic > 0.0:
+            gap_ms = now - self._voice_ar1_qml_diag_last_monotonic
+            self._voice_ar1_qml_diag_max_gap_ms = max(
+                self._voice_ar1_qml_diag_max_gap_ms,
+                gap_ms,
+            )
+        self._voice_ar1_qml_diag_last_monotonic = now
+        self._voice_ar1_qml_diag_count += 1
+        elapsed_seconds = (
+            (now - self._voice_ar1_qml_diag_first_monotonic) / 1000.0
+            if self._voice_ar1_qml_diag_first_monotonic > 0.0
+            and now > self._voice_ar1_qml_diag_first_monotonic
+            else 0.0
+        )
+        qml_rate_hz = (
+            (self._voice_ar1_qml_diag_count - 1) / elapsed_seconds
+            if self._voice_ar1_qml_diag_count > 1 and elapsed_seconds > 0.0
+            else 0.0
+        )
+        voice_state = dict(self._voice_visual_state or {})
+        row = sanitize_scalar_payload(payload)
+        row.update(
+            {
+                "stage": "production_qml_anchor",
+                "bridge_receive_time_ms": round(now, 3),
+                "bridge_receive_wall_time_ms": round(time.time() * 1000.0, 3),
+                "bridge_voice_visual_energy": voice_state.get(
+                    "voice_visual_energy", 0.0
+                ),
+                "bridge_voice_visual_active": bool(
+                    voice_state.get("voice_visual_active", False)
+                ),
+                "bridge_playback_id": voice_state.get("playback_id"),
+                "authoritativeVoiceStateVersion": voice_state.get(
+                    "authoritativeVoiceStateVersion"
+                ),
+                "activePlaybackId": voice_state.get("activePlaybackId"),
+                "activePlaybackStatus": voice_state.get("activePlaybackStatus"),
+                "authoritativePlaybackId": voice_state.get("authoritativePlaybackId"),
+                "authoritativePlaybackStatus": voice_state.get(
+                    "authoritativePlaybackStatus"
+                ),
+                "authoritativeVoiceVisualActive": bool(
+                    voice_state.get("authoritativeVoiceVisualActive", False)
+                ),
+                "authoritativeVoiceVisualEnergy": voice_state.get(
+                    "authoritativeVoiceVisualEnergy", 0.0
+                ),
+                "authoritativeStateSequence": voice_state.get(
+                    "authoritativeStateSequence"
+                ),
+                "authoritativeStateSource": voice_state.get(
+                    "authoritativeStateSource"
+                ),
+                "lastAcceptedUpdateSource": voice_state.get(
+                    "lastAcceptedUpdateSource"
+                ),
+                "lastIgnoredUpdateSource": voice_state.get(
+                    "lastIgnoredUpdateSource"
+                ),
+                "staleBroadSnapshotIgnored": bool(
+                    voice_state.get("staleBroadSnapshotIgnored", False)
+                ),
+                "staleBroadSnapshotIgnoredCount": voice_state.get(
+                    "staleBroadSnapshotIgnoredCount", 0
+                ),
+                "hotPathAcceptedCount": voice_state.get("hotPathAcceptedCount", 0),
+                "terminalEventAcceptedCount": voice_state.get(
+                    "terminalEventAcceptedCount", 0
+                ),
+                "playbackIdSwitchCount": voice_state.get("playbackIdSwitchCount", 0),
+                "playbackIdMismatchIgnoredCount": voice_state.get(
+                    "playbackIdMismatchIgnoredCount", 0
+                ),
+                "voiceVisualActiveFlapCount": voice_state.get(
+                    "voiceVisualActiveFlapCount", 0
+                ),
+                "bridge_update_rate_hz": round(
+                    self._visualizer_updates_received / elapsed_seconds, 3
+                )
+                if elapsed_seconds > 0.0
+                else 0.0,
+                "bridge_latency_from_payload_ms": (
+                    round(now - float(voice_state.get("payload_time_ms") or 0.0), 3)
+                    if voice_state.get("payload_time_ms")
+                    else None
+                ),
+                "surface_model_rebuild_count_during_speaking": int(
+                    self._bridge_collection_rebuilds_during_speech
+                ),
+                "collection_rebuild_count_during_visualizer_updates": int(
+                    self._bridge_collection_rebuilds_during_speech
+                ),
+                "surface_model_rebuild_count_during_visualizer_updates": int(
+                    self._bridge_collection_rebuilds_during_speech
+                ),
+                "dropped_update_count": int(self._visualizer_updates_dropped),
+                "coalesced_update_count": int(self._visualizer_updates_coalesced),
+                "bridge_visualizer_update_count": int(
+                    self._visualizer_updates_received
+                ),
+                "qml_diagnostic_emit_count": int(self._voice_ar1_qml_diag_count),
+                "qml_diagnostic_update_rate_hz": round(qml_rate_hz, 3),
+                "qml_diagnostic_max_gap_ms": round(
+                    self._voice_ar1_qml_diag_max_gap_ms, 3
+                ),
+                "raw_audio_present": False,
+            }
+        )
+        self._voice_ar1_qml_diag_buffer.append(sanitize_scalar_payload(row))
+        if not self._voice_ar1_qml_diag_flush_timer.isActive():
+            self._voice_ar1_qml_diag_flush_timer.start()
+        if len(self._voice_ar1_qml_diag_buffer) >= 120:
+            self._flush_voice_reactive_qml_diagnostics()
+
+    def _flush_voice_reactive_qml_diagnostics(self) -> None:
+        if not self._voice_ar1_qml_diag_buffer:
+            return
+        rows = [sanitize_scalar_payload(row) for row in self._voice_ar1_qml_diag_buffer]
+        self._voice_ar1_qml_diag_buffer = []
+        try:
+            self._voice_ar1_qml_diag_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._voice_ar1_qml_diag_path.open("a", encoding="utf-8") as handle:
+                for row in rows:
+                    handle.write(json.dumps(row, sort_keys=True))
+                    handle.write("\n")
+        except Exception:
+            return
 
     @QtCore.Property("QVariantMap", notify=statusChanged)
     def eventStreamConnectionState(self) -> dict[str, Any]:
@@ -1706,7 +1897,6 @@ class UiBridge(QtCore.QObject):
                         bridge_update_ms=bridge_update_ms,
                         model_notify_ms=model_notify_ms,
                     )
-                    self.voiceStateChanged.emit()
                     self._record_ui_latency_mark(
                         request_id=request_id,
                         event_id=str(cursor),
@@ -2625,6 +2815,11 @@ class UiBridge(QtCore.QObject):
         event_payload = (
             event.get("payload") if isinstance(event.get("payload"), dict) else {}
         )
+        metadata_payload = (
+            event_payload.get("metadata")
+            if isinstance(event_payload.get("metadata"), dict)
+            else {}
+        )
         event_type = str(event.get("event_type") or event.get("type") or "").strip().lower()
         family = str(event.get("event_family") or "").strip().lower()
         identity = (
@@ -2635,6 +2830,8 @@ class UiBridge(QtCore.QObject):
             or event_payload.get("turn_id")
             or event_payload.get("capture_id")
             or event_payload.get("playback_id")
+            or metadata_payload.get("playback_id")
+            or event.get("playback_id")
             or "default"
         )
         if event_type.startswith("voice."):
@@ -2850,11 +3047,87 @@ class UiBridge(QtCore.QObject):
                 "audioDriveLevel",
                 "voice_audio_reactive_available",
                 "voice_audio_reactive_source",
+                "voice_visual_active",
+                "voice_visual_available",
+                "voice_visual_energy",
+                "voice_visual_source",
+                "voice_visual_energy_source",
+                "voice_visual_playback_id",
+                "voice_visual_sample_rate_hz",
+                "voice_visual_started_at_ms",
+                "voice_visual_latest_age_ms",
+                "voice_visual_disabled_reason",
                 "voice_anchor_debug",
                 "streaming_tts_active",
                 "live_playback_active",
                 "first_audio_started",
                 "active_playback_status",
+                "playback_id",
+                "active_playback_id",
+                "active_playback_stream_id",
+                "playback_envelope_supported",
+                "playback_envelope_available",
+                "playback_envelope_usable",
+                "playback_envelope_source",
+                "playback_envelope_energy",
+                "playback_envelope_sample_rate_hz",
+                "playback_envelope_latency_ms",
+                "estimated_output_latency_ms",
+                "envelope_visual_offset_ms",
+                "playback_envelope_visual_offset_ms",
+                "playback_visual_time_ms",
+                "playback_envelope_time_offset_applied_ms",
+                "playback_envelope_sync_enabled",
+                "envelope_sync_calibration_version",
+                "envelope_sync_debug_show_sync",
+                "playback_envelope_sample_age_ms",
+                "playback_envelope_sample_count",
+                "playback_envelope_window_mode",
+                "playback_envelope_latest_time_ms",
+                "playback_envelope_query_time_ms",
+                "playback_envelope_timebase_aligned",
+                "playback_envelope_alignment_error_ms",
+                "playback_envelope_alignment_delta_ms",
+                "playback_envelope_alignment_tolerance_ms",
+                "playback_envelope_alignment_status",
+                "playback_envelope_usable_reason",
+                "playback_envelope_samples_recent",
+                "envelope_timeline_samples",
+                "envelopeTimelineSamples",
+                "envelope_timeline_available",
+                "envelopeTimelineAvailable",
+                "envelope_timeline_sample_rate_hz",
+                "envelope_timeline_sample_count",
+                "envelope_timeline_ready_at_playback_start",
+                "envelopeTimelineReadyAtPlaybackStart",
+                "playback_envelope_samples_dropped",
+                "anchor_uses_playback_envelope",
+                "procedural_fallback_active",
+                "speaking_visual_sync_mode",
+                "visualizer_source_strategy",
+                "visualizerSourceStrategy",
+                "visualizer_source_locked",
+                "visualizerSourceLocked",
+                "visualizer_source_playback_id",
+                "visualizerSourcePlaybackId",
+                "visualizer_source_switch_count",
+                "visualizerSourceSwitchCount",
+                "visualizer_source_switching_disabled",
+                "visualizerSourceSwitchingDisabled",
+                "timeline_visualizer_version",
+                "timelineVisualizerVersion",
+                "requested_anchor_visualizer_mode",
+                "requestedAnchorVisualizerMode",
+                "effective_anchor_visualizer_mode",
+                "effectiveAnchorVisualizerMode",
+                "forced_visualizer_mode_honored",
+                "forcedVisualizerModeHonored",
+                "forced_visualizer_mode_unavailable_reason",
+                "forcedVisualizerModeUnavailableReason",
+                "visualizer_strategy_selected_by",
+                "visualizerStrategySelectedBy",
+                "envelope_interpolation_active",
+                "envelope_fallback_reason",
             }
             direct_voice = {
                 key: event_payload.get(key)
@@ -2864,8 +3137,22 @@ class UiBridge(QtCore.QObject):
             voice_payload = direct_voice or None
         if not isinstance(voice_payload, dict) or not voice_payload:
             return False
+        authority_now = ui_monotonic_ms()
+        if event_type.lower().startswith("voice.playback_"):
+            self._voice_visual_authority.apply_playback_event(
+                event_type,
+                event_payload,
+                now_ms=authority_now,
+            )
         if visualizer_event:
             self._record_visualizer_stream_update(voice_payload)
+            previous_visual_state = dict(self._voice_visual_state)
+            next_visual = self._voice_visual_authority.apply_hot_path_update(
+                voice_payload,
+                now_ms=authority_now,
+            )
+            self._set_voice_visual_state_payload(next_visual)
+            return self._voice_visual_state != previous_visual_state
         next_status = dict(self._status)
         current_voice = (
             dict(next_status.get("voice"))
@@ -3590,7 +3877,13 @@ class UiBridge(QtCore.QObject):
         }
 
     def _refresh_voice_state(self, *, visualizer_update: bool = False) -> bool:
-        next_state = build_voice_ui_state(self._status)
+        base_state = build_voice_ui_state(self._status)
+        authoritative_visual_state = self._voice_visual_authority.apply_snapshot_update(
+            base_state,
+            now_ms=ui_monotonic_ms(),
+        )
+        next_state = dict(base_state)
+        next_state.update(authoritative_visual_state)
         next_state.update(self._voice_visualizer_bridge_counters())
         if visualizer_update and bool(next_state.get("speaking_visual_active")):
             self._qml_anchor_updates_during_speech += 1
@@ -3600,7 +3893,129 @@ class UiBridge(QtCore.QObject):
         if next_state == self._voice_state:
             return False
         self._voice_state = next_state
+        self._set_voice_visual_state_payload(
+            authoritative_visual_state,
+            immediate=visualizer_update
+            and bool(authoritative_visual_state.get("voice_visual_active")),
+        )
         return True
+
+    def _extract_voice_visual_state(self, voice_state: dict[str, Any]) -> dict[str, Any]:
+        scalar_keys = (
+            "playback_id",
+            "voice_visual_active",
+            "voice_visual_energy",
+            "voice_visual_source",
+            "voice_visual_latest_age_ms",
+            "payload_time_ms",
+            "payload_wall_time_ms",
+            "meter_time_ms",
+            "meter_wall_time_ms",
+        )
+        payload = {
+            key: voice_state.get(key)
+            for key in scalar_keys
+            if key in voice_state
+        }
+        playback_id = (
+            voice_state.get("playback_id")
+            or voice_state.get("voice_visual_playback_id")
+            or voice_state.get("active_playback_stream_id")
+            or voice_state.get("active_playback_id")
+        )
+        if playback_id:
+            payload["playback_id"] = playback_id
+        if "voice_visual_source" not in payload and voice_state.get("voice_visual_energy_source"):
+            payload["voice_visual_source"] = voice_state.get("voice_visual_energy_source")
+        source = str(payload.get("voice_visual_source") or "").strip()
+        prior_visual_state = getattr(self, "_voice_visual_state", {})
+        prior_source = str(prior_visual_state.get("voice_visual_source") or "").strip()
+        playback_status = (
+            str(
+                voice_state.get("active_playback_status")
+                or voice_state.get("playback_status")
+                or ""
+            )
+            .strip()
+            .lower()
+        )
+        playback_active = playback_status in {
+            "active",
+            "playing",
+            "prerolling",
+            "started",
+        }
+        if (
+            source in {"", "none", "unavailable"}
+            and prior_source == "pcm_stream_meter"
+            and (
+                "voice_visual_active" in payload
+                or "voice_visual_energy" in payload
+                or "voice_visual_latest_age_ms" in payload
+            )
+        ):
+            payload["voice_visual_source"] = prior_source
+        if (
+            prior_source == "pcm_stream_meter"
+            and bool(prior_visual_state.get("voice_visual_active"))
+            and playback_active
+            and not bool(payload.get("voice_visual_active", False))
+        ):
+            payload["voice_visual_active"] = True
+            payload["voice_visual_source"] = "pcm_stream_meter"
+            if "playback_id" not in payload and prior_visual_state.get("playback_id"):
+                payload["playback_id"] = prior_visual_state.get("playback_id")
+        payload["raw_audio_present"] = False
+        return sanitize_scalar_payload(payload)
+
+    def _set_voice_visual_state_from_voice_state(
+        self,
+        voice_state: dict[str, Any],
+        *,
+        immediate: bool = False,
+    ) -> None:
+        next_visual = self._voice_visual_authority.apply_snapshot_update(
+            voice_state,
+            now_ms=ui_monotonic_ms(),
+        )
+        self._set_voice_visual_state_payload(next_visual, immediate=immediate)
+
+    def _set_voice_visual_state_payload(
+        self,
+        visual_state: dict[str, Any],
+        *,
+        immediate: bool = False,
+    ) -> None:
+        next_visual = dict(visual_state)
+        next_visual.update(self._voice_visualizer_bridge_counters())
+        next_visual = sanitize_scalar_payload(next_visual)
+        if next_visual == self._voice_visual_state:
+            return
+        was_active = bool(self._voice_visual_state.get("voice_visual_active"))
+        is_active = bool(next_visual.get("voice_visual_active"))
+        self._voice_visual_state = next_visual
+        if immediate or (is_active != was_active):
+            self._voice_visual_pending_emit = True
+            self._flush_voice_visual_state_changed()
+            return
+        self._queue_voice_visual_state_changed()
+
+    def _queue_voice_visual_state_changed(self) -> None:
+        self._voice_visual_pending_emit = True
+        now = ui_monotonic_ms()
+        elapsed = now - self._voice_visual_last_emit_monotonic
+        if self._voice_visual_last_emit_monotonic <= 0.0 or elapsed >= 33.0:
+            self._flush_voice_visual_state_changed()
+            return
+        if not self._voice_visual_emit_timer.isActive():
+            self._voice_visual_emit_timer.start(max(1, int(33.0 - elapsed)))
+
+    def _flush_voice_visual_state_changed(self) -> None:
+        if not self._voice_visual_pending_emit and self._voice_visual_last_emit_monotonic > 0.0:
+            return
+        self._voice_visual_pending_emit = False
+        self._voice_visual_last_emit_monotonic = ui_monotonic_ms()
+        self.voiceVisualStateChanged.emit()
 
     def _voice_collection_signature(self, value: Any) -> Any:
         volatile_keys = {

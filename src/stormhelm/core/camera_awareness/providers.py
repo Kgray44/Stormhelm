@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
+import os
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -282,7 +284,7 @@ class LocalCameraCaptureProvider:
         backend: LocalStillCaptureBackend | None = None,
     ) -> None:
         self.config = config
-        self.backend = backend or FfmpegDirectShowStillBackend()
+        self.backend = backend or default_local_still_backend()
         self.backend_kind = getattr(self.backend, "backend_kind", "unknown_local_backend")
         self.backend_available = bool(self.backend.is_available())
         self.backend_unavailable_reason = (
@@ -621,6 +623,120 @@ class FfmpegDirectShowStillBackend:
             image_format="jpg",
             file_path=output_path,
         )
+
+
+class WindowsMediaCaptureStillBackend:
+    backend_kind = "windows_media_capture"
+
+    def __init__(self, *, executable: str | None = None) -> None:
+        self.executable = executable or shutil.which("powershell") or shutil.which("pwsh")
+
+    def is_available(self) -> bool:
+        return bool(sys.platform.startswith("win") and self.executable)
+
+    def get_devices(self, *, timeout_seconds: float) -> list[CameraDeviceStatus]:
+        if not sys.platform.startswith("win"):
+            return [_unavailable_device("unsupported_platform", self.backend_kind)]
+        if not self.executable:
+            return [_unavailable_device("local_capture_backend_unavailable", self.backend_kind)]
+        payload = _run_powershell_json(
+            self.executable,
+            _WINRT_LIST_DEVICES_SCRIPT,
+            timeout_seconds=timeout_seconds,
+        )
+        if str(payload.get("status") or "").lower() != "ok":
+            return [
+                _unavailable_device(
+                    _winrt_error_code(payload),
+                    self.backend_kind,
+                    message=str(payload.get("error_message") or "Windows camera probe failed."),
+                )
+            ]
+        devices = payload.get("devices") if isinstance(payload.get("devices"), list) else []
+        if not devices:
+            return [_unavailable_device("camera_no_device", self.backend_kind)]
+        results: list[CameraDeviceStatus] = []
+        for index, device in enumerate(devices):
+            if not isinstance(device, dict):
+                continue
+            name = str(device.get("name") or f"Camera {index}").strip()
+            device_id = str(device.get("id") or str(index)).strip() or str(index)
+            results.append(
+                CameraDeviceStatus(
+                    device_id=device_id,
+                    display_name=name,
+                    provider=self.backend_kind,
+                    available=bool(device.get("is_enabled", True)),
+                    permission_state=CameraPermissionState.UNKNOWN,
+                    active=False,
+                    mock_device=False,
+                    source_provenance=CAMERA_SOURCE_PROVENANCE_LOCAL,
+                )
+            )
+        return results or [_unavailable_device("camera_no_device", self.backend_kind)]
+
+    def capture_still(
+        self,
+        *,
+        device_id: str,
+        output_path: Path,
+        timeout_seconds: float,
+        requested_resolution: str,
+    ) -> LocalStillCaptureBackendResult:
+        if not sys.platform.startswith("win"):
+            return LocalStillCaptureBackendResult(
+                success=False,
+                error_code="unsupported_platform",
+                error_message="Windows MediaCapture is only available on Windows.",
+                device_id=device_id,
+            )
+        if not self.executable:
+            return LocalStillCaptureBackendResult(
+                success=False,
+                error_code="local_capture_backend_unavailable",
+                error_message="PowerShell executable was not found.",
+                device_id=device_id,
+            )
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        env = {
+            "STORMHELM_CAMERA_OUTPUT_PATH": str(output_path),
+            "STORMHELM_CAMERA_DEVICE_ID": str(device_id or ""),
+        }
+        payload = _run_powershell_json(
+            self.executable,
+            _WINRT_CAPTURE_SCRIPT,
+            timeout_seconds=timeout_seconds,
+            extra_env=env,
+        )
+        if str(payload.get("status") or "").lower() != "ok" or not output_path.exists():
+            code = _winrt_error_code(payload)
+            return LocalStillCaptureBackendResult(
+                success=False,
+                error_code=code,
+                error_message=str(
+                    payload.get("error_message")
+                    or payload.get("message")
+                    or "Windows camera capture failed."
+                ),
+                device_id=str(payload.get("device_id") or device_id),
+            )
+        width, height = _image_dimensions(output_path, fallback=requested_resolution)
+        return LocalStillCaptureBackendResult(
+            success=True,
+            device_id=str(payload.get("device_id") or device_id),
+            width=width,
+            height=height,
+            image_format="jpg",
+            file_path=output_path,
+        )
+
+
+def default_local_still_backend() -> LocalStillCaptureBackend:
+    if sys.platform.startswith("win"):
+        winrt = WindowsMediaCaptureStillBackend()
+        if winrt.is_available():
+            return winrt
+    return FfmpegDirectShowStillBackend()
 
 
 class MockVisionAnalysisProvider:
@@ -984,7 +1100,12 @@ def _capture_status_for_error(error_code: str) -> CameraCaptureStatus:
         return CameraCaptureStatus.NO_DEVICE
     if error_code == "camera_device_busy":
         return CameraCaptureStatus.DEVICE_BUSY
-    if error_code in {"camera_permission_denied", "local_capture_backend_unavailable", "unsupported_platform"}:
+    if error_code in {
+        "camera_permission_denied",
+        "permission_denied",
+        "local_capture_backend_unavailable",
+        "unsupported_platform",
+    }:
         return CameraCaptureStatus.BLOCKED
     return CameraCaptureStatus.FAILED
 
@@ -1041,6 +1162,197 @@ def _ffmpeg_error_code(output: str) -> str:
     if "timeout" in text or "timed out" in text:
         return "camera_capture_timeout"
     return "camera_capture_failed"
+
+
+def _winrt_error_code(payload: dict[str, Any]) -> str:
+    code = str(payload.get("error_code") or "").strip().lower()
+    if code:
+        return code
+    text = str(payload.get("error_message") or payload.get("message") or "").lower()
+    if "permission" in text or "access is denied" in text or "unauthorized" in text:
+        return "permission_denied"
+    if "being used" in text or "busy" in text or "in use" in text:
+        return "camera_device_busy"
+    if "timeout" in text or "timed out" in text:
+        return "camera_capture_timeout"
+    if "no_camera_device" in text or "no camera" in text or "not found" in text:
+        return "camera_no_device"
+    return "camera_capture_failed"
+
+
+def _image_dimensions(path: Path, *, fallback: str) -> tuple[int, int]:
+    try:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            width, height = image.size
+            if int(width) > 0 and int(height) > 0:
+                return int(width), int(height)
+    except Exception:
+        pass
+    return _parse_resolution(fallback)
+
+
+def _run_powershell_json(
+    executable: str,
+    script: str,
+    *,
+    timeout_seconds: float,
+    extra_env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    env = dict(os.environ)
+    env.update(extra_env or {})
+    try:
+        result = subprocess.run(
+            [
+                executable,
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=max(1.0, float(timeout_seconds)),
+            check=False,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "error",
+            "error_code": "camera_capture_timeout",
+            "error_message": "Windows camera command timed out.",
+        }
+    except OSError as error:
+        return {
+            "status": "error",
+            "error_code": "local_capture_backend_unavailable",
+            "error_message": str(error),
+        }
+    output = (result.stdout or "").strip() or (result.stderr or "").strip()
+    try:
+        payload = json.loads(output)
+    except json.JSONDecodeError:
+        payload = {
+            "status": "error",
+            "error_code": "camera_capture_failed",
+            "error_message": output or f"PowerShell exited with {result.returncode}.",
+        }
+    if result.returncode != 0 and str(payload.get("status") or "").lower() == "ok":
+        payload["status"] = "error"
+        payload["error_code"] = "camera_capture_failed"
+    return payload
+
+
+_WINRT_COMMON_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+Add-Type -AssemblyName System.Runtime.WindowsRuntime -ErrorAction SilentlyContinue
+[Windows.Devices.Enumeration.DeviceInformation, Windows.Devices.Enumeration, ContentType = WindowsRuntime] | Out-Null
+[Windows.Devices.Enumeration.DeviceInformationCollection, Windows.Devices.Enumeration, ContentType = WindowsRuntime] | Out-Null
+[Windows.Devices.Enumeration.DeviceClass, Windows.Devices.Enumeration, ContentType = WindowsRuntime] | Out-Null
+function Await-AsyncAction($Op, [int]$TimeoutMs=5000) {
+    $method = [System.WindowsRuntimeSystemExtensions].GetMethods() |
+        Where-Object { $_.Name -eq 'AsTask' -and -not $_.IsGenericMethodDefinition -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncAction' } |
+        Select-Object -First 1
+    $task = $method.Invoke($null, @($Op))
+    if (-not $task.Wait($TimeoutMs)) { throw 'camera_capture_timeout' }
+    return $null
+}
+function Await-AsyncOperation($Op, [Type]$ResultType, [int]$TimeoutMs=5000) {
+    $method = [System.WindowsRuntimeSystemExtensions].GetMethods() |
+        Where-Object { $_.Name -eq 'AsTask' -and $_.IsGenericMethodDefinition -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -like 'IAsyncOperation*' } |
+        Select-Object -First 1
+    $task = $method.MakeGenericMethod($ResultType).Invoke($null, @($Op))
+    if (-not $task.Wait($TimeoutMs)) { throw 'camera_capture_timeout' }
+    return $task.Result
+}
+"""
+
+_WINRT_LIST_DEVICES_SCRIPT = _WINRT_COMMON_SCRIPT + r"""
+try {
+    $devices = Await-AsyncOperation ([Windows.Devices.Enumeration.DeviceInformation]::FindAllAsync([Windows.Devices.Enumeration.DeviceClass]::VideoCapture)) ([Windows.Devices.Enumeration.DeviceInformationCollection]) 5000
+    $items = @()
+    $index = 0
+    foreach ($device in $devices) {
+        $items += [PSCustomObject]@{
+            index = $index
+            name = $device.Name
+            id = $device.Id
+            is_enabled = [bool]$device.IsEnabled
+        }
+        $index += 1
+    }
+    [PSCustomObject]@{ status='ok'; devices=$items } | ConvertTo-Json -Compress -Depth 6
+} catch {
+    [PSCustomObject]@{ status='error'; error_code='camera_probe_failed'; error_message=$_.Exception.Message } | ConvertTo-Json -Compress -Depth 4
+    exit 1
+}
+"""
+
+_WINRT_CAPTURE_SCRIPT = _WINRT_COMMON_SCRIPT + r"""
+try {
+    [Windows.Media.Capture.MediaCapture, Windows.Media.Capture, ContentType = WindowsRuntime] | Out-Null
+    [Windows.Media.Capture.MediaCaptureInitializationSettings, Windows.Media.Capture, ContentType = WindowsRuntime] | Out-Null
+    [Windows.Media.Capture.StreamingCaptureMode, Windows.Media.Capture, ContentType = WindowsRuntime] | Out-Null
+    [Windows.Media.MediaProperties.ImageEncodingProperties, Windows.Media.MediaProperties, ContentType = WindowsRuntime] | Out-Null
+    [Windows.Storage.StorageFolder, Windows.Storage, ContentType = WindowsRuntime] | Out-Null
+    [Windows.Storage.CreationCollisionOption, Windows.Storage, ContentType = WindowsRuntime] | Out-Null
+    [Windows.Storage.StorageFile, Windows.Storage, ContentType = WindowsRuntime] | Out-Null
+
+    $outputPath = [string]$env:STORMHELM_CAMERA_OUTPUT_PATH
+    if ([string]::IsNullOrWhiteSpace($outputPath)) { throw 'missing_output_path' }
+    $targetId = [string]$env:STORMHELM_CAMERA_DEVICE_ID
+    $devices = Await-AsyncOperation ([Windows.Devices.Enumeration.DeviceInformation]::FindAllAsync([Windows.Devices.Enumeration.DeviceClass]::VideoCapture)) ([Windows.Devices.Enumeration.DeviceInformationCollection]) 5000
+    if ($devices.Count -lt 1) { throw 'no_camera_device' }
+    $selected = $null
+    if (-not [string]::IsNullOrWhiteSpace($targetId)) {
+        foreach ($device in $devices) {
+            if ($device.Id -eq $targetId -or $device.Name -eq $targetId) {
+                $selected = $device
+                break
+            }
+        }
+    }
+    if ($null -eq $selected) { $selected = $devices[0] }
+    $settings = [Windows.Media.Capture.MediaCaptureInitializationSettings]::new()
+    $settings.VideoDeviceId = $selected.Id
+    $settings.StreamingCaptureMode = [Windows.Media.Capture.StreamingCaptureMode]::Video
+    $capture = [Windows.Media.Capture.MediaCapture]::new()
+    try {
+        Await-AsyncAction ($capture.InitializeAsync($settings)) 10000
+        $folderPath = Split-Path -Parent $outputPath
+        New-Item -ItemType Directory -Force -Path $folderPath | Out-Null
+        $fileName = Split-Path -Leaf $outputPath
+        $folder = Await-AsyncOperation ([Windows.Storage.StorageFolder]::GetFolderFromPathAsync($folderPath)) ([Windows.Storage.StorageFolder]) 5000
+        $file = Await-AsyncOperation ($folder.CreateFileAsync($fileName, [Windows.Storage.CreationCollisionOption]::ReplaceExisting)) ([Windows.Storage.StorageFile]) 5000
+        $props = [Windows.Media.MediaProperties.ImageEncodingProperties]::CreateJpeg()
+        Await-AsyncAction ($capture.CapturePhotoToStorageFileAsync($props, $file)) 10000
+    } finally {
+        if ($null -ne $capture) { $capture.Dispose() }
+    }
+    $item = Get-Item -LiteralPath $outputPath -ErrorAction Stop
+    [PSCustomObject]@{
+        status='ok'
+        device_name=$selected.Name
+        device_id=$selected.Id
+        path=$outputPath
+        bytes=$item.Length
+    } | ConvertTo-Json -Compress -Depth 5
+} catch {
+    $message = $_.Exception.Message
+    $code = 'camera_capture_failed'
+    if ($message -match 'no_camera_device') { $code = 'camera_no_device' }
+    elseif ($message -match 'permission|denied|UnauthorizedAccess') { $code = 'permission_denied' }
+    elseif ($message -match 'busy|used|in use') { $code = 'camera_device_busy' }
+    elseif ($message -match 'timeout') { $code = 'camera_capture_timeout' }
+    [PSCustomObject]@{ status='error'; error_code=$code; error_message=$message } | ConvertTo-Json -Compress -Depth 4
+    exit 1
+}
+"""
 
 
 def _mock_answer_for_fixture(fixture: str, normalized_question: str) -> tuple[str, str]:

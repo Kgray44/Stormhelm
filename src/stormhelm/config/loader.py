@@ -40,6 +40,7 @@ from stormhelm.config.models import (
     SafetyConfig,
     StorageConfig,
     StormforgeFogConfig,
+    StormforgeVoiceDiagnosticsConfig,
     PlaywrightBrowserAdapterConfig,
     ScreenAwarenessBrowserAdaptersConfig,
     ToolConfig,
@@ -50,6 +51,8 @@ from stormhelm.config.models import (
     VoiceConfirmationConfig,
     VoiceOpenAIConfig,
     VoicePlaybackConfig,
+    VoiceVisualMeterConfig,
+    VoiceVisualSyncConfig,
     VoicePostWakeConfig,
     VoiceRealtimeConfig,
     VoiceVADConfig,
@@ -168,6 +171,11 @@ def _build_app_config(
         if isinstance(ui_stormforge_data.get("fog"), dict)
         else {}
     )
+    ui_stormforge_voice_diagnostics_data = (
+        ui_stormforge_data.get("voice_diagnostics", {})
+        if isinstance(ui_stormforge_data.get("voice_diagnostics"), dict)
+        else {}
+    )
     ui_config = UIConfig(
         poll_interval_ms=int(ui_data.get("poll_interval_ms", 1500)),
         hide_to_tray_on_close=bool(ui_data.get("hide_to_tray_on_close", True)),
@@ -228,6 +236,26 @@ def _build_app_config(
             debug_tint=_coerce_config_bool(
                 ui_stormforge_fog_data.get("debug_tint"),
                 True,
+            ),
+            diagnostic_disable_during_speech=_coerce_config_bool(
+                ui_stormforge_fog_data.get("diagnostic_disable_during_speech"),
+                False,
+            ),
+        ),
+        stormforge_voice_diagnostics=StormforgeVoiceDiagnosticsConfig(
+            anchor_visualizer_mode=str(
+                ui_stormforge_voice_diagnostics_data.get(
+                    "anchor_visualizer_mode",
+                    "auto",
+                )
+            ),
+            anchor_renderer=str(
+                ui_stormforge_voice_diagnostics_data.get(
+                    "anchor_renderer",
+                    ui_stormforge_data.get(
+                        "anchor_renderer", "legacy_blob_reference"
+                    ),
+                )
             ),
         ),
     )
@@ -411,6 +439,7 @@ def _build_app_config(
                 allow_select_option=bool(screen_awareness_playwright_data.get("allow_select_option", False)),
                 allow_scroll=bool(screen_awareness_playwright_data.get("allow_scroll", False)),
                 allow_scroll_to_target=bool(screen_awareness_playwright_data.get("allow_scroll_to_target", False)),
+                allow_task_plans=bool(screen_awareness_playwright_data.get("allow_task_plans", False)),
                 allow_form_fill=bool(screen_awareness_playwright_data.get("allow_form_fill", False)),
                 allow_form_submit=bool(screen_awareness_playwright_data.get("allow_form_submit", False)),
                 allow_login=bool(screen_awareness_playwright_data.get("allow_login", False)),
@@ -423,6 +452,7 @@ def _build_app_config(
                 allow_dev_type_text=bool(screen_awareness_playwright_data.get("allow_dev_type_text", False)),
                 allow_dev_choice_controls=bool(screen_awareness_playwright_data.get("allow_dev_choice_controls", False)),
                 allow_dev_scroll=bool(screen_awareness_playwright_data.get("allow_dev_scroll", False)),
+                allow_dev_task_plans=bool(screen_awareness_playwright_data.get("allow_dev_task_plans", False)),
                 max_session_seconds=int(screen_awareness_playwright_data.get("max_session_seconds", 120)),
                 navigation_timeout_seconds=int(screen_awareness_playwright_data.get("navigation_timeout_seconds", 12000)),
                 observation_timeout_seconds=int(screen_awareness_playwright_data.get("observation_timeout_seconds", 8000)),
@@ -430,6 +460,11 @@ def _build_app_config(
                 scroll_step_pixels=int(screen_awareness_playwright_data.get("scroll_step_pixels", 700)),
                 scroll_timeout_seconds=float(screen_awareness_playwright_data.get("scroll_timeout_seconds", 8.0)),
                 max_scroll_distance_pixels=int(screen_awareness_playwright_data.get("max_scroll_distance_pixels", 5000)),
+                max_task_steps=int(screen_awareness_playwright_data.get("max_task_steps", 5)),
+                stop_on_unverified_step=bool(screen_awareness_playwright_data.get("stop_on_unverified_step", True)),
+                stop_on_partial_step=bool(screen_awareness_playwright_data.get("stop_on_partial_step", True)),
+                stop_on_ambiguous_step=bool(screen_awareness_playwright_data.get("stop_on_ambiguous_step", True)),
+                stop_on_unexpected_navigation=bool(screen_awareness_playwright_data.get("stop_on_unexpected_navigation", True)),
                 debug_events_enabled=bool(screen_awareness_playwright_data.get("debug_events_enabled", True)),
             )
         ),
@@ -931,6 +966,16 @@ def _build_app_config(
         if isinstance(voice_data.get("playback"), dict)
         else {}
     )
+    voice_visual_sync_data = (
+        voice_data.get("visual_sync", {})
+        if isinstance(voice_data.get("visual_sync"), dict)
+        else {}
+    )
+    voice_visual_meter_data = (
+        voice_data.get("visual_meter", {})
+        if isinstance(voice_data.get("visual_meter"), dict)
+        else {}
+    )
     voice_capture_data = (
         voice_data.get("capture", {})
         if isinstance(voice_data.get("capture"), dict)
@@ -1037,11 +1082,51 @@ def _build_app_config(
                 voice_playback_data.get("streaming_fallback_to_file", True)
             ),
             prewarm_enabled=bool(voice_playback_data.get("prewarm_enabled", True)),
+            streaming_min_preroll_ms=int(
+                voice_playback_data.get("streaming_min_preroll_ms", 350)
+            ),
+            streaming_min_preroll_chunks=int(
+                voice_playback_data.get("streaming_min_preroll_chunks", 2)
+            ),
+            streaming_min_preroll_bytes=int(
+                voice_playback_data.get("streaming_min_preroll_bytes", 0)
+            ),
+            streaming_max_preroll_wait_ms=int(
+                voice_playback_data.get("streaming_max_preroll_wait_ms", 1200)
+            ),
+            playback_stable_after_ms=int(
+                voice_playback_data.get("playback_stable_after_ms", 180)
+            ),
             max_audio_bytes=int(voice_playback_data.get("max_audio_bytes", 10_000_000)),
             max_duration_ms=int(voice_playback_data.get("max_duration_ms", 120_000)),
             delete_transient_after_playback=bool(
                 voice_playback_data.get("delete_transient_after_playback", True)
             ),
+        ),
+        visual_sync=VoiceVisualSyncConfig(
+            enabled=voice_visual_sync_data.get("enabled", True),
+            envelope_visual_offset_ms=voice_visual_sync_data.get(
+                "envelope_visual_offset_ms", 0
+            ),
+            estimated_output_latency_ms=voice_visual_sync_data.get(
+                "estimated_output_latency_ms", 120
+            ),
+            debug_show_sync=voice_visual_sync_data.get("debug_show_sync", False),
+        ),
+        visual_meter=VoiceVisualMeterConfig(
+            enabled=voice_visual_meter_data.get("enabled", True),
+            sample_rate_hz=voice_visual_meter_data.get("sample_rate_hz", 60),
+            startup_preroll_ms=voice_visual_meter_data.get(
+                "startup_preroll_ms", 350
+            ),
+            attack_ms=voice_visual_meter_data.get("attack_ms", 60),
+            release_ms=voice_visual_meter_data.get("release_ms", 160),
+            noise_floor=voice_visual_meter_data.get("noise_floor", 0.015),
+            gain=voice_visual_meter_data.get("gain", 2.0),
+            max_startup_wait_ms=voice_visual_meter_data.get(
+                "max_startup_wait_ms", 800
+            ),
+            visual_offset_ms=voice_visual_meter_data.get("visual_offset_ms", 0),
         ),
         capture=VoiceCaptureConfig(
             enabled=bool(voice_capture_data.get("enabled", False)),
@@ -1384,6 +1469,18 @@ def _apply_env_overrides(data: ConfigDict, env: Mapping[str, str]) -> ConfigDict
             "ui.stormforge.fog.debug_visible",
             _parse_bool,
         ),
+        "STORMHELM_STORMFORGE_FOG_DIAGNOSTIC_DISABLE_DURING_SPEECH": (
+            "ui.stormforge.fog.diagnostic_disable_during_speech",
+            _parse_bool,
+        ),
+        "STORMHELM_ANCHOR_VISUALIZER_MODE": (
+            "ui.stormforge.voice_diagnostics.anchor_visualizer_mode",
+            str,
+        ),
+        "STORMHELM_STORMFORGE_ANCHOR_RENDERER": (
+            "ui.stormforge.voice_diagnostics.anchor_renderer",
+            str,
+        ),
         "STORMHELM_MAX_CONCURRENT_JOBS": ("concurrency.max_workers", int),
         "STORMHELM_DEFAULT_JOB_TIMEOUT_SECONDS": (
             "concurrency.default_job_timeout_seconds",
@@ -1621,6 +1718,26 @@ def _apply_env_overrides(data: ConfigDict, env: Mapping[str, str]) -> ConfigDict
             "voice.playback.prewarm_enabled",
             _parse_bool,
         ),
+        "STORMHELM_VOICE_PLAYBACK_STREAMING_MIN_PREROLL_MS": (
+            "voice.playback.streaming_min_preroll_ms",
+            int,
+        ),
+        "STORMHELM_VOICE_PLAYBACK_STREAMING_MIN_PREROLL_CHUNKS": (
+            "voice.playback.streaming_min_preroll_chunks",
+            int,
+        ),
+        "STORMHELM_VOICE_PLAYBACK_STREAMING_MIN_PREROLL_BYTES": (
+            "voice.playback.streaming_min_preroll_bytes",
+            int,
+        ),
+        "STORMHELM_VOICE_PLAYBACK_STREAMING_MAX_PREROLL_WAIT_MS": (
+            "voice.playback.streaming_max_preroll_wait_ms",
+            int,
+        ),
+        "STORMHELM_VOICE_PLAYBACK_STABLE_AFTER_MS": (
+            "voice.playback.playback_stable_after_ms",
+            int,
+        ),
         "STORMHELM_VOICE_PLAYBACK_MAX_AUDIO_BYTES": (
             "voice.playback.max_audio_bytes",
             int,
@@ -1632,6 +1749,66 @@ def _apply_env_overrides(data: ConfigDict, env: Mapping[str, str]) -> ConfigDict
         "STORMHELM_VOICE_PLAYBACK_DELETE_TRANSIENT_AFTER_PLAYBACK": (
             "voice.playback.delete_transient_after_playback",
             _parse_bool,
+        ),
+        "STORMHELM_VOICE_VISUAL_SYNC_ENABLED": (
+            "voice.visual_sync.enabled",
+            _parse_bool,
+        ),
+        "STORMHELM_VOICE_VISUAL_OFFSET_MS": (
+            "voice.visual_sync.envelope_visual_offset_ms",
+            int,
+        ),
+        "STORMHELM_VOICE_VISUAL_SYNC_OFFSET_MS": (
+            "voice.visual_sync.envelope_visual_offset_ms",
+            int,
+        ),
+        "STORMHELM_VOICE_VISUAL_ESTIMATED_OUTPUT_LATENCY_MS": (
+            "voice.visual_sync.estimated_output_latency_ms",
+            int,
+        ),
+        "STORMHELM_VOICE_ESTIMATED_OUTPUT_LATENCY_MS": (
+            "voice.visual_sync.estimated_output_latency_ms",
+            int,
+        ),
+        "STORMHELM_VOICE_VISUAL_SYNC_DEBUG": (
+            "voice.visual_sync.debug_show_sync",
+            _parse_bool,
+        ),
+        "STORMHELM_VOICE_VISUAL_METER_ENABLED": (
+            "voice.visual_meter.enabled",
+            _parse_bool,
+        ),
+        "STORMHELM_VOICE_VISUAL_METER_SAMPLE_RATE_HZ": (
+            "voice.visual_meter.sample_rate_hz",
+            int,
+        ),
+        "STORMHELM_VOICE_VISUAL_METER_STARTUP_PREROLL_MS": (
+            "voice.visual_meter.startup_preroll_ms",
+            int,
+        ),
+        "STORMHELM_VOICE_VISUAL_METER_ATTACK_MS": (
+            "voice.visual_meter.attack_ms",
+            int,
+        ),
+        "STORMHELM_VOICE_VISUAL_METER_RELEASE_MS": (
+            "voice.visual_meter.release_ms",
+            int,
+        ),
+        "STORMHELM_VOICE_VISUAL_METER_NOISE_FLOOR": (
+            "voice.visual_meter.noise_floor",
+            float,
+        ),
+        "STORMHELM_VOICE_VISUAL_METER_GAIN": (
+            "voice.visual_meter.gain",
+            float,
+        ),
+        "STORMHELM_VOICE_VISUAL_METER_MAX_STARTUP_WAIT_MS": (
+            "voice.visual_meter.max_startup_wait_ms",
+            int,
+        ),
+        "STORMHELM_VOICE_VISUAL_METER_OFFSET_MS": (
+            "voice.visual_meter.visual_offset_ms",
+            int,
         ),
         "STORMHELM_VOICE_CAPTURE_ENABLED": ("voice.capture.enabled", _parse_bool),
         "STORMHELM_VOICE_CAPTURE_PROVIDER": ("voice.capture.provider", str),
@@ -2063,8 +2240,16 @@ def _apply_env_overrides(data: ConfigDict, env: Mapping[str, str]) -> ConfigDict
             "screen_awareness.browser_adapters.playwright.allow_scroll_to_target",
             _parse_bool,
         ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_TASK_PLANS": (
+            "screen_awareness.browser_adapters.playwright.allow_task_plans",
+            _parse_bool,
+        ),
         "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_DEV_SCROLL": (
             "screen_awareness.browser_adapters.playwright.allow_dev_scroll",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_DEV_TASK_PLANS": (
+            "screen_awareness.browser_adapters.playwright.allow_dev_task_plans",
             _parse_bool,
         ),
         "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_MAX_SCROLL_ATTEMPTS": (
@@ -2082,6 +2267,26 @@ def _apply_env_overrides(data: ConfigDict, env: Mapping[str, str]) -> ConfigDict
         "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_MAX_SCROLL_DISTANCE_PIXELS": (
             "screen_awareness.browser_adapters.playwright.max_scroll_distance_pixels",
             int,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_MAX_TASK_STEPS": (
+            "screen_awareness.browser_adapters.playwright.max_task_steps",
+            int,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_STOP_ON_UNVERIFIED_STEP": (
+            "screen_awareness.browser_adapters.playwright.stop_on_unverified_step",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_STOP_ON_PARTIAL_STEP": (
+            "screen_awareness.browser_adapters.playwright.stop_on_partial_step",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_STOP_ON_AMBIGUOUS_STEP": (
+            "screen_awareness.browser_adapters.playwright.stop_on_ambiguous_step",
+            _parse_bool,
+        ),
+        "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_STOP_ON_UNEXPECTED_NAVIGATION": (
+            "screen_awareness.browser_adapters.playwright.stop_on_unexpected_navigation",
+            _parse_bool,
         ),
         "STORMHELM_SCREEN_AWARENESS_PLAYWRIGHT_ALLOW_DEV_ACTIONS": (
             "screen_awareness.browser_adapters.playwright.allow_dev_actions",

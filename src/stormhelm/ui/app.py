@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtQml, QtWidgets, QtWebEngineQuick
@@ -40,6 +41,8 @@ def run_ui(
     startup_mode: str | None = None,
 ) -> int:
     app_config = config or load_config()
+    if str(app_config.ui.visual_variant or "").strip().lower() == "stormforge":
+        os.environ.setdefault("QSG_RENDER_LOOP", "threaded")
     logger = configure_application_logging(app_config, "ui")
     install_exception_logging(logger, "ui")
     QQuickStyle.setStyle("Basic")

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
+import math
+import os
+import struct
 import threading
 import time
 from collections import deque
@@ -49,6 +53,7 @@ from stormhelm.core.voice.models import VoicePlaybackRequest
 from stormhelm.core.voice.models import VoicePlaybackPrewarmRequest
 from stormhelm.core.voice.models import VoicePlaybackPrewarmResult
 from stormhelm.core.voice.models import VoicePlaybackResult
+from stormhelm.core.voice.models import VoicePlaybackStartupTrace
 from stormhelm.core.voice.models import VoicePipelineStageSummary
 from stormhelm.core.voice.models import VoicePostWakeListenWindow
 from stormhelm.core.voice.models import VoiceProviderPrewarmRequest
@@ -108,13 +113,23 @@ from stormhelm.core.voice.state import VoiceStateController
 from stormhelm.core.voice.state import VoiceStateSnapshot
 from stormhelm.core.voice.state import VoiceTransitionError
 from stormhelm.core.voice.visualizer import VoiceAudioEnvelope
-from stormhelm.core.voice.visualizer import VoicePlaybackMeter
 from stormhelm.core.voice.visualizer import build_voice_anchor_payload
 from stormhelm.core.voice.visualizer import compute_voice_audio_envelope
 from stormhelm.core.voice.visualizer import compute_voice_audio_envelope_frames
 from stormhelm.core.voice.visualizer import synthetic_voice_audio_envelope
+from stormhelm.core.voice.voice_visual_meter import VoiceVisualMeter
 from stormhelm.shared.time import utc_now_iso
 
+
+_ANCHOR_VISUALIZER_MODE_ENV = "STORMHELM_ANCHOR_VISUALIZER_MODE"
+_PLAYBACK_ENVELOPE_ALIGNMENT_TOLERANCE_MS = 260
+_FORCED_ANCHOR_VISUALIZER_STRATEGIES = {
+    "off": "off",
+    "constant_test_wave": "constant_test_wave",
+    "pcm_stream_meter": "pcm_stream_meter",
+    "procedural": "procedural_speaking",
+    "envelope_timeline": "playback_envelope_timeline",
+}
 
 _SUPPORTED_AUDIO_MIME_TYPES = {
     "audio/mpeg",
@@ -267,6 +282,9 @@ class VoiceService:
     last_live_playback_result: VoiceLivePlaybackResult | None = field(
         default=None, init=False
     )
+    last_playback_startup_trace: VoicePlaybackStartupTrace | None = field(
+        default=None, init=False
+    )
     last_provider_prewarm_result: VoiceProviderPrewarmResult | None = field(
         default=None, init=False
     )
@@ -293,10 +311,13 @@ class VoiceService:
         default=None, init=False, repr=False
     )
     _voice_envelope_frame_active: bool = field(default=False, init=False, repr=False)
-    _voice_playback_meter: VoicePlaybackMeter | None = field(
+    _voice_playback_meter: VoiceVisualMeter | None = field(
         default=None, init=False, repr=False
     )
     _voice_playback_meter_context: dict[str, Any] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _voice_visualizer_source_locks: dict[str, dict[str, Any]] = field(
         default_factory=dict, init=False, repr=False
     )
     _voice_playback_meter_thread: threading.Thread | None = field(
@@ -340,6 +361,9 @@ class VoiceService:
     )
     _voice_visualizer_max_update_gap_ms: float = field(
         default=0.0, init=False, repr=False
+    )
+    _voice_ar1_pcm_sample_time_by_playback: dict[str, float] = field(
+        default_factory=dict, init=False, repr=False
     )
     last_capture_request: VoiceCaptureRequest | None = field(default=None, init=False)
     last_capture_session: VoiceCaptureSession | None = field(default=None, init=False)
@@ -6253,12 +6277,144 @@ class VoiceService:
         first_chunk_ms: int | None = None
         first_chunk_event_published = False
         terminal_playback_event_published = False
+        stream_sample_rate = 24000
+        stream_channels = 1
+        stream_sample_width_bytes = 2
+        bytes_per_second = max(
+            1, stream_sample_rate * stream_channels * stream_sample_width_bytes
+        )
+        visual_meter_config = getattr(self.config, "visual_meter", None)
+        streaming_min_preroll_ms = max(
+            0,
+            int(
+                getattr(
+                    visual_meter_config,
+                    "startup_preroll_ms",
+                    getattr(self.config.playback, "streaming_min_preroll_ms", 350),
+                )
+                or 0
+            ),
+        )
+        streaming_min_preroll_chunks = max(
+            1,
+            int(getattr(self.config.playback, "streaming_min_preroll_chunks", 2) or 1),
+        )
+        configured_min_preroll_bytes = max(
+            0,
+            int(getattr(self.config.playback, "streaming_min_preroll_bytes", 0) or 0),
+        )
+        streaming_min_preroll_bytes = (
+            configured_min_preroll_bytes
+            if configured_min_preroll_bytes > 0
+            else int(bytes_per_second * (streaming_min_preroll_ms / 1000.0))
+        )
+        streaming_max_preroll_wait_ms = max(
+            0,
+            int(
+                getattr(
+                    visual_meter_config,
+                    "max_startup_wait_ms",
+                    getattr(
+                        self.config.playback,
+                        "streaming_max_preroll_wait_ms",
+                        1200,
+                    ),
+                )
+                or 0
+            ),
+        )
+        playback_stable_after_ms = max(
+            0, int(getattr(self.config.playback, "playback_stable_after_ms", 180) or 0)
+        )
+        startup_trace = VoicePlaybackStartupTrace(
+            request_id=streaming_request.tts_stream_id,
+            mode="streaming",
+            tts_format=streaming_request.live_format,
+            sample_rate=stream_sample_rate,
+            preroll_ms=streaming_min_preroll_ms,
+            streaming_min_preroll_ms=streaming_min_preroll_ms,
+            streaming_min_preroll_chunks=streaming_min_preroll_chunks,
+            streaming_min_preroll_bytes=streaming_min_preroll_bytes,
+            streaming_max_preroll_wait_ms=streaming_max_preroll_wait_ms,
+        )
+        startup_trace.mark("spoken_text_approved", request_started_ms)
+        startup_trace.mark("tts_request_started", tts_started_ms)
+        startup_trace.transition("tts_started")
+        self.last_playback_startup_trace = startup_trace
+        preroll_buffer: list[VoiceStreamingTTSChunk] = []
+        preroll_bytes = 0
+        submitted_stream_bytes = 0
+        preroll_first_elapsed_ms: int | None = None
+        last_chunk_elapsed_ms: int | None = None
+        preroll_flushed = False
+        preroll_lock = asyncio.Lock()
+        preroll_timeout_task: asyncio.Task[None] | None = None
 
         def progressive_elapsed_ms() -> int:
             return int(max(0.0, (time.perf_counter() - provider_stream_started) * 1000.0))
 
         def progressive_absolute_ms() -> int:
             return tts_started_ms + progressive_elapsed_ms()
+
+        def playback_buffered_ms(byte_count: int) -> int:
+            return int(max(0.0, (max(0, int(byte_count)) * 1000.0) / bytes_per_second))
+
+        def startup_trace_payload() -> dict[str, Any]:
+            return startup_trace.to_dict()
+
+        def attach_startup_trace(
+            result: VoiceLivePlaybackResult,
+        ) -> VoiceLivePlaybackResult:
+            return replace(
+                result,
+                metadata={
+                    **dict(result.metadata),
+                    "playback_startup_trace": startup_trace_payload(),
+                    "playback_startup_stable": bool(
+                        startup_trace.playback_startup_stable
+                    ),
+                    "playback_preroll_active": bool(
+                        startup_trace.playback_preroll_active
+                    ),
+                    "playback_buffered_ms": int(startup_trace.playback_buffered_ms),
+                    "raw_audio_present": False,
+                },
+            )
+
+        def mark_startup_stable(
+            *,
+            session: VoiceLivePlaybackSession,
+            chunk: VoiceStreamingTTSChunk,
+        ) -> None:
+            if playback_started_ms is None or startup_trace.playback_startup_stable:
+                return
+            if startup_trace.playback_buffered_ms < playback_stable_after_ms:
+                startup_trace.transition("playing")
+                return
+            stable_at_ms = progressive_absolute_ms()
+            startup_trace.playback_startup_stable = True
+            startup_trace.playback_preroll_active = False
+            startup_trace.first_stable_at_ms = stable_at_ms
+            startup_trace.playback_stable_emitted_at_ms = stable_at_ms
+            startup_trace.mark_once("playback_stable_emitted", stable_at_ms)
+            startup_trace.transition("stable")
+            self._publish(
+                VoiceEventType.PLAYBACK_STABLE,
+                message="Voice playback stream reached stable startup.",
+                session_id=session_id,
+                turn_id=turn_id,
+                speech_request_id=speech_request.speech_request_id,
+                playback_request_id=session.playback_request_id,
+                playback_id=session.playback_stream_id,
+                provider=session.provider,
+                device=session.device,
+                format=session.audio_format,
+                status="stable",
+                metadata={
+                    "chunk": chunk.to_dict(),
+                    "playback_startup_trace": startup_trace_payload(),
+                },
+            )
 
         def make_live_result_from_session(
             session: VoiceLivePlaybackSession,
@@ -6306,8 +6462,25 @@ class VoiceService:
                 turn_id=turn_id,
                 volume=self.config.playback.volume,
                 allowed_to_play=True,
-                metadata={"source": "streaming_tts", "progressive_feed": True},
+                metadata={
+                    "source": "streaming_tts",
+                    "progressive_feed": True,
+                    "startup_preroll_active": True,
+                    "sample_rate": stream_sample_rate,
+                    "channels": stream_channels,
+                    "sample_width_bytes": stream_sample_width_bytes,
+                    "streaming_min_preroll_ms": streaming_min_preroll_ms,
+                    "streaming_min_preroll_chunks": streaming_min_preroll_chunks,
+                    "streaming_min_preroll_bytes": streaming_min_preroll_bytes,
+                    "streaming_max_preroll_wait_ms": streaming_max_preroll_wait_ms,
+                    "playback_stable_after_ms": playback_stable_after_ms,
+                    "estimated_output_latency_ms": self._voice_visual_sync_fields()[
+                        "estimated_output_latency_ms"
+                    ],
+                },
             )
+            startup_trace.playback_id = live_request.playback_stream_id
+            startup_trace.mark_once("playback_backend_open_requested", progressive_absolute_ms())
             self.last_live_playback_request = live_request
             start_operation = getattr(self.playback_provider, "start_stream", None)
             if not callable(start_operation):
@@ -6327,10 +6500,29 @@ class VoiceService:
                 )
             else:
                 live_session = start_operation(live_request)
+            startup_trace.backend = str(
+                live_session.metadata.get("backend")
+                or live_session.provider
+                or self._playback_provider_name()
+            )
+            startup_trace.playback_preroll_active = live_session.status in {
+                "prerolling",
+                "buffering",
+            }
+            startup_trace.mark_once("playback_backend_opened", progressive_absolute_ms())
+            if startup_trace.playback_preroll_active:
+                startup_trace.mark_once("playback_preroll_started", progressive_absolute_ms())
+                startup_trace.transition("prerolling")
+            else:
+                startup_trace.transition(live_session.status)
             self.last_live_playback_session = live_session
             self._publish(
                 VoiceEventType.PLAYBACK_STREAM_STARTED,
-                message="Voice playback stream started.",
+                message=(
+                    "Voice playback stream preroll started."
+                    if live_session.status == "prerolling"
+                    else "Voice playback stream started."
+                ),
                 session_id=session_id,
                 turn_id=turn_id,
                 speech_request_id=speech_request.speech_request_id,
@@ -6341,7 +6533,10 @@ class VoiceService:
                 format=live_session.audio_format,
                 status=live_session.status,
                 error_code=live_session.error_code,
-                metadata={"playback_stream": live_session.to_dict()},
+                metadata={
+                    "playback_stream": live_session.to_dict(),
+                    "playback_startup_trace": startup_trace_payload(),
+                },
             )
             return live_session
 
@@ -6350,136 +6545,329 @@ class VoiceService:
             nonlocal first_chunk_event_published
             nonlocal live_result
             nonlocal playback_started_ms
-            if first_chunk_ms is None:
-                first_chunk_ms = tts_started_ms + int(
-                    max(0, chunk.duration_ms if chunk.duration_ms is not None else progressive_elapsed_ms())
+            nonlocal preroll_bytes
+            nonlocal preroll_first_elapsed_ms
+            nonlocal last_chunk_elapsed_ms
+            nonlocal preroll_flushed
+            nonlocal preroll_timeout_task
+
+            def submit_chunk_locked(
+                session: VoiceLivePlaybackSession,
+                buffered_chunk: VoiceStreamingTTSChunk,
+            ) -> None:
+                nonlocal first_chunk_event_published
+                nonlocal live_result
+                nonlocal playback_started_ms
+                nonlocal submitted_stream_bytes
+                feed_operation = getattr(self.playback_provider, "feed_stream_chunk", None)
+                if not callable(feed_operation):
+                    live_result = make_live_result_from_session(
+                        session,
+                        ok=False,
+                        status="unsupported",
+                        error_code="streaming_playback_feed_unsupported",
+                        error_message="Playback provider does not implement live chunk feed.",
+                    )
+                    startup_trace.transition("unsupported")
+                    return
+                startup_trace.mark_once(
+                    "first_audio_submitted_to_device",
+                    progressive_absolute_ms(),
                 )
-            if live_result is not None:
-                return
-            block_reason = self._speech_output_block_reason(turn_id)
-            if block_reason is not None:
-                if live_session is not None:
-                    cancel_operation = getattr(self.playback_provider, "cancel_stream", None)
-                    if callable(cancel_operation):
-                        cancelled_result = cancel_operation(
-                            live_session.playback_stream_id,
-                            reason=block_reason,
+                self._publish_pcm_submit_visual_probe(
+                    buffered_chunk.data,
+                    publish_context={
+                        "session_id": session_id,
+                        "turn_id": turn_id,
+                        "speech_request_id": speech_request.speech_request_id,
+                        "playback_request_id": session.playback_request_id,
+                        "playback_id": session.playback_stream_id,
+                        "provider": buffered_chunk.provider,
+                        "model": buffered_chunk.model,
+                        "voice": buffered_chunk.voice,
+                        "audio_format": buffered_chunk.live_format,
+                        "chunk_index": buffered_chunk.chunk_index,
+                        "size_bytes": buffered_chunk.size_bytes,
+                        "sample_rate_hz": stream_sample_rate,
+                        "channels": stream_channels,
+                        "sample_width_bytes": stream_sample_width_bytes,
+                    },
+                )
+                chunk_result = feed_operation(
+                    session.playback_stream_id,
+                    buffered_chunk.data or b"",
+                    chunk_index=buffered_chunk.chunk_index,
+                )
+                submitted_stream_bytes += int(
+                    buffered_chunk.size_bytes or len(buffered_chunk.data or b"")
+                )
+                startup_trace.playback_buffered_ms = max(
+                    startup_trace.playback_buffered_ms,
+                    playback_buffered_ms(submitted_stream_bytes),
+                )
+                playback_active = chunk_result.status in {"started", "playing", "stable"}
+                self._queue_voice_output_envelope_frames(
+                    buffered_chunk.data,
+                    audio_format=buffered_chunk.live_format,
+                    source="playback_output_envelope"
+                    if chunk_result.ok
+                    else "streaming_chunk_envelope",
+                    publish_context={
+                        "session_id": session_id,
+                        "turn_id": turn_id,
+                        "speech_request_id": speech_request.speech_request_id,
+                        "playback_request_id": session.playback_request_id,
+                        "playback_id": session.playback_stream_id,
+                        "provider": buffered_chunk.provider,
+                        "model": buffered_chunk.model,
+                        "voice": buffered_chunk.voice,
+                        "audio_format": buffered_chunk.live_format,
+                        "chunk_index": buffered_chunk.chunk_index,
+                        "size_bytes": buffered_chunk.size_bytes,
+                        "playback_status": chunk_result.status,
+                        "playback_streaming_active": playback_active,
+                        "first_audio_started": bool(chunk_result.playback_started),
+                        "sample_rate_hz": stream_sample_rate,
+                        "channels": stream_channels,
+                        "sample_width_bytes": stream_sample_width_bytes,
+                    },
+                )
+                if playback_started_ms is None and chunk_result.playback_started:
+                    playback_started_ms = progressive_absolute_ms()
+                    startup_trace.startup_latency_ms = max(
+                        0,
+                        playback_started_ms
+                        - int(max(0.0, float(request_started_ms or 0.0))),
+                    )
+                    startup_trace.mark_once("playback_started_emitted", playback_started_ms)
+                    startup_trace.transition("playing")
+                    if not first_chunk_event_published:
+                        first_chunk_event_published = True
+                        self._publish(
+                            VoiceEventType.TTS_FIRST_CHUNK_RECEIVED,
+                            message="Voice first TTS chunk received.",
+                            session_id=session_id,
+                            turn_id=turn_id,
+                            speech_request_id=speech_request.speech_request_id,
+                            playback_request_id=session.playback_request_id,
+                            playback_id=session.playback_stream_id,
+                            provider=buffered_chunk.provider,
+                            model=buffered_chunk.model,
+                            voice=buffered_chunk.voice,
+                            format=buffered_chunk.live_format,
+                            status="first_audio_available",
+                            size_bytes=buffered_chunk.size_bytes,
+                            metadata={
+                                "chunk": buffered_chunk.to_dict(),
+                                "playback_chunk_result": chunk_result.to_dict(),
+                                "progressive_downstream_feed": True,
+                                "playback_startup_trace": startup_trace_payload(),
+                            },
                         )
+                if not chunk_result.ok:
+                    startup_trace.transition(chunk_result.status)
+                    live_result = VoiceLivePlaybackResult(
+                        ok=False,
+                        playback_stream_id=session.playback_stream_id,
+                        playback_request_id=session.playback_request_id,
+                        provider=session.provider,
+                        device=session.device,
+                        audio_format=session.audio_format,
+                        status=chunk_result.status,
+                        session_id=session_id,
+                        turn_id=turn_id,
+                        tts_stream_id=streaming_request.tts_stream_id,
+                        speech_request_id=speech_request.speech_request_id,
+                        started_at=session.started_at,
+                        first_chunk_received_at=chunk_result.first_chunk_received_at,
+                        playback_started_at=chunk_result.playback_started_at,
+                        partial_playback=playback_started_ms is not None,
+                        error_code=chunk_result.error_code,
+                        error_message=chunk_result.error_message,
+                        user_heard_claimed=False,
+                    )
+                    return
+                mark_startup_stable(session=session, chunk=buffered_chunk)
+
+            def flush_preroll_locked(reason: str) -> None:
+                nonlocal preroll_buffer
+                nonlocal preroll_bytes
+                nonlocal preroll_flushed
+                nonlocal live_result
+                if live_result is not None or not preroll_buffer:
+                    return
+                session = ensure_live_session()
+                if session.status not in {"started", "playing", "prerolling", "buffering"}:
+                    live_result = make_live_result_from_session(
+                        session,
+                        ok=False,
+                        status=session.status,
+                        error_code=session.error_code,
+                        error_message=session.error_message,
+                    )
+                    startup_trace.transition(session.status)
+                    return
+                buffered_chunks = list(preroll_buffer)
+                buffered_bytes = preroll_bytes
+                preroll_buffer = []
+                preroll_bytes = 0
+                preroll_flushed = True
+                startup_trace.chunk_count_before_start = len(buffered_chunks)
+                startup_trace.bytes_buffered_before_start = buffered_bytes
+                startup_trace.playback_buffered_ms = playback_buffered_ms(buffered_bytes)
+                startup_trace.playback_preroll_active = False
+                startup_trace.mark_once("playback_start_requested", progressive_absolute_ms())
+                if reason == "max_preroll_wait":
+                    startup_trace.record_warning("streaming_preroll_max_wait_elapsed")
+                    startup_trace.startup_queue_empty_count += 1
+                    startup_trace.buffer_wait_count += 1
+                    startup_trace.underrun_detected_startup = True
+                elif reason == "stream_completed":
+                    startup_trace.record_warning("stream_completed_before_preroll_full")
+                for buffered_chunk in buffered_chunks:
+                    submit_chunk_locked(session, buffered_chunk)
+                    if live_result is not None:
+                        break
+
+            async def flush_after_preroll_timeout() -> None:
+                try:
+                    await asyncio.sleep(streaming_max_preroll_wait_ms / 1000.0)
+                    async with preroll_lock:
                         if (
-                            cancelled_result.status == "unavailable"
-                            and playback_started_ms is not None
+                            not preroll_flushed
+                            and preroll_buffer
+                            and live_result is None
+                            and self._speech_output_block_reason(turn_id) is None
                         ):
+                            flush_preroll_locked("max_preroll_wait")
+                except asyncio.CancelledError:
+                    raise
+
+            chunk_elapsed_ms = int(
+                max(
+                    0,
+                    chunk.duration_ms
+                    if chunk.duration_ms is not None
+                    else progressive_elapsed_ms(),
+                )
+            )
+            if first_chunk_ms is None:
+                first_chunk_ms = tts_started_ms + chunk_elapsed_ms
+                startup_trace.mark_once("first_tts_byte_received", first_chunk_ms)
+                startup_trace.mark_once("first_tts_chunk_received", first_chunk_ms)
+            if last_chunk_elapsed_ms is not None:
+                startup_trace.chunk_gap_max_ms_startup = max(
+                    startup_trace.chunk_gap_max_ms_startup,
+                    max(0, chunk_elapsed_ms - last_chunk_elapsed_ms),
+                )
+            last_chunk_elapsed_ms = chunk_elapsed_ms
+            if chunk.data and any(chunk.data):
+                startup_trace.mark_once("first_nonzero_audio_level", progressive_absolute_ms())
+            async with preroll_lock:
+                if live_result is not None:
+                    return
+                block_reason = self._speech_output_block_reason(turn_id)
+                if block_reason is not None:
+                    if live_session is not None:
+                        active_stream_now = self._active_playback_stream()
+                        cancel_operation = getattr(
+                            self.playback_provider, "cancel_stream", None
+                        )
+                        if active_stream_now is None:
                             live_result = make_live_result_from_session(
                                 live_session,
                                 ok=True,
                                 status="cancelled",
                                 error_code=block_reason,
                                 error_message=f"Speech output suppressed: {block_reason}.",
-                                partial_playback=True,
+                                partial_playback=playback_started_ms is not None,
                             )
+                        elif callable(cancel_operation):
+                            cancelled_result = cancel_operation(
+                                live_session.playback_stream_id,
+                                reason=block_reason,
+                            )
+                            if cancelled_result.status == "unavailable":
+                                live_result = make_live_result_from_session(
+                                    live_session,
+                                    ok=True,
+                                    status="cancelled",
+                                    error_code=block_reason,
+                                    error_message=f"Speech output suppressed: {block_reason}.",
+                                    partial_playback=playback_started_ms is not None,
+                                )
+                            else:
+                                live_result = cancelled_result
                         else:
-                            live_result = cancelled_result
-                    else:
-                        live_result = make_live_result_from_session(
-                            live_session,
-                            ok=False,
-                            status="cancelled",
-                            error_code=block_reason,
-                            error_message=f"Speech output suppressed: {block_reason}.",
-                            partial_playback=playback_started_ms is not None,
-                        )
-                return
-            session = ensure_live_session()
-            if session.status not in {"started", "playing"}:
-                live_result = make_live_result_from_session(
-                    session,
-                    ok=False,
-                    status=session.status,
-                    error_code=session.error_code,
-                    error_message=session.error_message,
-                )
-                return
-            feed_operation = getattr(self.playback_provider, "feed_stream_chunk", None)
-            if not callable(feed_operation):
-                live_result = make_live_result_from_session(
-                    session,
-                    ok=False,
-                    status="unsupported",
-                    error_code="streaming_playback_feed_unsupported",
-                    error_message="Playback provider does not implement live chunk feed.",
-                )
-                return
-            chunk_result = feed_operation(
-                session.playback_stream_id,
-                chunk.data or b"",
-                chunk_index=chunk.chunk_index,
-            )
-            self._queue_voice_output_envelope_frames(
-                chunk.data,
-                audio_format=chunk.live_format,
-                source="playback_output_envelope" if chunk_result.ok else "streaming_chunk_envelope",
-                publish_context={
-                    "session_id": session_id,
-                    "turn_id": turn_id,
-                    "speech_request_id": speech_request.speech_request_id,
-                    "playback_request_id": session.playback_request_id,
-                    "playback_id": session.playback_stream_id,
-                    "provider": chunk.provider,
-                    "model": chunk.model,
-                    "voice": chunk.voice,
-                    "audio_format": chunk.live_format,
-                    "chunk_index": chunk.chunk_index,
-                    "size_bytes": chunk.size_bytes,
-                    "playback_status": chunk_result.status,
-                    "playback_streaming_active": chunk_result.status in {"started", "playing"},
-                    "first_audio_started": bool(chunk_result.playback_started),
-                },
-            )
-            if playback_started_ms is None and chunk_result.playback_started:
-                playback_started_ms = progressive_absolute_ms()
-                if not first_chunk_event_published:
-                    first_chunk_event_published = True
-                    self._publish(
-                        VoiceEventType.TTS_FIRST_CHUNK_RECEIVED,
-                        message="Voice first TTS chunk received.",
-                        session_id=session_id,
-                        turn_id=turn_id,
-                        speech_request_id=speech_request.speech_request_id,
-                        playback_request_id=session.playback_request_id,
-                        playback_id=session.playback_stream_id,
-                        provider=chunk.provider,
-                        model=chunk.model,
-                        voice=chunk.voice,
-                        format=chunk.live_format,
-                        status="first_audio_available",
-                        size_bytes=chunk.size_bytes,
-                        metadata={
-                            "chunk": chunk.to_dict(),
-                            "playback_chunk_result": chunk_result.to_dict(),
-                            "progressive_downstream_feed": True,
-                        },
+                            live_result = make_live_result_from_session(
+                                live_session,
+                                ok=False,
+                                status="cancelled",
+                                error_code=block_reason,
+                                error_message=f"Speech output suppressed: {block_reason}.",
+                                partial_playback=playback_started_ms is not None,
+                            )
+                    startup_trace.playback_preroll_active = False
+                    startup_trace.mark_once("playback_cancelled", progressive_absolute_ms())
+                    startup_trace.transition("cancelled")
+                    return
+                session = ensure_live_session()
+                if session.status not in {"started", "playing", "prerolling", "buffering"}:
+                    live_result = make_live_result_from_session(
+                        session,
+                        ok=False,
+                        status=session.status,
+                        error_code=session.error_code,
+                        error_message=session.error_message,
                     )
-            if not chunk_result.ok:
-                live_result = VoiceLivePlaybackResult(
-                    ok=False,
-                    playback_stream_id=session.playback_stream_id,
-                    playback_request_id=session.playback_request_id,
-                    provider=session.provider,
-                    device=session.device,
-                    audio_format=session.audio_format,
-                    status=chunk_result.status,
-                    session_id=session_id,
-                    turn_id=turn_id,
-                    tts_stream_id=streaming_request.tts_stream_id,
-                    speech_request_id=speech_request.speech_request_id,
-                    started_at=session.started_at,
-                    first_chunk_received_at=chunk_result.first_chunk_received_at,
-                    playback_started_at=chunk_result.playback_started_at,
-                    partial_playback=playback_started_ms is not None,
-                    error_code=chunk_result.error_code,
-                    error_message=chunk_result.error_message,
-                    user_heard_claimed=False,
+                    startup_trace.transition(session.status)
+                    return
+                if preroll_flushed:
+                    submit_chunk_locked(session, chunk)
+                    return
+                if not preroll_buffer:
+                    startup_trace.mark_once(
+                        "first_audio_buffer_queued",
+                        progressive_absolute_ms(),
+                    )
+                    preroll_first_elapsed_ms = progressive_elapsed_ms()
+                    if (
+                        streaming_max_preroll_wait_ms > 0
+                        and preroll_timeout_task is None
+                    ):
+                        preroll_timeout_task = asyncio.create_task(
+                            flush_after_preroll_timeout()
+                        )
+                preroll_buffer.append(chunk)
+                preroll_bytes += int(chunk.size_bytes or len(chunk.data or b""))
+                buffered_ms = playback_buffered_ms(preroll_bytes)
+                startup_trace.playback_buffered_ms = buffered_ms
+                startup_trace.min_buffered_ms_startup = (
+                    buffered_ms
+                    if startup_trace.min_buffered_ms_startup is None
+                    else min(startup_trace.min_buffered_ms_startup, buffered_ms)
                 )
+                startup_trace.buffer_wait_count += 1
+                elapsed_since_preroll_ms = (
+                    progressive_elapsed_ms() - preroll_first_elapsed_ms
+                    if preroll_first_elapsed_ms is not None
+                    else 0
+                )
+                enough_preroll = bool(
+                    len(preroll_buffer) >= streaming_min_preroll_chunks
+                    and preroll_bytes >= streaming_min_preroll_bytes
+                    and buffered_ms >= streaming_min_preroll_ms
+                )
+                max_wait_elapsed = bool(
+                    streaming_max_preroll_wait_ms > 0
+                    and elapsed_since_preroll_ms >= streaming_max_preroll_wait_ms
+                )
+                if enough_preroll:
+                    flush_preroll_locked("minimum_preroll")
+                elif max_wait_elapsed:
+                    flush_preroll_locked("max_preroll_wait")
+                elif chunk.final_chunk:
+                    flush_preroll_locked("stream_completed")
 
         progressive_operation = getattr(self.provider, "stream_speech_progressive", None)
         operation = getattr(self.provider, "stream_speech", None)
@@ -6506,6 +6894,26 @@ class VoiceService:
         if inspect.isawaitable(tts_result):
             tts_result = await tts_result
         self.last_streaming_tts_result = tts_result
+        if preroll_timeout_task is not None and not preroll_timeout_task.done():
+            preroll_timeout_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await preroll_timeout_task
+        async with preroll_lock:
+            if live_result is None and preroll_buffer:
+                if tts_result.ok:
+                    flush_preroll_locked("stream_completed")
+                else:
+                    startup_trace.record_warning("stream_failed_before_preroll_playback")
+                    startup_trace.playback_preroll_active = False
+                    if live_session is not None:
+                        cancel_operation = getattr(
+                            self.playback_provider, "cancel_stream", None
+                        )
+                        if callable(cancel_operation):
+                            live_result = cancel_operation(
+                                live_session.playback_stream_id,
+                                reason=tts_result.error_code or "streaming_tts_failed",
+                            )
         first_chunk_delta = tts_result.first_audio_byte_ms
         if first_chunk_ms is None:
             first_chunk_ms = (
@@ -6644,7 +7052,12 @@ class VoiceService:
                 turn_id=turn_id,
                 volume=self.config.playback.volume,
                 allowed_to_play=True,
-                metadata={"source": "streaming_tts"},
+                metadata={
+                    "source": "streaming_tts",
+                    "estimated_output_latency_ms": self._voice_visual_sync_fields()[
+                        "estimated_output_latency_ms"
+                    ],
+                },
             )
             self.last_live_playback_request = live_request
             start_operation = getattr(self.playback_provider, "start_stream", None)
@@ -6695,6 +7108,25 @@ class VoiceService:
                             )
                         break
                     if callable(feed_operation):
+                        self._publish_pcm_submit_visual_probe(
+                            chunk.data,
+                            publish_context={
+                                "session_id": session_id,
+                                "turn_id": turn_id,
+                                "speech_request_id": speech_request.speech_request_id,
+                                "playback_request_id": live_session.playback_request_id,
+                                "playback_id": live_session.playback_stream_id,
+                                "provider": tts_result.provider,
+                                "model": tts_result.model,
+                                "voice": tts_result.voice,
+                                "audio_format": chunk.live_format,
+                                "chunk_index": chunk.chunk_index,
+                                "size_bytes": chunk.size_bytes,
+                                "sample_rate_hz": stream_sample_rate,
+                                "channels": stream_channels,
+                                "sample_width_bytes": stream_sample_width_bytes,
+                            },
+                        )
                         chunk_result = feed_operation(
                             live_session.playback_stream_id,
                             chunk.data or b"",
@@ -6722,6 +7154,9 @@ class VoiceService:
                                 "playback_streaming_active": chunk_result.status
                                 in {"started", "playing"},
                                 "first_audio_started": bool(chunk_result.playback_started),
+                                "sample_rate_hz": stream_sample_rate,
+                                "channels": stream_channels,
+                                "sample_width_bytes": stream_sample_width_bytes,
                             },
                         )
                         if playback_started_ms is None and chunk_result.playback_started:
@@ -6854,6 +7289,10 @@ class VoiceService:
                 metadata={"playback_stream_result": live_result.to_dict()},
             )
             terminal_playback_event_published = True
+
+        if live_result is not None:
+            live_result = attach_startup_trace(live_result)
+            self.last_live_playback_result = live_result
 
         if live_result is not None and not terminal_playback_event_published:
             terminal_event = (
@@ -7048,6 +7487,7 @@ class VoiceService:
                 "core_result_id": core_result_id,
                 "sink_kind": sink_kind,
                 "first_output_start_ms": latency.first_output_start_ms,
+                "playback_startup_trace": startup_trace_payload(),
                 "raw_audio_logged": False,
                 "user_heard_claimed": user_heard_claimed,
             },
@@ -9455,6 +9895,7 @@ class VoiceService:
         )
         if envelope is not None:
             snapshot["voice_output_envelope"] = envelope
+        snapshot["voice_visualizer"] = self._voice_envelope_frame_status_snapshot()
         voice_anchor = build_voice_anchor_payload(snapshot)
         snapshot.update(self._voice_anchor_status_fields(voice_anchor))
         return snapshot
@@ -9562,6 +10003,7 @@ class VoiceService:
         )
         if envelope is not None:
             snapshot["voice_output_envelope"] = envelope
+        snapshot["voice_visualizer"] = self._voice_envelope_frame_status_snapshot()
         voice_anchor = build_voice_anchor_payload(snapshot)
         snapshot.update(self._voice_anchor_status_fields(voice_anchor))
         snapshot["streaming_tts_active"] = voice_anchor.get("streaming_tts_active")
@@ -12943,6 +13385,406 @@ class VoiceService:
             return self.last_voice_output_envelope
         return self.last_voice_output_envelope
 
+    def _voice_ar1_live_diag_enabled(self) -> bool:
+        value = str(os.environ.get("STORMHELM_VOICE_AR1_LIVE_DIAG", "")).strip().lower()
+        return value in {"1", "true", "yes", "on"}
+
+    def _pcm_submit_levels_for_visual_probe(
+        self,
+        audio: bytes | bytearray | memoryview | None,
+        *,
+        audio_format: str,
+        sample_rate_hz: int,
+        channels: int,
+        sample_width_bytes: int,
+    ) -> dict[str, Any] | None:
+        if not audio:
+            return None
+        payload = bytes(audio or b"")
+        if (
+            str(audio_format or "").strip().lower() == "wav"
+            and payload[:4] == b"RIFF"
+            and len(payload) > 44
+        ):
+            payload = payload[44:]
+        frame_width = max(1, int(channels or 1)) * max(
+            1, int(sample_width_bytes or 2)
+        )
+        trimmed_length = len(payload) - (len(payload) % frame_width)
+        if trimmed_length <= 0:
+            return None
+        payload = payload[:trimmed_length]
+        sample_width = max(1, int(sample_width_bytes or 2))
+        if sample_width == 2:
+            even_length = len(payload) - (len(payload) % 2)
+            if even_length <= 0:
+                return None
+            sum_squares = 0.0
+            peak = 0
+            count = 0
+            for sample in struct.iter_unpack("<h", payload[:even_length]):
+                value = int(sample[0])
+                magnitude = abs(value)
+                peak = max(peak, magnitude)
+                sum_squares += float(value * value)
+                count += 1
+            if count <= 0:
+                return None
+            rms = math.sqrt(sum_squares / count) / 32768.0
+            peak_level = peak / 32768.0
+        else:
+            centered = [int(byte) - 128 for byte in payload]
+            if not centered:
+                return None
+            sum_squares = sum(float(value * value) for value in centered)
+            peak_level = max(abs(value) for value in centered) / 128.0
+            rms = math.sqrt(sum_squares / len(centered)) / 128.0
+        visual_meter_config = getattr(self.config, "visual_meter", None)
+        noise_floor = float(
+            getattr(visual_meter_config, "noise_floor", 0.015)
+            if visual_meter_config is not None
+            else 0.015
+        )
+        gain = float(
+            getattr(visual_meter_config, "gain", 2.0)
+            if visual_meter_config is not None
+            else 2.0
+        )
+        clamped_rms = max(0.0, min(1.0, float(rms)))
+        clamped_peak = max(0.0, min(1.0, float(peak_level)))
+        combined = max(clamped_rms, clamped_peak * 0.62)
+        if combined <= noise_floor:
+            energy = 0.0
+        else:
+            normalized = (combined - noise_floor) / max(0.001, 1.0 - noise_floor)
+            normalized = max(0.0, min(1.0, normalized * gain))
+            energy = max(0.0, min(1.0, math.pow(normalized, 0.65)))
+        frames = trimmed_length // frame_width
+        duration_ms = (
+            float(frames) / max(1, int(sample_rate_hz or 1)) * 1000.0
+            if frames > 0
+            else 0.0
+        )
+        return {
+            "rms": round(clamped_rms, 6),
+            "peak": round(clamped_peak, 6),
+            "voice_visual_energy": round(float(energy), 6),
+            "smoothed_energy": round(float(energy), 6),
+            "chunk_duration_ms": round(duration_ms, 3),
+            "trimmed_size_bytes": int(trimmed_length),
+            "raw_audio_present": False,
+        }
+
+    def _publish_pcm_submit_visual_probe(
+        self,
+        audio: bytes | bytearray | memoryview | None,
+        *,
+        publish_context: dict[str, Any],
+    ) -> None:
+        if not self._voice_ar1_live_diag_enabled():
+            return
+        try:
+            playback_id = str(
+                publish_context.get("playback_id")
+                or publish_context.get("playback_request_id")
+                or publish_context.get("speech_request_id")
+                or ""
+            ).strip()
+            sample_rate_hz = int(publish_context.get("sample_rate_hz") or 24000)
+            channels = int(publish_context.get("channels") or 1)
+            sample_width_bytes = int(publish_context.get("sample_width_bytes") or 2)
+            levels = self._pcm_submit_levels_for_visual_probe(
+                audio,
+                audio_format=str(publish_context.get("audio_format") or "pcm"),
+                sample_rate_hz=sample_rate_hz,
+                channels=channels,
+                sample_width_bytes=sample_width_bytes,
+            )
+            if levels is None:
+                return
+            with self._voice_envelope_frame_condition:
+                sample_time_ms = self._voice_ar1_pcm_sample_time_by_playback.get(
+                    playback_id, 0.0
+                )
+                self._voice_ar1_pcm_sample_time_by_playback[playback_id] = (
+                    sample_time_ms + float(levels.get("chunk_duration_ms") or 0.0)
+                )
+                latest_meter_energy = (
+                    self._voice_playback_meter.latest_energy
+                    if self._voice_playback_meter is not None
+                    else levels["voice_visual_energy"]
+                )
+            now_monotonic = time.perf_counter()
+            now_wall_ms = time.time() * 1000.0
+            diagnostics = {
+                "stage": "pcm_submit_to_playback",
+                "playback_id": playback_id,
+                "playback_request_id": publish_context.get("playback_request_id"),
+                "session_id": publish_context.get("session_id"),
+                "turn_id": publish_context.get("turn_id"),
+                "speech_request_id": publish_context.get("speech_request_id"),
+                "pcm_submit_time_ms": round(now_monotonic * 1000.0, 3),
+                "pcm_submit_wall_time_ms": round(now_wall_ms, 3),
+                "pcm_sample_time_ms": round(float(sample_time_ms), 3),
+                "rms": levels["rms"],
+                "peak": levels["peak"],
+                "voice_visual_energy": levels["voice_visual_energy"],
+                "smoothed_energy": round(float(latest_meter_energy), 6),
+                "sample_rate": sample_rate_hz,
+                "sample_rate_hz": sample_rate_hz,
+                "channels": channels,
+                "chunk_duration_ms": levels["chunk_duration_ms"],
+                "meter_emit_time_ms": None,
+                "chunk_index": publish_context.get("chunk_index"),
+                "source": "pcm_stream_meter",
+                "raw_audio_present": False,
+            }
+            self._publish(
+                VoiceEventType.PCM_SUBMITTED_TO_PLAYBACK,
+                message="Voice PCM submitted to playback.",
+                session_id=str(publish_context.get("session_id") or "") or None,
+                turn_id=str(publish_context.get("turn_id") or "") or None,
+                speech_request_id=str(publish_context.get("speech_request_id") or "")
+                or None,
+                playback_request_id=str(publish_context.get("playback_request_id") or "")
+                or None,
+                playback_id=playback_id or None,
+                provider=str(publish_context.get("provider") or "") or None,
+                model=str(publish_context.get("model") or "") or None,
+                voice=str(publish_context.get("voice") or "") or None,
+                format=str(publish_context.get("audio_format") or "pcm"),
+                raw_audio_present=False,
+                size_bytes=int(levels.get("trimmed_size_bytes") or 0),
+                duration_ms=int(round(float(levels.get("chunk_duration_ms") or 0.0))),
+                metadata={"voice_ar1_pcm_submit": diagnostics},
+            )
+        except Exception:
+            return
+
+    def run_local_pcm_voice_fixture(
+        self,
+        *,
+        session_id: str = "voice-ar1-local-fixture",
+        turn_id: str | None = None,
+        prompt: str = "Testing one, two, three. Anchor sync check.",
+    ) -> dict[str, Any]:
+        if not self._voice_ar1_live_diag_enabled():
+            return {
+                "ok": False,
+                "status": "blocked",
+                "error_code": "voice_ar1_live_diag_disabled",
+                "raw_audio_present": False,
+            }
+        from stormhelm.core.voice.reactive_chain_probe import (
+            generate_synthetic_pcm_stimulus,
+        )
+
+        stimulus = generate_synthetic_pcm_stimulus(sample_rate_hz=24_000, update_hz=60)
+        speech_request_id = f"voice-ar1-fixture-{uuid4().hex[:12]}"
+        live_request = VoiceLivePlaybackRequest(
+            speech_request_id=speech_request_id,
+            provider="local",
+            device="default",
+            audio_format="pcm",
+            session_id=session_id,
+            turn_id=turn_id,
+            allowed_to_play=True,
+            metadata={
+                "diagnostic_fixture": "voice_ar1_real_environment",
+                "prompt": str(prompt or ""),
+                "sample_rate_hz": stimulus.sample_rate_hz,
+                "channels": stimulus.channels,
+                "sample_width_bytes": stimulus.sample_width_bytes,
+                "raw_audio_present": False,
+            },
+        )
+        start_operation = getattr(self.playback_provider, "start_stream", None)
+        feed_operation = getattr(self.playback_provider, "feed_stream_chunk", None)
+        complete_operation = getattr(self.playback_provider, "complete_stream", None)
+        if not callable(start_operation) or not callable(feed_operation):
+            return {
+                "ok": False,
+                "status": "unsupported",
+                "error_code": "streaming_playback_fixture_unsupported",
+                "raw_audio_present": False,
+            }
+        try:
+            try:
+                live_session = start_operation(request=live_request)
+            except TypeError:
+                live_session = start_operation(live_request)
+        except Exception as error:
+            return {
+                "ok": False,
+                "status": "failed",
+                "error_code": "local_fixture_start_failed",
+                "error_message": str(error),
+                "raw_audio_present": False,
+            }
+        self.last_live_playback_request = live_request
+        self.last_live_playback_session = live_session
+        self._publish(
+            VoiceEventType.PLAYBACK_STREAM_STARTED,
+            message="Voice AR1 local PCM fixture playback stream started.",
+            session_id=session_id,
+            turn_id=turn_id,
+            speech_request_id=speech_request_id,
+            playback_request_id=live_session.playback_request_id,
+            playback_id=live_session.playback_stream_id,
+            provider=live_session.provider,
+            device=live_session.device,
+            format=live_session.audio_format,
+            status=live_session.status,
+            raw_audio_present=False,
+            metadata={
+                "diagnostic_fixture": "voice_ar1_real_environment",
+                "playback_stream": live_session.to_dict(),
+                "raw_audio_present": False,
+            },
+        )
+        if live_session.status not in {"started", "playing", "prerolling"}:
+            return {
+                "ok": False,
+                "status": live_session.status,
+                "playback_id": live_session.playback_stream_id,
+                "playback_request_id": live_session.playback_request_id,
+                "error_code": live_session.error_code,
+                "error_message": live_session.error_message,
+                "raw_audio_present": False,
+            }
+        frame_width = stimulus.channels * stimulus.sample_width_bytes
+        chunk_frames = max(1, int(stimulus.sample_rate_hz * 0.05))
+        chunk_bytes = chunk_frames * frame_width
+        chunks_sent = 0
+        bytes_sent = 0
+        playback_started_published = False
+        for offset in range(0, len(stimulus.pcm_bytes), chunk_bytes):
+            chunk = stimulus.pcm_bytes[offset : offset + chunk_bytes]
+            if not chunk:
+                continue
+            publish_context = {
+                "session_id": session_id,
+                "turn_id": turn_id,
+                "speech_request_id": speech_request_id,
+                "playback_request_id": live_session.playback_request_id,
+                "playback_id": live_session.playback_stream_id,
+                "provider": "local_pcm_fixture",
+                "model": "synthetic_pcm",
+                "voice": "voice_ar1_fixture",
+                "audio_format": "pcm",
+                "chunk_index": chunks_sent,
+                "size_bytes": len(chunk),
+                "sample_rate_hz": stimulus.sample_rate_hz,
+                "channels": stimulus.channels,
+                "sample_width_bytes": stimulus.sample_width_bytes,
+            }
+            self._publish_pcm_submit_visual_probe(chunk, publish_context=publish_context)
+            chunk_result = feed_operation(
+                live_session.playback_stream_id,
+                chunk,
+                chunk_index=chunks_sent,
+            )
+            bytes_sent += len(chunk)
+            chunks_sent += 1
+            playback_active = str(chunk_result.status) in {"started", "playing", "stable"}
+            self._queue_voice_output_envelope_frames(
+                chunk,
+                audio_format="pcm",
+                source="playback_output_envelope"
+                if getattr(chunk_result, "ok", False)
+                else "streaming_chunk_envelope",
+                publish_context={
+                    **publish_context,
+                    "playback_status": str(chunk_result.status),
+                    "playback_streaming_active": playback_active,
+                    "first_audio_started": bool(
+                        getattr(chunk_result, "playback_started", False)
+                    ),
+                },
+            )
+            if (
+                not playback_started_published
+                and bool(getattr(chunk_result, "playback_started", False))
+            ):
+                playback_started_published = True
+                self._publish(
+                    VoiceEventType.PLAYBACK_STARTED,
+                    message="Voice AR1 local PCM fixture playback started.",
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    speech_request_id=speech_request_id,
+                    playback_request_id=live_session.playback_request_id,
+                    playback_id=live_session.playback_stream_id,
+                    provider="local_pcm_fixture",
+                    format="pcm",
+                    status=str(chunk_result.status),
+                    raw_audio_present=False,
+                    metadata={"diagnostic_fixture": "voice_ar1_real_environment"},
+                )
+        live_result = (
+            complete_operation(live_session.playback_stream_id)
+            if callable(complete_operation)
+            else None
+        )
+        self.last_live_playback_result = live_result
+        self._finish_voice_playback_meter()
+        self._drain_voice_output_envelope_frames(max_wait_seconds=6.0)
+        result_status = str(getattr(live_result, "status", "completed") or "completed")
+        self._publish(
+            VoiceEventType.PLAYBACK_STREAM_COMPLETED,
+            message="Voice AR1 local PCM fixture playback stream completed.",
+            session_id=session_id,
+            turn_id=turn_id,
+            speech_request_id=speech_request_id,
+            playback_request_id=live_session.playback_request_id,
+            playback_id=live_session.playback_stream_id,
+            provider="local_pcm_fixture",
+            format="pcm",
+            status=result_status,
+            size_bytes=bytes_sent,
+            raw_audio_present=False,
+            metadata={
+                "diagnostic_fixture": "voice_ar1_real_environment",
+                "chunks_sent": chunks_sent,
+                "bytes_sent": bytes_sent,
+                "duration_ms": stimulus.duration_ms,
+                "raw_audio_present": False,
+            },
+        )
+        self._publish(
+            VoiceEventType.PLAYBACK_COMPLETED,
+            message="Voice AR1 local PCM fixture playback completed.",
+            session_id=session_id,
+            turn_id=turn_id,
+            speech_request_id=speech_request_id,
+            playback_request_id=live_session.playback_request_id,
+            playback_id=live_session.playback_stream_id,
+            provider="local_pcm_fixture",
+            format="pcm",
+            status=result_status,
+            size_bytes=bytes_sent,
+            raw_audio_present=False,
+            metadata={"diagnostic_fixture": "voice_ar1_real_environment"},
+        )
+        return {
+            "ok": True,
+            "status": result_status,
+            "playback_id": live_session.playback_stream_id,
+            "playback_request_id": live_session.playback_request_id,
+            "speech_request_id": speech_request_id,
+            "sample_rate_hz": stimulus.sample_rate_hz,
+            "channels": stimulus.channels,
+            "duration_ms": stimulus.duration_ms,
+            "chunks_sent": chunks_sent,
+            "bytes_sent": bytes_sent,
+            "audible_playback": bool(
+                getattr(live_result, "user_heard_claimed", False)
+                or getattr(live_result, "metadata", {}).get("audible_playback", False)
+            ),
+            "user_heard_claimed": bool(getattr(live_result, "user_heard_claimed", False)),
+            "raw_audio_present": False,
+        }
+
     def _queue_voice_output_envelope_frames(
         self,
         audio: bytes | bytearray | memoryview | None,
@@ -12951,6 +13793,11 @@ class VoiceService:
         source: str,
         publish_context: dict[str, Any],
     ) -> VoiceAudioEnvelope | None:
+        visual_meter_config = getattr(self.config, "visual_meter", None)
+        if visual_meter_config is not None and not bool(
+            getattr(visual_meter_config, "enabled", True)
+        ):
+            return self.last_voice_output_envelope
         if not audio:
             return self.last_voice_output_envelope
         del source
@@ -12960,19 +13807,73 @@ class VoiceService:
         if not payload:
             return self.last_voice_output_envelope
 
+        incoming_playback_id = str(
+            publish_context.get("playback_id")
+            or publish_context.get("playback_request_id")
+            or publish_context.get("speech_request_id")
+            or ""
+        ).strip()
         with self._voice_envelope_frame_condition:
+            self._reset_voice_playback_meter_for_new_playback_locked(
+                incoming_playback_id
+            )
             generation = self._voice_envelope_frame_generation
             meter = self._voice_playback_meter
             if meter is None or not meter.active:
-                meter = VoicePlaybackMeter(
-                    update_hz=60,
-                    sample_rate_hz=24000,
-                    channels=1,
-                    sample_width_bytes=2,
-                    window_ms=33,
-                    playback_meter_alignment=self._voice_playback_meter_alignment,
+                playback_id = (
+                    publish_context.get("playback_id")
+                    or publish_context.get("playback_request_id")
+                    or publish_context.get("speech_request_id")
                 )
-                meter.start(start_monotonic=time.perf_counter())
+                update_hz = int(
+                    getattr(visual_meter_config, "sample_rate_hz", 60)
+                    if visual_meter_config is not None
+                    else 60
+                )
+                meter = VoiceVisualMeter(
+                    playback_id=str(playback_id) if playback_id else None,
+                    update_hz=update_hz,
+                    sample_rate_hz=int(
+                        publish_context.get("sample_rate_hz")
+                        or publish_context.get("sample_rate")
+                        or 24000
+                    ),
+                    channels=int(publish_context.get("channels") or 1),
+                    sample_width_bytes=int(
+                        publish_context.get("sample_width_bytes") or 2
+                    ),
+                    startup_preroll_ms=int(
+                        getattr(visual_meter_config, "startup_preroll_ms", 350)
+                        if visual_meter_config is not None
+                        else 350
+                    ),
+                    attack_ms=int(
+                        getattr(visual_meter_config, "attack_ms", 60)
+                        if visual_meter_config is not None
+                        else 60
+                    ),
+                    release_ms=int(
+                        getattr(visual_meter_config, "release_ms", 160)
+                        if visual_meter_config is not None
+                        else 160
+                    ),
+                    noise_floor=float(
+                        getattr(visual_meter_config, "noise_floor", 0.015)
+                        if visual_meter_config is not None
+                        else 0.015
+                    ),
+                    gain=float(
+                        getattr(visual_meter_config, "gain", 2.0)
+                        if visual_meter_config is not None
+                        else 2.0
+                    ),
+                    max_startup_wait_ms=int(
+                        getattr(visual_meter_config, "max_startup_wait_ms", 800)
+                        if visual_meter_config is not None
+                        else 800
+                    ),
+                )
+                meter.start_playback(start_monotonic=time.perf_counter())
                 self._voice_playback_meter = meter
                 self._voice_visualizer_last_publish_monotonic = 0.0
                 self._voice_visualizer_first_publish_monotonic = 0.0
@@ -12982,7 +13883,8 @@ class VoiceService:
             context.pop("chunk_index", None)
             context.pop("size_bytes", None)
             context["audio_format"] = "pcm"
-            context["playback_meter_alignment"] = self._voice_playback_meter_alignment
+            context["playback_meter_alignment"] = "pcm_stream_meter"
+            context["voice_visual_source"] = "pcm_stream_meter"
             self._voice_playback_meter_context = context
             meter.feed_pcm(payload)
             thread = self._voice_playback_meter_thread
@@ -13000,21 +13902,50 @@ class VoiceService:
             self._voice_envelope_frame_condition.notify_all()
         return self.last_voice_output_envelope
 
+    def _reset_voice_playback_meter_for_new_playback_locked(
+        self, incoming_playback_id: str
+    ) -> None:
+        if not incoming_playback_id:
+            return
+        meter = self._voice_playback_meter
+        if meter is None or not meter.active:
+            return
+        current_playback_id = str(
+            self._voice_playback_meter_context.get("playback_id")
+            or getattr(meter, "playback_id", "")
+            or ""
+        ).strip()
+        if not current_playback_id or current_playback_id == incoming_playback_id:
+            return
+        meter.stop()
+        self._voice_playback_meter = None
+        self._voice_playback_meter_context = {}
+        self._voice_playback_meter_finishing = False
+        self._voice_playback_meter_thread = None
+        self._voice_envelope_frame_active = False
+        self._voice_visualizer_last_publish_monotonic = 0.0
+        self._voice_visualizer_first_publish_monotonic = 0.0
+        self._voice_visualizer_publish_window_count = 0
+        self._voice_envelope_frame_generation += 1
+
     def _voice_playback_meter_worker(self, generation: int) -> None:
         min_publish_interval = 1.0 / 60.0
         next_tick = time.perf_counter()
+        worker_thread = threading.current_thread()
         while True:
             with self._voice_envelope_frame_condition:
                 if generation != self._voice_envelope_frame_generation:
-                    self._voice_playback_meter_thread = None
-                    self._voice_envelope_frame_active = False
-                    self._voice_envelope_frame_condition.notify_all()
+                    if self._voice_playback_meter_thread is worker_thread:
+                        self._voice_playback_meter_thread = None
+                        self._voice_envelope_frame_active = False
+                        self._voice_envelope_frame_condition.notify_all()
                     return
                 meter = self._voice_playback_meter
                 if meter is None or not meter.active:
-                    self._voice_playback_meter_thread = None
-                    self._voice_envelope_frame_active = False
-                    self._voice_envelope_frame_condition.notify_all()
+                    if self._voice_playback_meter_thread is worker_thread:
+                        self._voice_playback_meter_thread = None
+                        self._voice_envelope_frame_active = False
+                        self._voice_envelope_frame_condition.notify_all()
                     return
                 now = time.perf_counter()
                 remaining = next_tick - now
@@ -13053,9 +13984,10 @@ class VoiceService:
                     self._voice_playback_meter = None
                     self._voice_playback_meter_context = {}
                     self._voice_playback_meter_finishing = False
-                    self._voice_playback_meter_thread = None
-                    self._voice_envelope_frame_active = False
-                    self._voice_envelope_frame_condition.notify_all()
+                    if self._voice_playback_meter_thread is worker_thread:
+                        self._voice_playback_meter_thread = None
+                        self._voice_envelope_frame_active = False
+                        self._voice_envelope_frame_condition.notify_all()
                     return
 
     def _voice_envelope_frame_worker(self) -> None:
@@ -13246,6 +14178,14 @@ class VoiceService:
                 if self._voice_visualizer_publish_window_count > 1 and elapsed > 0
                 else 0.0
             )
+            last_frame = dict(self._voice_envelope_last_frame or {})
+            try:
+                voice_visual_energy = float(
+                    last_frame.get("voice_visual_energy", last_frame.get("energy", 0.0))
+                    or 0.0
+                )
+            except (TypeError, ValueError):
+                voice_visual_energy = 0.0
             return {
                 "envelope_frames_generated": int(
                     self._voice_envelope_frames_generated_total
@@ -13272,18 +14212,22 @@ class VoiceService:
                 "visualizer_updates_dropped": int(
                     self._voice_visualizer_updates_dropped_total
                 ),
-                "visualizer_update_rate_limit_hz": 30,
+                "visualizer_update_rate_limit_hz": 60,
                 "visualizer_last_update_gap_ms": last_gap_ms,
                 "visualizer_max_update_gap_ms": max_gap_ms,
                 "max_visualizer_frame_gap_ms": max_gap_ms,
                 "status_polling_used_for_visualizer": False,
-                "playback_meter_alignment": self._voice_playback_meter_alignment,
-                "playback_meter_source": "stormhelm_playback_meter",
+                "playback_meter_alignment": "pcm_stream_meter",
+                "playback_meter_source": "pcm_stream_meter",
                 "playback_meter_active": bool(self._voice_playback_meter is not None),
+                "voice_visual_source": "pcm_stream_meter",
+                "voice_visual_energy": round(max(0.0, min(1.0, voice_visual_energy)), 4),
+                "voice_visual_available": bool(self._voice_playback_meter is not None),
+                "voice_visual_active": bool(self._voice_playback_meter is not None),
                 "queue_depth": len(self._voice_envelope_frame_queue),
                 "active": bool(self._voice_envelope_frame_active),
                 "generation": int(self._voice_envelope_frame_generation),
-                "last_frame": dict(self._voice_envelope_last_frame or {}),
+                "last_frame": last_frame,
                 "raw_audio_present": False,
             }
 
@@ -13295,6 +14239,29 @@ class VoiceService:
         center_scale_drive = voice_anchor.get("center_blob_scale_drive", center_drive)
         center_scale = voice_anchor.get("center_blob_scale", 1.0)
         outer_motion = voice_anchor.get("outer_speaking_motion", 0.0)
+        visualizer_source = (
+            visualizer.get("voice_visual_source")
+            or visualizer.get("playback_meter_source")
+            or voice_anchor.get("voice_visual_source")
+            or "unavailable"
+        )
+        visualizer_energy = visualizer.get(
+            "voice_visual_energy",
+            voice_anchor.get("voice_visual_energy", 0.0),
+        )
+        visualizer_active = bool(
+            visualizer.get("voice_visual_active")
+            or voice_anchor.get("voice_visual_active", False)
+        )
+        authoritative_playback_id = (
+            voice_anchor.get("voice_visual_playback_id")
+            or voice_anchor.get("playback_id")
+            or voice_anchor.get("active_playback_id")
+        )
+        authoritative_playback_status = (
+            voice_anchor.get("active_playback_status")
+            or ("playing" if visualizer_active else "idle")
+        )
         debug = {
             "state": voice_anchor.get("state", "idle"),
             "source": audio_source,
@@ -13315,11 +14282,48 @@ class VoiceService:
             "update_hz": voice_anchor.get("visualizer_update_hz", 30),
             "last_update_at": voice_anchor.get("visualizer_last_update_at"),
             "synthetic_fallback": bool(voice_anchor.get("synthetic_fallback", False)),
+            "playback_envelope_available": bool(
+                voice_anchor.get("playback_envelope_available", False)
+            ),
+            "playback_envelope_source": voice_anchor.get(
+                "playback_envelope_source", "unavailable"
+            ),
+            "playback_envelope_energy": voice_anchor.get(
+                "playback_envelope_energy", 0.0
+            ),
+            "voice_visual_energy": voice_anchor.get("voice_visual_energy", 0.0),
+            "voice_visual_source": voice_anchor.get(
+                "voice_visual_source", voice_anchor.get("audio_reactive_source")
+            ),
+            "voice_visual_active": bool(
+                voice_anchor.get("voice_visual_active", False)
+            ),
+            "speaking_visual_sync_mode": voice_anchor.get(
+                "speaking_visual_sync_mode", "idle"
+            ),
             "raw_audio_present": False,
         }
         return {
             "voice_anchor": voice_anchor,
             "voice_visualizer": visualizer,
+            "authoritativeVoiceStateVersion": "AR6",
+            "activePlaybackId": authoritative_playback_id
+            if authoritative_playback_status
+            in {"active", "playing", "prerolling", "started", "stable"}
+            else None,
+            "activePlaybackStatus": authoritative_playback_status,
+            "authoritativePlaybackId": authoritative_playback_id,
+            "authoritativePlaybackStatus": authoritative_playback_status,
+            "authoritativeVoiceVisualActive": visualizer_active,
+            "authoritativeVoiceVisualEnergy": visualizer_energy,
+            "authoritativeStateSource": visualizer_source,
+            "lastAcceptedUpdateSource": "core_status_pcm_meter"
+            if visualizer_source == "pcm_stream_meter"
+            else "core_status_snapshot",
+            "lastIgnoredUpdateSource": "",
+            "staleBroadSnapshotIgnored": False,
+            "staleBroadSnapshotIgnoredCount": 0,
+            "terminalEventAcceptedCount": 0,
             "voice_anchor_state": voice_anchor.get("state"),
             "speaking_visual_active": voice_anchor.get("speaking_visual_active"),
             "voice_motion_intensity": voice_anchor.get("motion_intensity"),
@@ -13339,8 +14343,102 @@ class VoiceService:
             "voice_visual_gain": voice_anchor.get("visual_gain"),
             "audioDriveLevel": center_scale_drive,
             "voice_audio_reactive_source": audio_source,
+            "legacy_voice_visual_active": bool(
+                voice_anchor.get("voice_visual_active", False)
+            ),
+            "legacy_voice_visual_energy": voice_anchor.get("voice_visual_energy", 0.0),
+            "legacy_voice_visual_source": voice_anchor.get(
+                "voice_visual_source", "unavailable"
+            ),
+            "voice_visual_active": visualizer_active,
+            "voice_visual_available": bool(
+                voice_anchor.get("voice_visual_available", False)
+            ),
+            "voice_visual_energy": visualizer_energy,
+            "voice_visual_source": visualizer_source,
+            "voice_visual_energy_source": voice_anchor.get(
+                "voice_visual_energy_source",
+                visualizer_source,
+            ),
+            "voice_visual_playback_id": authoritative_playback_id,
+            "voice_visual_sample_rate_hz": voice_anchor.get(
+                "voice_visual_sample_rate_hz", 0
+            ),
+            "voice_visual_started_at_ms": voice_anchor.get(
+                "voice_visual_started_at_ms"
+            ),
+            "voice_visual_latest_age_ms": voice_anchor.get(
+                "voice_visual_latest_age_ms"
+            ),
+            "voice_visual_disabled_reason": voice_anchor.get(
+                "voice_visual_disabled_reason"
+            ),
             "voice_audio_reactive_available": voice_anchor.get(
                 "audio_reactive_available"
+            ),
+            "playback_id": voice_anchor.get("playback_id"),
+            "active_playback_id": voice_anchor.get("active_playback_id"),
+            "active_playback_stream_id": voice_anchor.get("active_playback_stream_id"),
+            "playback_envelope_supported": voice_anchor.get(
+                "playback_envelope_supported"
+            ),
+            "playback_envelope_available": voice_anchor.get(
+                "playback_envelope_available"
+            ),
+            "playback_envelope_usable": voice_anchor.get("playback_envelope_usable"),
+            "playback_envelope_source": voice_anchor.get("playback_envelope_source"),
+            "playback_envelope_energy": voice_anchor.get("playback_envelope_energy"),
+            "playback_envelope_sample_rate_hz": voice_anchor.get(
+                "playback_envelope_sample_rate_hz"
+            ),
+            "playback_envelope_latency_ms": voice_anchor.get(
+                "playback_envelope_latency_ms"
+            ),
+            "playback_envelope_sample_age_ms": voice_anchor.get(
+                "playback_envelope_sample_age_ms"
+            ),
+            "playback_envelope_sample_count": voice_anchor.get(
+                "playback_envelope_sample_count"
+            ),
+            "playback_envelope_window_mode": voice_anchor.get(
+                "playback_envelope_window_mode"
+            ),
+            "playback_envelope_latest_time_ms": voice_anchor.get(
+                "playback_envelope_latest_time_ms"
+            ),
+            "playback_envelope_query_time_ms": voice_anchor.get(
+                "playback_envelope_query_time_ms"
+            ),
+            "playback_envelope_timebase_aligned": voice_anchor.get(
+                "playback_envelope_timebase_aligned"
+            ),
+            "playback_envelope_alignment_error_ms": voice_anchor.get(
+                "playback_envelope_alignment_error_ms"
+            ),
+            "playback_envelope_usable_reason": voice_anchor.get(
+                "playback_envelope_usable_reason"
+            ),
+            "playback_envelope_samples_recent": voice_anchor.get(
+                "playback_envelope_samples_recent"
+            ),
+            "playback_envelope_samples_dropped": voice_anchor.get(
+                "playback_envelope_samples_dropped"
+            ),
+            "anchor_uses_playback_envelope": voice_anchor.get(
+                "anchor_uses_playback_envelope"
+            ),
+            "procedural_fallback_active": voice_anchor.get(
+                "procedural_fallback_active"
+            ),
+            "speaking_visual_sync_mode": voice_anchor.get(
+                "speaking_visual_sync_mode"
+            ),
+            "envelope_interpolation_active": voice_anchor.get(
+                "envelope_interpolation_active"
+            ),
+            "envelope_fallback_reason": voice_anchor.get("envelope_fallback_reason"),
+            "envelope_to_visual_latency_estimate_ms": voice_anchor.get(
+                "envelope_to_visual_latency_estimate_ms"
             ),
             "voice_visualizer_update_hz": voice_anchor.get("visualizer_update_hz"),
             "voice_visualizer_last_update_at": voice_anchor.get(
@@ -13394,15 +14492,40 @@ class VoiceService:
         first_audio_started: bool = True,
     ) -> dict[str, Any]:
         envelope_payload = envelope.to_dict()
+        playback_envelope_fields = self._playback_envelope_snapshot_fields(
+            self._current_playback_envelope_payload(
+                playback_time_ms=self._current_voice_playback_position_ms()
+            )
+        )
+        startup_trace = self.last_playback_startup_trace
+        startup_trace_payload = (
+            startup_trace.to_dict() if startup_trace is not None else None
+        )
         voice_payload: dict[str, Any] = {
             "enabled": bool(self.config.enabled),
             "spoken_responses_enabled": bool(self.config.spoken_responses_enabled),
             "voice_output_envelope": envelope_payload,
+            **playback_envelope_fields,
             "playback": {
                 "active_playback_status": playback_status,
                 "live_playback_status": playback_status,
                 "stream_status": playback_status,
                 "playback_streaming_active": bool(playback_streaming_active),
+                **playback_envelope_fields,
+                "playback_preroll_active": bool(
+                    startup_trace_payload
+                    and startup_trace_payload.get("playback_preroll_active")
+                ),
+                "playback_startup_stable": bool(
+                    startup_trace_payload
+                    and startup_trace_payload.get("playback_startup_stable")
+                ),
+                "playback_buffered_ms": int(
+                    startup_trace_payload.get("playback_buffered_ms", 0)
+                    if startup_trace_payload
+                    else 0
+                ),
+                "playback_startup_trace": startup_trace_payload,
                 "first_audio_started": bool(first_audio_started),
                 "voice_output_envelope": envelope_payload,
                 "raw_audio_included": False,
@@ -13428,9 +14551,83 @@ class VoiceService:
         playback_status: str = "playing",
         playback_streaming_active: bool = True,
         first_audio_started: bool = True,
+        envelope_frame: Any | None = None,
     ) -> dict[str, Any]:
         envelope_payload = envelope.to_dict()
-        active = playback_status in {"started", "playing"}
+        playback_time_ms = None
+        if envelope_frame is not None and hasattr(envelope_frame, "playback_position_ms"):
+            playback_time_ms = getattr(envelope_frame, "playback_position_ms", None)
+        playback_envelope_fields = self._playback_envelope_snapshot_fields(
+            self._current_playback_envelope_payload(playback_time_ms=playback_time_ms)
+        )
+        startup_trace = self.last_playback_startup_trace
+        startup_trace_payload = (
+            startup_trace.to_dict() if startup_trace is not None else None
+        )
+        active = playback_status in {"started", "playing", "stable"}
+        if envelope_frame is not None and hasattr(envelope_frame, "to_payload"):
+            voice_visual_fields = envelope_frame.to_payload()
+        else:
+            voice_visual_fields = {
+                "voice_visual_active": bool(active),
+                "voice_visual_available": envelope.source == "pcm_stream_meter",
+                "voice_visual_energy": round(float(envelope.speech_energy), 4),
+                "voice_visual_source": envelope.source,
+                "voice_visual_energy_source": envelope.source,
+                "voice_visual_playback_id": None,
+                "voice_visual_sample_rate_hz": int(envelope.update_hz or 60),
+                "voice_visual_started_at_ms": None,
+                "voice_visual_latest_age_ms": None,
+                "voice_visual_disabled_reason": None
+                if envelope.source == "pcm_stream_meter"
+                else "visual_meter_unavailable",
+                "raw_audio_present": False,
+            }
+        visual_meter_production = envelope.source == "pcm_stream_meter" or (
+            envelope.source == "unavailable"
+            and bool(getattr(getattr(self.config, "visual_meter", None), "enabled", False))
+        )
+        meter_wall_time_ms = round(time.time() * 1000.0, 3)
+        meter_monotonic_time_ms = round(time.perf_counter() * 1000.0, 3)
+        visualizer_status = self._voice_envelope_frame_status_snapshot()
+        meter_diagnostic_fields = {
+            "meter_time_ms": meter_monotonic_time_ms,
+            "meter_wall_time_ms": meter_wall_time_ms,
+            "meter_sample_time_ms": playback_time_ms,
+            "payload_time_ms": meter_monotonic_time_ms,
+            "payload_wall_time_ms": meter_wall_time_ms,
+            "payload_sample_time_ms": playback_time_ms,
+            "payload_latency_from_meter_ms": 0.0,
+            "emit_rate_hz": visualizer_status.get("visualizer_emit_rate_hz", 0.0),
+            "dropped_sample_count": visualizer_status.get(
+                "visualizer_updates_dropped", 0
+            ),
+            "meter_latency_from_pcm_submit_ms": None,
+            "raw_audio_present": False,
+        }
+        if visual_meter_production:
+            playback_envelope_fields = {
+                **playback_envelope_fields,
+                "playback_envelope_supported": False,
+                "playback_envelope_available": False,
+                "playback_envelope_usable": False,
+                "playback_envelope_source": "deprecated_envelope_timeline",
+                "playback_envelope_energy": 0.0,
+                "playback_envelope_sample_rate_hz": 0,
+                "playback_envelope_sample_count": 0,
+                "playback_envelope_samples_recent": [],
+                "envelope_timeline_samples": [],
+                "envelopeTimelineSamples": [],
+                "envelope_timeline_available": False,
+                "envelopeTimelineAvailable": False,
+                "speaking_visual_sync_mode": "pcm_stream_meter"
+                if active and envelope.source == "pcm_stream_meter"
+                else "idle",
+                "envelope_interpolation_active": False,
+                "playback_envelope_fallback_reason": (
+                    "deprecated_envelope_timeline_bypassed"
+                ),
+            }
         center_drive = round(float(envelope.center_blob_drive), 4)
         center_scale_drive = round(float(envelope.center_blob_scale_drive), 4)
         center_scale = round(float(envelope.center_blob_scale), 4)
@@ -13457,9 +14654,100 @@ class VoiceService:
             "outer_speaking_motion": outer_motion,
             "visual_gain": round(float(envelope.visual_gain), 4),
             "audio_drive_level": center_scale_drive,
+            "playback_envelope_supported": playback_envelope_fields[
+                "playback_envelope_supported"
+            ],
+            "playback_envelope_available": playback_envelope_fields[
+                "playback_envelope_available"
+            ],
+            "playback_envelope_usable": playback_envelope_fields[
+                "playback_envelope_usable"
+            ],
+            "playback_envelope_source": playback_envelope_fields[
+                "playback_envelope_source"
+            ],
+            "playback_envelope_energy": playback_envelope_fields[
+                "playback_envelope_energy"
+            ],
+            "playback_envelope_sample_rate_hz": playback_envelope_fields[
+                "playback_envelope_sample_rate_hz"
+            ],
+            "playback_envelope_latency_ms": playback_envelope_fields[
+                "playback_envelope_latency_ms"
+            ],
+            "estimated_output_latency_ms": playback_envelope_fields[
+                "estimated_output_latency_ms"
+            ],
+            "envelope_visual_offset_ms": playback_envelope_fields[
+                "envelope_visual_offset_ms"
+            ],
+            "playback_envelope_visual_offset_ms": playback_envelope_fields[
+                "playback_envelope_visual_offset_ms"
+            ],
+            "playback_visual_time_ms": playback_envelope_fields[
+                "playback_visual_time_ms"
+            ],
+            "playback_envelope_time_offset_applied_ms": playback_envelope_fields[
+                "playback_envelope_time_offset_applied_ms"
+            ],
+            "playback_envelope_sync_enabled": playback_envelope_fields[
+                "playback_envelope_sync_enabled"
+            ],
+            "envelope_sync_calibration_version": playback_envelope_fields[
+                "envelope_sync_calibration_version"
+            ],
+            "envelope_sync_debug_show_sync": playback_envelope_fields[
+                "envelope_sync_debug_show_sync"
+            ],
+            "playback_envelope_sample_age_ms": playback_envelope_fields[
+                "playback_envelope_sample_age_ms"
+            ],
+            "playback_envelope_sample_count": playback_envelope_fields[
+                "playback_envelope_sample_count"
+            ],
+            "playback_envelope_window_mode": playback_envelope_fields[
+                "playback_envelope_window_mode"
+            ],
+            "playback_envelope_query_time_ms": playback_envelope_fields[
+                "playback_envelope_query_time_ms"
+            ],
+            "playback_envelope_samples_recent": playback_envelope_fields[
+                "playback_envelope_samples_recent"
+            ],
+            "anchor_uses_playback_envelope": bool(
+                playback_envelope_fields["playback_envelope_usable"] and active
+            ),
+            "procedural_fallback_active": bool(
+                active and not playback_envelope_fields["playback_envelope_usable"]
+            ),
+            "speaking_visual_sync_mode": playback_envelope_fields[
+                "speaking_visual_sync_mode"
+            ],
+            "envelope_interpolation_active": playback_envelope_fields[
+                "envelope_interpolation_active"
+            ],
+            "envelope_fallback_reason": playback_envelope_fields[
+                "playback_envelope_fallback_reason"
+            ],
+            "envelope_to_visual_latency_estimate_ms": playback_envelope_fields[
+                "playback_envelope_latency_ms"
+            ],
             "first_audio_started": bool(first_audio_started),
             "streaming_tts_active": bool(playback_streaming_active),
             "live_playback_active": bool(active),
+            "playback_preroll_active": bool(
+                startup_trace_payload
+                and startup_trace_payload.get("playback_preroll_active")
+            ),
+            "playback_startup_stable": bool(
+                startup_trace_payload
+                and startup_trace_payload.get("playback_startup_stable")
+            ),
+            "playback_buffered_ms": int(
+                startup_trace_payload.get("playback_buffered_ms", 0)
+                if startup_trace_payload
+                else 0
+            ),
             "visualizer_update_hz": 30,
             "visualizer_last_update_at": envelope.last_update_at,
             "synthetic_fallback": bool(envelope.synthetic),
@@ -13467,17 +14755,76 @@ class VoiceService:
             "playback_started_does_not_mean_user_heard": True,
             "speaking_visual_is_not_completion": True,
             "speaking_visual_is_not_verification": True,
+            **meter_diagnostic_fields,
         }
+        anchor.update(voice_visual_fields)
+        if visual_meter_production:
+            anchor.update(
+                {
+                    "audio_reactive_available": bool(
+                        active and envelope.source == "pcm_stream_meter"
+                    ),
+                    "audio_reactive_source": envelope.source,
+                    "playback_envelope_supported": False,
+                    "playback_envelope_available": False,
+                    "playback_envelope_usable": False,
+                    "playback_envelope_source": "deprecated_envelope_timeline",
+                    "playback_envelope_energy": 0.0,
+                    "playback_envelope_sample_count": 0,
+                    "playback_envelope_samples_recent": [],
+                    "anchor_uses_playback_envelope": False,
+                    "procedural_fallback_active": False,
+                    "speaking_visual_sync_mode": "pcm_stream_meter"
+                    if active and envelope.source == "pcm_stream_meter"
+                    else "idle",
+                    "visualizer_source_strategy": "pcm_stream_meter",
+                    "visualizerSourceStrategy": "pcm_stream_meter",
+                    "visualizer_source_locked": bool(active),
+                    "visualizerSourceLocked": bool(active),
+                    "visualizer_source_playback_id": voice_visual_fields.get(
+                        "voice_visual_playback_id"
+                    ),
+                    "visualizerSourcePlaybackId": voice_visual_fields.get(
+                        "voice_visual_playback_id"
+                    ),
+                    "visualizer_source_switch_count": 0,
+                    "visualizerSourceSwitchCount": 0,
+                    "envelope_timeline_samples": [],
+                    "envelopeTimelineSamples": [],
+                    "envelope_timeline_available": False,
+                    "envelopeTimelineAvailable": False,
+                    "raw_audio_present": False,
+                }
+            )
         return {
             "enabled": bool(self.config.enabled),
             "spoken_responses_enabled": bool(self.config.spoken_responses_enabled),
             "voice_output_envelope": envelope_payload,
+            **playback_envelope_fields,
+            **voice_visual_fields,
             "voice_anchor": anchor,
             "playback": {
                 "active_playback_status": playback_status,
                 "live_playback_status": playback_status,
                 "stream_status": playback_status,
                 "playback_streaming_active": bool(playback_streaming_active),
+                **playback_envelope_fields,
+                **voice_visual_fields,
+                **meter_diagnostic_fields,
+                "playback_preroll_active": bool(
+                    startup_trace_payload
+                    and startup_trace_payload.get("playback_preroll_active")
+                ),
+                "playback_startup_stable": bool(
+                    startup_trace_payload
+                    and startup_trace_payload.get("playback_startup_stable")
+                ),
+                "playback_buffered_ms": int(
+                    startup_trace_payload.get("playback_buffered_ms", 0)
+                    if startup_trace_payload
+                    else 0
+                ),
+                "playback_startup_trace": startup_trace_payload,
                 "first_audio_started": bool(first_audio_started),
                 "raw_audio_included": False,
                 "raw_audio_logged": False,
@@ -13500,6 +14847,8 @@ class VoiceService:
             "audioDriveLevel": center_scale_drive,
             "voice_audio_reactive_available": anchor["audio_reactive_available"],
             "voice_audio_reactive_source": envelope.source,
+            **voice_visual_fields,
+            **meter_diagnostic_fields,
             "voice_visualizer_update_hz": 30,
             "voice_visualizer_last_update_at": envelope.last_update_at,
             "streaming_tts_active": bool(playback_streaming_active),
@@ -13530,15 +14879,25 @@ class VoiceService:
         first_audio_started: bool = True,
         envelope_frame: Any | None = None,
         playback_meter_alignment: str | None = None,
+        sample_rate_hz: int | None = None,
+        channels: int | None = None,
+        sample_width_bytes: int | None = None,
+        **_extra: Any,
     ) -> None:
+        del sample_rate_hz, channels, sample_width_bytes
         if envelope is None:
             return
-        if envelope.source == "stormhelm_playback_meter":
+        visual_meter_event = envelope.source == "pcm_stream_meter" or (
+            envelope.source == "unavailable"
+            and bool(getattr(getattr(self.config, "visual_meter", None), "enabled", False))
+        )
+        if visual_meter_event or envelope.source == "stormhelm_playback_meter":
             voice_payload = self._voice_meter_event_payload(
                 envelope,
                 playback_status=playback_status,
                 playback_streaming_active=playback_streaming_active,
                 first_audio_started=first_audio_started,
+                envelope_frame=envelope_frame,
             )
         else:
             voice_payload = self._voice_envelope_ui_payload(
@@ -13550,13 +14909,22 @@ class VoiceService:
         metadata = {
             "chunk_index": chunk_index,
             "visualizer_only": True,
-            "visualizer_clock": "stormhelm_playback_meter"
+            "visualizer_clock": "pcm_stream_meter"
+            if visual_meter_event
+            else "stormhelm_playback_meter"
             if envelope.source == "stormhelm_playback_meter"
             else "playback_time_envelope",
             "source": envelope.source,
             "current_rms": round(float(envelope.rms_level), 4),
             "current_peak": round(float(envelope.peak_level), 4),
             "visual_drive": round(float(envelope.visual_drive_level), 4),
+            "meter_time_ms": voice_payload.get("meter_time_ms"),
+            "meter_wall_time_ms": voice_payload.get("meter_wall_time_ms"),
+            "meter_sample_time_ms": voice_payload.get("meter_sample_time_ms"),
+            "payload_time_ms": voice_payload.get("payload_time_ms"),
+            "payload_wall_time_ms": voice_payload.get("payload_wall_time_ms"),
+            "emit_rate_hz": voice_payload.get("emit_rate_hz"),
+            "dropped_sample_count": voice_payload.get("dropped_sample_count"),
             "voice": voice_payload,
             "voice_output_envelope": envelope.to_dict(),
             "payload_keys": [
@@ -13583,7 +14951,11 @@ class VoiceService:
         self._publish(
             VoiceEventType.VOICE_VISUALIZER_UPDATE,
             message="Voice visualizer envelope updated.",
-            session_id=session_id,
+            # Voice visualizer energy is a global UI hot-path scalar. The
+            # playback_id/speech_request_id fields carry correlation; keeping
+            # this event session-scoped hides it from the production Ghost's
+            # default event stream during diagnostic or non-default turns.
+            session_id=None,
             turn_id=turn_id,
             speech_request_id=speech_request_id,
             playback_request_id=playback_request_id,
@@ -13634,6 +15006,698 @@ class VoiceService:
             "detail_load_deferred": True,
         }
 
+    def _current_voice_playback_position_ms(self) -> int | None:
+        with self._voice_envelope_frame_condition:
+            frame = dict(self._voice_envelope_last_frame or {})
+        value = frame.get("playback_position_ms")
+        try:
+            if value is None:
+                return None
+            return max(0, int(round(float(value))))
+        except (TypeError, ValueError):
+            return None
+
+    def _current_playback_envelope_payload(
+        self, *, playback_time_ms: int | float | None = None
+    ) -> dict[str, Any] | None:
+        sync_fields = self._voice_visual_sync_fields()
+        visual_time_ms, query_time_ms, applied_offset_ms = (
+            self._calibrated_playback_envelope_query_time_ms(
+                playback_time_ms,
+                sync_fields=sync_fields,
+            )
+        )
+        active_stream = self._active_playback_stream()
+        stream_id = (
+            getattr(active_stream, "playback_stream_id", None)
+            if active_stream is not None
+            else None
+        )
+        provider_payload = None
+        provider_method = getattr(self.playback_provider, "playback_envelope_payload", None)
+        if callable(provider_method) and stream_id:
+            try:
+                candidate = provider_method(
+                    stream_id,
+                    playback_time_ms=query_time_ms,
+                    max_samples=12,
+                )
+                if isinstance(candidate, dict):
+                    provider_payload = dict(candidate)
+            except Exception:
+                provider_payload = None
+        if provider_payload:
+            return self._apply_voice_visual_sync_to_envelope_payload(
+                provider_payload,
+                visual_time_ms=visual_time_ms,
+                query_time_ms=query_time_ms,
+                applied_offset_ms=applied_offset_ms,
+                sync_fields=sync_fields,
+            )
+        candidates: list[Any] = [
+            active_stream,
+            self.last_live_playback_result,
+            self._active_playback(),
+            self.last_playback_result,
+        ]
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            for metadata_name in ("metadata", "output_metadata"):
+                metadata = getattr(candidate, metadata_name, None)
+                if not isinstance(metadata, dict):
+                    continue
+                envelope = metadata.get("playback_envelope")
+                if isinstance(envelope, dict):
+                    return self._apply_voice_visual_sync_to_envelope_payload(
+                        dict(envelope),
+                        visual_time_ms=visual_time_ms,
+                        query_time_ms=query_time_ms,
+                        applied_offset_ms=applied_offset_ms,
+                        sync_fields=sync_fields,
+                    )
+                nested = metadata.get("metadata")
+                if isinstance(nested, dict) and isinstance(
+                    nested.get("playback_envelope"), dict
+                ):
+                    return self._apply_voice_visual_sync_to_envelope_payload(
+                        dict(nested["playback_envelope"]),
+                        visual_time_ms=visual_time_ms,
+                        query_time_ms=query_time_ms,
+                        applied_offset_ms=applied_offset_ms,
+                        sync_fields=sync_fields,
+                    )
+        return None
+
+    def _voice_visual_sync_fields(self) -> dict[str, Any]:
+        visual_sync = getattr(self.config, "visual_sync", None)
+
+        def clamped_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
+            try:
+                parsed = int(round(float(value)))
+            except (TypeError, ValueError):
+                parsed = default
+            return max(minimum, min(maximum, parsed))
+
+        enabled = bool(getattr(visual_sync, "enabled", True))
+        offset_ms = clamped_int(
+            getattr(visual_sync, "envelope_visual_offset_ms", 0),
+            default=0,
+            minimum=-500,
+            maximum=500,
+        )
+        latency_ms = clamped_int(
+            getattr(visual_sync, "estimated_output_latency_ms", 120),
+            default=120,
+            minimum=0,
+            maximum=500,
+        )
+        return {
+            "playback_envelope_sync_enabled": enabled,
+            "envelope_visual_offset_ms": offset_ms,
+            "playback_envelope_visual_offset_ms": offset_ms,
+            "estimated_output_latency_ms": latency_ms,
+            "envelope_sync_debug_show_sync": bool(
+                getattr(visual_sync, "debug_show_sync", False)
+            ),
+            "envelope_sync_calibration_version": "Voice-L0.5",
+        }
+
+    def _calibrated_playback_envelope_query_time_ms(
+        self,
+        playback_time_ms: int | float | None,
+        *,
+        sync_fields: dict[str, Any] | None = None,
+    ) -> tuple[int | None, int | None, int]:
+        sync = dict(sync_fields or self._voice_visual_sync_fields())
+        if playback_time_ms is None:
+            return None, None, 0
+        try:
+            visual_time_ms = max(0, int(round(float(playback_time_ms))))
+        except (TypeError, ValueError):
+            return None, None, 0
+        if not bool(sync.get("playback_envelope_sync_enabled", True)):
+            return visual_time_ms, visual_time_ms, 0
+        latency_ms = int(sync.get("estimated_output_latency_ms") or 0)
+        offset_ms = int(sync.get("envelope_visual_offset_ms") or 0)
+        applied_offset_ms = -latency_ms - offset_ms
+        query_time_ms = max(0, visual_time_ms + applied_offset_ms)
+        return visual_time_ms, query_time_ms, applied_offset_ms
+
+    def _apply_voice_visual_sync_to_envelope_payload(
+        self,
+        envelope_payload: dict[str, Any],
+        *,
+        visual_time_ms: int | None,
+        query_time_ms: int | None,
+        applied_offset_ms: int,
+        sync_fields: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload = dict(envelope_payload)
+        sync = dict(sync_fields or self._voice_visual_sync_fields())
+        payload["estimated_output_latency_ms"] = int(sync["estimated_output_latency_ms"])
+        payload["envelope_visual_offset_ms"] = int(sync["envelope_visual_offset_ms"])
+        payload["playback_envelope_visual_offset_ms"] = int(
+            sync["playback_envelope_visual_offset_ms"]
+        )
+        payload["playback_envelope_sync_enabled"] = bool(
+            sync["playback_envelope_sync_enabled"]
+        )
+        payload["envelope_sync_debug_show_sync"] = bool(
+            sync["envelope_sync_debug_show_sync"]
+        )
+        payload["envelope_sync_calibration_version"] = str(
+            sync["envelope_sync_calibration_version"]
+        )
+        if visual_time_ms is not None:
+            payload["playback_visual_time_ms"] = visual_time_ms
+        if query_time_ms is not None:
+            payload["playback_envelope_query_time_ms"] = query_time_ms
+        payload["playback_envelope_time_offset_applied_ms"] = int(applied_offset_ms)
+        return payload
+
+    def _playback_envelope_timebase_alignment(
+        self,
+        samples: list[dict[str, Any]],
+        *,
+        query_time_ms: Any,
+        window_mode: Any,
+    ) -> tuple[bool, int | None, str, int]:
+        tolerance_ms = _PLAYBACK_ENVELOPE_ALIGNMENT_TOLERANCE_MS
+        if not samples:
+            return False, None, "no_samples", tolerance_ms
+        if str(window_mode or "").strip().lower() != "playback_time":
+            return False, None, "not_playback_time", tolerance_ms
+        try:
+            query = float(query_time_ms)
+        except (TypeError, ValueError):
+            return False, None, "invalid_query", tolerance_ms
+        if not math.isfinite(query):
+            return False, None, "invalid_query", tolerance_ms
+        sample_times: list[int] = []
+        for sample in samples:
+            try:
+                sample_times.append(int(round(float(sample.get("sample_time_ms")))))
+            except (TypeError, ValueError):
+                continue
+        if not sample_times:
+            return False, None, "no_sample_times", tolerance_ms
+        first = min(sample_times)
+        last = max(sample_times)
+        if first <= query <= last:
+            return True, 0, "aligned", tolerance_ms
+        if query > last:
+            alignment_delta = int(round(query - last))
+            status = "ahead_clamped" if alignment_delta <= tolerance_ms else "ahead"
+        else:
+            alignment_delta = int(round(first - query))
+            status = "behind_clamped" if alignment_delta <= tolerance_ms else "behind"
+        return alignment_delta <= tolerance_ms, alignment_delta, status, tolerance_ms
+
+    def _bounded_playback_envelope_samples(
+        self,
+        samples: list[Any],
+        *,
+        query_time_ms: Any,
+        window_mode: Any,
+        limit: int = 8,
+    ) -> list[dict[str, Any]]:
+        sanitized = [dict(sample) for sample in samples if isinstance(sample, dict)]
+        bounded_limit = max(0, int(limit or 0))
+        if bounded_limit <= 0:
+            return []
+        if len(sanitized) <= bounded_limit:
+            return sanitized
+        if str(window_mode or "").strip().lower() == "playback_time":
+            try:
+                query = float(query_time_ms)
+            except (TypeError, ValueError):
+                query = float("nan")
+            if math.isfinite(query):
+                before_index = 0
+                for index, sample in enumerate(sanitized):
+                    try:
+                        sample_time = float(sample.get("sample_time_ms"))
+                    except (TypeError, ValueError):
+                        continue
+                    if sample_time <= query:
+                        before_index = index
+                    else:
+                        break
+                half_before = max(1, bounded_limit // 2)
+                start = max(0, before_index - half_before + 1)
+                end = min(len(sanitized), start + bounded_limit)
+                start = max(0, end - bounded_limit)
+                return sanitized[start:end]
+        return sanitized[-bounded_limit:]
+
+    def _playback_envelope_timeline_samples(
+        self,
+        payload: dict[str, Any],
+        samples_recent: list[dict[str, Any]],
+        *,
+        limit: int = 120,
+    ) -> list[dict[str, Any]]:
+        raw = (
+            payload.get("envelope_timeline_samples")
+            or payload.get("envelopeTimelineSamples")
+            or payload.get("playback_envelope_timeline_samples")
+            or []
+        )
+        timeline: list[dict[str, Any]] = []
+        if isinstance(raw, list):
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    t_ms = int(round(float(item.get("t_ms", item.get("sample_time_ms")))))
+                    energy = float(item.get("energy", item.get("smoothed_energy")))
+                except (TypeError, ValueError):
+                    continue
+                timeline.append(
+                    {"t_ms": max(0, t_ms), "energy": round(max(0.0, min(1.0, energy)), 4)}
+                )
+        if not timeline:
+            for item in samples_recent:
+                try:
+                    t_ms = int(round(float(item.get("sample_time_ms", item.get("t_ms")))))
+                    energy = float(item.get("smoothed_energy", item.get("energy")))
+                except (TypeError, ValueError):
+                    continue
+                timeline.append(
+                    {"t_ms": max(0, t_ms), "energy": round(max(0.0, min(1.0, energy)), 4)}
+                )
+        timeline.sort(key=lambda item: item["t_ms"])
+        bounded = max(0, int(limit or 0))
+        if bounded and len(timeline) > bounded:
+            return timeline[-bounded:]
+        return timeline
+
+    def _playback_envelope_samples_from_timeline(
+        self,
+        timeline: list[dict[str, Any]],
+        *,
+        sample_rate: int = 0,
+    ) -> list[dict[str, Any]]:
+        samples: list[dict[str, Any]] = []
+        for item in timeline:
+            try:
+                t_ms = int(round(float(item.get("t_ms", item.get("sample_time_ms")))))
+                energy = float(item.get("energy", item.get("smoothed_energy")))
+            except (TypeError, ValueError):
+                continue
+            energy = max(0.0, min(1.0, energy))
+            samples.append(
+                {
+                    "sample_time_ms": max(0, t_ms),
+                    "monotonic_time_ms": 0,
+                    "rms": round(energy, 4),
+                    "peak": round(energy, 4),
+                    "energy": round(energy, 4),
+                    "smoothed_energy": round(energy, 4),
+                    "sample_rate": int(sample_rate or 0),
+                    "channels": 0,
+                    "source": "pcm_playback",
+                    "valid": True,
+                    "raw_audio_present": False,
+                }
+            )
+        samples.sort(key=lambda item: item["sample_time_ms"])
+        return samples
+
+    def _playback_envelope_energy_near_query(
+        self,
+        samples: list[dict[str, Any]],
+        *,
+        query_time_ms: Any,
+    ) -> float:
+        if not samples:
+            return 0.0
+        try:
+            query = float(query_time_ms)
+        except (TypeError, ValueError):
+            query = float("nan")
+        selected = None
+        if math.isfinite(query):
+            selected = min(
+                samples,
+                key=lambda item: abs(
+                    float(item.get("sample_time_ms", item.get("t_ms", 0)) or 0.0)
+                    - query
+                ),
+            )
+        if selected is None:
+            selected = samples[-1]
+        try:
+            return max(
+                0.0,
+                min(
+                    1.0,
+                    float(selected.get("smoothed_energy", selected.get("energy", 0.0))),
+                ),
+            )
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _visualizer_source_strategy_fields(
+        self,
+        *,
+        playback_id: Any,
+        envelope_ready: bool,
+        envelope_unavailable_reason: Any = None,
+    ) -> dict[str, Any]:
+        forced_mode = (
+            str(os.environ.get(_ANCHOR_VISUALIZER_MODE_ENV, "") or "")
+            .strip()
+            .lower()
+            .replace("-", "_")
+            .replace(" ", "_")
+        )
+        if forced_mode == "auto":
+            forced_mode = ""
+        forced_strategy = _FORCED_ANCHOR_VISUALIZER_STRATEGIES.get(forced_mode, "")
+        requested_mode = forced_mode or "auto"
+        selected_by = "config" if forced_strategy else "service_auto"
+        forced_unavailable_reason = ""
+        if forced_strategy == "playback_envelope_timeline" and not envelope_ready:
+            forced_unavailable_reason = str(
+                envelope_unavailable_reason or "playback_envelope_unavailable"
+            )
+
+        def common_fields(strategy: str) -> dict[str, Any]:
+            honored = bool(forced_strategy and strategy == forced_strategy)
+            if not forced_strategy:
+                honored = False
+            return {
+                "requested_anchor_visualizer_mode": requested_mode,
+                "requestedAnchorVisualizerMode": requested_mode,
+                "effective_anchor_visualizer_mode": requested_mode,
+                "effectiveAnchorVisualizerMode": requested_mode,
+                "forced_visualizer_mode_honored": honored,
+                "forcedVisualizerModeHonored": honored,
+                "forced_visualizer_mode_unavailable_reason": forced_unavailable_reason,
+                "forcedVisualizerModeUnavailableReason": forced_unavailable_reason,
+                "visualizer_strategy_selected_by": selected_by,
+                "visualizerStrategySelectedBy": selected_by,
+                "envelope_timeline_ready_at_playback_start": bool(
+                    strategy == "playback_envelope_timeline" and envelope_ready
+                ),
+                "envelopeTimelineReadyAtPlaybackStart": bool(
+                    strategy == "playback_envelope_timeline" and envelope_ready
+                ),
+            }
+
+        normalized_id = str(playback_id or "").strip()
+        if not normalized_id:
+            strategy = forced_strategy or "idle"
+            return {
+                "visualizer_source_strategy": strategy,
+                "visualizerSourceStrategy": strategy,
+                "visualizer_source_locked": False,
+                "visualizerSourceLocked": False,
+                "visualizer_source_playback_id": "",
+                "visualizerSourcePlaybackId": "",
+                "visualizer_source_switch_count": 0,
+                "visualizerSourceSwitchCount": 0,
+                "visualizer_source_switching_disabled": True,
+                "visualizerSourceSwitchingDisabled": True,
+                "timeline_visualizer_version": "Voice-L0.6",
+                "timelineVisualizerVersion": "Voice-L0.6",
+                **common_fields(strategy),
+            }
+        locked = self._voice_visualizer_source_locks.get(normalized_id)
+        if forced_strategy:
+            locked = {
+                "strategy": forced_strategy,
+                "switch_count": 0,
+                "selected_by": "config",
+            }
+            self._voice_visualizer_source_locks[normalized_id] = locked
+        if locked is None:
+            strategy = (
+                "playback_envelope_timeline"
+                if envelope_ready
+                else "procedural_speaking"
+            )
+            locked = {
+                "strategy": strategy,
+                "switch_count": 0,
+            }
+            self._voice_visualizer_source_locks[normalized_id] = locked
+            if len(self._voice_visualizer_source_locks) > 12:
+                for old_id in list(self._voice_visualizer_source_locks)[:-12]:
+                    self._voice_visualizer_source_locks.pop(old_id, None)
+        strategy = str(locked.get("strategy") or "procedural_speaking")
+        switch_count = int(locked.get("switch_count") or 0)
+        return {
+            "visualizer_source_strategy": strategy,
+            "visualizerSourceStrategy": strategy,
+            "visualizer_source_locked": True,
+            "visualizerSourceLocked": True,
+            "visualizer_source_playback_id": normalized_id,
+            "visualizerSourcePlaybackId": normalized_id,
+            "visualizer_source_switch_count": switch_count,
+            "visualizerSourceSwitchCount": switch_count,
+            "visualizer_source_switching_disabled": True,
+            "visualizerSourceSwitchingDisabled": True,
+            "timeline_visualizer_version": "Voice-L0.6",
+            "timelineVisualizerVersion": "Voice-L0.6",
+            **common_fields(strategy),
+        }
+
+    def _playback_envelope_snapshot_fields(
+        self, envelope_payload: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        payload = dict(envelope_payload or {})
+        sync_fields = self._voice_visual_sync_fields()
+        latency_ms = max(
+            0,
+            min(
+                500,
+                int(
+                    payload.get("estimated_output_latency_ms")
+                    or sync_fields["estimated_output_latency_ms"]
+                    or 0
+                ),
+            ),
+        )
+        offset_ms = int(sync_fields["envelope_visual_offset_ms"])
+        samples = payload.get("envelope_samples_recent")
+        if not isinstance(samples, list):
+            samples = []
+        supported = bool(payload.get("envelope_supported"))
+        available = bool(supported and payload.get("envelope_available"))
+        window_mode = payload.get("playback_envelope_window_mode") or "latest"
+        query_time_ms = payload.get("playback_envelope_query_time_ms")
+        timeline_seed = self._playback_envelope_timeline_samples(
+            payload,
+            [],
+        )
+        if (
+            query_time_ms is not None
+            and str(window_mode or "").strip().lower() != "playback_time"
+            and (samples or timeline_seed)
+        ):
+            window_mode = "playback_time"
+        if not samples and timeline_seed:
+            samples = self._playback_envelope_samples_from_timeline(
+                timeline_seed,
+                sample_rate=int(payload.get("envelope_sample_rate_hz") or 0),
+            )
+        samples_recent = self._bounded_playback_envelope_samples(
+            samples,
+            query_time_ms=query_time_ms,
+            window_mode=window_mode,
+            limit=8,
+        )
+        try:
+            energy = float(payload.get("latest_voice_energy") or 0.0)
+        except (TypeError, ValueError):
+            energy = 0.0
+        if energy <= 0.006 and samples_recent:
+            energy = self._playback_envelope_energy_near_query(
+                samples_recent,
+                query_time_ms=query_time_ms,
+            )
+        (
+            computed_timebase_aligned,
+            computed_alignment_error_ms,
+            computed_alignment_status,
+            computed_alignment_tolerance_ms,
+        ) = (
+            self._playback_envelope_timebase_alignment(
+                samples_recent,
+                query_time_ms=query_time_ms,
+                window_mode=window_mode,
+            )
+        )
+        explicit_timebase_aligned = payload.get("playback_envelope_timebase_aligned")
+        if isinstance(explicit_timebase_aligned, str):
+            explicit_timebase_aligned_bool = (
+                explicit_timebase_aligned.strip().lower()
+                in {"1", "true", "yes", "on", "aligned"}
+            )
+        else:
+            explicit_timebase_aligned_bool = bool(explicit_timebase_aligned)
+        timebase_aligned = computed_timebase_aligned or explicit_timebase_aligned_bool
+        alignment_error_ms = payload.get("playback_envelope_alignment_error_ms")
+        if computed_alignment_error_ms is not None:
+            alignment_error_ms = computed_alignment_error_ms
+        elif alignment_error_ms is not None:
+            try:
+                alignment_error_ms = max(0, int(round(float(alignment_error_ms))))
+            except (TypeError, ValueError):
+                alignment_error_ms = None
+        alignment_delta_ms = payload.get("playback_envelope_alignment_delta_ms")
+        if computed_alignment_error_ms is not None:
+            alignment_delta_ms = computed_alignment_error_ms
+        elif alignment_delta_ms is not None:
+            try:
+                alignment_delta_ms = max(0, int(round(float(alignment_delta_ms))))
+            except (TypeError, ValueError):
+                alignment_delta_ms = None
+        alignment_status = str(
+            payload.get("playback_envelope_alignment_status")
+            or computed_alignment_status
+            or "unknown"
+        )
+        if computed_alignment_status not in {"no_samples", "not_playback_time"}:
+            alignment_status = computed_alignment_status
+        sample_age_ms = payload.get("playback_envelope_sample_age_ms")
+        try:
+            sample_age_value = (
+                None if sample_age_ms is None else max(0, int(round(float(sample_age_ms))))
+            )
+        except (TypeError, ValueError):
+            sample_age_value = None
+        sample_has_energy = bool(
+            energy > 0.006
+            or any(
+                float(sample.get("smoothed_energy") or sample.get("energy") or 0.0)
+                > 0.006
+                for sample in samples_recent
+            )
+        )
+        usable = bool(
+            available
+            and bool(payload.get("playback_envelope_usable", True))
+            and len(samples_recent) > 0
+            and (sample_age_value is None or sample_age_value <= 500)
+            and sample_has_energy
+            and timebase_aligned
+        )
+        timeline_samples = self._playback_envelope_timeline_samples(
+            payload,
+            samples_recent,
+        )
+        timeline_available = bool(
+            payload.get("envelope_timeline_available") or len(timeline_samples) >= 2
+        )
+        fallback_reason = payload.get("envelope_disabled_reason")
+        if not fallback_reason and not usable:
+            if not supported:
+                fallback_reason = "playback_envelope_unsupported"
+            elif not available:
+                fallback_reason = "playback_envelope_unavailable"
+            elif not samples_recent:
+                fallback_reason = "playback_envelope_empty"
+            elif sample_age_value is not None and sample_age_value > 500:
+                fallback_reason = "playback_envelope_stale"
+            elif not timebase_aligned:
+                fallback_reason = "playback_envelope_unaligned"
+            elif not sample_has_energy:
+                fallback_reason = "playback_envelope_zero_energy"
+        playback_id = payload.get("playback_id")
+        source_strategy_fields = self._visualizer_source_strategy_fields(
+            playback_id=playback_id,
+            envelope_ready=bool(usable and timeline_available),
+            envelope_unavailable_reason=fallback_reason,
+        )
+        return {
+            "playback_envelope": payload if payload else None,
+            "playback_envelope_supported": supported,
+            "playback_envelope_available": available,
+            "playback_envelope_usable": usable,
+            "playback_envelope_source": str(
+                payload.get("envelope_source") or "unavailable"
+            ),
+            "playback_envelope_energy": energy,
+            "playback_envelope_sample_rate_hz": int(
+                payload.get("envelope_sample_rate_hz") or 0
+            ),
+            "playback_envelope_latency_ms": latency_ms,
+            "estimated_output_latency_ms": latency_ms,
+            "envelope_visual_offset_ms": offset_ms,
+            "playback_envelope_visual_offset_ms": offset_ms,
+            "playback_visual_time_ms": payload.get("playback_visual_time_ms"),
+            "playback_envelope_time_offset_applied_ms": payload.get(
+                "playback_envelope_time_offset_applied_ms"
+            ),
+            "playback_envelope_sync_enabled": bool(
+                payload.get(
+                    "playback_envelope_sync_enabled",
+                    sync_fields["playback_envelope_sync_enabled"],
+                )
+            ),
+            "envelope_sync_debug_show_sync": bool(
+                payload.get(
+                    "envelope_sync_debug_show_sync",
+                    sync_fields["envelope_sync_debug_show_sync"],
+                )
+            ),
+            "envelope_sync_calibration_version": str(
+                payload.get(
+                    "envelope_sync_calibration_version",
+                    sync_fields["envelope_sync_calibration_version"],
+                )
+            ),
+            "playback_envelope_latest_time_ms": payload.get(
+                "latest_voice_energy_time_ms"
+            ),
+            "playback_envelope_query_time_ms": payload.get(
+                "playback_envelope_query_time_ms"
+            ),
+            "playback_envelope_window_mode": window_mode,
+            "playback_envelope_timebase_aligned": bool(timebase_aligned),
+            "playback_envelope_alignment_error_ms": alignment_error_ms,
+            "playback_envelope_alignment_delta_ms": alignment_delta_ms,
+            "playback_envelope_alignment_tolerance_ms": computed_alignment_tolerance_ms,
+            "playback_envelope_alignment_status": alignment_status,
+            "playback_envelope_usable_reason": (
+                "playback_envelope_usable"
+                if usable
+                else fallback_reason or "playback_envelope_unusable"
+            ),
+            "playback_envelope_sample_age_ms": sample_age_value,
+            "playback_envelope_samples_recent": samples_recent,
+            "envelope_timeline_samples": timeline_samples,
+            "envelopeTimelineSamples": timeline_samples,
+            "envelope_timeline_available": bool(timeline_available),
+            "envelopeTimelineAvailable": bool(timeline_available),
+            "envelope_timeline_sample_rate_hz": int(
+                payload.get("envelope_timeline_sample_rate_hz")
+                or payload.get("envelope_sample_rate_hz")
+                or 0
+            ),
+            "envelope_timeline_sample_count": int(
+                payload.get("envelope_timeline_sample_count")
+                or len(timeline_samples)
+            ),
+            "playback_envelope_sample_count": len(samples_recent),
+            "playback_envelope_samples_dropped": int(
+                payload.get("envelope_samples_dropped")
+                or payload.get("samples_dropped")
+                or 0
+            ),
+            **source_strategy_fields,
+            "playback_envelope_fallback_reason": fallback_reason,
+            "speaking_visual_sync_mode": "playback_envelope"
+            if usable
+            else "procedural_fallback",
+            "envelope_interpolation_active": bool(usable and len(samples_recent) >= 2),
+            "raw_audio_present": False,
+        }
+
     def _playback_status_snapshot_fast(self) -> dict[str, Any]:
         request = self.last_playback_request
         result = self.last_playback_result
@@ -13642,6 +15706,15 @@ class VoiceService:
         live_result = self.last_live_playback_result
         first_audio = self.last_first_audio_latency
         envelope = self.last_voice_output_envelope
+        playback_envelope_fields = self._playback_envelope_snapshot_fields(
+            self._current_playback_envelope_payload(
+                playback_time_ms=self._current_voice_playback_position_ms()
+            )
+        )
+        startup_trace = self.last_playback_startup_trace
+        startup_trace_payload = (
+            startup_trace.to_dict() if startup_trace is not None else None
+        )
         active_status = (
             getattr(active, "status", None)
             or getattr(active_stream, "status", None)
@@ -13676,8 +15749,8 @@ class VoiceService:
             getattr(active_stream, "status", "") or ""
         ).strip().lower()
         currently_speaking = bool(
-            active_playback_state in {"started", "playing"}
-            or active_stream_state in {"started", "playing"}
+            active_playback_state in {"started", "playing", "stable"}
+            or active_stream_state in {"started", "playing", "stable"}
         )
         return {
             "enabled": self.config.playback.enabled,
@@ -13714,7 +15787,37 @@ class VoiceService:
             "live_playback_enabled": bool(self.config.playback.streaming_enabled),
             "live_playback_status": getattr(live_result, "status", None),
             "streaming_enabled": bool(self.config.playback.streaming_enabled),
-            "playback_streaming_active": active_stream_state in {"started", "playing"},
+            "playback_streaming_active": active_stream_state
+            in {"started", "playing", "stable"},
+            "playback_preroll_active": bool(
+                startup_trace_payload
+                and startup_trace_payload.get("playback_preroll_active")
+            ),
+            "playback_startup_stable": bool(
+                startup_trace_payload
+                and startup_trace_payload.get("playback_startup_stable")
+            ),
+            "playback_buffered_ms": int(
+                startup_trace_payload.get("playback_buffered_ms", 0)
+                if startup_trace_payload
+                else 0
+            ),
+            "playback_underrun_count_startup": int(
+                startup_trace_payload.get("underrun_count_startup", 0)
+                if startup_trace_payload
+                else 0
+            ),
+            "speaking_visual_flap_count_startup": int(
+                startup_trace_payload.get("speaking_visual_flap_count_startup", 0)
+                if startup_trace_payload
+                else 0
+            ),
+            "playback_state_transition_count_startup": int(
+                startup_trace_payload.get("playback_state_transition_count_startup", 0)
+                if startup_trace_payload
+                else 0
+            ),
+            "playback_startup_trace": startup_trace_payload,
             "stream_status": getattr(active_stream, "status", None)
             if active_stream is not None
             else getattr(live_result, "status", None),
@@ -13740,6 +15843,7 @@ class VoiceService:
             if envelope is not None
             and envelope.source in {"playback_output_envelope", "streaming_chunk_envelope"}
             else None,
+            **playback_envelope_fields,
             "interruption_available": bool(
                 active is not None
                 or active_stream is not None
@@ -13917,6 +16021,15 @@ class VoiceService:
         playback_prewarm = self.last_playback_prewarm_result
         first_audio = self.last_first_audio_latency
         envelope = self.last_voice_output_envelope
+        playback_envelope_fields = self._playback_envelope_snapshot_fields(
+            self._current_playback_envelope_payload(
+                playback_time_ms=self._current_voice_playback_position_ms()
+            )
+        )
+        startup_trace = self.last_playback_startup_trace
+        startup_trace_payload = (
+            startup_trace.to_dict() if startup_trace is not None else None
+        )
         availability = self._playback_provider_availability()
         provider_name = (
             result.provider
@@ -13954,11 +16067,11 @@ class VoiceService:
         currently_speaking = bool(
             (
                 active is not None
-                and active.status in {"started", "playing"}
+                and active.status in {"started", "playing", "stable"}
             )
             or (
                 active_stream is not None
-                and active_stream.status in {"started", "playing"}
+                and active_stream.status in {"started", "playing", "stable"}
             )
         )
         degraded_reason = (
@@ -14009,7 +16122,7 @@ class VoiceService:
             "active_playback_id": active.playback_id if active is not None else None,
             "active_playback_status": active.status if active is not None else None,
             "active_playback_interruptible": bool(
-                active is not None and active.status in {"started", "playing"}
+                active is not None and active.status in {"started", "playing", "stable"}
             ),
             "playback_started_at": result.started_at if result is not None else None,
             "playback_completed_at": result.completed_at
@@ -14031,8 +16144,37 @@ class VoiceService:
             "streaming_enabled": bool(self.config.playback.streaming_enabled),
             "playback_streaming_active": bool(
                 active_stream is not None
-                and active_stream.status in {"started", "playing"}
+                and active_stream.status in {"started", "playing", "stable"}
             ),
+            "playback_preroll_active": bool(
+                startup_trace_payload
+                and startup_trace_payload.get("playback_preroll_active")
+            ),
+            "playback_startup_stable": bool(
+                startup_trace_payload
+                and startup_trace_payload.get("playback_startup_stable")
+            ),
+            "playback_buffered_ms": int(
+                startup_trace_payload.get("playback_buffered_ms", 0)
+                if startup_trace_payload
+                else 0
+            ),
+            "playback_underrun_count_startup": int(
+                startup_trace_payload.get("underrun_count_startup", 0)
+                if startup_trace_payload
+                else 0
+            ),
+            "speaking_visual_flap_count_startup": int(
+                startup_trace_payload.get("speaking_visual_flap_count_startup", 0)
+                if startup_trace_payload
+                else 0
+            ),
+            "playback_state_transition_count_startup": int(
+                startup_trace_payload.get("playback_state_transition_count_startup", 0)
+                if startup_trace_payload
+                else 0
+            ),
+            "playback_startup_trace": startup_trace_payload,
             "playback_prewarmed": bool(playback_prewarm and playback_prewarm.ok),
             "provider_prewarmed": bool(
                 self.last_provider_prewarm_result
@@ -14089,6 +16231,7 @@ class VoiceService:
             if envelope is not None
             and envelope.source in {"playback_output_envelope", "streaming_chunk_envelope"}
             else None,
+            **playback_envelope_fields,
             "partial_playback": bool(
                 (result is not None and result.partial_playback)
                 or (live_result is not None and live_result.partial_playback)

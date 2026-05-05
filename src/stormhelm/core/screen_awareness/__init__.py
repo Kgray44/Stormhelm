@@ -24,6 +24,9 @@ from stormhelm.core.screen_awareness.models import BrowserSemanticActionExecutio
 from stormhelm.core.screen_awareness.models import BrowserSemanticActionExecutionResult
 from stormhelm.core.screen_awareness.models import BrowserSemanticActionPlan
 from stormhelm.core.screen_awareness.models import BrowserSemanticActionPreview
+from stormhelm.core.screen_awareness.models import BrowserSemanticTaskExecutionResult
+from stormhelm.core.screen_awareness.models import BrowserSemanticTaskPlan
+from stormhelm.core.screen_awareness.models import BrowserSemanticTaskStep
 from stormhelm.core.screen_awareness.models import BrowserSemanticChange
 from stormhelm.core.screen_awareness.models import BrowserSemanticControl
 from stormhelm.core.screen_awareness.models import BrowserSemanticObservation
@@ -179,6 +182,10 @@ from stormhelm.core.screen_awareness.evaluation import ScreenScenarioDefinition
 from stormhelm.core.screen_awareness.evaluation import ScreenScenarioEvaluationResult
 from stormhelm.core.screen_awareness.evaluation import ScreenScenarioEvaluator
 from stormhelm.core.screen_awareness.evaluation import ScreenScenarioExpectation
+from stormhelm.core.screen_awareness.evidence import rank_screen_evidence
+from stormhelm.core.screen_awareness.evidence import has_strong_current_evidence
+from stormhelm.core.screen_awareness.evidence import top_evidence_confidence
+from stormhelm.core.screen_awareness.evidence import top_summary_evidence
 from stormhelm.core.screen_awareness.planner import ScreenAwarenessPlannerSeam
 from stormhelm.core.screen_awareness.planner import ScreenPlannerEvaluation
 from stormhelm.core.screen_awareness.service import ScreenAwarenessSubsystem
@@ -216,6 +223,9 @@ __all__ = [
     "BrowserSemanticActionExecutionResult",
     "BrowserSemanticActionPlan",
     "BrowserSemanticActionPreview",
+    "BrowserSemanticTaskExecutionResult",
+    "BrowserSemanticTaskPlan",
+    "BrowserSemanticTaskStep",
     "BrowserSemanticChange",
     "BrowserSemanticControl",
     "BrowserSemanticObservation",
@@ -320,6 +330,10 @@ __all__ = [
     "ScreenScenarioEvaluationResult",
     "ScreenScenarioEvaluator",
     "ScreenScenarioExpectation",
+    "rank_screen_evidence",
+    "has_strong_current_evidence",
+    "top_evidence_confidence",
+    "top_summary_evidence",
     "ScreenTruthState",
     "ScreenTruthfulnessAudit",
     "ScreenTruthfulnessContract",

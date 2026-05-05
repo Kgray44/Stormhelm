@@ -8,10 +8,12 @@ Tests: `tests/test_camera_awareness_c0.py` through `tests/test_camera_awareness_
 ## Current Capabilities
 
 - Disabled-by-default Camera Awareness config with mock-first providers.
+- Opt-in real local camera Kraken lane that physically attempts a bounded still capture when `STORMHELM_LIVE_CAMERA_TESTS=true` and live-camera gates are enabled.
 - Route seam for explicit camera intent such as holding an object, asking for a camera still, or asking for retake guidance tied to camera/photo wording.
 - Source-boundary protection for ambiguous visual requests, screen requests, uploaded images, files, clipboard, selected text, and general knowledge questions.
 - Mock capture and mock vision paths for deterministic, hardware-free tests.
 - Local single-still capture provider behind explicit policy and provider contracts.
+- Windows MediaCapture local still backend for machines without `ffmpeg`, with device listing, single-frame capture, timeout handling, typed failures, and immediate cleanup/release.
 - OpenAI/cloud vision provider integration behind separate cloud-analysis policy and confirmation gates.
 - Ephemeral artifact metadata, readiness validation, expiry, cleanup, and safe preview refs.
 - Explicit artifact save/retain foundation: when backend policy allows it and the user confirms, a fresh artifact can be marked saved with a safe `camera-library:*` ref. This prevents normal TTL expiry for that artifact metadata and records user-requested persistence without exposing raw image payloads.
@@ -21,6 +23,27 @@ Tests: `tests/test_camera_awareness_c0.py` through `tests/test_camera_awareness_
 - Bounded multi-capture sessions and still-image comparison as visual evidence only.
 - Guided capture-quality and retake guidance from existing artifact metadata, provider/helper uncertainty, and comparison/session state.
 - C8 hardening coverage for routing pressure, policy separation, no-side-effect rendering/status reads, raw payload leakage, lifecycle cleanup, provider boundary failures, helper truthfulness, comparison truthfulness, guidance truthfulness, and Ghost/Deck consistency.
+- Live Camera Kraken reports capability, route ownership, fake/mock usage, provider hijack count, identity/emotion/surveillance violations, raw-frame leakage, cleanup, latency, and slowest rows.
+
+## Live Camera Kraken
+
+The live lane is intentionally separate from hardware-free unit tests. It must use real local camera hardware when camera-required rows require capture. If no camera is available, permission is denied, the device is busy, capture times out, or the frame is empty, the lane returns typed unavailable/blocked state instead of fake observed success.
+
+Run:
+
+```powershell
+$env:STORMHELM_LIVE_CAMERA_TESTS='true'
+$env:STORMHELM_ENABLE_LIVE_CAMERA='true'
+$env:STORMHELM_CAMERA_REQUIRE_REAL_DEVICE='true'
+$env:STORMHELM_CAMERA_DEVICE_INDEX='0'
+$env:STORMHELM_CAMERA_CAPTURE_TIMEOUT_MS='5000'
+$env:STORMHELM_CAMERA_SAVE_ARTIFACTS='false'
+python scripts\run_camera_awareness_kraken.py --output-dir .artifacts\kraken\camera-awareness-live-01 --require-real-camera --enable-live-camera
+```
+
+Artifacts written by the runner include `camera_awareness_kraken_report.json`, `camera_awareness_kraken_summary.md`, row-level JSONL/CSV, gate summary, route histogram, outlier report, capability report, and safety summary.
+
+The runner does not persist raw frames by default. If `STORMHELM_CAMERA_SAVE_ARTIFACTS=true` or `--save-frame-artifacts` is used, the report exposes only bounded `camera-artifact:*` refs.
 
 ## Permission Boundaries
 
@@ -66,9 +89,13 @@ Surfaces covered by tests include:
 Sources: `src/stormhelm/core/camera_awareness/telemetry.py`, `src/stormhelm/core/camera_awareness/providers.py`, `src/stormhelm/ui/camera_ghost_surface.py`
 Tests: `tests/test_camera_awareness_c21_boundary_hardening.py`, `tests/test_camera_awareness_c4_deck_workspace.py`, `tests/test_camera_awareness_c8_hardening_audit.py`
 
+Live Kraken event/status/report payloads may include capture id, status, width, height, latency, cleanup status, error code, claim ceiling, and safe artifact refs. They must not include raw image bytes, base64, data URLs, full file paths to frames, or provider prompts containing private image payloads.
+
 ## Visual Evidence Boundary
 
 Camera Awareness output is visual evidence, not verification. It must not claim measured resistance, voltage, continuity, exact dimensions, repair success, safety certification, task completion, action execution, trust approval, identity recognition, or biometric inference from image content alone. Helper, comparison, and guidance models force action/verification flags false unless a separate trusted subsystem later supplies proof.
+
+For live camera rows, a captured frame is still only a momentary frame. Stormhelm may say it captured a frame, report frame metadata, and give cautious frame-bounded observations or guidance. It must not say it is watching continuously, identify who is in frame, infer emotional state, verify room safety, verify prior events, or verify browser/software actions from camera-only evidence.
 
 Sources: `src/stormhelm/core/camera_awareness/models.py`, `src/stormhelm/core/camera_awareness/helpers.py`, `src/stormhelm/core/camera_awareness/comparison.py`, `src/stormhelm/core/camera_awareness/guidance.py`
 Tests: `tests/test_camera_awareness_c5_engineering_helpers.py`, `tests/test_camera_awareness_c6_multi_capture_comparison.py`, `tests/test_camera_awareness_c7_guided_capture.py`, `tests/test_camera_awareness_c8_hardening_audit.py`

@@ -885,6 +885,107 @@ class VoiceLivePlaybackResult:
         }
 
 
+@dataclass(slots=True)
+class VoicePlaybackStartupTrace:
+    request_id: str | None = None
+    playback_id: str | None = None
+    backend: str = ""
+    mode: str = "streaming"
+    tts_format: str | None = None
+    sample_rate: int | None = None
+    chunk_count_before_start: int = 0
+    bytes_buffered_before_start: int = 0
+    preroll_ms: int = 0
+    startup_latency_ms: int | None = None
+    underrun_count_startup: int = 0
+    state_transition_count_startup: int = 0
+    speaking_visual_flap_count_startup: int = 0
+    first_stable_at_ms: int | None = None
+    playback_stable_emitted_at_ms: int | None = None
+    warnings: list[str] = field(default_factory=list)
+    timestamps_ms: dict[str, int | None] = field(default_factory=dict)
+    chunk_gap_max_ms_startup: int = 0
+    startup_queue_empty_count: int = 0
+    buffer_wait_count: int = 0
+    min_buffered_ms_startup: int | None = None
+    underrun_detected_startup: bool = False
+    playback_preroll_active: bool = False
+    playback_buffered_ms: int = 0
+    playback_startup_stable: bool = False
+    playback_state: str = "pending"
+    streaming_min_preroll_ms: int = 0
+    streaming_min_preroll_chunks: int = 0
+    streaming_min_preroll_bytes: int = 0
+    streaming_max_preroll_wait_ms: int = 0
+    raw_audio_present: bool = False
+
+    def mark(self, name: str, value_ms: int | float | None) -> None:
+        self.timestamps_ms[str(name)] = (
+            int(max(0, float(value_ms))) if value_ms is not None else None
+        )
+
+    def mark_once(self, name: str, value_ms: int | float | None) -> None:
+        if str(name) not in self.timestamps_ms:
+            self.mark(name, value_ms)
+
+    def transition(self, state: str) -> None:
+        normalized = str(state or "unknown").strip().lower() or "unknown"
+        if normalized != self.playback_state:
+            self.state_transition_count_startup += 1
+            self.playback_state = normalized
+
+    def record_warning(self, warning: str) -> None:
+        normalized = str(warning or "").strip()
+        if normalized and normalized not in self.warnings:
+            self.warnings.append(normalized)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "request_id": self.request_id,
+            "playback_id": self.playback_id,
+            "backend": self.backend,
+            "mode": self.mode,
+            "tts_format": self.tts_format,
+            "sample_rate": self.sample_rate,
+            "chunk_count_before_start": int(self.chunk_count_before_start),
+            "bytes_buffered_before_start": int(self.bytes_buffered_before_start),
+            "preroll_ms": int(self.preroll_ms),
+            "startup_latency_ms": self.startup_latency_ms,
+            "underrun_count_startup": int(self.underrun_count_startup),
+            "state_transition_count_startup": int(
+                self.state_transition_count_startup
+            ),
+            "playback_state_transition_count_startup": int(
+                self.state_transition_count_startup
+            ),
+            "speaking_visual_flap_count_startup": int(
+                self.speaking_visual_flap_count_startup
+            ),
+            "first_stable_at_ms": self.first_stable_at_ms,
+            "playback_stable_emitted_at_ms": self.playback_stable_emitted_at_ms,
+            "warnings": list(self.warnings),
+            "timestamps_ms": dict(self.timestamps_ms),
+            "chunk_gap_max_ms_startup": int(self.chunk_gap_max_ms_startup),
+            "startup_queue_empty_count": int(self.startup_queue_empty_count),
+            "buffer_wait_count": int(self.buffer_wait_count),
+            "min_buffered_ms_startup": self.min_buffered_ms_startup,
+            "underrun_detected_startup": bool(self.underrun_detected_startup),
+            "playback_preroll_active": bool(self.playback_preroll_active),
+            "playback_buffered_ms": int(self.playback_buffered_ms),
+            "playback_startup_stable": bool(self.playback_startup_stable),
+            "playback_state": self.playback_state,
+            "streaming_min_preroll_ms": int(self.streaming_min_preroll_ms),
+            "streaming_min_preroll_chunks": int(
+                self.streaming_min_preroll_chunks
+            ),
+            "streaming_min_preroll_bytes": int(self.streaming_min_preroll_bytes),
+            "streaming_max_preroll_wait_ms": int(
+                self.streaming_max_preroll_wait_ms
+            ),
+            "raw_audio_present": False,
+        }
+
+
 @dataclass(slots=True, frozen=True)
 class VoicePlaybackPrewarmRequest:
     session_id: str | None = None
@@ -3024,6 +3125,7 @@ __all__ = [
     "VoicePlaybackPrewarmRequest",
     "VoicePlaybackPrewarmResult",
     "VoicePlaybackResult",
+    "VoicePlaybackStartupTrace",
     "VoicePipelineStageSummary",
     "VoiceProviderPrewarmRequest",
     "VoiceProviderPrewarmResult",

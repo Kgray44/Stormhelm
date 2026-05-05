@@ -150,9 +150,33 @@ class BrowserSearchFallbackProvider(AssistantProvider):
 
 
 class FakeDiscordRelayAdapter:
-    def __init__(self, *, state: DiscordDispatchState = DiscordDispatchState.STARTED) -> None:
+    def __init__(self, *, state: DiscordDispatchState = DiscordDispatchState.SENT_UNVERIFIED) -> None:
         self.state = state
         self.calls: list[dict[str, object]] = []
+
+    def capability(self) -> dict[str, object]:
+        return {
+            "route_mode": DiscordRouteMode.LOCAL_CLIENT_AUTOMATION.value,
+            "preview_supported": True,
+            "dispatch_supported": True,
+            "verification_supported": False,
+            "requires_trust_approval": True,
+            "uses_discord_api_user_token": False,
+            "uses_self_bot": False,
+            "uses_local_client": True,
+            "adapter_kind": "real",
+            "route_constraint": "can_navigate_to_alias_dm",
+            "can_focus_client": True,
+            "can_launch_client": True,
+            "can_identify_discord_surface": True,
+            "can_navigate_dm": True,
+            "can_locate_message_input": True,
+            "can_insert_text": True,
+            "can_press_send": True,
+            "can_verify_send": False,
+            "can_verify_sent_message": False,
+            "can_report_failure": True,
+        }
 
     def send(self, *, destination, preview) -> DiscordDispatchAttempt:
         self.calls.append({"destination": destination.to_dict(), "preview": preview.to_dict()})
@@ -161,7 +185,8 @@ class FakeDiscordRelayAdapter:
             route_mode=DiscordRouteMode.LOCAL_CLIENT_AUTOMATION,
             route_basis="fake_adapter",
             verification_evidence=["Fake Discord adapter executed the send route."],
-            send_summary="Fake Discord adapter completed the send path.",
+            send_summary="Fake Discord adapter attempted the send path.",
+            debug={"dispatch_attempted": True, "final_send_gesture_performed": True, "verification_attempted": False},
         )
 
 
@@ -3139,7 +3164,8 @@ def test_assistant_orchestrator_enforces_comparison_requests_as_clarifications(t
 
 
 def test_assistant_orchestrator_handles_discord_relay_preview_then_confirmation(temp_config) -> None:
-    adapter = FakeDiscordRelayAdapter(state=DiscordDispatchState.STARTED)
+    temp_config.openai.enabled = False
+    adapter = FakeDiscordRelayAdapter(state=DiscordDispatchState.SENT_UNVERIFIED)
     assistant, jobs, executor, session_state = _build_assistant(
         temp_config,
         system_probe=FakeSystemProbe(),
@@ -3197,10 +3223,12 @@ def test_assistant_orchestrator_handles_discord_relay_preview_then_confirmation(
     assert preview_debug["execution_plan"]["plan_type"] == "discord_relay_preview"
 
     assert dispatch_payload["jobs"] == []
-    assert dispatch_payload["assistant_message"]["metadata"]["bearing_title"] == "Discord Dispatch"
-    assert "Started the Discord dispatch to Baby" in dispatch_payload["assistant_message"]["content"]
+    assert dispatch_payload["assistant_message"]["metadata"]["bearing_title"] == "Discord Unverified"
+    assert "could not verify" in dispatch_payload["assistant_message"]["content"]
     assert dispatch_debug["structured_query"]["query_shape"] == "discord_relay_request"
     assert dispatch_debug["execution_plan"]["plan_type"] == "discord_relay_dispatch"
+    assert dispatch_debug["discord_relay"]["provider_fallback_attempted"] is False
+    assert dispatch_debug["discord_relay"]["openai_required"] is False
     assert adapter.calls
     assert session_state.get_active_request_state("default") == {}
 

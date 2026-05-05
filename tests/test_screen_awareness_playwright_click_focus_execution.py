@@ -9,6 +9,7 @@ from typing import Any
 from stormhelm.config.models import ScreenAwarenessConfig
 from stormhelm.core.events import EventBuffer
 from stormhelm.core.screen_awareness import BrowserSemanticActionExecutionResult
+from stormhelm.core.screen_awareness import ActionExecutionStatus
 from stormhelm.core.screen_awareness import BrowserSemanticControl
 from stormhelm.core.screen_awareness import BrowserSemanticObservation
 from stormhelm.core.screen_awareness import PlaywrightBrowserSemanticAdapter
@@ -416,6 +417,8 @@ class _FakeActionPage:
     def title(self) -> str:
         if self.scenario == "after_snapshot_failure" and self.state == "after_click":
             return ""
+        if self.scenario == "sensitive_page_with_safe_controls":
+            return "Account Security Login Payment"
         if self.scenario == "scroll_sensitive_page":
             return "Login Payment Security"
         if self.scenario == "scroll_warning_after" and self.state == "after_scroll":
@@ -464,6 +467,9 @@ class _FakeActionPage:
         email_summary = ""
         if self.state == "after_type" and email_value and self.scenario not in {"type_unverifiable", "type_no_value_change"}:
             email_summary = f"[redacted text, {len(email_value)} chars]"
+        password_value_summary = "[redacted sensitive field]"
+        if self.scenario == "redaction_sentinel_fields":
+            password_value_summary = "PASSWORD-KRAKEN-RAW-SECRET-8-1"
         if self.scenario == "email_missing":
             return [
                 _payload_control("button-continue", "button", "Continue", selector_hint="#continue"),
@@ -472,7 +478,7 @@ class _FakeActionPage:
                     "textbox",
                     "Password",
                     selector_hint="#password",
-                    value_summary="[redacted sensitive field]",
+                    value_summary=password_value_summary,
                     risk_hint="sensitive_input",
                 ),
             ]
@@ -526,6 +532,16 @@ class _FakeActionPage:
             {"label": "Canada", "value_summary": "ca", "selected": False, "disabled": False, "ordinal": 2},
             {"label": "Disabled Option", "value_summary": "disabled", "selected": False, "disabled": True, "ordinal": 3},
         ]
+        if self.scenario == "redaction_sentinel_fields":
+            country_options.append(
+                {
+                    "label": "Hidden token option",
+                    "value_summary": "OPTION-KRAKEN-HIDDEN-SECRET-8-1",
+                    "selected": False,
+                    "disabled": True,
+                    "ordinal": 4,
+                }
+            )
         if self.scenario == "option_removed":
             country_options = [option for option in country_options if option.get("label") != "Canada"]
         if self.scenario == "option_disabled_after_preview":
@@ -571,7 +587,7 @@ class _FakeActionPage:
                 "textbox",
                 "Password",
                 selector_hint="#password",
-                value_summary="[redacted sensitive field]",
+                value_summary=password_value_summary,
                 risk_hint="sensitive_input",
             ),
             _payload_control(
@@ -665,6 +681,18 @@ class _FakeActionPage:
                 controls.append(_payload_control("link-privacy-copy", "link", "Privacy Policy", selector_hint="#privacy-copy"))
         if self.scenario == "scroll_long_page" and self.scroll_y >= 700:
             controls.append(_payload_control("button-more", "button", "More details", selector_hint="#more-details"))
+        if self.scenario == "redaction_sentinel_fields":
+            controls.append(
+                _payload_control(
+                    "hidden-token-field",
+                    "textbox",
+                    "Hidden token field",
+                    selector_hint="#hidden-token",
+                    visible=False,
+                    value_summary="HIDDEN-KRAKEN-RAW-SECRET-8-1",
+                    risk_hint="hidden token secret cookie-like COOKIE-KRAKEN-RAW-SECRET-8-1",
+                )
+            )
         return controls
 
     def dialogs(self) -> list[dict[str, Any]]:
@@ -791,6 +819,22 @@ def _scroll_config() -> ScreenAwarenessConfig:
     return _execution_config(scroll=True, scroll_to_target=True, dev_scroll=True)
 
 
+def _all_browser_actions_config() -> ScreenAwarenessConfig:
+    return _execution_config(
+        click=True,
+        focus=True,
+        type_text=True,
+        dev_type_text=True,
+        check=True,
+        uncheck=True,
+        select_option=True,
+        dev_choice_controls=True,
+        scroll=True,
+        scroll_to_target=True,
+        dev_scroll=True,
+    )
+
+
 def _choice_plan(
     subsystem,
     *,
@@ -825,6 +869,51 @@ def _scroll_plan(
     return subsystem.build_playwright_browser_action_plan(preview, action_arguments=action_arguments)
 
 
+def _plan_for_action_kind(subsystem, action_kind: str) -> Any:
+    if action_kind == "click":
+        return _approved_click_plan(subsystem)
+    if action_kind == "focus":
+        observation = _plan_observation()
+        preview = subsystem.preview_playwright_browser_action(observation, "Email field", "focus email field")
+        return subsystem.build_playwright_browser_action_plan(preview)
+    if action_kind == "type_text":
+        return _type_plan(subsystem, text="kraken safe text")
+    if action_kind == "check":
+        return _choice_plan(subsystem, target_phrase="Newsletter checkbox", action_phrase="check Newsletter")
+    if action_kind == "uncheck":
+        return _choice_plan(
+            subsystem,
+            target_phrase="Already subscribed checkbox",
+            action_phrase="uncheck Already subscribed",
+        )
+    if action_kind == "select_option":
+        return _choice_plan(
+            subsystem,
+            target_phrase="Country dropdown",
+            action_phrase="select Canada from Country",
+            action_arguments={"option": "Canada"},
+        )
+    if action_kind == "scroll":
+        return _scroll_plan(
+            subsystem,
+            action_phrase="scroll down",
+            action_arguments={"direction": "down", "amount_pixels": 700, "max_attempts": 1},
+        )
+    if action_kind == "scroll_to_target":
+        return _scroll_plan(
+            subsystem,
+            target_phrase="Privacy Policy link",
+            action_phrase="scroll to Privacy Policy link",
+            action_arguments={
+                "direction": "down",
+                "amount_pixels": 700,
+                "max_attempts": 2,
+                "target_phrase": "Privacy Policy link",
+            },
+        )
+    raise AssertionError(f"unsupported test action kind: {action_kind}")
+
+
 def _approve_plan(subsystem, trust_service, plan: Any, *, url: str = "http://127.0.0.1:60231/type.html") -> Any:
     pending = subsystem.request_playwright_browser_action_execution(
         plan,
@@ -840,6 +929,14 @@ def _approve_plan(subsystem, trust_service, plan: Any, *, url: str = "http://127
         scope=PermissionScope.ONCE,
     )
     return pending
+
+
+def _assert_no_submit_side_effects(fake: _FakeActionPlaywright, *, allowed_actions: set[str]) -> None:
+    assert fake.page.submit_count == 0
+    assert fake.page.enter_pressed is False
+    forbidden = {"press", "dispatch_event", "evaluate_submit"}
+    assert all(action[0] not in forbidden for action in fake.page.actions)
+    assert all(action[0] in allowed_actions for action in fake.page.actions)
 
 
 def test_action_execution_models_serialize_precise_non_truthful_status() -> None:
@@ -2807,3 +2904,228 @@ def test_scroll_deck_status_events_audit_are_bounded_and_truthful(trust_harness)
     assert "typed text into" not in rendered
     assert "i saw your screen" not in rendered
     assert "verified truth" not in rendered
+
+
+def test_interaction_kraken_sensitive_page_context_blocks_every_action_type(trust_harness) -> None:
+    for action_kind in (
+        "click",
+        "focus",
+        "type_text",
+        "check",
+        "uncheck",
+        "select_option",
+        "scroll",
+        "scroll_to_target",
+    ):
+        fake = _FakeActionPlaywright(scenario="sensitive_page_with_safe_controls")
+        subsystem = _subsystem_with_fake(_all_browser_actions_config(), fake)
+        plan = _plan_for_action_kind(subsystem, action_kind)
+        _approve_plan(subsystem, trust_harness["trust_service"], plan, url="http://127.0.0.1:60231/account-security.html")
+
+        result = subsystem.execute_playwright_browser_action(
+            plan,
+            url="http://127.0.0.1:60231/account-security.html",
+            trust_service=trust_harness["trust_service"],
+            session_id="default",
+            fixture_mode=True,
+        )
+
+        assert result.status == "blocked", action_kind
+        assert result.error_code in {"sensitive_page_context", "target_sensitive"}, action_kind
+        assert result.action_attempted is False, action_kind
+        assert result.cleanup_status == "closed", action_kind
+        assert fake.page.actions == [], action_kind
+
+
+def test_interaction_kraken_cross_action_approvals_do_not_transfer(trust_harness) -> None:
+    cases = [
+        ("click", "type_text"),
+        ("click", "scroll"),
+        ("click", "select_option"),
+        ("focus", "click"),
+        ("type_text", "click"),
+        ("type_text", "focus"),
+        ("type_text", "select_option"),
+        ("type_text", "scroll"),
+        ("select_option", "check"),
+        ("select_option", "uncheck"),
+        ("scroll", "click"),
+        ("scroll", "type_text"),
+        ("scroll", "select_option"),
+    ]
+    for approved_action, attempted_action in cases:
+        fake = _FakeActionPlaywright()
+        subsystem = _subsystem_with_fake(_all_browser_actions_config(), fake)
+        approved_plan = _plan_for_action_kind(subsystem, approved_action)
+        attempted_plan = replace(_plan_for_action_kind(subsystem, attempted_action), plan_id=approved_plan.plan_id)
+        _approve_plan(subsystem, trust_harness["trust_service"], approved_plan, url="http://127.0.0.1:60231/kraken.html")
+
+        result = subsystem.execute_playwright_browser_action(
+            attempted_plan,
+            url="http://127.0.0.1:60231/kraken.html",
+            trust_service=trust_harness["trust_service"],
+            session_id="default",
+            fixture_mode=True,
+        )
+
+        assert result.status in {"approval_required", "blocked", "unsupported"}, (approved_action, attempted_action)
+        assert result.action_attempted is False, (approved_action, attempted_action)
+        assert result.cleanup_status == "not_started", (approved_action, attempted_action)
+        assert fake.page.actions == [], (approved_action, attempted_action)
+
+
+def test_interaction_kraken_target_binding_tampering_blocks_every_action_type(trust_harness) -> None:
+    for action_kind in (
+        "click",
+        "focus",
+        "type_text",
+        "check",
+        "uncheck",
+        "select_option",
+        "scroll",
+        "scroll_to_target",
+    ):
+        fake = _FakeActionPlaywright()
+        subsystem = _subsystem_with_fake(_all_browser_actions_config(), fake)
+        plan = _plan_for_action_kind(subsystem, action_kind)
+        _approve_plan(subsystem, trust_harness["trust_service"], plan, url="http://127.0.0.1:60231/kraken.html")
+        mutated_target = dict(plan.target_candidate or {})
+        mutated_target["name"] = f"{mutated_target.get('name') or 'target'} changed"
+        mutated_target["label"] = f"{mutated_target.get('label') or 'target'} changed"
+        mutated_target["target_fingerprint"] = "tampered-target-fingerprint"
+        mutated_plan = replace(plan, target_candidate=mutated_target)
+
+        result = subsystem.execute_playwright_browser_action(
+            mutated_plan,
+            url="http://127.0.0.1:60231/kraken.html",
+            trust_service=trust_harness["trust_service"],
+            session_id="default",
+            fixture_mode=True,
+        )
+
+        assert result.status == "blocked", action_kind
+        assert result.error_code == "approval_invalid", action_kind
+        assert result.action_attempted is False, action_kind
+        assert result.cleanup_status == "not_started", action_kind
+        assert fake.page.actions == [], action_kind
+
+
+def test_interaction_kraken_no_submit_invariant_for_every_supported_action(trust_harness) -> None:
+    cases = [
+        ("click", "normal", {"click"}),
+        ("focus", "normal", {"focus"}),
+        ("type_text", "normal", {"focus", "type_text"}),
+        ("check", "normal", {"check"}),
+        ("uncheck", "normal", {"uncheck"}),
+        ("select_option", "normal", {"select_option"}),
+        ("scroll", "scroll_long_page", {"scroll"}),
+        ("scroll_to_target", "scroll_target_below_fold", {"scroll"}),
+    ]
+    for action_kind, scenario, allowed_actions in cases:
+        fake = _FakeActionPlaywright(scenario=scenario)
+        subsystem = _subsystem_with_fake(_all_browser_actions_config(), fake)
+        plan = _plan_for_action_kind(subsystem, action_kind)
+        _approve_plan(subsystem, trust_harness["trust_service"], plan, url="http://127.0.0.1:60231/no-submit.html")
+
+        result = subsystem.execute_playwright_browser_action(
+            plan,
+            url="http://127.0.0.1:60231/no-submit.html",
+            trust_service=trust_harness["trust_service"],
+            session_id="default",
+            fixture_mode=True,
+        )
+
+        assert result.status in {"verified_supported", "completed_unverified"}, action_kind
+        assert "unexpected_form_submission" not in result.limitations
+        _assert_no_submit_side_effects(fake, allowed_actions=allowed_actions)
+
+
+def test_interaction_kraken_redaction_invariant_across_reporting_surfaces(trust_harness) -> None:
+    events = EventBuffer(capacity=220)
+    typed_sentinel = "TYPE-KRAKEN-RAW-SENTINEL-8-1"
+    forbidden_values = [
+        typed_sentinel,
+        "PASSWORD-KRAKEN-RAW-SECRET-8-1",
+        "HIDDEN-KRAKEN-RAW-SECRET-8-1",
+        "OPTION-KRAKEN-HIDDEN-SECRET-8-1",
+        "COOKIE-KRAKEN-RAW-SECRET-8-1",
+    ]
+    fake = _FakeActionPlaywright(scenario="redaction_sentinel_fields")
+    subsystem = _subsystem_with_fake(_all_browser_actions_config(), fake, events=events)
+    plan = _type_plan(subsystem, text=typed_sentinel)
+    _approve_plan(subsystem, trust_harness["trust_service"], plan, url="http://127.0.0.1:60231/redaction.html")
+
+    result = subsystem.execute_playwright_browser_action(
+        plan,
+        url="http://127.0.0.1:60231/redaction.html",
+        trust_service=trust_harness["trust_service"],
+        session_id="default",
+        fixture_mode=True,
+    )
+    canonical = subsystem.action_engine.result_from_browser_semantic_execution(result)
+    surface = build_command_surface_model(
+        active_request_state={
+            "family": "screen_awareness",
+            "subject": "browser typing execution",
+            "parameters": {"result_state": "attempted", "request_stage": "execution"},
+        },
+        active_task=None,
+        recent_context_resolutions=[],
+        latest_message={
+            "content": result.user_message,
+            "metadata": {"route_state": {"winner": {"route_family": "screen_awareness"}}},
+        },
+        status={"screen_awareness": subsystem.status_snapshot()},
+        workspace_focus={},
+    )
+    audit = trust_harness["trust_service"].repository.list_recent_audit(session_id="default", limit=32)
+    rendered = str(
+        {
+            "plan": plan.to_dict(),
+            "result": result.to_dict(),
+            "canonical": canonical.to_dict(),
+            "status": subsystem.status_snapshot(),
+            "events": events.recent(limit=220),
+            "surface": surface,
+            "audit": [record.to_dict() for record in audit],
+            "trust": trust_harness["trust_service"].status_snapshot(session_id="default"),
+        }
+    )
+
+    assert result.status == "verified_supported"
+    assert f"[redacted text, {len(typed_sentinel)} chars]" in rendered
+    for value in forbidden_values:
+        assert value not in rendered
+
+
+def test_interaction_kraken_canonical_status_mapping_is_consistent() -> None:
+    subsystem = _subsystem_with_fake(_all_browser_actions_config(), _FakeActionPlaywright())
+    expected = {
+        "verified_supported": ActionExecutionStatus.VERIFIED_SUCCESS,
+        "verified_unsupported": ActionExecutionStatus.ATTEMPTED_UNVERIFIED,
+        "completed_unverified": ActionExecutionStatus.ATTEMPTED_UNVERIFIED,
+        "partial": ActionExecutionStatus.ATTEMPTED_UNVERIFIED,
+        "ambiguous": ActionExecutionStatus.AMBIGUOUS,
+        "blocked": ActionExecutionStatus.BLOCKED,
+        "failed": ActionExecutionStatus.FAILED,
+        "unsupported": ActionExecutionStatus.BLOCKED,
+    }
+    for browser_status, canonical_status in expected.items():
+        browser_result = BrowserSemanticActionExecutionResult(
+            action_kind="scroll" if browser_status == "partial" else "click",
+            status=browser_status,
+            action_attempted=browser_status in {"verified_supported", "verified_unsupported", "completed_unverified", "partial", "failed"},
+            action_completed=browser_status in {"verified_supported", "verified_unsupported", "completed_unverified", "partial"},
+            verification_attempted=browser_status not in {"blocked", "unsupported"},
+            verification_status="supported" if browser_status == "verified_supported" else browser_status,
+            target_summary={"role": "button", "name": "Continue"},
+            provider="playwright_live_semantic",
+            claim_ceiling="browser_semantic_action_execution",
+        )
+
+        canonical = subsystem.action_engine.result_from_browser_semantic_execution(browser_result)
+
+        assert canonical.status == canonical_status, browser_status
+        assert canonical.plan.parameters["claim_ceiling"] == "browser_semantic_action_execution"
+        if browser_status != "verified_supported":
+            assert canonical.status != ActionExecutionStatus.VERIFIED_SUCCESS

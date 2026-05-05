@@ -41,6 +41,25 @@ def test_restored_weather_owner_reaches_planner_v2_native_route() -> None:
     assert decision.debug.get("routing_engine") == "planner_v2"
 
 
+def test_exact_weather_prompt_does_not_hit_voice_control_helper_regression() -> None:
+    decision = _plan("what is the weather")
+
+    assert decision.structured_query is not None
+    assert decision.structured_query.domain == "weather"
+    assert [request.tool_name for request in decision.tool_requests] == ["weather_current"]
+    assert decision.debug.get("routing_engine") == "planner_v2"
+
+
+def test_voice_control_prompt_reaches_planner_v2_native_route() -> None:
+    decision = _plan("stop talking")
+    winner = decision.route_state.to_dict()["winner"] if decision.route_state is not None else {}
+
+    assert decision.structured_query is not None
+    assert decision.structured_query.domain == "voice"
+    assert winner.get("route_family") == "voice_control"
+    assert decision.debug.get("routing_engine") == "planner_v2"
+
+
 def test_terminal_direct_eval_taxonomy_matches_terminal_subsystem() -> None:
     case = _case("shell_command_canonical_00")
 

@@ -37,6 +37,20 @@ def _window_title(observation: ScreenObservation) -> str:
     return str(observation.focus_metadata.get("window_title") or "").strip()
 
 
+def _window_titles(observation: ScreenObservation) -> list[str]:
+    raw = observation.window_metadata.get("windows")
+    if not isinstance(raw, list):
+        return []
+    titles: list[str] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("window_title") or item.get("title") or "").strip()
+        if title and title not in titles:
+            titles.append(title)
+    return titles[:5]
+
+
 def _process_name(observation: ScreenObservation) -> str:
     return str(observation.focus_metadata.get("process_name") or observation.app_identity or "").strip().lower()
 
@@ -165,6 +179,12 @@ def _visible_messages(observation: ScreenObservation, visible_text: str | None) 
     return messages[:3]
 
 
+def _clipping_tool_involved(observation: ScreenObservation) -> bool:
+    title = _window_title(observation).lower()
+    process = _process_name(observation)
+    return any(marker in f"{title} {process}" for marker in {"clipping tool", "snippingtool", "snipping tool"})
+
+
 @dataclass(slots=True)
 class DeterministicScreenInterpreter:
     def interpret(
@@ -244,24 +264,32 @@ class DeterministicContextSynthesizer:
         process_label = str(observation.focus_metadata.get("process_name") or observation.app_identity or "").strip()
         title = _window_title(observation)
         live_visible_text = best_live_visible_text(observation)
+        window_titles = _window_titles(observation)
         summary_parts: list[str] = []
-        if process_label:
-            summary_parts.append(f"{process_label.title()} is focused")
-        if title:
-            if summary_parts:
-                summary_parts[-1] = f"{summary_parts[-1]} on \"{title}\""
-            else:
-                summary_parts.append(f"The current window appears to be \"{title}\"")
         if observation.selected_text:
             summary_parts.append(f"Selected text reads: {_preview(observation.selected_text)}")
         elif observation.visual_text:
             summary_parts.append(f"Visible text reads: {_preview(observation.visual_text)}")
-        elif live_visible_text:
-            summary_parts.append(f"Visible cue: {_preview(live_visible_text)}")
-        elif observation.clipboard_text:
-            summary_parts.append(f"Clipboard hint available: {_preview(observation.clipboard_text)}")
-        elif interpretation.question_relevant_findings:
-            summary_parts.append(f"Visible cue: {interpretation.question_relevant_findings[0]}")
+            if _clipping_tool_involved(observation):
+                summary_parts.append("Clipping Tool appears to be showing a captured image")
+            elif process_label:
+                summary_parts.append(f"Supporting app metadata points to {process_label.title()}")
+        elif len(window_titles) > 1:
+            summary_parts.append(f"Window stack metadata includes: {'; '.join(window_titles[:4])}")
+        elif process_label:
+            summary_parts.append(f"{process_label.title()} is reported by window metadata")
+        if not observation.selected_text and not observation.visual_text:
+            if title and len(window_titles) <= 1:
+                if summary_parts:
+                    summary_parts[-1] = f"{summary_parts[-1]} on \"{title}\""
+                else:
+                    summary_parts.append(f"Window title metadata reports \"{title}\"")
+            elif live_visible_text:
+                summary_parts.append(f"Visible cue: {_preview(live_visible_text)}")
+            elif observation.clipboard_text:
+                summary_parts.append(f"Clipboard hint available: {_preview(observation.clipboard_text)}")
+            elif interpretation.question_relevant_findings:
+                summary_parts.append(f"Visible cue: {interpretation.question_relevant_findings[0]}")
         summary = ". ".join(part.rstrip(".") for part in summary_parts if part).strip()
         if summary:
             summary += "."
