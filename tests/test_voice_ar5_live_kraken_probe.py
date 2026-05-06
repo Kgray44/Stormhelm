@@ -17,6 +17,8 @@ from stormhelm.core.voice.live_kraken_probe import (
     summarize_live_kraken,
 )
 from scripts.run_voice_ar5_live_kraken_probe import (
+    _clamp_voice_visual_offset_ms,
+    _normalize_qsg_visual_approval,
     _pcm_events_have_valid_stimulus,
     _resolve_renderer_plan,
 )
@@ -303,6 +305,111 @@ def test_kraken_does_not_treat_ar6_ignored_snapshot_as_override() -> None:
     assert "voice_visual_active_flap" not in classifications
 
 
+def test_ar12_kraken_reports_stale_authoritative_rows_without_latch_bug() -> None:
+    rows = [
+        {
+            "time_ms": 0,
+            "authoritativeVoiceVisualActive": True,
+            "authoritativePlaybackStatus": "playing",
+            "qml_received_energy": 0.6,
+            "targetVoiceVisualEnergy": 0.6,
+            "voiceVisualTargetAgeMs": 20,
+            "speaking_visual_active": True,
+            "anchor_visual_state": "speaking",
+            "finalSpeakingEnergy": 0.4,
+            "blobScaleDrive": 0.3,
+        },
+        {
+            "time_ms": 120,
+            "authoritativeVoiceVisualActive": True,
+            "authoritativePlaybackStatus": "playing",
+            "qml_received_energy": 0.6,
+            "targetVoiceVisualEnergy": 0.0,
+            "voiceVisualTargetAgeMs": 1200,
+            "anchorStaleEnergyReason": "voice_visual_stale",
+            "speaking_visual_active": False,
+            "anchor_visual_state": "idle",
+            "finalSpeakingEnergy": 0.0,
+            "blobScaleDrive": 0.0,
+        },
+    ]
+
+    classifications = classify_live_kraken_scenario(
+        "repeated_speech",
+        rows,
+        report={
+            "speaking_state_stability": {
+                "anchorStatusGlitchDetected": False,
+                "midSpeechAnchorIdleRows": 0,
+                "midSpeechSpeakingVisualFalseRows": 0,
+                "staleAuthoritativeRowsIgnoredForLatch": 1,
+                "latchBugReason": "stale_authoritative_rows_ignored",
+            }
+        },
+    )
+
+    assert "anchor_state_latch_bug" not in classifications
+    assert "sync_measurement_stale_authoritative_rows" in classifications
+
+
+def test_ar12_kraken_keeps_fresh_anchor_idle_as_latch_bug() -> None:
+    rows = [
+        {
+            "time_ms": 0,
+            "authoritativeVoiceVisualActive": True,
+            "authoritativePlaybackStatus": "playing",
+            "qml_received_energy": 0.4,
+            "targetVoiceVisualEnergy": 0.4,
+            "voiceVisualTargetAgeMs": 20,
+            "speaking_visual_active": True,
+            "anchor_visual_state": "speaking",
+            "finalSpeakingEnergy": 0.3,
+            "blobScaleDrive": 0.2,
+        },
+        {
+            "time_ms": 60,
+            "authoritativeVoiceVisualActive": True,
+            "authoritativePlaybackStatus": "playing",
+            "qml_received_energy": 0.5,
+            "targetVoiceVisualEnergy": 0.5,
+            "voiceVisualTargetAgeMs": 30,
+            "anchorStaleEnergyReason": "",
+            "speaking_visual_active": False,
+            "anchor_visual_state": "idle",
+            "finalSpeakingEnergy": 0.0,
+            "blobScaleDrive": 0.0,
+        },
+        {
+            "time_ms": 120,
+            "authoritativeVoiceVisualActive": True,
+            "authoritativePlaybackStatus": "playing",
+            "qml_received_energy": 0.4,
+            "targetVoiceVisualEnergy": 0.4,
+            "voiceVisualTargetAgeMs": 24,
+            "speaking_visual_active": True,
+            "anchor_visual_state": "speaking",
+            "finalSpeakingEnergy": 0.3,
+            "blobScaleDrive": 0.2,
+        },
+    ]
+
+    classifications = classify_live_kraken_scenario(
+        "repeated_speech",
+        rows,
+        report={
+            "speaking_state_stability": {
+                "anchorStatusGlitchDetected": True,
+                "midSpeechAnchorIdleRows": 1,
+                "midSpeechSpeakingVisualFalseRows": 1,
+                "staleAuthoritativeRowsIgnoredForLatch": 0,
+                "latchBugReason": "fresh_authoritative_active_anchor_not_speaking",
+            }
+        },
+    )
+
+    assert "anchor_state_latch_bug" in classifications
+
+
 def test_kraken_detects_payload_energy_missing_from_bridge_and_qml() -> None:
     rows = [
         {
@@ -429,6 +536,110 @@ def test_kraken_report_and_renderer_comparison_are_scalar_only(tmp_path: Path) -
     assert "pcm_bytes" not in artifact.read_text(encoding="utf-8")
 
 
+def test_kraken_classifies_audio_quality_separately_from_state() -> None:
+    classifications = classify_live_kraken_scenario(
+        "single_spoken_response",
+        [
+            {
+                "time_ms": 0,
+                "playback_status": "playing",
+                "voice_visual_active": True,
+                "speaking_visual_active": True,
+                "audio_quality_status": "playback_buffer_underrun",
+                "underrun_count": 2,
+                "raw_audio_present": False,
+            }
+        ],
+        report={
+            "classification": ["production_chain_pass"],
+            "audio_quality_status": "playback_buffer_underrun",
+            "audio_quality_reasons": ["playback_buffer_underrun"],
+            "anchor_dynamics_status": "pass",
+            "renderer_cadence_status": "pass",
+            "state_lifetime_status": "pass",
+        },
+    )
+
+    assert "playback_buffer_underrun" in classifications
+    assert "production_chain_pass" not in classifications
+
+
+def test_kraken_summary_preserves_ar14_split_statuses_and_operator_scoring() -> None:
+    summary = summarize_live_kraken(
+        [
+            {
+                "scenario": "single_spoken_response",
+                "renderer": "legacy_blob_qsg_candidate",
+                "classification": ["playback_buffer_underrun"],
+                "audio_quality_status": "playback_buffer_underrun",
+                "anchor_dynamics_status": "startup_overshoot_limited",
+                "sync_status": "inconclusive",
+                "renderer_cadence_status": "pass",
+                "state_lifetime_status": "pass",
+                "operator_scoring": {
+                    "audible_skip_seen": "yes",
+                    "audible_buzz_or_squelch_seen": "no",
+                    "anchor_startup_overshoot_seen": "uncertain",
+                    "anchor_late_motion_collapse_seen": "uncertain",
+                    "subjective_sync_good": "uncertain",
+                    "operator_notes": "manual note",
+                    "raw_audio_present": False,
+                },
+                "ranges": {
+                    "finalSpeakingEnergy": {"span": 0.7},
+                    "blobScaleDrive": {"span": 0.5},
+                    "blobDeformationDrive": {"span": 0.3},
+                },
+                "render_metrics": {
+                    "effectiveAnchorRenderer": "legacy_blob_qsg_candidate",
+                    "anchorPaintFpsDuringSpeaking": 35.0,
+                    "dynamicCorePaintFpsDuringSpeaking": 35.0,
+                    "renderCadenceDuringSpeakingStable": True,
+                    "requestPaintStormDetected": False,
+                },
+                "speaking_lifetime": {
+                    "anchor_speaking_start_delay_ms": 40,
+                    "anchor_release_tail_ms": 30,
+                },
+                "raw_audio_present": False,
+            }
+        ],
+        process_state={"raw_audio_present": False},
+        config_env_snapshot={"raw_audio_present": False},
+    )
+
+    item = summary["scenarios"]["single_spoken_response"][0]
+    assert item["audio_quality_status"] == "playback_buffer_underrun"
+    assert item["anchor_dynamics_status"] == "startup_overshoot_limited"
+    assert item["operator_scoring"]["audible_skip_seen"] == "yes"
+    assert summary["audio_quality_status"] == "playback_buffer_underrun"
+    assert summary["anchor_dynamics_status"] == "startup_overshoot_limited"
+    assert summary["state_lifetime_status"] == "pass"
+
+
+def test_kraken_summary_ignores_not_measured_audio_when_active_scenarios_pass() -> None:
+    summary = summarize_live_kraken(
+        [
+            {
+                "scenario": "idle_baseline",
+                "classification": ["production_chain_pass"],
+                "audio_quality_status": "not_measured",
+                "raw_audio_present": False,
+            },
+            {
+                "scenario": "single_spoken_response",
+                "classification": ["production_chain_pass"],
+                "audio_quality_status": "pass",
+                "raw_audio_present": False,
+            },
+        ],
+        process_state={"raw_audio_present": False},
+        config_env_snapshot={"raw_audio_present": False},
+    )
+
+    assert summary["audio_quality_status"] == "pass"
+
+
 def test_ar8_qsg_promotion_gate_requires_human_visual_approval() -> None:
     live_summary = {
         "renderer_comparison": [
@@ -460,6 +671,45 @@ def test_ar8_qsg_promotion_gate_requires_human_visual_approval() -> None:
     assert gate["qsg_candidate_default_eligible"] is False
     assert "visual_status_not_approved" in gate["qsg_candidate_rejection_reason"]
     assert "human_approval_missing" in gate["qsg_candidate_rejection_reason"]
+
+
+def test_ar11_qsg_promotion_gate_rejected_state_blocks_default() -> None:
+    live_summary = {
+        "renderer_comparison": [
+            {
+                "renderer": "legacy_blob_qsg_candidate",
+                "classification": ["production_chain_pass"],
+                "anchorPaintFpsDuringSpeaking": 53.0,
+                "dynamicCorePaintFpsDuringSpeaking": 53.0,
+                "renderCadenceDuringSpeakingStable": True,
+                "requestPaintStormDetected": False,
+                "anchorSpeakingStartDelayMs": 90.0,
+                "anchorReleaseTailMs": 180.0,
+                "finalSpeakingEnergySpan": 0.62,
+                "blobScaleDriveSpan": 0.44,
+                "blobDeformationDriveSpan": 0.28,
+                "raw_audio_present": False,
+            }
+        ],
+        "raw_audio_present": False,
+    }
+
+    gate = qsg_candidate_promotion_gate(
+        visual_status="rejected",
+        live_report=live_summary,
+        human_approval="operator rejected AR11 artifacts",
+    )
+
+    assert gate["qsg_candidate_default_eligible"] is False
+    assert "visual_status_rejected" in gate["qsg_candidate_rejection_reason"]
+
+
+def test_ar11_qsg_approval_and_visual_offset_helpers_normalize_inputs() -> None:
+    assert _normalize_qsg_visual_approval("pending-review") == "pending"
+    assert _normalize_qsg_visual_approval("approved") == "approved"
+    assert _normalize_qsg_visual_approval("nope") == "pending"
+    assert _clamp_voice_visual_offset_ms("-999") == -300
+    assert _clamp_voice_visual_offset_ms("999") == 300
 
 
 def test_ar10_qsg_promotion_gate_rejects_reflection_mismatch_even_with_approval() -> None:

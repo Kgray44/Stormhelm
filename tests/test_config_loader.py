@@ -167,6 +167,8 @@ def test_load_config_applies_stormforge_live_voice_isolation_overrides(
     assert config.ui.stormforge_voice_diagnostics.to_qml_map() == {
         "anchorVisualizerMode": "constant_test_wave",
         "anchorRenderer": "legacy_blob_reference",
+        "qsgVisualApproval": "pending",
+        "qsgVisualApprovalReason": "",
         "liveIsolationVersion": "UI-VOICE-LIVE-ISO",
     }
     assert config.ui.stormforge_fog.enabled is True
@@ -185,6 +187,8 @@ def test_load_config_defaults_stormforge_anchor_renderer_to_legacy_blob_referenc
     diagnostics = config.ui.stormforge_voice_diagnostics
     assert diagnostics.anchor_renderer == "legacy_blob_reference"
     assert diagnostics.to_qml_map()["anchorRenderer"] == "legacy_blob_reference"
+    assert diagnostics.qsg_visual_approval == "pending"
+    assert diagnostics.to_qml_map()["qsgVisualApproval"] == "pending"
 
 
 def test_load_config_applies_stormforge_anchor_renderer_environment_override(
@@ -237,6 +241,38 @@ def test_load_config_keeps_legacy_blob_as_reference_alias(
     assert config.ui.stormforge_voice_diagnostics.anchor_renderer == (
         "legacy_blob_reference"
     )
+
+
+def test_load_config_applies_qsg_visual_approval_environment_override(
+    temp_project_root: Path,
+) -> None:
+    config = load_config(
+        project_root=temp_project_root,
+        env={
+            "STORMHELM_STORMFORGE_QSG_VISUAL_APPROVAL": "approved",
+            "STORMHELM_STORMFORGE_QSG_VISUAL_APPROVAL_REASON": (
+                "operator approved AR11 visual package"
+            ),
+        },
+    )
+
+    diagnostics = config.ui.stormforge_voice_diagnostics
+    assert diagnostics.qsg_visual_approval == "approved"
+    assert diagnostics.qsg_visual_approval_reason == (
+        "operator approved AR11 visual package"
+    )
+    assert diagnostics.to_qml_map()["qsgVisualApproval"] == "approved"
+
+
+def test_load_config_normalizes_invalid_qsg_visual_approval_to_pending(
+    temp_project_root: Path,
+) -> None:
+    config = load_config(
+        project_root=temp_project_root,
+        env={"STORMHELM_STORMFORGE_QSG_VISUAL_APPROVAL": "sure-whatever"},
+    )
+
+    assert config.ui.stormforge_voice_diagnostics.qsg_visual_approval == "pending"
 
 
 def test_load_config_normalizes_invalid_stormforge_fog_values(

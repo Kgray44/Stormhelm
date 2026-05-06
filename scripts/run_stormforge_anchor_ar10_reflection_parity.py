@@ -37,15 +37,36 @@ OUTPUT_DIR = PROJECT_ROOT / ".artifacts" / "voice_ar10_qsg_reflection_parity"
 REFERENCE_RENDERER = "legacy_blob_reference"
 QSG_RENDERER = "legacy_blob_qsg_candidate"
 VALID_VISUAL_STATUSES = {"pending_review", "approved", "rejected"}
+VALID_VISUAL_APPROVALS = {"pending", "approved", "rejected"}
 
 
 def _normalize_visual_status(value: str) -> str:
     status = str(value or "pending_review").strip().lower()
+    status = status.replace("-", "_").replace(" ", "_")
+    if status == "pending":
+        status = "pending_review"
     if status not in VALID_VISUAL_STATUSES:
         raise ValueError(
             f"visual status must be one of {sorted(VALID_VISUAL_STATUSES)}, got {value!r}"
         )
     return status
+
+
+def _normalize_visual_approval(value: str) -> str:
+    approval = str(value or "pending").strip().lower()
+    approval = approval.replace("-", "_").replace(" ", "_")
+    if approval == "pending_review":
+        approval = "pending"
+    if approval not in VALID_VISUAL_APPROVALS:
+        raise ValueError(
+            f"visual approval must be one of {sorted(VALID_VISUAL_APPROVALS)}, got {value!r}"
+        )
+    return approval
+
+
+def _visual_status_from_approval(value: str) -> str:
+    approval = _normalize_visual_approval(value)
+    return "pending_review" if approval == "pending" else approval
 
 
 def _save_captures(output_dir: Path, captures: dict[str, QtGui.QImage]) -> None:
@@ -221,6 +242,8 @@ def _write_report(
     *,
     visual_status: str,
     human_approval: str,
+    visual_approval: str = "pending",
+    visual_approval_reason: str = "",
 ) -> dict[str, Any]:
     differences = {
         name: _image_difference(image)
@@ -272,6 +295,13 @@ def _write_report(
         human_approval=human_approval,
         visual_differences=visual_differences,
     )
+    visual_gate_open = (
+        visual_approval == "approved"
+        and visual_status == "approved"
+        and bool(str(human_approval or "").strip())
+        and not visual_differences
+    )
+    live_gate_open = False
     top_level_reasons = ["live_kraken_validation_required"]
     if visual_status != "approved":
         top_level_reasons.append("visual_status_not_approved")
@@ -289,6 +319,11 @@ def _write_report(
                 "candidate_promoted_to_default": False,
             },
             "qsg_candidate_visual_status": visual_status,
+            "qsg_visual_approval": visual_approval,
+            "qsg_visual_approval_reason": visual_approval_reason,
+            "qsg_default_eligible_visual_gate": bool(visual_gate_open),
+            "qsg_default_eligible_live_gate": bool(live_gate_open),
+            "qsg_default_eligible_final": False,
             "qsg_candidate_default_eligible": False,
             "qsg_candidate_rejection_reason": ";".join(sorted(set(top_level_reasons))),
             "qsg_candidate_visual_differences": visual_differences,
@@ -315,6 +350,11 @@ def _write_report(
         f"- Candidate renderer: `{QSG_RENDERER}`",
         f"- Default renderer: `{REFERENCE_RENDERER}`",
         f"- QSG visual status: `{visual_status}`",
+        f"- QSG visual approval: `{visual_approval}`",
+        f"- QSG visual approval reason: `{visual_approval_reason}`",
+        f"- QSG default eligible visual gate: `{visual_gate_open}`",
+        f"- QSG default eligible live gate: `{live_gate_open}`",
+        "- QSG default eligible final: `false`",
         "- QSG default eligible: `false`",
         f"- Rejection reason: `{report.get('qsg_candidate_rejection_reason')}`",
         "- Privacy: scalar-only metadata, raw_audio_present=false",
@@ -364,11 +404,25 @@ def main() -> int:
         choices=sorted(VALID_VISUAL_STATUSES),
         default="pending_review",
     )
+    parser.add_argument(
+        "--visual-approval",
+        choices=sorted(VALID_VISUAL_APPROVALS),
+        default=None,
+        help="Explicit AR11 human approval state: pending, approved, or rejected.",
+    )
+    parser.add_argument("--visual-approval-reason", default="")
     parser.add_argument("--human-approval", default="")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir).resolve()
-    visual_status = _normalize_visual_status(args.visual_status)
+    visual_approval = _normalize_visual_approval(
+        args.visual_approval if args.visual_approval is not None else args.visual_status
+    )
+    visual_status = _visual_status_from_approval(visual_approval)
+    human_approval = (
+        args.human_approval
+        or (args.visual_approval_reason if visual_approval == "approved" else "")
+    )
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     QQuickStyle.setStyle("Basic")
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
@@ -399,7 +453,9 @@ def main() -> int:
         captures,
         anchors[1],
         visual_status=visual_status,
-        human_approval=args.human_approval,
+        human_approval=human_approval,
+        visual_approval=visual_approval,
+        visual_approval_reason=args.visual_approval_reason,
     )
 
     engine.clearComponentCache()
@@ -408,6 +464,7 @@ def main() -> int:
             {
                 "output_dir": str(output_dir),
                 "visual_status": report.get("qsg_candidate_visual_status"),
+                "visual_approval": report.get("qsg_visual_approval"),
                 "qsg_candidate_default_eligible": report.get("qsg_candidate_default_eligible"),
                 "rejection_reason": report.get("qsg_candidate_rejection_reason"),
                 "report": str(output_dir / "visual_parity_report.json"),

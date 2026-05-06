@@ -435,6 +435,20 @@ def test_default_windows_backend_exposes_progressive_stream_methods() -> None:
     assert callable(getattr(backend, "cancel_stream", None))
 
 
+def test_windows_stream_backend_carries_partial_pcm_frame_across_chunks() -> None:
+    backend = WindowsMCIPlaybackBackend()
+    handle = {"channels": 1, "sample_width_bytes": 2, "partial_frame_bytes": b""}
+
+    first = backend._aligned_stream_payload(handle, b"\x01")
+    second = backend._aligned_stream_payload(handle, b"\x02\x03")
+    third = backend._aligned_stream_payload(handle, b"\x04")
+
+    assert first == b""
+    assert second == b"\x01\x02"
+    assert third == b"\x03\x04"
+    assert handle["partial_frame_bytes"] == b""
+
+
 def test_local_speaker_stream_cancel_reports_partial_playback_truthfully() -> None:
     backend = FakeStreamingSpeakerBackend()
     provider = LocalPlaybackProvider(config=_local_config(), backend=backend)

@@ -26,6 +26,9 @@ class VoiceVisualMeterFrame:
     peak: float
     energy: float
     sample_rate_hz: int
+    sample_time_ms: int | None = None
+    playback_clock_position_ms: int | None = None
+    visual_offset_ms: int = 0
     source: str = "pcm_stream_meter"
     active: bool = True
     started_at_ms: int | None = None
@@ -57,9 +60,13 @@ class VoiceVisualMeterFrame:
             "voice_visual_sample_rate_hz": int(self.sample_rate_hz),
             "voice_visual_started_at_ms": self.started_at_ms,
             "voice_visual_latest_age_ms": self.latest_age_ms,
+            "voice_visual_sample_time_ms": self.sample_time_ms,
+            "voice_visual_playback_clock_position_ms": self.playback_clock_position_ms,
+            "voice_visual_offset_ms": int(self.visual_offset_ms),
             "voice_visual_disabled_reason": None,
             "playback_id": self.playback_id,
             "playback_position_ms": int(self.playback_position_ms),
+            "sample_time_ms": self.sample_time_ms,
             "duration_ms": int(self.duration_ms),
             "rms": round(_clamp(self.rms), 4),
             "peak": round(_clamp(self.peak), 4),
@@ -105,6 +112,7 @@ class VoiceVisualMeter:
         noise_floor: float = 0.015,
         gain: float = 2.0,
         max_startup_wait_ms: int = 800,
+        visual_offset_ms: int = 0,
         clock: Any | None = None,
     ) -> None:
         self.playback_id = str(playback_id).strip() if playback_id else None
@@ -119,6 +127,11 @@ class VoiceVisualMeter:
         self.noise_floor = _clamp(float(noise_floor), 0.0, 0.5)
         self.gain = max(0.01, min(12.0, float(gain or 1.0)))
         self.max_startup_wait_ms = max(0, int(max_startup_wait_ms or 0))
+        try:
+            offset = int(round(float(visual_offset_ms)))
+        except (TypeError, ValueError):
+            offset = 0
+        self.visual_offset_ms = max(-300, min(300, offset))
         self.clock = clock if callable(clock) else time.perf_counter
         self.source = "pcm_stream_meter"
 
@@ -217,7 +230,13 @@ class VoiceVisualMeter:
             playback_position_ms = max(
                 0, int(round((now - self._started_monotonic) * 1000.0))
             )
-            frame = self._sample_locked(playback_position_ms, now, active=True)
+            sample_time_ms = max(0, playback_position_ms - self.visual_offset_ms)
+            frame = self._sample_locked(
+                playback_position_ms,
+                now,
+                active=True,
+                sample_time_ms=sample_time_ms,
+            )
             interval = 1.0 / self.update_hz
             next_emit = (
                 self._next_emit_monotonic + interval
@@ -261,6 +280,13 @@ class VoiceVisualMeter:
                 "voice_visual_sample_rate_hz": int(self.update_hz),
                 "voice_visual_started_at_ms": self._started_at_ms,
                 "voice_visual_latest_age_ms": latest_age_ms,
+                "voice_visual_sample_time_ms": latest.sample_time_ms
+                if latest is not None
+                else None,
+                "voice_visual_playback_clock_position_ms": (
+                    latest.playback_clock_position_ms if latest is not None else None
+                ),
+                "voice_visual_offset_ms": int(self.visual_offset_ms),
                 "voice_visual_disabled_reason": disabled_reason,
                 "raw_audio_present": False,
                 "raw_audio_included": False,
@@ -291,8 +317,21 @@ class VoiceVisualMeter:
         now_monotonic: float,
         *,
         active: bool,
+        sample_time_ms: int | None = None,
     ) -> VoiceVisualMeterFrame:
-        rms, peak = self._window_levels_locked(playback_position_ms)
+        effective_sample_time_ms = max(
+            0,
+            int(
+                round(
+                    float(
+                        playback_position_ms
+                        if sample_time_ms is None
+                        else sample_time_ms
+                    )
+                )
+            ),
+        )
+        rms, peak = self._window_levels_locked(effective_sample_time_ms)
         target = self._energy_from_levels(rms, peak)
         previous = self._smoothed_energy
         if previous is None:
@@ -318,6 +357,9 @@ class VoiceVisualMeter:
             peak=_clamp(peak),
             energy=_clamp(self._smoothed_energy),
             sample_rate_hz=self.update_hz,
+            sample_time_ms=int(effective_sample_time_ms),
+            playback_clock_position_ms=int(playback_position_ms),
+            visual_offset_ms=int(self.visual_offset_ms),
             active=active,
             started_at_ms=self._started_at_ms,
             latest_age_ms=0,

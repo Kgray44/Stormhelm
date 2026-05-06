@@ -46,6 +46,7 @@ QSG_BLOCKING_CLASSES = {
     "qml_binding_stale",
     "anchor_state_latch_bug",
     "anchor_release_bug",
+    "sync_measurement_stale_authoritative_rows",
     "render_cadence_problem",
     "canvas_paint_backend_bottleneck",
     "fog_or_shared_clock_starvation",
@@ -56,6 +57,21 @@ QSG_BLOCKING_VISUAL_DIFFERENCES = {
     "reflection_animation_mismatch",
     "center_glass_highlight_mismatch",
 }
+AR14_AUDIO_QUALITY_CLASSES = {
+    "playback_buffer_underrun",
+    "tts_chunk_gap",
+    "playback_write_late",
+    "sample_rate_mismatch",
+    "sample_format_mismatch",
+    "clipping_or_saturation",
+    "chunk_boundary_discontinuity",
+    "duplicate_or_out_of_order_chunk",
+    "stream_reset_or_overlap",
+    "old_playback_worker_interference",
+    "playback_backend_callback_jitter",
+    "unknown_audio_artifact",
+}
+AR14_NON_PASS_STATUSES = {"", "pass", "not_measured", "none", "unknown"}
 
 
 def sanitize_kraken_payload(value: Any) -> Any:
@@ -258,8 +274,43 @@ def classify_live_kraken_scenario(
         classes.add("delayed_speaking_entry")
     if "speaking_state_stale_after_playback" in existing:
         classes.update({"speaking_stuck_after_audio", "anchor_release_bug"})
+    for item in existing:
+        if item in AR14_AUDIO_QUALITY_CLASSES:
+            classes.add(item)
+
+    report_audio_quality = str(report.get("audio_quality_status") or "").strip()
+    if report_audio_quality and report_audio_quality not in AR14_NON_PASS_STATUSES:
+        classes.add(report_audio_quality)
+    report_audio_reasons = report.get("audio_quality_reasons")
+    if isinstance(report_audio_reasons, Sequence) and not isinstance(
+        report_audio_reasons, (str, bytes)
+    ):
+        for reason in report_audio_reasons:
+            reason_text = str(reason or "").strip()
+            if reason_text in AR14_AUDIO_QUALITY_CLASSES:
+                classes.add(reason_text)
 
     for row in rows:
+        row_audio_quality = str(row.get("audio_quality_status") or "").strip()
+        if row_audio_quality and row_audio_quality not in AR14_NON_PASS_STATUSES:
+            classes.add(row_audio_quality)
+        for counter_key, class_name in (
+            ("underrun_count", "playback_buffer_underrun"),
+            ("chunk_gap_audio_risk_count", "tts_chunk_gap"),
+            ("late_write_count", "playback_write_late"),
+            ("dropped_chunk_count", "duplicate_or_out_of_order_chunk"),
+            ("duplicate_chunk_count", "duplicate_or_out_of_order_chunk"),
+            ("out_of_order_chunk_count", "duplicate_or_out_of_order_chunk"),
+            ("chunk_boundary_discontinuity_count", "chunk_boundary_discontinuity"),
+            ("clipping_count", "clipping_or_saturation"),
+            ("stream_reset_count", "stream_reset_or_overlap"),
+        ):
+            if (_number(row.get(counter_key)) or 0) > 0:
+                classes.add(class_name)
+        if _truthy(row.get("sample_rate_mismatch_flag")):
+            classes.add("sample_rate_mismatch")
+        if _truthy(row.get("format_mismatch_flag")):
+            classes.add("sample_format_mismatch")
         no_audio = not _playback_active(row) and not _visual_active(row) and not _has_audio_energy(row)
         if no_audio and _speaking_state_active(row):
             classes.add("false_speaking_without_audio")
@@ -322,6 +373,8 @@ def classify_live_kraken_scenario(
         classes.update({"speaking_stuck_after_audio", "anchor_release_bug"})
 
     stability = report.get("speaking_state_stability") if isinstance(report.get("speaking_state_stability"), Mapping) else {}
+    if (_number(stability.get("staleAuthoritativeRowsIgnoredForLatch")) or 0) > 0:
+        classes.add("sync_measurement_stale_authoritative_rows")
     if _truthy(stability.get("anchorStatusGlitchDetected")):
         classes.add("anchor_state_latch_bug")
     if (_number(stability.get("midSpeechAnchorIdleRows")) or 0) > 0 or (
@@ -402,6 +455,13 @@ def _scenario_summary(report: Mapping[str, Any]) -> dict[str, Any]:
             "finalSpeakingEnergySpan": (ranges.get("finalSpeakingEnergy") or {}).get("span") if isinstance(ranges.get("finalSpeakingEnergy"), Mapping) else None,
             "blobScaleDriveSpan": (ranges.get("blobScaleDrive") or {}).get("span") if isinstance(ranges.get("blobScaleDrive"), Mapping) else None,
             "blobDeformationDriveSpan": (ranges.get("blobDeformationDrive") or {}).get("span") if isinstance(ranges.get("blobDeformationDrive"), Mapping) else None,
+            "audio_quality_status": report.get("audio_quality_status"),
+            "audio_quality_reasons": report.get("audio_quality_reasons", []),
+            "anchor_dynamics_status": report.get("anchor_dynamics_status"),
+            "sync_status": report.get("sync_status"),
+            "renderer_cadence_status": report.get("renderer_cadence_status"),
+            "state_lifetime_status": report.get("state_lifetime_status"),
+            "operator_scoring": report.get("operator_scoring", {}),
             "authoritativeVoiceStateVersion": report.get("authoritativeVoiceStateVersion")
             or report.get("authoritative_voice_state_version"),
             "authoritativePlaybackStatus": report.get("authoritativePlaybackStatus"),
@@ -416,6 +476,19 @@ def _scenario_summary(report: Mapping[str, Any]) -> dict[str, Any]:
             "raw_audio_present": False,
         }
     )
+
+
+def _first_non_pass_status(values: Sequence[Any], *, default: str = "pass") -> str:
+    seen_statuses: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            seen_statuses.append(text)
+        if text and text not in AR14_NON_PASS_STATUSES:
+            return text
+    if seen_statuses and all(text == "not_measured" for text in seen_statuses):
+        return "not_measured"
+    return default
 
 
 def _qsg_gate_rows(live_report: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -489,6 +562,9 @@ def qsg_candidate_promotion_gate(
 ) -> dict[str, Any]:
     """Return the AR8 default-promotion decision without changing defaults."""
     normalized_visual_status = str(visual_status or "pending_review").strip().lower()
+    normalized_visual_status = normalized_visual_status.replace("-", "_").replace(" ", "_")
+    if normalized_visual_status == "pending":
+        normalized_visual_status = "pending_review"
     live_report = live_report or {}
     rows = _qsg_gate_rows(live_report)
     row = _best_qsg_gate_row(rows)
@@ -496,6 +572,8 @@ def qsg_candidate_promotion_gate(
 
     if normalized_visual_status != "approved":
         reasons.append("visual_status_not_approved")
+    if normalized_visual_status == "rejected":
+        reasons.append("visual_status_rejected")
     if not str(human_approval or "").strip():
         reasons.append("human_approval_missing")
     visual_difference_values = {str(item) for item in (visual_differences or []) if str(item)}
@@ -590,6 +668,45 @@ def summarize_live_kraken(
     if "production_chain_pass" in classes and len(classes) > 1:
         classes.remove("production_chain_pass")
 
+    audio_quality_status = _first_non_pass_status(
+        [report.get("audio_quality_status") for report in sanitized_reports],
+        default="pass",
+    )
+    anchor_dynamics_status = _first_non_pass_status(
+        [report.get("anchor_dynamics_status") for report in sanitized_reports],
+        default="pass",
+    )
+    sync_status = _first_non_pass_status(
+        [report.get("sync_status") for report in sanitized_reports],
+        default="pass",
+    )
+    renderer_cadence_status = _first_non_pass_status(
+        [report.get("renderer_cadence_status") for report in sanitized_reports],
+        default="pass",
+    )
+    state_lifetime_status = _first_non_pass_status(
+        [report.get("state_lifetime_status") for report in sanitized_reports],
+        default="pass",
+    )
+    audio_quality_reasons = sorted(
+        {
+            str(reason)
+            for report in sanitized_reports
+            for reason in (
+                report.get("audio_quality_reasons")
+                if isinstance(report.get("audio_quality_reasons"), Sequence)
+                and not isinstance(report.get("audio_quality_reasons"), (str, bytes))
+                else []
+            )
+            if str(reason)
+        }
+    )
+    operator_scoring = [
+        sanitize_kraken_payload(report.get("operator_scoring", {}))
+        for report in sanitized_reports
+        if isinstance(report.get("operator_scoring"), Mapping)
+    ]
+
     renderer_comparison = [
         _scenario_summary(report)
         for report in sanitized_reports
@@ -607,6 +724,13 @@ def summarize_live_kraken(
     summary = {
         "probe": "voice_ar5_live_kraken",
         "classification": sorted(classes),
+        "audio_quality_status": audio_quality_status,
+        "audio_quality_reasons": audio_quality_reasons,
+        "anchor_dynamics_status": anchor_dynamics_status,
+        "sync_status": sync_status,
+        "renderer_cadence_status": renderer_cadence_status,
+        "state_lifetime_status": state_lifetime_status,
+        "operator_scoring": operator_scoring,
         "scenarios": dict(by_scenario),
         "scenario_reports": sanitized_reports,
         "renderer_comparison": renderer_comparison,
@@ -635,6 +759,11 @@ def kraken_markdown(summary: Mapping[str, Any]) -> str:
         "# Voice-AR5 Live Kraken Flight Recorder",
         "",
         f"- Classification: `{classes}`",
+        f"- Audio quality status: `{summary.get('audio_quality_status', 'unknown')}`",
+        f"- Anchor dynamics status: `{summary.get('anchor_dynamics_status', 'unknown')}`",
+        f"- Sync status: `{summary.get('sync_status', 'unknown')}`",
+        f"- Renderer cadence status: `{summary.get('renderer_cadence_status', 'unknown')}`",
+        f"- State/lifetime status: `{summary.get('state_lifetime_status', 'unknown')}`",
         f"- Default renderer after pass: `{summary.get('default_renderer_after_pass', 'legacy_blob_reference')}`",
         "- Privacy: scalar-only, raw_audio_present=false",
         "",
@@ -650,10 +779,22 @@ def kraken_markdown(summary: Mapping[str, Any]) -> str:
             lines.append(
                 "- renderer="
                 f"`{item.get('renderer', '')}`, classification=`{item_classes}`, "
+                f"audio_quality=`{item.get('audio_quality_status', '')}`, "
+                f"anchor_dynamics=`{item.get('anchor_dynamics_status', '')}`, "
                 f"paint_fps={item.get('anchorPaintFpsDuringSpeaking')}, "
                 f"start_delay_ms={item.get('anchorSpeakingStartDelayMs')}, "
                 f"release_tail_ms={item.get('anchorReleaseTailMs')}"
             )
+            operator_scoring = item.get("operator_scoring")
+            if isinstance(operator_scoring, Mapping) and operator_scoring:
+                lines.append(
+                    "  - operator: "
+                    f"skip={operator_scoring.get('audible_skip_seen')}, "
+                    f"buzz_or_squelch={operator_scoring.get('audible_buzz_or_squelch_seen')}, "
+                    f"startup_overshoot={operator_scoring.get('anchor_startup_overshoot_seen')}, "
+                    f"late_collapse={operator_scoring.get('anchor_late_motion_collapse_seen')}, "
+                    f"sync_good={operator_scoring.get('subjective_sync_good')}"
+                )
     lines.extend(["", "## Renderer Comparison", renderer_comparison_markdown(summary.get("renderer_comparison", []))])
     gate = summary.get("qsg_promotion_gate")
     if isinstance(gate, Mapping):

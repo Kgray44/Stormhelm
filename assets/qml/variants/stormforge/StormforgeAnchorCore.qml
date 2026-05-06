@@ -59,6 +59,7 @@ Item {
     readonly property bool rawLevelDirectGeometryDriveDisabled: true
     readonly property bool missingRawLevelUsesProceduralSpeechEnergy: true
     readonly property bool speakingEnergyJitterGuardEnabled: true
+    readonly property string speakingEnergyAttackVersion: "AR14"
     readonly property string playbackEnvelopeVersion: "Voice-L0.2.1"
     readonly property string playbackEnvelopeVisualDriveVersion: "Voice-L0.2.1A"
     readonly property string envelopeDynamicsVersion: "Voice-L0.3"
@@ -273,6 +274,9 @@ Item {
     property double stateDwellUntil: 0
     property string stateLatchReason: "idle_fallback"
     readonly property bool stateLatchActive: root.latchedVisualState !== root.rawDerivedVisualState
+    readonly property string latchBugReason: root.stateLatchActive
+        ? root.stateLatchReason
+        : root.anchorStaleEnergyReason.length > 0 ? root.anchorStaleEnergyReason : "none"
     readonly property string normalizedState: root.latchedVisualState.length > 0 ? root.latchedVisualState : root.normalizedStateFallback
     readonly property string resolvedState: root.normalizedState
     property string visualState: "idle"
@@ -603,6 +607,26 @@ Item {
     property real envelopeDerivativeEnergy: 0
     property real speakingBaseEnergy: 0
     property real proceduralCarrierEnergy: 0
+    property real speakingDynamicsElapsedMs: 0
+    property real speakingDynamicsStartupRamp: 1
+    property int speakingDynamicsStartupRampMs: 440
+    property real speakingDynamicsStartupCap: 0.44
+    property real speakingDynamicsFloorEnergyThreshold: 0.055
+    property real speakingDynamicsExpressiveFloor: 0.105
+    property bool startupLimiterActive: false
+    property bool startupBoostActive: false
+    property real startupBoostAmount: 0
+    property bool earlySpeechOvershootDetected: false
+    property bool lateSpeechCompressionDetected: false
+    property string speakingDynamicsPhase: "idle"
+    property string speakingDynamicsConfidence: "medium"
+    property real speakingDynamicsEnergyRecentMin: 0
+    property real speakingDynamicsEnergyRecentMax: 0
+    property real speakingDynamicsEnergyDynamicRange: 0
+    readonly property real energyRecentMin: root.speakingDynamicsEnergyRecentMin
+    readonly property real energyRecentMax: root.speakingDynamicsEnergyRecentMax
+    readonly property real energyDynamicRange: root.speakingDynamicsEnergyDynamicRange
+    readonly property real adaptiveGain: root.envelopeAdaptiveGain
     property string speakingEnergySourceLatched: "none"
     property string speakingEnergySourceLatchPlaybackId: ""
     property int speakingEnergySourceSwitchCount: 0
@@ -966,6 +990,18 @@ Item {
         root.envelopeDerivativeEnergy = 0
         root.speakingBaseEnergy = 0
         root.proceduralCarrierEnergy = 0
+        root.speakingDynamicsElapsedMs = 0
+        root.speakingDynamicsStartupRamp = 1
+        root.startupLimiterActive = false
+        root.startupBoostActive = false
+        root.startupBoostAmount = 0
+        root.earlySpeechOvershootDetected = false
+        root.lateSpeechCompressionDetected = false
+        root.speakingDynamicsPhase = "idle"
+        root.speakingDynamicsConfidence = "medium"
+        root.speakingDynamicsEnergyRecentMin = 0
+        root.speakingDynamicsEnergyRecentMax = 0
+        root.speakingDynamicsEnergyDynamicRange = 0
         root.envelopeDynamicsLastEnergy = 0
         root.envelopeDynamicsLastSampleMs = 0
     }
@@ -1313,15 +1349,63 @@ Item {
             var meterEnergyTarget = backendSpeakingNow && root.voiceVisualTargetFresh
                 ? root.targetVoiceVisualEnergy
                 : 0
+            var startupReferenceMs = root.voiceVisualFirstTrueAtMs > 0
+                ? root.voiceVisualFirstTrueAtMs
+                : root.speakingStateEnteredAtMs
+            root.speakingDynamicsElapsedMs = backendSpeakingNow && startupReferenceMs > 0
+                ? Math.max(0, now - startupReferenceMs)
+                : 0
+            root.speakingDynamicsStartupRamp = backendSpeakingNow
+                ? smoothStep(clamp01(root.speakingDynamicsElapsedMs / Math.max(1, root.speakingDynamicsStartupRampMs)))
+                : 1
+            var startupLimitedMeterTarget = meterEnergyTarget * root.speakingDynamicsStartupRamp
+            var startupCap = root.speakingDynamicsStartupCap
+                + root.speakingDynamicsStartupRamp * (1.0 - root.speakingDynamicsStartupCap)
+            root.startupLimiterActive = backendSpeakingNow
+                && root.speakingDynamicsElapsedMs < root.speakingDynamicsStartupRampMs
+                && meterEnergyTarget > startupLimitedMeterTarget + 0.005
+            root.startupBoostActive = false
+            root.startupBoostAmount = 0
+            root.earlySpeechOvershootDetected = root.startupLimiterActive && meterEnergyTarget > startupCap
+            var stableMeterTarget = root.startupLimiterActive
+                ? Math.min(startupLimitedMeterTarget, startupCap)
+                : meterEnergyTarget
+            if (backendSpeakingNow && root.voiceVisualTargetFresh) {
+                if (root.speakingDynamicsEnergyRecentMax <= 0 && root.speakingDynamicsEnergyRecentMin <= 0) {
+                    root.speakingDynamicsEnergyRecentMin = meterEnergyTarget
+                    root.speakingDynamicsEnergyRecentMax = meterEnergyTarget
+                } else {
+                    root.speakingDynamicsEnergyRecentMin = Math.min(root.speakingDynamicsEnergyRecentMin, meterEnergyTarget)
+                    root.speakingDynamicsEnergyRecentMax = Math.max(root.speakingDynamicsEnergyRecentMax, meterEnergyTarget)
+                }
+                root.speakingDynamicsEnergyDynamicRange = Math.max(0, root.speakingDynamicsEnergyRecentMax - root.speakingDynamicsEnergyRecentMin)
+            } else if (!backendSpeakingNow) {
+                root.speakingDynamicsEnergyRecentMin = 0
+                root.speakingDynamicsEnergyRecentMax = 0
+                root.speakingDynamicsEnergyDynamicRange = 0
+            }
+            root.speakingDynamicsPhase = backendSpeakingNow
+                ? (root.speakingDynamicsElapsedMs < root.speakingDynamicsStartupRampMs ? "startup" : "steady")
+                : (root.finalSpeakingEnergy > 0.003 ? "release" : "idle")
             root.smoothedVoiceVisualEnergy = root.stepToward(
                 root.smoothedVoiceVisualEnergy,
-                meterEnergyTarget,
+                stableMeterTarget,
                 0.105 * frameScale,
                 0.095 * frameScale
             )
             if (!backendSpeakingNow && root.smoothedVoiceVisualEnergy < 0.003)
                 root.smoothedVoiceVisualEnergy = 0
             var gainedEnergy = root.smoothedVoiceVisualEnergy * root.finalSpeakingEnergyGain
+            if (backendSpeakingNow && root.voiceVisualTargetFresh
+                    && !root.startupLimiterActive
+                    && meterEnergyTarget > root.speakingDynamicsFloorEnergyThreshold)
+                gainedEnergy = Math.max(gainedEnergy, root.speakingDynamicsExpressiveFloor)
+            root.lateSpeechCompressionDetected = backendSpeakingNow
+                && !root.startupLimiterActive
+                && root.speakingDynamicsElapsedMs > 900
+                && meterEnergyTarget > 0.28
+                && gainedEnergy < meterEnergyTarget * 0.42
+            root.speakingDynamicsConfidence = root.voiceVisualTargetFresh ? "medium" : "low"
             root.finalSpeakingEnergyClampReason = ""
             if (gainedEnergy > 1.0)
                 root.finalSpeakingEnergyClampReason = "upper_clamp"

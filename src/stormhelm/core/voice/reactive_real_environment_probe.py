@@ -24,6 +24,26 @@ SCALAR_TYPES = (str, int, float, bool, type(None))
 TIMELINE_FIELDNAMES = [
     "time_ms",
     "pcm_energy",
+    "audio_quality_status",
+    "playback_artifact_reasons_text",
+    "playback_artifact_suspected",
+    "underrun_count",
+    "chunk_gap_count",
+    "chunk_gap_audio_risk_count",
+    "max_chunk_gap_ms",
+    "late_write_count",
+    "dropped_chunk_count",
+    "duplicate_chunk_count",
+    "out_of_order_chunk_count",
+    "sample_rate_mismatch_flag",
+    "format_mismatch_flag",
+    "chunk_boundary_discontinuity_count",
+    "clipping_count",
+    "stream_reset_count",
+    "audio_chunk_duration_ms",
+    "audio_chunk_byte_length",
+    "chunk_queue_depth",
+    "playback_buffer_duration_queued_ms",
     "meter_energy",
     "payload_energy",
     "bridge_energy",
@@ -58,9 +78,35 @@ TIMELINE_FIELDNAMES = [
     "terminalEventAcceptedCount",
     "playbackIdSwitchCount",
     "playbackIdMismatchIgnoredCount",
+    "anchorSpeakingVisualActive",
     "voiceVisualActiveFlapCount",
     "speaking_visual_active",
     "anchor_visual_state",
+    "targetVoiceVisualEnergy",
+    "voiceVisualEnergy",
+    "voiceVisualTargetAgeMs",
+    "speakingEnergyAttackVersion",
+    "energyRecentMin",
+    "energyRecentMax",
+    "energyDynamicRange",
+    "adaptiveGain",
+    "startupBoostActive",
+    "startupBoostAmount",
+    "startupLimiterActive",
+    "earlySpeechOvershootDetected",
+    "lateSpeechCompressionDetected",
+    "speakingDynamicsPhase",
+    "speakingDynamicsConfidence",
+    "anchorStaleEnergyReason",
+    "stateLatchReason",
+    "latchBugReason",
+    "currentAnchorPlaybackId",
+    "anchorAcceptedPlaybackId",
+    "anchorIgnoredPlaybackId",
+    "anchorSpeakingEntryPlaybackId",
+    "anchorSpeakingExitPlaybackId",
+    "speakingEnteredAtMs",
+    "speakingExitedAtMs",
     "playback_status",
     "fog_active",
     "frame_gap_ms",
@@ -162,16 +208,51 @@ def _voice_visual_row_active(row: Mapping[str, Any]) -> bool:
     )
 
 
+def _voice_visual_row_stale(row: Mapping[str, Any]) -> bool:
+    reason = str(
+        row.get("anchorStaleEnergyReason")
+        or row.get("staleEnergyReason")
+        or ""
+    ).strip().lower()
+    if "stale" in reason:
+        return True
+    target_age = _round(row.get("voiceVisualTargetAgeMs"), 3)
+    if target_age is not None and target_age > 1000.0:
+        return True
+    if (
+        _voice_visual_row_active(row)
+        and (_round(row.get("targetVoiceVisualEnergy")) or 0.0) <= 0.001
+        and (_round(row.get("pcm_energy")) or 0.0) <= 0.001
+        and (_round(row.get("meter_energy")) or 0.0) <= 0.001
+        and str(row.get("authoritativePlaybackStatus", "")).strip().lower()
+        in {"completed", "complete", "idle", "stopped", "failed", "unavailable"}
+    ):
+        return True
+    return False
+
+
+def _anchor_speaking_row_active(row: Mapping[str, Any]) -> bool:
+    if "anchorSpeakingVisualActive" in row:
+        return _truthy(row.get("anchorSpeakingVisualActive"))
+    return _truthy(row.get("speaking_visual_active"))
+
+
 def _speaking_state_stability(
     rows: Sequence[Mapping[str, Any]]
-) -> dict[str, bool | int]:
+) -> dict[str, bool | int | str]:
     voice_active_rows = [
         row for row in rows if _voice_visual_row_active(row)
+    ]
+    stale_voice_active_rows = [
+        row for row in voice_active_rows if _voice_visual_row_stale(row)
+    ]
+    fresh_voice_active_rows = [
+        row for row in voice_active_rows if not _voice_visual_row_stale(row)
     ]
     speaking_true_indices = [
         index
         for index, row in enumerate(rows)
-        if _truthy(row.get("speaking_visual_active"))
+        if _anchor_speaking_row_active(row)
     ]
     first_speaking_index = (
         min(speaking_true_indices) if speaking_true_indices else None
@@ -183,26 +264,44 @@ def _speaking_state_stability(
         else []
     )
     active_mid_speech_rows = [
-        row for row in mid_speech_rows if _voice_visual_row_active(row)
+        row
+        for row in mid_speech_rows
+        if _voice_visual_row_active(row) and not _voice_visual_row_stale(row)
     ]
     mid_speech_false_rows = [
         row
         for row in active_mid_speech_rows
-        if not _truthy(row.get("speaking_visual_active"))
+        if not _anchor_speaking_row_active(row)
     ]
     mid_speech_idle_rows = [
         row
         for row in active_mid_speech_rows
         if str(row.get("anchor_visual_state", "")).strip().lower() == "idle"
     ]
+    stale_rows_ignored_for_latch = [
+        row
+        for row in stale_voice_active_rows
+        if (
+            not _anchor_speaking_row_active(row)
+            or str(row.get("anchor_visual_state", "")).strip().lower() == "idle"
+        )
+    ]
+    latch_bug_detected = bool(mid_speech_false_rows or mid_speech_idle_rows)
+    latch_bug_reason = "none"
+    if latch_bug_detected:
+        latch_bug_reason = "fresh_authoritative_active_anchor_not_speaking"
+    elif stale_rows_ignored_for_latch:
+        latch_bug_reason = "stale_authoritative_rows_ignored"
     return {
         "voiceVisualActiveRows": len(voice_active_rows),
+        "freshVoiceVisualActiveRows": len(fresh_voice_active_rows),
+        "staleVoiceVisualActiveRows": len(stale_voice_active_rows),
         "speakingVisualTrueRows": len(speaking_true_indices),
         "speakingVisualFalseWhileVoiceVisualActiveRows": len(
             [
                 row
                 for row in voice_active_rows
-                if not _truthy(row.get("speaking_visual_active"))
+                if not _anchor_speaking_row_active(row)
             ]
         ),
         "anchorIdleWhileVoiceVisualActiveRows": len(
@@ -214,9 +313,16 @@ def _speaking_state_stability(
         ),
         "midSpeechSpeakingVisualFalseRows": len(mid_speech_false_rows),
         "midSpeechAnchorIdleRows": len(mid_speech_idle_rows),
-        "anchorStatusGlitchDetected": bool(
-            mid_speech_false_rows or mid_speech_idle_rows
+        "staleAuthoritativeRowsIgnoredForLatch": len(stale_rows_ignored_for_latch),
+        "anchorStatusGlitchDetected": latch_bug_detected,
+        "stateLatchReason": str(
+            (mid_speech_false_rows or mid_speech_idle_rows or stale_rows_ignored_for_latch or [{}])[0].get(
+                "stateLatchReason",
+                "",
+            )
         ),
+        "latchBugReason": latch_bug_reason,
+        "offsetSafetyRule": "fresh_playback_bound_rows_required_for_latch_classification",
         "raw_audio_present": False,
     }
 
@@ -390,6 +496,32 @@ def _offset_recommendation_for_confidence(
     return None, f"{basis}_measurement_only"
 
 
+def _sync_measurement_guard_fields(
+    *,
+    status: str,
+    confidence: str,
+    basis: str,
+    recommended_offset: float | None,
+    rejection_reason: str = "",
+) -> dict[str, Any]:
+    normalized_confidence = str(confidence or "low").strip().lower()
+    if status == "aligned":
+        safe = True
+        reason = ""
+    elif recommended_offset is not None and normalized_confidence == "high":
+        safe = True
+        reason = ""
+    else:
+        safe = False
+        reason = rejection_reason or f"{basis}_measurement_not_safe_for_offset"
+    return {
+        "syncMeasurementConfidence": normalized_confidence,
+        "syncMeasurementRejectionReason": reason,
+        "syncOffsetCandidateSafe": bool(safe),
+        "syncOffsetCandidateRejectedReason": "" if safe else reason,
+    }
+
+
 def _stage_latency_components(latency: Mapping[str, Any]) -> dict[str, float]:
     stage_keys = (
         "pcm_to_meter",
@@ -484,6 +616,13 @@ def audio_visual_sync_diagnosis(
             confidence=confidence,
             basis="direct_correlation",
         )
+        guard = _sync_measurement_guard_fields(
+            status=status,
+            confidence=confidence,
+            basis="direct_correlation",
+            recommended_offset=recommended_offset,
+            rejection_reason="direct_correlation_confidence_not_high",
+        )
         return {
             "perceptual_sync_status": status,
             "perceptual_sync_basis": basis,
@@ -508,6 +647,7 @@ def audio_visual_sync_diagnosis(
             "recommended_visual_offset_ms": recommended_offset,
             "visual_offset_applied_ms": 0,
             "visual_offset_recommendation_basis": recommendation_basis,
+            **guard,
             "sync_diagnosis_reason": (
                 "direct audible PCM to visual-drive correlation was usable for "
                 "classification; an offset is recommended only at high confidence"
@@ -532,6 +672,10 @@ def audio_visual_sync_diagnosis(
             "recommended_visual_offset_ms": None,
             "visual_offset_applied_ms": 0,
             "visual_offset_recommendation_basis": "none",
+            "syncMeasurementConfidence": "inconclusive",
+            "syncMeasurementRejectionReason": "stage_latency_inconsistent",
+            "syncOffsetCandidateSafe": False,
+            "syncOffsetCandidateRejectedReason": "stage_latency_inconsistent",
             "sync_diagnosis_reason": (
                 "stage timestamp deltas include impossible negative or implausibly "
                 "large values; direct PCM-to-visual correlation was too weak to "
@@ -556,6 +700,13 @@ def audio_visual_sync_diagnosis(
             confidence=confidence,
             basis="stage_latency",
         )
+        guard = _sync_measurement_guard_fields(
+            status=status,
+            confidence=confidence,
+            basis="stage_latency",
+            recommended_offset=recommended_offset,
+            rejection_reason="stage_latency_measurement_only",
+        )
         return {
             "perceptual_sync_status": status,
             "perceptual_sync_basis": "stage_latency_pcm_to_paint_estimated",
@@ -575,6 +726,7 @@ def audio_visual_sync_diagnosis(
             "recommended_visual_offset_ms": recommended_offset,
             "visual_offset_applied_ms": 0,
             "visual_offset_recommendation_basis": recommendation_basis,
+            **guard,
             "sync_diagnosis_reason": (
                 "direct audible PCM to visual-drive correlation was too weak or "
                 "sparse; using scalar stage timestamps from audible PCM to paint "
@@ -597,6 +749,10 @@ def audio_visual_sync_diagnosis(
         "recommended_visual_offset_ms": None,
         "visual_offset_applied_ms": 0,
         "visual_offset_recommendation_basis": "none",
+        "syncMeasurementConfidence": "inconclusive",
+        "syncMeasurementRejectionReason": "insufficient_direct_and_stage_timing_evidence",
+        "syncOffsetCandidateSafe": False,
+        "syncOffsetCandidateRejectedReason": "insufficient_direct_and_stage_timing_evidence",
         "sync_diagnosis_reason": (
             "direct audible PCM to visual-drive correlation was weak and no usable "
             "audio-to-paint stage latency was available"
@@ -993,6 +1149,96 @@ def summarize_real_environment_chain(
         }
     )
     speaking_state_stability = sanitize_scalar_payload(_speaking_state_stability(rows))
+    audio_quality_rows = [
+        row for row in rows if row.get("audio_quality_status") not in (None, "")
+    ]
+    audio_quality_reasons = sorted(
+        {
+            str(reason)
+            for row in rows
+            for reason in (
+                row.get("playback_artifact_reasons")
+                if isinstance(row.get("playback_artifact_reasons"), list)
+                else str(row.get("playback_artifact_reasons_text") or "").split(";")
+            )
+            if str(reason)
+        }
+    )
+    count_reason_map = {
+        "underrun_count": "playback_buffer_underrun",
+        "chunk_gap_audio_risk_count": "tts_chunk_gap",
+        "late_write_count": "playback_write_late",
+        "dropped_chunk_count": "duplicate_or_out_of_order_chunk",
+        "duplicate_chunk_count": "duplicate_or_out_of_order_chunk",
+        "out_of_order_chunk_count": "duplicate_or_out_of_order_chunk",
+        "chunk_boundary_discontinuity_count": "chunk_boundary_discontinuity",
+        "clipping_count": "clipping_or_saturation",
+        "stream_reset_count": "stream_reset_or_overlap",
+    }
+    for row in rows:
+        for key, reason in count_reason_map.items():
+            if (_round(row.get(key)) or 0.0) > 0 and reason not in audio_quality_reasons:
+                audio_quality_reasons.append(reason)
+        if _truthy(row.get("sample_rate_mismatch_flag")) and "sample_rate_mismatch" not in audio_quality_reasons:
+            audio_quality_reasons.append("sample_rate_mismatch")
+        if _truthy(row.get("format_mismatch_flag")) and "sample_format_mismatch" not in audio_quality_reasons:
+            audio_quality_reasons.append("sample_format_mismatch")
+    audio_quality_reasons = sorted(dict.fromkeys(audio_quality_reasons))
+    audio_quality_status = "pass"
+    if any(str(row.get("audio_quality_status")) != "pass" for row in audio_quality_rows):
+        audio_quality_status = next(
+            str(row.get("audio_quality_status"))
+            for row in audio_quality_rows
+            if str(row.get("audio_quality_status")) not in {"", "pass"}
+        )
+    elif audio_quality_reasons:
+        audio_quality_status = audio_quality_reasons[0]
+    elif not audio_quality_rows:
+        audio_quality_status = "not_measured"
+    anchor_dynamics_status = "pass"
+    if any(str(row.get("earlySpeechOvershootDetected")).lower() == "true" for row in rows):
+        anchor_dynamics_status = "startup_overshoot_limited"
+    if any(str(row.get("lateSpeechCompressionDetected")).lower() == "true" for row in rows):
+        anchor_dynamics_status = (
+            "startup_overshoot_late_compression"
+            if anchor_dynamics_status != "pass"
+            else "late_motion_compression"
+        )
+    renderer_cadence_status = (
+        "render_cadence_problem"
+        if any(
+            item
+            in {
+                "render_cadence_problem",
+                "anchor_canvas_paint_path_render_backend_bottleneck",
+                "canvas_paint_backend_bottleneck",
+                "fog_or_shared_clock_starvation",
+            }
+            for item in classification
+        )
+        else "pass"
+    )
+    state_lifetime_status = (
+        "state_lifetime_problem"
+        if any(
+            item
+            in {
+                "delayed_speaking_entry",
+                "speaking_stuck_after_audio",
+                "false_speaking_without_audio",
+                "stale_broad_voice_snapshot_overrides_hot_path",
+                "voice_visual_active_flap",
+                "anchor_state_latch_bug",
+            }
+            for item in classification
+        )
+        else "pass"
+    )
+    sync_status = str(
+        alignment.get("perceptual_sync_status")
+        or alignment.get("syncMeasurementConfidence")
+        or "inconclusive"
+    )
     recommendation = ""
     if "anchor_canvas_paint_path_render_backend_bottleneck" in classification:
         recommendation = (
@@ -1039,6 +1285,12 @@ def summarize_real_environment_chain(
         "latency_ms": latency_values,
         "audio_visual_alignment": alignment,
         "audio_visual_sync_stages": sync_timeline_stages,
+        "audio_quality_status": audio_quality_status,
+        "audio_quality_reasons": audio_quality_reasons,
+        "anchor_dynamics_status": anchor_dynamics_status,
+        "sync_status": sync_status,
+        "renderer_cadence_status": renderer_cadence_status,
+        "state_lifetime_status": state_lifetime_status,
         "speaking_lifetime": lifetime,
         "speaking_state_stability": speaking_state_stability,
         "render_metrics": render_metrics_sanitized,
@@ -1098,6 +1350,11 @@ def real_environment_report_markdown(report: Mapping[str, Any]) -> str:
         f"- Source: `{report.get('source', PCM_STREAM_SOURCE)}`",
         f"- Spoken stimulus valid: `{str(report.get('spoken_stimulus_valid', False)).lower()}`",
         f"- Classification: `{classifications}`",
+        f"- Audio quality status: `{report.get('audio_quality_status', 'unknown')}`",
+        f"- Anchor dynamics status: `{report.get('anchor_dynamics_status', 'unknown')}`",
+        f"- Sync status: `{report.get('sync_status', 'unknown')}`",
+        f"- Renderer cadence status: `{report.get('renderer_cadence_status', 'unknown')}`",
+        f"- State/lifetime status: `{report.get('state_lifetime_status', 'unknown')}`",
         "- Privacy: scalar-only, raw_audio_present=false",
         "",
         "## Energy Ranges",
@@ -1149,6 +1406,12 @@ def real_environment_report_markdown(report: Mapping[str, Any]) -> str:
         f"{alignment.get('direct_pcm_visual_correlation_usable')}"
     )
     lines.append(
+        "- syncMeasurementConfidence: "
+        f"{alignment.get('syncMeasurementConfidence')} "
+        f"(offsetCandidateSafe={alignment.get('syncOffsetCandidateSafe')}, "
+        f"rejection={alignment.get('syncOffsetCandidateRejectedReason')})"
+    )
+    lines.append(
         f"- sync_diagnosis_reason: {alignment.get('sync_diagnosis_reason')}"
     )
     lines.append(f"- sync_likely_cause: {alignment.get('sync_likely_cause')}")
@@ -1158,6 +1421,15 @@ def real_environment_report_markdown(report: Mapping[str, Any]) -> str:
         f"(applied={alignment.get('visual_offset_applied_ms')}, "
         f"basis={alignment.get('visual_offset_recommendation_basis')})"
     )
+    lines.extend(["", "## AR14 Split Status"])
+    lines.append(f"- audio_quality_status: {report.get('audio_quality_status')}")
+    reasons = report.get("audio_quality_reasons", [])
+    if isinstance(reasons, Sequence) and not isinstance(reasons, (str, bytes)):
+        lines.append(f"- audio_quality_reasons: {', '.join(str(item) for item in reasons) or 'none'}")
+    lines.append(f"- anchor_dynamics_status: {report.get('anchor_dynamics_status')}")
+    lines.append(f"- sync_status: {report.get('sync_status')}")
+    lines.append(f"- renderer_cadence_status: {report.get('renderer_cadence_status')}")
+    lines.append(f"- state_lifetime_status: {report.get('state_lifetime_status')}")
     if sync_stages:
         lines.extend(["", "## Sync Timeline Stages"])
         for key in [
@@ -1187,12 +1459,18 @@ def real_environment_report_markdown(report: Mapping[str, Any]) -> str:
     lines.extend(["", "## Speaking State Stability"])
     for key in [
         "voiceVisualActiveRows",
+        "freshVoiceVisualActiveRows",
+        "staleVoiceVisualActiveRows",
         "speakingVisualTrueRows",
         "speakingVisualFalseWhileVoiceVisualActiveRows",
         "anchorIdleWhileVoiceVisualActiveRows",
         "midSpeechSpeakingVisualFalseRows",
         "midSpeechAnchorIdleRows",
+        "staleAuthoritativeRowsIgnoredForLatch",
         "anchorStatusGlitchDetected",
+        "stateLatchReason",
+        "latchBugReason",
+        "offsetSafetyRule",
     ]:
         lines.append(f"- {key}: {speaking_state_stability.get(key)}")
     lines.extend(["", "## Render Cadence"])

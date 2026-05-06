@@ -17,6 +17,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = PROJECT_ROOT / "src"
 SCRIPTS_DIR = PROJECT_ROOT / "scripts"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / ".artifacts" / "voice_ar5_live_kraken"
+VALID_QSG_VISUAL_APPROVALS = {"pending", "approved", "rejected"}
+OPERATOR_YES_NO_UNKNOWN = {"yes", "no", "unknown"}
+OPERATOR_YES_NO_UNCERTAIN = {"yes", "no", "uncertain"}
 
 sys.path.insert(0, str(SRC_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR))
@@ -65,6 +68,47 @@ RAW_TEXT_FORBIDDEN = (
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _normalize_qsg_visual_approval(value: str | None) -> str:
+    approval = str(value or "pending").strip().lower()
+    approval = approval.replace("-", "_").replace(" ", "_")
+    if approval == "pending_review":
+        approval = "pending"
+    return approval if approval in VALID_QSG_VISUAL_APPROVALS else "pending"
+
+
+def _qsg_visual_status_from_approval(value: str | None) -> str:
+    approval = _normalize_qsg_visual_approval(value)
+    return "pending_review" if approval == "pending" else approval
+
+
+def _clamp_voice_visual_offset_ms(value: int | float | str | None) -> int:
+    try:
+        parsed = int(round(float(value)))
+    except (TypeError, ValueError):
+        parsed = 0
+    return max(-300, min(300, parsed))
+
+
+def _operator_scoring_payload(args: argparse.Namespace) -> dict[str, Any]:
+    return sanitize_kraken_payload(
+        {
+            "audible_skip_seen": str(args.audible_skip_seen or "unknown"),
+            "audible_buzz_or_squelch_seen": str(
+                args.audible_buzz_or_squelch_seen or "unknown"
+            ),
+            "anchor_startup_overshoot_seen": str(
+                args.anchor_startup_overshoot_seen or "unknown"
+            ),
+            "anchor_late_motion_collapse_seen": str(
+                args.anchor_late_motion_collapse_seen or "unknown"
+            ),
+            "subjective_sync_good": str(args.subjective_sync_good or "uncertain"),
+            "operator_notes": str(args.operator_notes or ""),
+            "raw_audio_present": False,
+        }
+    )
 
 
 def _write_json(path: Path, payload: Any) -> None:
@@ -309,6 +353,7 @@ def _build_report(
     events: list[dict[str, Any]],
     status_rows: list[dict[str, Any]],
     qml_rows: list[dict[str, Any]],
+    operator_scoring: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
     status_rows = _enrich_status_rows_with_authority(status_rows, qml_rows)
     timeline_rows, stage_rows = _build_timelines(events, qml_rows)
@@ -357,6 +402,7 @@ def _build_report(
     if report["stale_playback_id_detected"]:
         kraken_classes = sorted(set(kraken_classes) | {"stale_playback_id"})
     report["classification"] = kraken_classes
+    report["operator_scoring"] = sanitize_kraken_payload(operator_scoring or {})
     report["raw_audio_present"] = False
     report = sanitize_kraken_payload(report)
 
@@ -389,6 +435,10 @@ def _run_runtime_scenario(
     repeat_count: int = 1,
     stop_existing: bool = True,
     playback_enabled: bool = True,
+    voice_visual_offset_ms: int = 0,
+    qsg_visual_approval: str = "pending",
+    qsg_visual_approval_reason: str = "",
+    operator_scoring: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
     scenario_dir = output_dir / scenario / renderer
     if scenario_dir.exists():
@@ -422,6 +472,15 @@ def _run_runtime_scenario(
         env["STORMHELM_VOICE_AR1_QML_DIAG"] = "1"
         env["STORMHELM_VOICE_AR1_QML_DIAG_PATH"] = str(qml_diag_path)
         env["STORMHELM_STORMFORGE_ANCHOR_RENDERER"] = renderer
+        env["STORMHELM_VOICE_VISUAL_METER_OFFSET_MS"] = str(
+            _clamp_voice_visual_offset_ms(voice_visual_offset_ms)
+        )
+        env["STORMHELM_STORMFORGE_QSG_VISUAL_APPROVAL"] = (
+            _normalize_qsg_visual_approval(qsg_visual_approval)
+        )
+        env["STORMHELM_STORMFORGE_QSG_VISUAL_APPROVAL_REASON"] = str(
+            qsg_visual_approval_reason or ""
+        )
         if clear_cache:
             env["QML_DISABLE_DISK_CACHE"] = "1"
         if stormforge:
@@ -458,6 +517,15 @@ def _run_runtime_scenario(
                     "STORMHELM_UI_VARIANT": env.get("STORMHELM_UI_VARIANT"),
                     "STORMHELM_STORMFORGE_FOG": env.get("STORMHELM_STORMFORGE_FOG"),
                     "STORMHELM_STORMFORGE_ANCHOR_RENDERER": renderer,
+                    "STORMHELM_VOICE_VISUAL_METER_OFFSET_MS": env.get(
+                        "STORMHELM_VOICE_VISUAL_METER_OFFSET_MS"
+                    ),
+                    "STORMHELM_STORMFORGE_QSG_VISUAL_APPROVAL": env.get(
+                        "STORMHELM_STORMFORGE_QSG_VISUAL_APPROVAL"
+                    ),
+                    "STORMHELM_STORMFORGE_QSG_VISUAL_APPROVAL_REASON": env.get(
+                        "STORMHELM_STORMFORGE_QSG_VISUAL_APPROVAL_REASON"
+                    ),
                     "STORMHELM_VOICE_PLAYBACK_ENABLED": env.get("STORMHELM_VOICE_PLAYBACK_ENABLED"),
                     "STORMHELM_VOICE_AR1_LIVE_DIAG": "1",
                     "STORMHELM_VOICE_AR1_QML_DIAG": "1",
@@ -580,6 +648,7 @@ def _run_runtime_scenario(
             events=events,
             status_rows=status_rows,
             qml_rows=qml_rows,
+            operator_scoring=operator_scoring,
         )
         if scenario == "single_spoken_response":
             _write_csv(scenario_dir / "post_speech_timeline.csv", _post_speech_rows(timeline_rows))
@@ -632,6 +701,45 @@ def main() -> int:
         default="",
         help="Run the main live scenarios with one explicit Stormforge anchor renderer.",
     )
+    parser.add_argument(
+        "--voice-visual-offset-ms",
+        type=int,
+        default=0,
+        help="Calibration-only PCM meter visual offset in milliseconds (-300..300).",
+    )
+    parser.add_argument(
+        "--qsg-visual-approval",
+        choices=sorted(VALID_QSG_VISUAL_APPROVALS),
+        default="pending",
+        help="Explicit human visual approval state for the QSG candidate.",
+    )
+    parser.add_argument("--qsg-visual-approval-reason", default="")
+    parser.add_argument(
+        "--audible-skip-seen",
+        choices=sorted(OPERATOR_YES_NO_UNKNOWN),
+        default="unknown",
+    )
+    parser.add_argument(
+        "--audible-buzz-or-squelch-seen",
+        choices=sorted(OPERATOR_YES_NO_UNKNOWN),
+        default="unknown",
+    )
+    parser.add_argument(
+        "--anchor-startup-overshoot-seen",
+        choices=sorted(OPERATOR_YES_NO_UNKNOWN),
+        default="unknown",
+    )
+    parser.add_argument(
+        "--anchor-late-motion-collapse-seen",
+        choices=sorted(OPERATOR_YES_NO_UNKNOWN),
+        default="unknown",
+    )
+    parser.add_argument(
+        "--subjective-sync-good",
+        choices=sorted(OPERATOR_YES_NO_UNCERTAIN),
+        default="uncertain",
+    )
+    parser.add_argument("--operator-notes", default="")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     args = parser.parse_args()
 
@@ -641,6 +749,7 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     main_renderer, renderers = _resolve_renderer_plan(args.anchor_renderer, args.renderers)
+    operator_scoring = _operator_scoring_payload(args)
     scenario_reports: list[dict[str, Any]] = []
     all_rows: list[dict[str, Any]] = []
     all_pcm_rows: list[dict[str, Any]] = []
@@ -677,6 +786,10 @@ def main() -> int:
             repeat_count=repeat_count,
             stop_existing=True,
             playback_enabled=playback_enabled,
+            voice_visual_offset_ms=_clamp_voice_visual_offset_ms(args.voice_visual_offset_ms),
+            qsg_visual_approval=args.qsg_visual_approval,
+            qsg_visual_approval_reason=args.qsg_visual_approval_reason,
+            operator_scoring=operator_scoring,
         )
         scenario_reports.append(report)
         all_rows.extend(timeline_rows)
@@ -713,17 +826,31 @@ def main() -> int:
         "clear_cache": bool(args.clear_cache),
         "audible": bool(args.audible),
         "use_local_pcm_voice_fixture": bool(args.use_local_pcm_voice_fixture),
+        "voice_visual_offset_ms": _clamp_voice_visual_offset_ms(args.voice_visual_offset_ms),
+        "qsg_visual_approval": _normalize_qsg_visual_approval(args.qsg_visual_approval),
+        "qsg_visual_approval_reason": str(args.qsg_visual_approval_reason or ""),
+        "operator_scoring": operator_scoring,
         "raw_audio_present": False,
     }
     summary = summarize_live_kraken(
         scenario_reports,
         process_state=process_state,
         config_env_snapshot=config_env_snapshot,
+        qsg_visual_status=_qsg_visual_status_from_approval(args.qsg_visual_approval),
+        qsg_human_approval=args.qsg_visual_approval_reason
+        if _normalize_qsg_visual_approval(args.qsg_visual_approval) == "approved"
+        else "",
     )
+    summary["qsg_visual_approval"] = _normalize_qsg_visual_approval(args.qsg_visual_approval)
+    summary["qsg_visual_approval_reason"] = str(args.qsg_visual_approval_reason or "")
+    summary["voice_visual_offset_ms"] = _clamp_voice_visual_offset_ms(args.voice_visual_offset_ms)
+    summary["operator_scoring"] = [operator_scoring]
     summary["qsg_promotion_gate"] = qsg_candidate_promotion_gate(
-        visual_status="pending_review",
+        visual_status=_qsg_visual_status_from_approval(args.qsg_visual_approval),
         live_report=summary,
-        human_approval="",
+        human_approval=args.qsg_visual_approval_reason
+        if _normalize_qsg_visual_approval(args.qsg_visual_approval) == "approved"
+        else "",
     )
     summary = sanitize_kraken_payload(summary)
     assert_no_raw_audio_payload(summary)
@@ -757,6 +884,8 @@ def main() -> int:
                 "classification": summary.get("classification"),
                 "renderer_modes": renderers,
                 "anchor_renderer": args.anchor_renderer or None,
+                "voice_visual_offset_ms": _clamp_voice_visual_offset_ms(args.voice_visual_offset_ms),
+                "qsg_visual_approval": _normalize_qsg_visual_approval(args.qsg_visual_approval),
                 "qsg_promotion_gate": summary.get("qsg_promotion_gate"),
             },
             indent=2,

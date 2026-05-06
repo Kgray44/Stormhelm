@@ -6474,6 +6474,26 @@ class VoiceService:
                     "streaming_min_preroll_bytes": streaming_min_preroll_bytes,
                     "streaming_max_preroll_wait_ms": streaming_max_preroll_wait_ms,
                     "playback_stable_after_ms": playback_stable_after_ms,
+                    "streaming_jitter_buffer_ms": int(
+                        getattr(self.config.playback, "streaming_jitter_buffer_ms", 120)
+                        or 120
+                    ),
+                    "streaming_min_buffer_ms": int(
+                        getattr(self.config.playback, "streaming_min_buffer_ms", 80)
+                        or 80
+                    ),
+                    "streaming_max_buffer_ms": int(
+                        getattr(self.config.playback, "streaming_max_buffer_ms", 400)
+                        or 400
+                    ),
+                    "streaming_underrun_recovery": str(
+                        getattr(
+                            self.config.playback,
+                            "streaming_underrun_recovery",
+                            "hold_or_silence",
+                        )
+                        or "hold_or_silence"
+                    ),
                     "estimated_output_latency_ms": self._voice_visual_sync_fields()[
                         "estimated_output_latency_ms"
                     ],
@@ -6574,6 +6594,11 @@ class VoiceService:
                     "first_audio_submitted_to_device",
                     progressive_absolute_ms(),
                 )
+                chunk_result = feed_operation(
+                    session.playback_stream_id,
+                    buffered_chunk.data or b"",
+                    chunk_index=buffered_chunk.chunk_index,
+                )
                 self._publish_pcm_submit_visual_probe(
                     buffered_chunk.data,
                     publish_context={
@@ -6591,12 +6616,20 @@ class VoiceService:
                         "sample_rate_hz": stream_sample_rate,
                         "channels": stream_channels,
                         "sample_width_bytes": stream_sample_width_bytes,
+                        "playback_audio_quality": chunk_result.metadata.get(
+                            "audio_quality"
+                        )
+                        if isinstance(chunk_result.metadata, dict)
+                        else None,
+                        "playback_audio_quality_chunk": chunk_result.metadata.get(
+                            "audio_quality_chunk"
+                        )
+                        if isinstance(chunk_result.metadata, dict)
+                        else None,
+                        "waveout_write": chunk_result.metadata.get("waveout_write")
+                        if isinstance(chunk_result.metadata, dict)
+                        else None,
                     },
-                )
-                chunk_result = feed_operation(
-                    session.playback_stream_id,
-                    buffered_chunk.data or b"",
-                    chunk_index=buffered_chunk.chunk_index,
                 )
                 submitted_stream_bytes += int(
                     buffered_chunk.size_bytes or len(buffered_chunk.data or b"")
@@ -7054,6 +7087,29 @@ class VoiceService:
                 allowed_to_play=True,
                 metadata={
                     "source": "streaming_tts",
+                    "sample_rate": stream_sample_rate,
+                    "channels": stream_channels,
+                    "sample_width_bytes": stream_sample_width_bytes,
+                    "streaming_jitter_buffer_ms": int(
+                        getattr(self.config.playback, "streaming_jitter_buffer_ms", 120)
+                        or 120
+                    ),
+                    "streaming_min_buffer_ms": int(
+                        getattr(self.config.playback, "streaming_min_buffer_ms", 80)
+                        or 80
+                    ),
+                    "streaming_max_buffer_ms": int(
+                        getattr(self.config.playback, "streaming_max_buffer_ms", 400)
+                        or 400
+                    ),
+                    "streaming_underrun_recovery": str(
+                        getattr(
+                            self.config.playback,
+                            "streaming_underrun_recovery",
+                            "hold_or_silence",
+                        )
+                        or "hold_or_silence"
+                    ),
                     "estimated_output_latency_ms": self._voice_visual_sync_fields()[
                         "estimated_output_latency_ms"
                     ],
@@ -7108,6 +7164,11 @@ class VoiceService:
                             )
                         break
                     if callable(feed_operation):
+                        chunk_result = feed_operation(
+                            live_session.playback_stream_id,
+                            chunk.data or b"",
+                            chunk_index=chunk.chunk_index,
+                        )
                         self._publish_pcm_submit_visual_probe(
                             chunk.data,
                             publish_context={
@@ -7125,12 +7186,22 @@ class VoiceService:
                                 "sample_rate_hz": stream_sample_rate,
                                 "channels": stream_channels,
                                 "sample_width_bytes": stream_sample_width_bytes,
+                                "playback_audio_quality": chunk_result.metadata.get(
+                                    "audio_quality"
+                                )
+                                if isinstance(chunk_result.metadata, dict)
+                                else None,
+                                "playback_audio_quality_chunk": chunk_result.metadata.get(
+                                    "audio_quality_chunk"
+                                )
+                                if isinstance(chunk_result.metadata, dict)
+                                else None,
+                                "waveout_write": chunk_result.metadata.get(
+                                    "waveout_write"
+                                )
+                                if isinstance(chunk_result.metadata, dict)
+                                else None,
                             },
-                        )
-                        chunk_result = feed_operation(
-                            live_session.playback_stream_id,
-                            chunk.data or b"",
-                            chunk_index=chunk.chunk_index,
                         )
                         self._queue_voice_output_envelope_frames(
                             chunk.data,
@@ -13539,6 +13610,124 @@ class VoiceService:
                 "source": "pcm_stream_meter",
                 "raw_audio_present": False,
             }
+            audio_quality = publish_context.get("playback_audio_quality")
+            if isinstance(audio_quality, dict):
+                safe_audio_quality = dict(audio_quality)
+                safe_audio_quality["raw_audio_present"] = False
+                diagnostics["audio_quality"] = safe_audio_quality
+                diagnostics["audio_quality_status"] = safe_audio_quality.get(
+                    "audio_quality_status"
+                )
+                diagnostics["playback_artifact_suspected"] = bool(
+                    safe_audio_quality.get("playback_artifact_suspected")
+                )
+                diagnostics["playback_artifact_reasons"] = list(
+                    safe_audio_quality.get("playback_artifact_reasons") or []
+                )
+                diagnostics["playback_artifact_reasons_text"] = ";".join(
+                    str(reason)
+                    for reason in safe_audio_quality.get(
+                        "playback_artifact_reasons",
+                        [],
+                    )
+                    if str(reason)
+                )
+                diagnostics["underrun_count"] = safe_audio_quality.get(
+                    "underrun_count",
+                    0,
+                )
+                diagnostics["chunk_gap_count"] = safe_audio_quality.get(
+                    "chunk_gap_count",
+                    0,
+                )
+                diagnostics["chunk_gap_audio_risk_count"] = safe_audio_quality.get(
+                    "chunk_gap_audio_risk_count",
+                    0,
+                )
+                diagnostics["max_chunk_gap_ms"] = safe_audio_quality.get(
+                    "max_chunk_gap_ms",
+                    0,
+                )
+                diagnostics["late_write_count"] = safe_audio_quality.get(
+                    "late_write_count",
+                    0,
+                )
+                diagnostics["dropped_chunk_count"] = safe_audio_quality.get(
+                    "dropped_chunk_count",
+                    0,
+                )
+                diagnostics["duplicate_chunk_count"] = safe_audio_quality.get(
+                    "duplicate_chunk_count",
+                    0,
+                )
+                diagnostics["out_of_order_chunk_count"] = safe_audio_quality.get(
+                    "out_of_order_chunk_count",
+                    0,
+                )
+                diagnostics["sample_rate_mismatch_flag"] = safe_audio_quality.get(
+                    "sample_rate_mismatch_flag",
+                    False,
+                )
+                diagnostics["format_mismatch_flag"] = safe_audio_quality.get(
+                    "format_mismatch_flag",
+                    False,
+                )
+                diagnostics["chunk_boundary_discontinuity_count"] = (
+                    safe_audio_quality.get("chunk_boundary_discontinuity_count", 0)
+                )
+                diagnostics["clipping_count"] = safe_audio_quality.get(
+                    "clipping_count",
+                    0,
+                )
+                diagnostics["stream_reset_count"] = safe_audio_quality.get(
+                    "stream_reset_count",
+                    0,
+                )
+                diagnostics["playback_buffer_duration_queued_avg_ms"] = (
+                    safe_audio_quality.get(
+                        "playback_buffer_duration_queued_avg_ms",
+                        0,
+                    )
+                )
+            audio_quality_chunk = publish_context.get("playback_audio_quality_chunk")
+            if isinstance(audio_quality_chunk, dict):
+                safe_audio_quality_chunk = dict(audio_quality_chunk)
+                safe_audio_quality_chunk["raw_audio_present"] = False
+                diagnostics["audio_quality_chunk"] = safe_audio_quality_chunk
+                diagnostics["audio_chunk_duration_ms"] = safe_audio_quality_chunk.get(
+                    "audio_chunk_duration_ms",
+                    levels["chunk_duration_ms"],
+                )
+                diagnostics["audio_chunk_byte_length"] = safe_audio_quality_chunk.get(
+                    "audio_chunk_byte_length",
+                    int(levels.get("trimmed_size_bytes") or 0),
+                )
+                diagnostics["waveOutWriteSubmitTimeMs"] = (
+                    safe_audio_quality_chunk.get("wave_write_submit_time_ms")
+                )
+                diagnostics["waveOutWriteCompletionTimeMs"] = (
+                    safe_audio_quality_chunk.get("wave_write_completion_time_ms")
+                )
+                diagnostics["write_latency_ms"] = safe_audio_quality_chunk.get(
+                    "write_latency_ms",
+                    0,
+                )
+                diagnostics["chunk_queue_depth"] = safe_audio_quality_chunk.get(
+                    "chunk_queue_depth",
+                    0,
+                )
+                diagnostics["playback_buffer_duration_queued_ms"] = (
+                    safe_audio_quality_chunk.get(
+                        "playback_buffer_duration_queued_ms",
+                        0,
+                    )
+                )
+            waveout_write = publish_context.get("waveout_write")
+            if isinstance(waveout_write, dict):
+                diagnostics["waveout_write"] = {
+                    **dict(waveout_write),
+                    "raw_audio_present": False,
+                }
             self._publish(
                 VoiceEventType.PCM_SUBMITTED_TO_PLAYBACK,
                 message="Voice PCM submitted to playback.",
@@ -13595,6 +13784,27 @@ class VoiceService:
                 "sample_rate_hz": stimulus.sample_rate_hz,
                 "channels": stimulus.channels,
                 "sample_width_bytes": stimulus.sample_width_bytes,
+                "sample_rate": stimulus.sample_rate_hz,
+                "streaming_jitter_buffer_ms": int(
+                    getattr(self.config.playback, "streaming_jitter_buffer_ms", 120)
+                    or 120
+                ),
+                "streaming_min_buffer_ms": int(
+                    getattr(self.config.playback, "streaming_min_buffer_ms", 80)
+                    or 80
+                ),
+                "streaming_max_buffer_ms": int(
+                    getattr(self.config.playback, "streaming_max_buffer_ms", 400)
+                    or 400
+                ),
+                "streaming_underrun_recovery": str(
+                    getattr(
+                        self.config.playback,
+                        "streaming_underrun_recovery",
+                        "hold_or_silence",
+                    )
+                    or "hold_or_silence"
+                ),
                 "raw_audio_present": False,
             },
         )
@@ -13678,11 +13888,29 @@ class VoiceService:
                 "channels": stimulus.channels,
                 "sample_width_bytes": stimulus.sample_width_bytes,
             }
-            self._publish_pcm_submit_visual_probe(chunk, publish_context=publish_context)
             chunk_result = feed_operation(
                 live_session.playback_stream_id,
                 chunk,
                 chunk_index=chunks_sent,
+            )
+            self._publish_pcm_submit_visual_probe(
+                chunk,
+                publish_context={
+                    **publish_context,
+                    "playback_audio_quality": chunk_result.metadata.get(
+                        "audio_quality"
+                    )
+                    if isinstance(chunk_result.metadata, dict)
+                    else None,
+                    "playback_audio_quality_chunk": chunk_result.metadata.get(
+                        "audio_quality_chunk"
+                    )
+                    if isinstance(chunk_result.metadata, dict)
+                    else None,
+                    "waveout_write": chunk_result.metadata.get("waveout_write")
+                    if isinstance(chunk_result.metadata, dict)
+                    else None,
+                },
             )
             bytes_sent += len(chunk)
             chunks_sent += 1
@@ -13871,6 +14099,11 @@ class VoiceService:
                         getattr(visual_meter_config, "max_startup_wait_ms", 800)
                         if visual_meter_config is not None
                         else 800
+                    ),
+                    visual_offset_ms=int(
+                        getattr(visual_meter_config, "visual_offset_ms", 0)
+                        if visual_meter_config is not None
+                        else 0
                     ),
                 )
                 meter.start_playback(start_monotonic=time.perf_counter())
@@ -14557,6 +14790,15 @@ class VoiceService:
         playback_time_ms = None
         if envelope_frame is not None and hasattr(envelope_frame, "playback_position_ms"):
             playback_time_ms = getattr(envelope_frame, "playback_position_ms", None)
+        meter_sample_time_ms = playback_time_ms
+        if envelope_frame is not None and hasattr(envelope_frame, "sample_time_ms"):
+            meter_sample_time_ms = getattr(envelope_frame, "sample_time_ms", playback_time_ms)
+        visual_offset_ms = 0
+        if envelope_frame is not None and hasattr(envelope_frame, "visual_offset_ms"):
+            try:
+                visual_offset_ms = int(getattr(envelope_frame, "visual_offset_ms") or 0)
+            except (TypeError, ValueError):
+                visual_offset_ms = 0
         playback_envelope_fields = self._playback_envelope_snapshot_fields(
             self._current_playback_envelope_payload(playback_time_ms=playback_time_ms)
         )
@@ -14593,11 +14835,14 @@ class VoiceService:
         meter_diagnostic_fields = {
             "meter_time_ms": meter_monotonic_time_ms,
             "meter_wall_time_ms": meter_wall_time_ms,
-            "meter_sample_time_ms": playback_time_ms,
+            "meter_sample_time_ms": meter_sample_time_ms,
+            "meter_playback_clock_position_ms": playback_time_ms,
             "payload_time_ms": meter_monotonic_time_ms,
             "payload_wall_time_ms": meter_wall_time_ms,
-            "payload_sample_time_ms": playback_time_ms,
+            "payload_sample_time_ms": meter_sample_time_ms,
+            "payload_playback_clock_position_ms": playback_time_ms,
             "payload_latency_from_meter_ms": 0.0,
+            "voice_visual_offset_ms": int(visual_offset_ms),
             "emit_rate_hz": visualizer_status.get("visualizer_emit_rate_hz", 0.0),
             "dropped_sample_count": visualizer_status.get(
                 "visualizer_updates_dropped", 0

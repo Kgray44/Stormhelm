@@ -58,6 +58,8 @@ diagnostic_disable_during_speech = false
 [ui.stormforge.voice_diagnostics]
 anchor_visualizer_mode = "auto"
 anchor_renderer = "legacy_blob_reference"
+qsg_visual_approval = "pending"
+qsg_visual_approval_reason = ""
 
 [event_stream]
 enabled = true
@@ -413,6 +415,10 @@ streaming_min_preroll_chunks = 2
 streaming_min_preroll_bytes = 0
 streaming_max_preroll_wait_ms = 1200
 playback_stable_after_ms = 180
+streaming_jitter_buffer_ms = 120
+streaming_min_buffer_ms = 80
+streaming_max_buffer_ms = 400
+streaming_underrun_recovery = "hold_or_silence"
 max_audio_bytes = 10000000
 max_duration_ms = 120000
 delete_transient_after_playback = true

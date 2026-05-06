@@ -160,3 +160,29 @@ def test_pcm_stream_meter_payload_never_exposes_raw_audio() -> None:
     assert "20000" not in serialized
     assert "audio_bytes" not in serialized
     assert "data': b" not in serialized
+
+
+def test_pcm_stream_meter_visual_offset_samples_future_audio_without_shifting_clock() -> None:
+    meter = VoiceVisualMeter(
+        playback_id="offset",
+        update_hz=60,
+        visual_offset_ms=-120,
+        attack_ms=1,
+        release_ms=1,
+        gain=2.0,
+    )
+    meter.feed_pcm(_pcm_constant(0, samples=2400) + _pcm_constant(18_000, samples=4800))
+    meter.start_playback(start_monotonic=0.0)
+
+    frame = meter.sample_due(now_monotonic=0.0)
+
+    assert frame is not None
+    assert frame.playback_position_ms == 0
+    assert frame.playback_clock_position_ms == 0
+    assert frame.sample_time_ms == 120
+    assert frame.visual_offset_ms == -120
+    assert frame.energy > 0.50
+    payload = frame.to_payload()
+    assert payload["voice_visual_offset_ms"] == -120
+    assert payload["voice_visual_sample_time_ms"] == 120
+    assert payload["voice_visual_playback_clock_position_ms"] == 0

@@ -52,6 +52,7 @@ Item {
     readonly property alias rawDerivedVisualState: anchorCore.rawDerivedVisualState
     readonly property alias latchedVisualState: anchorCore.latchedVisualState
     readonly property alias stateLatchReason: anchorCore.stateLatchReason
+    readonly property alias latchBugReason: anchorCore.latchBugReason
     readonly property alias rawSpeakingActive: anchorCore.rawSpeakingActive
     readonly property alias visualSpeakingActive: anchorCore.visualSpeakingActive
     readonly property alias speakingLatched: anchorCore.speakingLatched
@@ -174,6 +175,18 @@ Item {
     readonly property alias qmlAnchorReactiveChainVersion: anchorCore.qmlAnchorReactiveChainVersion
     readonly property alias targetVoiceVisualEnergy: anchorCore.targetVoiceVisualEnergy
     readonly property alias smoothedVoiceVisualEnergy: anchorCore.smoothedVoiceVisualEnergy
+    readonly property alias speakingEnergyAttackVersion: anchorCore.speakingEnergyAttackVersion
+    readonly property alias startupLimiterActive: anchorCore.startupLimiterActive
+    readonly property alias startupBoostActive: anchorCore.startupBoostActive
+    readonly property alias startupBoostAmount: anchorCore.startupBoostAmount
+    readonly property alias earlySpeechOvershootDetected: anchorCore.earlySpeechOvershootDetected
+    readonly property alias lateSpeechCompressionDetected: anchorCore.lateSpeechCompressionDetected
+    readonly property alias speakingDynamicsPhase: anchorCore.speakingDynamicsPhase
+    readonly property alias speakingDynamicsConfidence: anchorCore.speakingDynamicsConfidence
+    readonly property alias energyRecentMin: anchorCore.energyRecentMin
+    readonly property alias energyRecentMax: anchorCore.energyRecentMax
+    readonly property alias energyDynamicRange: anchorCore.energyDynamicRange
+    readonly property alias adaptiveGain: anchorCore.adaptiveGain
     readonly property alias finalSpeakingEnergyGain: anchorCore.finalSpeakingEnergyGain
     readonly property alias finalSpeakingEnergyClampReason: anchorCore.finalSpeakingEnergyClampReason
     readonly property alias finalEnergyCompressionRatio: anchorCore.finalEnergyCompressionRatio

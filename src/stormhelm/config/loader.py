@@ -257,6 +257,18 @@ def _build_app_config(
                     ),
                 )
             ),
+            qsg_visual_approval=str(
+                ui_stormforge_voice_diagnostics_data.get(
+                    "qsg_visual_approval",
+                    "pending",
+                )
+            ),
+            qsg_visual_approval_reason=str(
+                ui_stormforge_voice_diagnostics_data.get(
+                    "qsg_visual_approval_reason",
+                    "",
+                )
+            ),
         ),
     )
 
@@ -1097,6 +1109,22 @@ def _build_app_config(
             playback_stable_after_ms=int(
                 voice_playback_data.get("playback_stable_after_ms", 180)
             ),
+            streaming_jitter_buffer_ms=int(
+                voice_playback_data.get("streaming_jitter_buffer_ms", 120)
+            ),
+            streaming_min_buffer_ms=int(
+                voice_playback_data.get("streaming_min_buffer_ms", 80)
+            ),
+            streaming_max_buffer_ms=int(
+                voice_playback_data.get("streaming_max_buffer_ms", 400)
+            ),
+            streaming_underrun_recovery=str(
+                voice_playback_data.get(
+                    "streaming_underrun_recovery",
+                    "hold_or_silence",
+                )
+            ).strip()
+            or "hold_or_silence",
             max_audio_bytes=int(voice_playback_data.get("max_audio_bytes", 10_000_000)),
             max_duration_ms=int(voice_playback_data.get("max_duration_ms", 120_000)),
             delete_transient_after_playback=bool(
@@ -1481,6 +1509,14 @@ def _apply_env_overrides(data: ConfigDict, env: Mapping[str, str]) -> ConfigDict
             "ui.stormforge.voice_diagnostics.anchor_renderer",
             str,
         ),
+        "STORMHELM_STORMFORGE_QSG_VISUAL_APPROVAL": (
+            "ui.stormforge.voice_diagnostics.qsg_visual_approval",
+            str,
+        ),
+        "STORMHELM_STORMFORGE_QSG_VISUAL_APPROVAL_REASON": (
+            "ui.stormforge.voice_diagnostics.qsg_visual_approval_reason",
+            str,
+        ),
         "STORMHELM_MAX_CONCURRENT_JOBS": ("concurrency.max_workers", int),
         "STORMHELM_DEFAULT_JOB_TIMEOUT_SECONDS": (
             "concurrency.default_job_timeout_seconds",
@@ -1737,6 +1773,22 @@ def _apply_env_overrides(data: ConfigDict, env: Mapping[str, str]) -> ConfigDict
         "STORMHELM_VOICE_PLAYBACK_STABLE_AFTER_MS": (
             "voice.playback.playback_stable_after_ms",
             int,
+        ),
+        "STORMHELM_VOICE_PLAYBACK_STREAMING_JITTER_BUFFER_MS": (
+            "voice.playback.streaming_jitter_buffer_ms",
+            int,
+        ),
+        "STORMHELM_VOICE_PLAYBACK_STREAMING_MIN_BUFFER_MS": (
+            "voice.playback.streaming_min_buffer_ms",
+            int,
+        ),
+        "STORMHELM_VOICE_PLAYBACK_STREAMING_MAX_BUFFER_MS": (
+            "voice.playback.streaming_max_buffer_ms",
+            int,
+        ),
+        "STORMHELM_VOICE_PLAYBACK_STREAMING_UNDERRUN_RECOVERY": (
+            "voice.playback.streaming_underrun_recovery",
+            str,
         ),
         "STORMHELM_VOICE_PLAYBACK_MAX_AUDIO_BYTES": (
             "voice.playback.max_audio_bytes",

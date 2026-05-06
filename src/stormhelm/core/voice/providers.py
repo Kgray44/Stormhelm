@@ -52,6 +52,8 @@ from stormhelm.core.voice.models import VoiceStreamingTTSResult
 from stormhelm.core.voice.models import VoiceTranscriptionResult
 from stormhelm.core.voice.models import VoiceVADSession
 from stormhelm.core.voice.models import VoiceWakeEvent
+from stormhelm.core.voice.audio_quality import PlaybackAudioQualityTracker
+from stormhelm.core.voice.audio_quality import safe_playback_buffer_policy
 from stormhelm.core.voice.visualizer import VoicePlaybackEnvelopeFollower
 from stormhelm.shared.time import utc_now_iso
 
@@ -2498,6 +2500,37 @@ class WindowsMCIPlaybackBackend:
                 request, "estimated_output_latency_ms", 80
             ),
         )
+        buffer_policy = safe_playback_buffer_policy(
+            jitter_buffer_ms=self._stream_int_metadata(
+                request, "streaming_jitter_buffer_ms", 120
+            ),
+            min_buffer_ms=self._stream_int_metadata(
+                request, "streaming_min_buffer_ms", 80
+            ),
+            max_buffer_ms=self._stream_int_metadata(
+                request, "streaming_max_buffer_ms", 400
+            ),
+            underrun_recovery=str(
+                request.metadata.get("streaming_underrun_recovery")
+                or "hold_or_silence"
+            ),
+        )
+        audio_quality_tracker = PlaybackAudioQualityTracker(
+            playback_id=request.playback_stream_id,
+            speech_request_id=request.speech_request_id,
+            tts_request_id=request.tts_stream_id,
+            expected_sample_rate_hz=sample_rate,
+            expected_channels=channels,
+            expected_sample_width_bytes=sample_width,
+            streaming_jitter_buffer_ms=int(
+                buffer_policy["streaming_jitter_buffer_ms"]
+            ),
+            streaming_min_buffer_ms=int(buffer_policy["streaming_min_buffer_ms"]),
+            streaming_max_buffer_ms=int(buffer_policy["streaming_max_buffer_ms"]),
+            streaming_underrun_recovery=str(
+                buffer_policy["streaming_underrun_recovery"]
+            ),
+        )
         handle = {
             "wave_out": wave_out,
             "buffers": [],
@@ -2506,6 +2539,13 @@ class WindowsMCIPlaybackBackend:
             "channels": channels,
             "sample_width_bytes": sample_width,
             "playback_envelope_follower": envelope_follower,
+            "audio_quality_tracker": audio_quality_tracker,
+            "audio_quality": audio_quality_tracker.summary(),
+            "buffer_policy": buffer_policy,
+            "partial_frame_bytes": b"",
+            "pending_preroll_bytes": bytearray(),
+            "pending_preroll_duration_ms": 0.0,
+            "streaming_started": False,
             "chunk_count": 0,
             "bytes_received": 0,
             "first_chunk_received_at": None,
@@ -2526,6 +2566,8 @@ class WindowsMCIPlaybackBackend:
             "sample_rate": sample_rate,
             "channels": channels,
             "sample_width_bytes": sample_width,
+            "buffer_policy": buffer_policy,
+            "audio_quality": audio_quality_tracker.summary(),
             "playback_envelope": envelope_follower.to_bridge_payload(max_samples=0),
             "audible_playback": False,
             "playback_preroll_active": initial_status == "prerolling",
@@ -2554,16 +2596,73 @@ class WindowsMCIPlaybackBackend:
             }
         if not payload:
             envelope_payload = self._handle_playback_envelope_payload(handle)
+            audio_quality_payload = self._handle_audio_quality_payload(handle)
             return {
                 "ok": True,
                 "status": "playing",
                 "chunk_index": chunk_index or int(handle.get("chunk_count") or 0),
                 "playback_started": bool(handle.get("audible_playback")),
                 "playback_envelope": envelope_payload,
+                "audio_quality": audio_quality_payload,
                 "raw_audio_present": False,
             }
+        aligned_payload = self._aligned_stream_payload(handle, payload)
+        if not aligned_payload:
+            return {
+                "ok": True,
+                "status": "prerolling"
+                if not bool(handle.get("streaming_started"))
+                else "playing",
+                "chunk_index": chunk_index or int(handle.get("chunk_count") or 0),
+                "playback_started": bool(handle.get("audible_playback")),
+                "audible_playback": bool(handle.get("audible_playback")),
+                "playback_envelope": self._handle_playback_envelope_payload(handle),
+                "audio_quality": self._handle_audio_quality_payload(handle),
+                "pcm_frame_alignment_buffered": True,
+                "raw_audio_present": False,
+            }
+        if not bool(handle.get("streaming_started")):
+            pending = handle.get("pending_preroll_bytes")
+            if not isinstance(pending, bytearray):
+                pending = bytearray()
+                handle["pending_preroll_bytes"] = pending
+            pending.extend(aligned_payload)
+            handle["pending_preroll_duration_ms"] = self._payload_duration_ms(
+                handle,
+                len(pending),
+            )
+            min_buffer_ms = int(
+                (handle.get("buffer_policy") or {}).get("streaming_min_buffer_ms")
+                or 0
+            )
+            if float(handle.get("pending_preroll_duration_ms") or 0.0) < float(
+                min_buffer_ms
+            ):
+                return {
+                    "ok": True,
+                    "status": "prerolling",
+                    "chunk_index": chunk_index or int(handle.get("chunk_count") or 0),
+                    "playback_started": False,
+                    "audible_playback": False,
+                    "playback_preroll_active": True,
+                    "jitter_buffer_queued_ms": round(
+                        float(handle.get("pending_preroll_duration_ms") or 0.0),
+                        3,
+                    ),
+                    "audio_quality": self._handle_audio_quality_payload(handle),
+                    "playback_envelope": self._handle_playback_envelope_payload(handle),
+                    "raw_audio_present": False,
+                }
+            aligned_payload = bytes(pending)
+            pending.clear()
+            handle["pending_preroll_duration_ms"] = 0.0
+            handle["streaming_started"] = True
         try:
-            self._waveout_write(handle, payload)
+            return self._submit_stream_payload(
+                handle,
+                aligned_payload,
+                chunk_index=chunk_index,
+            )
         except Exception as error:
             return {
                 "ok": False,
@@ -2572,8 +2671,45 @@ class WindowsMCIPlaybackBackend:
                 "error_code": "local_speaker_stream_chunk_failed",
                 "error_message": str(error),
                 "playback_envelope": self._handle_playback_envelope_payload(handle),
+                "audio_quality": self._handle_audio_quality_payload(handle),
                 "raw_audio_present": False,
             }
+
+    def _submit_stream_payload(
+        self,
+        handle: dict[str, Any],
+        payload: bytes,
+        *,
+        chunk_index: int | None,
+    ) -> dict[str, Any]:
+        queue_before = self._waveout_buffer_stats(handle)
+        write_metrics = self._waveout_write(handle, payload)
+        queue_after = self._waveout_buffer_stats(handle)
+        audio_quality_chunk: dict[str, Any] = {}
+        audio_quality_payload: dict[str, Any] | None = None
+        tracker = handle.get("audio_quality_tracker")
+        if isinstance(tracker, PlaybackAudioQualityTracker):
+            audio_quality_chunk = tracker.analyze_chunk(
+                payload,
+                chunk_index=chunk_index,
+                submit_time_ms=write_metrics.get("wave_write_submit_time_ms"),
+                actual_sample_rate_hz=int(handle.get("sample_rate") or 24000),
+                actual_channels=int(handle.get("channels") or 1),
+                actual_sample_width_bytes=int(handle.get("sample_width_bytes") or 2),
+                queue_depth_before=queue_before.get("queue_depth"),
+                queue_depth_after=queue_after.get("queue_depth"),
+                queued_duration_ms_before=queue_before.get("queued_duration_ms"),
+                queued_duration_ms_after=queue_after.get("queued_duration_ms"),
+                wave_write_submit_time_ms=write_metrics.get(
+                    "wave_write_submit_time_ms"
+                ),
+                wave_write_complete_time_ms=write_metrics.get(
+                    "wave_write_completion_time_ms"
+                ),
+            )
+            audio_quality_payload = tracker.summary()
+            handle["last_audio_quality_chunk"] = audio_quality_chunk
+            handle["audio_quality"] = audio_quality_payload
         follower = handle.get("playback_envelope_follower")
         if isinstance(follower, VoicePlaybackEnvelopeFollower):
             follower.feed_pcm(
@@ -2589,6 +2725,7 @@ class WindowsMCIPlaybackBackend:
         handle["chunk_count"] = int(handle.get("chunk_count") or 0) + 1
         handle["bytes_received"] = int(handle.get("bytes_received") or 0) + len(payload)
         handle["audible_playback"] = True
+        handle["streaming_started"] = True
         return {
             "ok": True,
             "status": "playing",
@@ -2601,6 +2738,10 @@ class WindowsMCIPlaybackBackend:
             "audible_playback": True,
             "user_heard_claimed": True,
             "playback_envelope": envelope_payload,
+            "audio_quality": audio_quality_payload,
+            "audio_quality_chunk": audio_quality_chunk,
+            "waveout_write": write_metrics,
+            "jitter_buffer_queued_ms": 0.0,
             "raw_audio_present": False,
         }
 
@@ -2616,6 +2757,16 @@ class WindowsMCIPlaybackBackend:
             }
         error: str | None = None
         try:
+            pending = handle.get("pending_preroll_bytes")
+            if isinstance(pending, bytearray) and pending:
+                handle["streaming_started"] = True
+                self._submit_stream_payload(
+                    handle,
+                    bytes(pending),
+                    chunk_index=None,
+                )
+                pending.clear()
+                handle["pending_preroll_duration_ms"] = 0.0
             self._waveout_wait_and_close(handle)
         except Exception as exc:
             error = str(exc)
@@ -2633,6 +2784,7 @@ class WindowsMCIPlaybackBackend:
             "audible_playback": heard,
             "user_heard_claimed": heard,
             "playback_envelope": self._handle_playback_envelope_payload(handle),
+            "audio_quality": self._handle_audio_quality_payload(handle),
             "raw_audio_present": False,
         }
 
@@ -2664,6 +2816,7 @@ class WindowsMCIPlaybackBackend:
         first_chunk_received_at = None
         playback_started_at = None
         envelope_payload: dict[str, Any] | None = None
+        audio_quality_payload: dict[str, Any] | None = None
         for handle in handles.values():
             heard = heard or bool(handle.get("audible_playback") and handle.get("chunk_count"))
             chunk_count += int(handle.get("chunk_count") or 0)
@@ -2671,6 +2824,7 @@ class WindowsMCIPlaybackBackend:
             first_chunk_received_at = first_chunk_received_at or handle.get("first_chunk_received_at")
             playback_started_at = playback_started_at or handle.get("playback_started_at")
             envelope_payload = envelope_payload or self._handle_playback_envelope_payload(handle)
+            audio_quality_payload = self._handle_audio_quality_payload(handle)
             try:
                 self._waveout_reset_and_close(handle)
             except Exception:
@@ -2685,6 +2839,7 @@ class WindowsMCIPlaybackBackend:
             "audible_playback": heard,
             "user_heard_claimed": heard,
             "playback_envelope": envelope_payload,
+            "audio_quality": audio_quality_payload,
             "raw_audio_present": False,
         }
 
@@ -2722,6 +2877,43 @@ class WindowsMCIPlaybackBackend:
                 max_samples=max_samples,
                 playback_time_ms=playback_time_ms,
             )
+        return None
+
+    def _stream_frame_width(self, handle: dict[str, Any]) -> int:
+        channels = int(handle.get("channels") or 1)
+        sample_width = int(handle.get("sample_width_bytes") or 2)
+        return max(1, channels * sample_width)
+
+    def _payload_duration_ms(self, handle: dict[str, Any], byte_length: int) -> float:
+        sample_rate = int(handle.get("sample_rate") or 24000)
+        frame_width = self._stream_frame_width(handle)
+        frames = max(0, int(byte_length) // frame_width)
+        return (frames * 1000.0) / float(max(1, sample_rate))
+
+    def _aligned_stream_payload(
+        self,
+        handle: dict[str, Any],
+        payload: bytes,
+    ) -> bytes:
+        frame_width = self._stream_frame_width(handle)
+        partial = bytes(handle.get("partial_frame_bytes") or b"")
+        combined = partial + bytes(payload or b"")
+        usable_length = len(combined) - (len(combined) % frame_width)
+        handle["partial_frame_bytes"] = combined[usable_length:]
+        return combined[:usable_length]
+
+    def _handle_audio_quality_payload(
+        self,
+        handle: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(handle, dict):
+            return None
+        payload = handle.get("audio_quality")
+        if isinstance(payload, dict):
+            return {**payload, "raw_audio_present": False}
+        tracker = handle.get("audio_quality_tracker")
+        if isinstance(tracker, PlaybackAudioQualityTracker):
+            return tracker.summary()
         return None
 
     def _unsupported_playback_envelope_payload(
@@ -2877,7 +3069,33 @@ class WindowsMCIPlaybackBackend:
         packed = (volume & 0xFFFF) | ((volume & 0xFFFF) << 16)
         ctypes.windll.winmm.waveOutSetVolume(wave_out, packed)
 
-    def _waveout_write(self, handle: dict[str, Any], payload: bytes) -> None:
+    def _waveout_buffer_stats(self, handle: dict[str, Any]) -> dict[str, Any]:
+        buffers = list(handle.get("buffers") or [])
+        sample_rate = int(handle.get("sample_rate") or 24000)
+        channels = int(handle.get("channels") or 1)
+        sample_width = int(handle.get("sample_width_bytes") or 2)
+        bytes_per_second = max(1, sample_rate * channels * sample_width)
+        pending_bytes = 0
+        pending_count = 0
+        completed_count = 0
+        for item in buffers:
+            header = item[0]
+            done = bool(getattr(header, "dwFlags", 0) & 0x00000001)
+            length = int(item[2]) if len(item) > 2 else int(getattr(header, "dwBufferLength", 0) or 0)
+            if done:
+                completed_count += 1
+            else:
+                pending_count += 1
+                pending_bytes += max(0, length)
+        return {
+            "queue_depth": pending_count,
+            "completed_buffer_count": completed_count,
+            "queued_duration_ms": round((pending_bytes * 1000.0) / bytes_per_second, 3),
+            "pending_bytes": pending_bytes,
+            "raw_audio_present": False,
+        }
+
+    def _waveout_write(self, handle: dict[str, Any], payload: bytes) -> dict[str, Any]:
         import ctypes
         from ctypes import wintypes
 
@@ -2898,6 +3116,7 @@ class WindowsMCIPlaybackBackend:
         header.lpData = ctypes.cast(buffer, ctypes.c_void_p)
         header.dwBufferLength = len(payload)
         wave_out = handle["wave_out"]
+        submit_ms = time.perf_counter() * 1000.0
         prepare = ctypes.windll.winmm.waveOutPrepareHeader(
             wave_out,
             ctypes.byref(header),
@@ -2910,6 +3129,7 @@ class WindowsMCIPlaybackBackend:
             ctypes.byref(header),
             ctypes.sizeof(header),
         )
+        completion_ms = time.perf_counter() * 1000.0
         if write:
             try:
                 ctypes.windll.winmm.waveOutUnprepareHeader(
@@ -2920,12 +3140,18 @@ class WindowsMCIPlaybackBackend:
             except Exception:
                 pass
             raise RuntimeError(self._winmm_error(write))
-        handle["buffers"].append((header, buffer))
+        handle["buffers"].append((header, buffer, len(payload), submit_ms))
+        return {
+            "wave_write_submit_time_ms": round(submit_ms, 3),
+            "wave_write_completion_time_ms": round(completion_ms, 3),
+            "write_latency_ms": round(max(0.0, completion_ms - submit_ms), 3),
+            "raw_audio_present": False,
+        }
 
     def _waveout_wait_and_close(self, handle: dict[str, Any]) -> None:
         deadline = time.perf_counter() + 10.0
         while time.perf_counter() < deadline:
-            if all(header.dwFlags & 0x00000001 for header, _ in handle["buffers"]):
+            if all(item[0].dwFlags & 0x00000001 for item in handle["buffers"]):
                 break
             time.sleep(0.01)
         self._waveout_reset_and_close(handle, reset=False)
@@ -2946,7 +3172,8 @@ class WindowsMCIPlaybackBackend:
                 ctypes.windll.winmm.waveOutReset(wave_out)
             except Exception:
                 pass
-        for header, _buffer in list(handle.get("buffers") or []):
+        for item in list(handle.get("buffers") or []):
+            header = item[0]
             try:
                 ctypes.windll.winmm.waveOutUnprepareHeader(
                     wave_out,
@@ -3279,6 +3506,8 @@ class LocalPlaybackProvider:
                 "backend": payload.get("backend") or availability.get("backend"),
                 "streaming_supported": bool(payload.get("streaming_supported")),
                 "playback_envelope": payload.get("playback_envelope"),
+                "buffer_policy": payload.get("buffer_policy"),
+                "audio_quality": payload.get("audio_quality"),
                 "audible_playback": bool(payload.get("audible_playback")),
                 "playback_preroll_active": initial_status == "prerolling",
                 "user_heard_claimed": False,
@@ -3352,6 +3581,9 @@ class LocalPlaybackProvider:
                 "audible_playback": bool(result.get("audible_playback")),
                 "user_heard_claimed": bool(result.get("user_heard_claimed")),
                 "playback_envelope": result.get("playback_envelope"),
+                "audio_quality": result.get("audio_quality"),
+                "audio_quality_chunk": result.get("audio_quality_chunk"),
+                "waveout_write": result.get("waveout_write"),
             },
         )
         with self._lock:
@@ -3374,6 +3606,12 @@ class LocalPlaybackProvider:
                         ),
                         "playback_envelope": result.get("playback_envelope")
                         or active_stream.metadata.get("playback_envelope"),
+                        "audio_quality": result.get("audio_quality")
+                        or active_stream.metadata.get("audio_quality"),
+                        "audio_quality_chunk": result.get("audio_quality_chunk")
+                        or active_stream.metadata.get("audio_quality_chunk"),
+                        "waveout_write": result.get("waveout_write")
+                        or active_stream.metadata.get("waveout_write"),
                         "playback_preroll_active": False,
                         "user_heard_claimed": bool(
                             active_stream.metadata.get("user_heard_claimed")
@@ -3401,6 +3639,12 @@ class LocalPlaybackProvider:
                             or dict(self._active_playback.output_metadata).get(
                                 "playback_envelope"
                             ),
+                            "audio_quality": result.get("audio_quality")
+                            or dict(self._active_playback.output_metadata).get(
+                                "audio_quality"
+                            ),
+                            "audio_quality_chunk": result.get("audio_quality_chunk"),
+                            "waveout_write": result.get("waveout_write"),
                             "playback_preroll_active": False,
                             "user_heard_claimed": bool(result.get("user_heard_claimed")),
                             "raw_audio_present": False,

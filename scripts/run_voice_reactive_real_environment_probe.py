@@ -614,6 +614,41 @@ def _build_timelines(
             {
                 "time_ms": round(rel_time, 3),
                 "pcm_energy": pcm.get("voice_visual_energy", ""),
+                "audio_quality_status": pcm.get("audio_quality_status", ""),
+                "playback_artifact_reasons_text": pcm.get(
+                    "playback_artifact_reasons_text",
+                    "",
+                ),
+                "playback_artifact_suspected": pcm.get(
+                    "playback_artifact_suspected",
+                    "",
+                ),
+                "underrun_count": pcm.get("underrun_count", ""),
+                "chunk_gap_count": pcm.get("chunk_gap_count", ""),
+                "chunk_gap_audio_risk_count": pcm.get(
+                    "chunk_gap_audio_risk_count",
+                    "",
+                ),
+                "max_chunk_gap_ms": pcm.get("max_chunk_gap_ms", ""),
+                "late_write_count": pcm.get("late_write_count", ""),
+                "dropped_chunk_count": pcm.get("dropped_chunk_count", ""),
+                "duplicate_chunk_count": pcm.get("duplicate_chunk_count", ""),
+                "out_of_order_chunk_count": pcm.get("out_of_order_chunk_count", ""),
+                "sample_rate_mismatch_flag": pcm.get("sample_rate_mismatch_flag", ""),
+                "format_mismatch_flag": pcm.get("format_mismatch_flag", ""),
+                "chunk_boundary_discontinuity_count": pcm.get(
+                    "chunk_boundary_discontinuity_count",
+                    "",
+                ),
+                "clipping_count": pcm.get("clipping_count", ""),
+                "stream_reset_count": pcm.get("stream_reset_count", ""),
+                "audio_chunk_duration_ms": pcm.get("audio_chunk_duration_ms", ""),
+                "audio_chunk_byte_length": pcm.get("audio_chunk_byte_length", ""),
+                "chunk_queue_depth": pcm.get("chunk_queue_depth", ""),
+                "playback_buffer_duration_queued_ms": pcm.get(
+                    "playback_buffer_duration_queued_ms",
+                    "",
+                ),
                 "meter_energy": payload.get("voice_visual_energy", ""),
                 "payload_energy": payload.get("voice_visual_energy", ""),
                 "bridge_energy": qml.get("bridge_voice_visual_energy", ""),
@@ -669,6 +704,7 @@ def _build_timelines(
                 "playbackIdMismatchIgnoredCount": qml.get(
                     "playbackIdMismatchIgnoredCount", ""
                 ),
+                "anchorSpeakingVisualActive": qml.get("anchorSpeakingVisualActive", ""),
                 "currentAnchorPlaybackId": qml.get("currentAnchorPlaybackId", ""),
                 "lastAnchorPlaybackId": qml.get("lastAnchorPlaybackId", ""),
                 "anchorPlaybackIdSwitchCount": qml.get("anchorPlaybackIdSwitchCount", ""),
@@ -686,6 +722,38 @@ def _build_timelines(
                 "voiceVisualActiveFlapCount": qml.get(
                     "voiceVisualActiveFlapCount", ""
                 ),
+                "targetVoiceVisualEnergy": qml.get("targetVoiceVisualEnergy", ""),
+                "voiceVisualEnergy": qml.get("voiceVisualEnergy", ""),
+                "voiceVisualTargetAgeMs": qml.get("voiceVisualTargetAgeMs", ""),
+                "speakingEnergyAttackVersion": qml.get(
+                    "speakingEnergyAttackVersion",
+                    "",
+                ),
+                "energyRecentMin": qml.get("energyRecentMin", ""),
+                "energyRecentMax": qml.get("energyRecentMax", ""),
+                "energyDynamicRange": qml.get("energyDynamicRange", ""),
+                "adaptiveGain": qml.get("adaptiveGain", ""),
+                "startupBoostActive": qml.get("startupBoostActive", ""),
+                "startupBoostAmount": qml.get("startupBoostAmount", ""),
+                "startupLimiterActive": qml.get("startupLimiterActive", ""),
+                "earlySpeechOvershootDetected": qml.get(
+                    "earlySpeechOvershootDetected",
+                    "",
+                ),
+                "lateSpeechCompressionDetected": qml.get(
+                    "lateSpeechCompressionDetected",
+                    "",
+                ),
+                "speakingDynamicsPhase": qml.get("speakingDynamicsPhase", ""),
+                "speakingDynamicsConfidence": qml.get(
+                    "speakingDynamicsConfidence",
+                    "",
+                ),
+                "anchorStaleEnergyReason": qml.get("anchorStaleEnergyReason", ""),
+                "stateLatchReason": qml.get("stateLatchReason", ""),
+                "latchBugReason": qml.get("latchBugReason", ""),
+                "speakingEnteredAtMs": qml.get("speakingStateEnteredAtMs", ""),
+                "speakingExitedAtMs": qml.get("anchorSpeakingExitedAtMs", ""),
                 "speaking_visual_active": qml.get("speaking_visual_active", ""),
                 "anchor_visual_state": qml.get("anchorCurrentVisualState", ""),
                 "playback_status": qml.get(

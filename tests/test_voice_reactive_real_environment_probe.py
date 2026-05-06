@@ -658,6 +658,9 @@ def test_audio_visual_sync_uses_stage_latency_when_direct_correlation_is_weak() 
     assert summary["sync_latency_basis"] == "stage_latency"
     assert summary["stage_latency_estimate_ms"] == pytest.approx(102.4)
     assert summary["sync_confidence"] == "medium"
+    assert summary["syncMeasurementConfidence"] == "medium"
+    assert summary["syncMeasurementRejectionReason"] == ""
+    assert summary["syncOffsetCandidateSafe"] is True
     assert summary["recommended_visual_offset_ms"] is None
     assert summary["visual_offset_recommendation_basis"] == "stage_latency_aligned_no_offset"
     assert summary["visual_offset_applied_ms"] == 0
@@ -750,6 +753,10 @@ def test_audio_visual_sync_marks_stage_latency_inconclusive_when_stage_timestamp
 
     assert summary["perceptual_sync_status"] == "inconclusive"
     assert summary["sync_confidence"] == "low"
+    assert summary["syncMeasurementConfidence"] == "inconclusive"
+    assert summary["syncMeasurementRejectionReason"] == "stage_latency_inconsistent"
+    assert summary["syncOffsetCandidateSafe"] is False
+    assert summary["syncOffsetCandidateRejectedReason"] == "stage_latency_inconsistent"
     assert summary["recommended_visual_offset_ms"] is None
     assert summary["sync_likely_cause"] == "stage_timestamp_alignment_inconsistent"
 
@@ -898,6 +905,168 @@ def test_real_environment_report_counts_mid_speech_state_glitches() -> None:
     assert stability["anchorStatusGlitchDetected"] is True
     assert "## Speaking State Stability" in markdown
     assert "midSpeechAnchorIdleRows" in markdown
+
+
+def test_ar12_stale_authoritative_rows_do_not_count_as_anchor_latch_bug() -> None:
+    rows = [
+        {
+            "time_ms": 0,
+            "pcm_energy": 0.5,
+            "meter_energy": 0.5,
+            "qml_received_energy": 0.5,
+            "authoritativeVoiceVisualActive": True,
+            "authoritativeVoiceVisualEnergy": 0.5,
+            "authoritativePlaybackStatus": "playing",
+            "voiceVisualTargetAgeMs": 20,
+            "targetVoiceVisualEnergy": 0.5,
+            "anchorStaleEnergyReason": "",
+            "speaking_visual_active": True,
+            "anchor_visual_state": "speaking",
+            "finalSpeakingEnergy": 0.32,
+            "blobScaleDrive": 0.24,
+        },
+        {
+            "time_ms": 80,
+            "pcm_energy": 0.0,
+            "meter_energy": 0.0,
+            "qml_received_energy": 0.5,
+            "authoritativeVoiceVisualActive": True,
+            "authoritativeVoiceVisualEnergy": 0.5,
+            "authoritativePlaybackStatus": "playing",
+            "voiceVisualTargetAgeMs": 1220,
+            "targetVoiceVisualEnergy": 0.0,
+            "anchorStaleEnergyReason": "voice_visual_stale",
+            "speaking_visual_active": False,
+            "anchor_visual_state": "idle",
+            "finalSpeakingEnergy": 0.0,
+            "blobScaleDrive": 0.0,
+            "stateLatchReason": "voice_visual_release",
+        },
+        {
+            "time_ms": 120,
+            "pcm_energy": 0.0,
+            "meter_energy": 0.0,
+            "qml_received_energy": 0.0,
+            "authoritativeVoiceVisualActive": False,
+            "authoritativePlaybackStatus": "completed",
+            "speaking_visual_active": False,
+            "anchor_visual_state": "idle",
+            "finalSpeakingEnergy": 0.0,
+            "blobScaleDrive": 0.0,
+        },
+    ]
+
+    report = summarize_real_environment_chain(
+        playback_id="ar12-stale-after-completion",
+        spoken_stimulus_valid=True,
+        timeline_rows=rows,
+        process_state={},
+        speaking_lifetime={},
+        paint_count=2,
+    )
+
+    stability = report["speaking_state_stability"]
+    assert stability["staleVoiceVisualActiveRows"] == 1
+    assert stability["staleAuthoritativeRowsIgnoredForLatch"] == 1
+    assert stability["midSpeechAnchorIdleRows"] == 0
+    assert stability["anchorStatusGlitchDetected"] is False
+    assert stability["latchBugReason"] == "stale_authoritative_rows_ignored"
+
+
+def test_ar12_fresh_active_anchor_idle_still_counts_as_latch_bug() -> None:
+    rows = [
+        {
+            "time_ms": 0,
+            "pcm_energy": 0.4,
+            "meter_energy": 0.4,
+            "qml_received_energy": 0.4,
+            "authoritativeVoiceVisualActive": True,
+            "authoritativeVoiceVisualEnergy": 0.4,
+            "authoritativePlaybackStatus": "playing",
+            "voiceVisualTargetAgeMs": 10,
+            "targetVoiceVisualEnergy": 0.4,
+            "speaking_visual_active": True,
+            "anchor_visual_state": "speaking",
+            "finalSpeakingEnergy": 0.25,
+            "blobScaleDrive": 0.18,
+        },
+        {
+            "time_ms": 40,
+            "pcm_energy": 0.5,
+            "meter_energy": 0.5,
+            "qml_received_energy": 0.5,
+            "authoritativeVoiceVisualActive": True,
+            "authoritativeVoiceVisualEnergy": 0.5,
+            "authoritativePlaybackStatus": "playing",
+            "voiceVisualTargetAgeMs": 18,
+            "targetVoiceVisualEnergy": 0.5,
+            "anchorStaleEnergyReason": "",
+            "speaking_visual_active": False,
+            "anchor_visual_state": "idle",
+            "finalSpeakingEnergy": 0.0,
+            "blobScaleDrive": 0.0,
+        },
+        {
+            "time_ms": 80,
+            "pcm_energy": 0.5,
+            "meter_energy": 0.5,
+            "qml_received_energy": 0.5,
+            "authoritativeVoiceVisualActive": True,
+            "authoritativeVoiceVisualEnergy": 0.5,
+            "authoritativePlaybackStatus": "playing",
+            "voiceVisualTargetAgeMs": 24,
+            "targetVoiceVisualEnergy": 0.5,
+            "speaking_visual_active": True,
+            "anchor_visual_state": "speaking",
+            "finalSpeakingEnergy": 0.30,
+            "blobScaleDrive": 0.22,
+        },
+    ]
+
+    report = summarize_real_environment_chain(
+        playback_id="ar12-real-latch-bug",
+        spoken_stimulus_valid=True,
+        timeline_rows=rows,
+        process_state={},
+        speaking_lifetime={},
+        paint_count=2,
+    )
+
+    stability = report["speaking_state_stability"]
+    assert stability["staleAuthoritativeRowsIgnoredForLatch"] == 0
+    assert stability["midSpeechAnchorIdleRows"] == 1
+    assert stability["anchorStatusGlitchDetected"] is True
+    assert stability["latchBugReason"] == "fresh_authoritative_active_anchor_not_speaking"
+
+
+def test_ar12_timeline_merger_preserves_anchor_stale_and_actual_speaking_fields() -> None:
+    _timeline, stage_rows = _build_timelines(
+        [],
+        [
+            {
+                "qml_receive_time_ms": 1000,
+                "authoritativeVoiceVisualActive": True,
+                "authoritativeVoiceVisualEnergy": 0.42,
+                "authoritativePlaybackStatus": "playing",
+                "qmlReceivedVoiceVisualEnergy": 0.42,
+                "speaking_visual_active": True,
+                "anchorSpeakingVisualActive": False,
+                "anchorCurrentVisualState": "idle",
+                "targetVoiceVisualEnergy": 0.0,
+                "voiceVisualTargetAgeMs": 1200,
+                "anchorStaleEnergyReason": "voice_visual_stale",
+                "stateLatchReason": "voice_visual_release",
+                "latchBugReason": "voice_visual_stale",
+            }
+        ],
+    )
+
+    assert stage_rows["qml_rows"][0]["anchorStaleEnergyReason"] == "voice_visual_stale"
+    assert _timeline[0]["anchorSpeakingVisualActive"] is False
+    assert _timeline[0]["targetVoiceVisualEnergy"] == 0.0
+    assert _timeline[0]["voiceVisualTargetAgeMs"] == 1200
+    assert _timeline[0]["anchorStaleEnergyReason"] == "voice_visual_stale"
+    assert _timeline[0]["latchBugReason"] == "voice_visual_stale"
 
 
 def test_real_environment_report_includes_ar3_before_after_render_comparison() -> None:

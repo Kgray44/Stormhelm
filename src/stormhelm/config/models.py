@@ -232,6 +232,8 @@ class StormforgeFogConfig:
 class StormforgeVoiceDiagnosticsConfig:
     anchor_visualizer_mode: str = "auto"
     anchor_renderer: str = "legacy_blob_reference"
+    qsg_visual_approval: str = "pending"
+    qsg_visual_approval_reason: str = ""
 
     def __post_init__(self) -> None:
         mode = str(self.anchor_visualizer_mode or "auto").strip().lower()
@@ -260,11 +262,23 @@ class StormforgeVoiceDiagnosticsConfig:
             self.anchor_renderer = "ar3_split"
         else:
             self.anchor_renderer = "legacy_blob_reference"
+        approval = str(self.qsg_visual_approval or "pending").strip().lower()
+        approval = approval.replace("-", "_").replace(" ", "_")
+        if approval == "pending_review":
+            approval = "pending"
+        self.qsg_visual_approval = (
+            approval if approval in {"pending", "approved", "rejected"} else "pending"
+        )
+        self.qsg_visual_approval_reason = str(
+            self.qsg_visual_approval_reason or ""
+        ).strip()
 
     def to_qml_map(self) -> dict[str, Any]:
         return {
             "anchorVisualizerMode": self.anchor_visualizer_mode,
             "anchorRenderer": self.anchor_renderer,
+            "qsgVisualApproval": self.qsg_visual_approval,
+            "qsgVisualApprovalReason": self.qsg_visual_approval_reason,
             "liveIsolationVersion": "UI-VOICE-LIVE-ISO",
         }
 
@@ -761,6 +775,10 @@ class VoicePlaybackConfig:
     streaming_min_preroll_bytes: int = 0
     streaming_max_preroll_wait_ms: int = 1200
     playback_stable_after_ms: int = 180
+    streaming_jitter_buffer_ms: int = 120
+    streaming_min_buffer_ms: int = 80
+    streaming_max_buffer_ms: int = 400
+    streaming_underrun_recovery: str = "hold_or_silence"
     max_audio_bytes: int = 10_000_000
     max_duration_ms: int = 120_000
     delete_transient_after_playback: bool = True
